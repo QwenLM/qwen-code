@@ -9,7 +9,7 @@
  *
  * The two execution paths are selected by whether cacheSafeParams is supplied:
  *
- *   WITH cacheSafeParams  → GeminiChat single-turn, shares parent prompt
+ *   WITH cacheSafeParams  → LlmChat single-turn, shares parent prompt
  *                            cache (systemInstruction + history). Tools are
  *                            stripped by default (NO_TOOLS) to prevent
  *                            function calls; pass preserveTools: true to
@@ -40,7 +40,7 @@ import {
   type RuntimeContentGeneratorView,
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
-import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
+import { LlmChat, StreamEventType } from '../core/llm-chat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -64,6 +64,7 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
+import { createChildAbortController } from '../utils/abortController.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
 
@@ -124,7 +125,7 @@ function copyHistoryContainers(history: Content[]): Content[] {
 
 /**
  * Save cache-safe params after a successful main conversation turn.
- * Called from GeminiClient.sendMessageStream() on successful completion.
+ * Called from LlmClient.sendMessageStream() on successful completion.
  */
 export function saveCacheSafeParams(
   generationConfig: GenerateContentConfig,
@@ -207,7 +208,7 @@ const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
 >;
 
 /**
- * Create an isolated GeminiChat that shares the main conversation's
+ * Create an isolated LlmChat that shares the main conversation's
  * generationConfig (including systemInstruction, tools, and history).
  *
  * Used by runForkedAgent (cache path) and directly by speculation.ts which
@@ -216,14 +217,14 @@ const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
 export function createForkedChat(
   config: Config,
   params: CacheSafeParams,
-): GeminiChat {
+): LlmChat {
   const maxHistoryEntries = 40;
   const history =
     params.history.length > maxHistoryEntries
       ? params.history.slice(-maxHistoryEntries)
       : params.history;
 
-  const forkedChat = new GeminiChat(
+  const forkedChat = new LlmChat(
     config,
     {
       ...params.generationConfig,
@@ -431,6 +432,13 @@ export interface AgentPathParams {
   abortSignal?: AbortSignal;
   /** Suppress chat-recording UI telemetry for hidden internal agents. */
   suppressChatRecording?: boolean;
+  /**
+   * Complete the run as soon as the first successful file write succeeds.
+   * Pass a predicate to restrict early completion to matching paths — the
+   * remember caller excludes MEMORY.md, whose write does not count as a
+   * memory update on its own.
+   */
+  completeAfterFirstSuccessfulWrite?: boolean | ((filePath: string) => boolean);
 }
 
 export interface ForkedAgentResult {
@@ -621,28 +629,6 @@ export async function runForkedAgent(
   const pendingMutatingPaths = new Map<string, string[]>();
   const filesWritten = new Set<string>();
 
-  const emitter = new AgentEventEmitter();
-  emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    const filePaths = extractFilePathsFromArgs(event.args);
-    for (const filePath of filePaths) {
-      filesTouched.add(filePath);
-    }
-    if (isMutatingFileTool(event.name)) {
-      pendingMutatingPaths.set(event.callId, filePaths);
-    }
-  });
-  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
-    if (!event.success) {
-      pendingMutatingPaths.delete(event.callId);
-      return;
-    }
-    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
-    pendingMutatingPaths.delete(event.callId);
-    for (const filePath of filePaths) {
-      filesWritten.add(filePath);
-    }
-  });
-
   const initialMessages =
     params.extraHistory &&
     (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
@@ -668,6 +654,53 @@ export async function runForkedAgent(
   };
   const toolConfig: ToolConfig | undefined =
     params.tools !== undefined ? { tools: params.tools } : undefined;
+  const executionController = createChildAbortController(params.abortSignal);
+  let completedAfterWrite = false;
+  // Identity marker for the run's own early-completion abort, so the
+  // execute catch below can tell it apart from an external cancel
+  // that races it — an external cancel must still reject the run.
+  const selfAbortReason = new DOMException(
+    'Early completion after successful write',
+    'AbortError',
+  );
+
+  const emitter = new AgentEventEmitter();
+  emitter.on(AgentEventType.TOOL_CALL, (event) => {
+    const filePaths = extractFilePathsFromArgs(event.args);
+    for (const filePath of filePaths) {
+      filesTouched.add(filePath);
+    }
+    if (isMutatingFileTool(event.name)) {
+      pendingMutatingPaths.set(event.callId, filePaths);
+    }
+  });
+  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+    if (!event.success) {
+      pendingMutatingPaths.delete(event.callId);
+      return;
+    }
+    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+    pendingMutatingPaths.delete(event.callId);
+    for (const filePath of filePaths) {
+      filesWritten.add(filePath);
+    }
+    const completesEarly =
+      params.completeAfterFirstSuccessfulWrite === true
+        ? filePaths.length > 0
+        : typeof params.completeAfterFirstSuccessfulWrite === 'function'
+          ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
+          : false;
+    if (completesEarly && !executionController.signal.aborted) {
+      completedAfterWrite = true;
+      // Defer the abort out of this emitter handler: agent-core emits a
+      // parallel batch's TOOL_RESULT events one by one, and aborting
+      // synchronously re-enters its onAbort mid-emission, which replaces
+      // the still-unemitted real successes of the same batch with
+      // synthetic cancellation failures — truncating filesWritten below
+      // the writes that actually landed on disk.
+      setImmediate(() => executionController.abort(selfAbortReason));
+    }
+  });
 
   try {
     const headless = await AgentHeadless.create(
@@ -687,22 +720,59 @@ export async function runForkedAgent(
     context.set('hook_context', '');
     const execute = () =>
       runWithForkedModelRuntime(modelRuntime, async () => {
-        await headless.execute(context, params.abortSignal);
+        await headless.execute(context, executionController.signal);
       });
 
-    if (params.suppressChatRecording) {
-      await runWithChatRecordingSuppressed(execute);
-    } else {
-      await execute();
+    try {
+      if (params.suppressChatRecording) {
+        await runWithChatRecordingSuppressed(execute);
+      } else {
+        await execute();
+      }
+    } catch (err) {
+      // The deferred self-abort lands after the reasoning loop's
+      // post-batch abort check, inside the next model round, so the
+      // run can reject with an AbortError even though the goal write
+      // is already on disk. Fall through to the completedAfterWrite
+      // return for that self-triggered abort; every other failure
+      // (external cancels included) propagates.
+      if (
+        !completedAfterWrite ||
+        executionController.signal.reason !== selfAbortReason
+      ) {
+        throw err;
+      }
     }
 
     const terminateReason = headless.getTerminateMode();
-    const finalText =
-      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
-      undefined;
+    const finalText = completedAfterWrite
+      ? undefined
+      : toModelVisibleSubagentResult(
+          headless.getFinalText(),
+          terminateReason,
+        ) || undefined;
     const touched = [...filesTouched];
     const written = [...filesWritten];
 
+    // The reject path above consults the abort identity; this one must too.
+    // When the external cancel lands on a batch boundary agent-core RESOLVES
+    // cancelled rather than throwing, so the catch never runs — and without
+    // this gate the latched early completion converted that cancellation into
+    // a successful GOAL result. The same user action then yielded opposite
+    // outcomes depending only on which event-loop boundary the cancel hit.
+    if (
+      completedAfterWrite &&
+      (!executionController.signal.aborted ||
+        executionController.signal.reason === selfAbortReason)
+    ) {
+      return {
+        status: 'completed',
+        terminateReason: AgentTerminateMode.GOAL,
+        finalText,
+        filesTouched: touched,
+        filesWritten: written,
+      };
+    }
     if (terminateReason === AgentTerminateMode.CANCELLED) {
       return {
         status: 'cancelled',
@@ -729,6 +799,7 @@ export async function runForkedAgent(
       filesWritten: written,
     };
   } finally {
+    executionController.abort();
     // Release the per-fork ToolRegistry so AgentTool / SkillTool
     // instances dispose their change-listeners on shared
     // SubagentManager / SkillManager. Same shape as the spawn-path

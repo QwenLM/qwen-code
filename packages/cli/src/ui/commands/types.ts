@@ -111,7 +111,7 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
@@ -254,7 +254,7 @@ export interface LoadHistoryActionReturn {
 
 /**
  * The return type for a command action that should immediately submit
- * content as a prompt to the Gemini model.
+ * content as a prompt to the model.
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';

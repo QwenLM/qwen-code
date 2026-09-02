@@ -245,6 +245,17 @@ export function compileWorkflowScript(scriptSource: string): {
   return { script, meta };
 }
 
+/**
+ * The error a cancelled run settles with. Named `AbortError` so every
+ * `isAbortError` check on the way up classifies it as a cancellation rather
+ * than a failure.
+ */
+function workflowCancelledError(): Error {
+  const error = new Error('Workflow run was aborted (cancelled).');
+  error.name = 'AbortError';
+  return error;
+}
+
 /** Longest source line rendered in a compile-failure message. */
 const COMPILE_ERROR_LINE_WIDTH = 80;
 
@@ -1860,6 +1871,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       let watchdog: WallClockWatchdog | undefined;
       let stopWatchingState: (() => void) | undefined;
       let rearmWatchdogOnAbort: (() => void) | undefined;
+      let settleOnAbort: (() => void) | undefined;
+      let wallClockFired = false;
       process.on('unhandledRejection', adoptionEscapeHook);
       try {
         // P4: extract `export const meta = {...}` once before the body runs.
@@ -1874,6 +1887,12 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // which is the failure the gate exists to prevent.
         const { script, meta } = compileWorkflowScript(scriptSource);
         extractedMeta = meta;
+        // A run cancelled before its script started must not start it: the
+        // registry pre-registers the run and shares this controller, so a
+        // user cancel can land before `run()` is entered.
+        if (opts.abortOnTimeout?.signal.aborted) {
+          throw workflowCancelledError();
+        }
         // 30s sync wall-clock cap inside vm — covers `while(true){}` style
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
@@ -1892,7 +1911,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
             // in-flight subagents see the cancellation and stop. Order
             // matters: rejecting first then aborting would race the
-            // caller's finally block.
+            // caller's finally block. The abort arm below must let this
+            // abort through untouched — a timeout is not a cancellation,
+            // and it has to be reported as the timeout it is.
+            wallClockFired = true;
             opts.abortOnTimeout?.abort();
             reject(
               new Error(
@@ -1929,25 +1951,48 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
           watchdog?.pause();
         }
-        // Cancellation must settle the run even when the script hangs in
-        // ungated code: `registry.cancel()` aborts this controller, but
-        // `abortPending()` emits no state transition, so a pause-suspended
-        // watchdog would never re-arm and the race below has no abort arm
-        // — the hung run would never reach its settlement `finally`
-        // (snapshot, telemetry, and handle release all skipped). Re-arm
-        // with the banked remainder on abort to restore the bound.
+        // Belt to the abort arm's braces below: `registry.cancel()` aborts
+        // this controller, but `abortPending()` emits no state transition,
+        // so a pause-suspended watchdog would otherwise stay suspended.
+        // Re-arm it with the banked remainder so the wall clock keeps
+        // bounding the run independently of the abort arm.
         rearmWatchdogOnAbort = (): void => watchdog?.resume();
         opts.abortOnTimeout?.signal.addEventListener(
           'abort',
           rearmWatchdogOnAbort,
           { once: true },
         );
-        return await Promise.race([result, timeoutPromise]);
+        // Cancellation settles the run now, not when the wall clock runs
+        // out. Without this arm a script that is not currently blocked on a
+        // dispatch — sitting in ungated `await`s, or simply hung — keeps the
+        // run open until the banked remainder of the clock expires, and the
+        // user watches a cancelled run refuse to end. The script's own
+        // promise is left to settle by itself: its dispatches see the
+        // aborted signal and reject, so its `finally` blocks still run, and
+        // `Promise.race` keeps a handler attached so that later rejection
+        // is never an unhandled one.
+        const abortPromise = new Promise<never>((_, reject) => {
+          const signal = opts.abortOnTimeout?.signal;
+          if (!signal) return;
+          settleOnAbort = (): void => {
+            // The watchdog aborts the controller itself on the way to
+            // rejecting with the timeout; that abort is not a cancellation.
+            if (!wallClockFired) reject(workflowCancelledError());
+          };
+          signal.addEventListener('abort', settleOnAbort, { once: true });
+        });
+        return await Promise.race([result, timeoutPromise, abortPromise]);
       } finally {
         if (rearmWatchdogOnAbort) {
           opts.abortOnTimeout?.signal.removeEventListener(
             'abort',
             rearmWatchdogOnAbort,
+          );
+        }
+        if (settleOnAbort) {
+          opts.abortOnTimeout?.signal.removeEventListener(
+            'abort',
+            settleOnAbort,
           );
         }
         stopWatchingState?.();

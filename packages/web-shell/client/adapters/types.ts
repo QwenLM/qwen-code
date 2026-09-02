@@ -121,10 +121,14 @@ export interface PermissionRequest {
 export interface CommandInfo {
   name: string;
   description: string;
+  completionLabel?: string;
+  completionSection?: string;
+  completionPriority?: number;
   argumentHint?: string;
   subcommands?: string[];
   source?: string;
   displayCategory?: 'custom' | 'skill' | 'system';
+  autoSubmit?: boolean;
 }
 
 export interface ModelInfo {

@@ -59,6 +59,13 @@ vi.mock('node:url', async () => {
       if (process.platform !== 'win32' && /^[a-zA-Z]:\\/.test(filePath)) {
         return actual.pathToFileURL(filePath, { windows: true });
       }
+      // The mirror case: fixtures spell workspace paths POSIX-style, and on
+      // win32 the real pathToFileURL would drive-qualify them against the
+      // process cwd (file:///C:/workspace/…). Parse them as POSIX so the
+      // expected URLs read the same on every host.
+      if (process.platform === 'win32' && filePath.startsWith('/')) {
+        return actual.pathToFileURL(filePath, { windows: false });
+      }
       return actual.pathToFileURL(filePath);
     },
   };

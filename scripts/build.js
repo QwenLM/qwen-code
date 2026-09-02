@@ -77,6 +77,7 @@ const buildOrder = [
         'packages/vscode-ide-companion',
         'packages/chrome-extension',
         'integrations/external-context',
+        'integrations/external-context-mem0',
       ]),
 ];
 

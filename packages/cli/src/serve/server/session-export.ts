@@ -77,9 +77,14 @@ export async function exportSessionTranscript(params: {
   format: SessionExportFormat;
   archiveState?: SessionArchiveState;
   config?: ExportConfig;
+  runtimeBaseDir?: string;
 }): Promise<SessionExportResult> {
   const { workspaceCwd, sessionId, format } = params;
-  const service = new SessionService(workspaceCwd);
+  const service = new SessionService(workspaceCwd, {
+    ...(params.runtimeBaseDir !== undefined
+      ? { runtimeBaseDir: params.runtimeBaseDir }
+      : {}),
+  });
   const sessionData =
     params.archiveState === 'archived'
       ? await service.loadArchivedSession(sessionId, {

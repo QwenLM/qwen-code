@@ -40,6 +40,8 @@ import type {
   DaemonTranscriptStore,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneWorkingDirectory,
   HeartbeatResult,
   GoalControlRequest,
   GoalSnapshotV2,
@@ -66,6 +68,18 @@ export interface DaemonSessionOwnerGuard {
   capture(): DaemonSessionOwnerSnapshot;
 }
 
+export type DaemonProductSessionContext =
+  | { kind: 'workspace'; cwd: string }
+  | { kind: 'standalone' }
+  | { kind: 'live' };
+
+export interface DaemonStandaloneConnectionState {
+  projectlessOutputDirectory?: string;
+  workingDirectory?: DaemonStandaloneWorkingDirectory;
+  creationRecovery?: DaemonStandaloneCreationRecovery;
+  errorCode?: string;
+}
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
@@ -76,7 +90,12 @@ export interface DaemonConnectionState {
    * the session and do not use this id as an ownership boundary.
    */
   clientId?: string;
+  /** Explicit product and restore context for the current or pending session. */
+  sessionContext?: DaemonProductSessionContext;
+  /** Product workspace cwd. Always absent for standalone and Live contexts. */
   workspaceCwd?: string;
+  /** Standalone-only working-directory and outcome recovery state. */
+  standaloneSession?: DaemonStandaloneConnectionState;
   /** Current Git branch, short detached-HEAD hash, or undefined outside Git. */
   gitBranch?: string;
   /**
@@ -118,6 +137,8 @@ export interface DaemonReasoningControls {
   enabled: boolean;
   effort: string;
   efforts: string[];
+  /** Defaults to true. False means effort is mutable but thinking is required. */
+  canDisable?: boolean;
 }
 
 export interface DaemonTokenUsage {
@@ -133,8 +154,10 @@ export interface DaemonSessionProviderProps {
   baseUrl?: string;
   /** Bearer token. Optional when nested inside DaemonWorkspaceProvider (inherited). */
   token?: string;
-  /** Workspace cwd used when creating, loading, or resuming daemon sessions. */
+  /** Legacy workspace context. Do not combine with standalone or Live context. */
   workspaceCwd?: string;
+  /** Explicit product context. Legacy callers may continue using workspaceCwd. */
+  sessionContext?: DaemonProductSessionContext;
   /** Session id to load. Undefined keeps the page empty until a prompt creates one. */
   sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
@@ -289,6 +312,7 @@ export interface DaemonCommandInfo {
   name: string;
   description: string;
   argumentHint?: string;
+  autoSubmit?: boolean;
   source?: string;
   raw: DaemonAvailableCommand;
 }
@@ -410,7 +434,10 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionSummary[]>;
   loadSession(
     sessionId: string,
-    options?: { workspaceCwd?: string },
+    options?: {
+      workspaceCwd?: string;
+      sessionContext?: DaemonProductSessionContext;
+    },
   ): Promise<void>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
   reloadSession(
@@ -419,15 +446,20 @@ export interface DaemonSessionActions {
   ): Promise<void>;
   resumeSession(
     sessionId: string,
-    options?: { workspaceCwd?: string },
+    options?: {
+      workspaceCwd?: string;
+      sessionContext?: DaemonProductSessionContext;
+    },
   ): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.
    *
-   * `options.workspaceCwd` targets a specific registered workspace runtime for
-   * this call only (multi-workspace daemons). Omit it to keep the provider's
-   * active workspace / primary fallback.
+   * `options.sessionContext` selects the exact product context. The legacy
+   * `options.workspaceCwd` form targets a registered workspace runtime only.
+   * Omit both to keep the provider's active context / legacy primary fallback.
+   * Standalone creation is not automatically retried; Live creation is not
+   * supported.
    *
    * `options.approvalMode` seeds the session's approval mode in the create
    * request itself, so the daemon applies it atomically at spawn instead of
@@ -437,6 +469,7 @@ export interface DaemonSessionActions {
    */
   createSession(options?: {
     workspaceCwd?: string;
+    sessionContext?: DaemonProductSessionContext;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -595,6 +628,7 @@ export interface PendingSessionLoad {
   id: number;
   sessionId: string;
   mode: 'load' | 'resume' | 'attach';
+  sessionContext?: DaemonProductSessionContext;
   timeout?: ReturnType<typeof setTimeout>;
   /** SDK timeout for load/resume; `0` disables its timer. */
   requestTimeoutMs?: number;

@@ -55,8 +55,11 @@ import {
 import {
   endLLMRequestSpan,
   areSensitiveSpanAttributesEnabled,
+  isTelemetrySdkInitialized,
 } from '../../telemetry/index.js';
 import { startLLMRequestSpanWithContext } from '../../telemetry/session-tracing.js';
+import type { ContextUsageV1 } from '../../telemetry/context-usage.js';
+import { createContextUsageSnapshot } from './context-usage-snapshot.js';
 import { getSessionIdFromContext } from '../../telemetry/session-context.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
@@ -77,6 +80,7 @@ import {
   createGenAiExchange,
   type GenAiExchangeController,
 } from '../../telemetry/gen-ai-request.js';
+import { DEFAULT_TOKEN_LIMIT } from '../tokenLimits.js';
 
 /**
  * Phase 4b — read the active retry context once, default attempt to 1 when
@@ -177,7 +181,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
-    generatorConfig: ContentGeneratorConfig,
+    private readonly generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
     this.splitToolMedia = generatorConfig.splitToolMedia;
@@ -204,6 +208,25 @@ export class LoggingContentGenerator implements ContentGenerator {
 
   getWrapped(): ContentGenerator {
     return this.wrapped;
+  }
+
+  private snapshotContextUsage(
+    request: GenerateContentParameters,
+    isInternal: boolean,
+  ): ContextUsageV1 | undefined {
+    if (isInternal || !isTelemetrySdkInitialized()) return undefined;
+    try {
+      return createContextUsageSnapshot(
+        request,
+        this.config,
+        this.generatorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to snapshot context usage: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
   }
 
   private logApiRequest(
@@ -366,6 +389,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
     const retrySnapshot = snapshotRetryMetadata();
+    const isInternal = isInternalPromptId(userPromptId);
+    const contextUsage = this.snapshotContextUsage(req, isInternal);
 
     const ownerSessionId = this.config.getSessionId();
     const ownerUserId = this.config.getTelemetryUserId();
@@ -376,13 +401,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
         sessionId: ownerSessionId,
         userId: ownerUserId,
+        contextUsage,
       });
     const requestSessionId =
       getSessionIdFromContext(llmContext) ?? ownerSessionId;
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
-    const isInternal = isInternalPromptId(userPromptId);
     const exchange = createGenAiExchange(llmContext, llmSpan, {
       captureContent:
         !isInternal && this.shouldCollectSensitiveSpanAttributes(),
@@ -529,6 +554,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     // loggingStreamWrapper so its closure carries the snapshot to all later
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
     const retrySnapshot = snapshotRetryMetadata();
+    const isInternal = isInternalPromptId(userPromptId);
+    const contextUsage = this.snapshotContextUsage(req, isInternal);
 
     const ownerSessionId = this.config.getSessionId();
     const ownerUserId = this.config.getTelemetryUserId();
@@ -539,6 +566,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
         sessionId: ownerSessionId,
         userId: ownerUserId,
+        contextUsage,
       });
     const requestSessionId =
       getSessionIdFromContext(llmContext) ?? ownerSessionId;
@@ -550,7 +578,6 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.
-    const isInternal = isInternalPromptId(userPromptId);
     const exchange = createGenAiExchange(llmContext, llmSpan, {
       captureContent:
         !isInternal && this.shouldCollectSensitiveSpanAttributes(),
@@ -877,7 +904,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses.push(lastResponseForLogging);
       }
       const consolidatedResponse = shouldCollectResponses
-        ? this.consolidateGeminiResponsesForLogging(responses)
+        ? this.consolidateLlmResponsesForLogging(responses)
         : undefined;
       if (consolidatedResponse) {
         consolidatedResponse.usageMetadata = lastUsageMetadata;
@@ -998,7 +1025,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const requestContext = this.createLoggingRequestContext(request.model);
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       requestContext,
       {
@@ -1013,7 +1040,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     if (request.config?.tools) {
       openaiRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+        await OpenAIContentConverter.convertLlmToolsToOpenAI(
           request.config.tools,
           this.schemaCompliance ?? 'auto',
         );
@@ -1062,7 +1089,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const openaiResponse = response
-      ? this.convertGeminiResponseToOpenAIForLogging(response, openaiRequest)
+      ? this.convertLlmResponseToOpenAIForLogging(response, openaiRequest)
       : undefined;
 
     await this.openaiLogger.logInteraction(
@@ -1090,17 +1117,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
   }
 
-  private convertGeminiResponseToOpenAIForLogging(
+  private convertLlmResponseToOpenAIForLogging(
     response: GenerateContentResponse,
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
   ): OpenAI.Chat.ChatCompletion {
-    return OpenAIContentConverter.convertGeminiResponseToOpenAI(
+    return OpenAIContentConverter.convertLlmResponseToOpenAI(
       response,
       this.createLoggingRequestContext(openaiRequest.model),
     );
   }
 
-  private consolidateGeminiResponsesForLogging(
+  private consolidateLlmResponsesForLogging(
     responses: GenerateContentResponse[],
   ): GenerateContentResponse | undefined {
     if (responses.length === 0) {

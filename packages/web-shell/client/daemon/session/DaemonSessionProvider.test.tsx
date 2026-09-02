@@ -21,7 +21,9 @@ import type {
   PromptResult,
 } from '@qwen-code/sdk/daemon';
 import {
+  DaemonCapabilityMissingError,
   DaemonHttpError,
+  DaemonStandaloneCreationOutcomeUnknownError,
   estimateDaemonTranscriptBlockBytes,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '@qwen-code/sdk/daemon';
@@ -67,6 +69,7 @@ interface MockSession {
   replayPartial?: boolean;
   replayError?: string;
   eventEpoch?: string;
+  session?: Record<string, unknown>;
   client?: MockClient;
   lastEventId?: number;
   setLastEventId: (lastEventId: number | undefined) => void;
@@ -131,6 +134,7 @@ interface MockClient {
   capabilities: () => Promise<unknown>;
   workspaceProviders: () => Promise<unknown>;
   listWorkspaceSessions: () => Promise<unknown[]>;
+  listStandaloneSessions: () => Promise<unknown[]>;
   closeSession: () => Promise<void>;
   setSessionApprovalMode: () => Promise<{ mode: string }>;
   workspaceMcp: () => Promise<unknown>;
@@ -181,9 +185,11 @@ interface MockClient {
 
 const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
+  const daemonClientOptions: unknown[] = [];
   const capabilities = vi.fn();
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
+  const listStandaloneSessions = vi.fn();
   const closeSession = vi.fn();
   const setSessionApprovalMode = vi.fn();
   const workspaceMcp = vi.fn();
@@ -210,7 +216,9 @@ const sdkMocks = vi.hoisted(() => {
   const getSessionTranscriptPage = vi.fn();
 
   class MockDaemonClient {
-    constructor(_opts: unknown) {}
+    constructor(opts: unknown) {
+      daemonClientOptions.push(opts);
+    }
 
     createOrAttachSession = vi.fn((req: unknown) =>
       MockDaemonSessionClient.createOrAttach(this, req),
@@ -218,6 +226,7 @@ const sdkMocks = vi.hoisted(() => {
     capabilities = capabilities;
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
+    listStandaloneSessions = listStandaloneSessions;
     closeSession = closeSession;
     setSessionApprovalMode = setSessionApprovalMode;
     workspaceMcp = workspaceMcp;
@@ -273,13 +282,35 @@ const sdkMocks = vi.hoisted(() => {
         _clientId?: string,
       ): Promise<MockSession> => takeSession(client),
     );
+    static createStandalone = vi.fn(
+      async (client: unknown, _opts?: unknown): Promise<MockSession> =>
+        takeSession(client),
+    );
+    static loadStandalone = vi.fn(
+      async (
+        client: unknown,
+        _sessionId: string,
+        _opts?: unknown,
+        _clientId?: string,
+      ): Promise<MockSession> => takeSession(client),
+    );
+    static resumeStandalone = vi.fn(
+      async (
+        client: unknown,
+        _sessionId: string,
+        _opts?: unknown,
+        _clientId?: string,
+      ): Promise<MockSession> => takeSession(client),
+    );
   }
 
   return {
     sessions,
+    daemonClientOptions,
     capabilities,
     workspaceProviders,
     workspaceSkills,
+    listStandaloneSessions,
     workspaceAcpStatus,
     workspaceAcpPreheat,
     workspaceGit,
@@ -294,6 +325,7 @@ const sdkMocks = vi.hoisted(() => {
     getSessionTranscriptPage,
     reset() {
       sessions.length = 0;
+      daemonClientOptions.length = 0;
       capabilities.mockReset();
       capabilities.mockResolvedValue({
         workspaceCwd: '/mock-workspace',
@@ -308,6 +340,8 @@ const sdkMocks = vi.hoisted(() => {
       });
       listWorkspaceSessions.mockReset();
       listWorkspaceSessions.mockResolvedValue([]);
+      listStandaloneSessions.mockReset();
+      listStandaloneSessions.mockResolvedValue([]);
       closeSession.mockReset();
       closeSession.mockResolvedValue(undefined);
       setSessionApprovalMode.mockReset();
@@ -411,6 +445,18 @@ const sdkMocks = vi.hoisted(() => {
       MockDaemonSessionClient.resume.mockImplementation(
         async (client: unknown, _sessionId: string): Promise<MockSession> =>
           takeSession(client),
+      );
+      MockDaemonSessionClient.createStandalone.mockReset();
+      MockDaemonSessionClient.createStandalone.mockImplementation(
+        async (client: unknown): Promise<MockSession> => takeSession(client),
+      );
+      MockDaemonSessionClient.loadStandalone.mockReset();
+      MockDaemonSessionClient.loadStandalone.mockImplementation(
+        async (client: unknown): Promise<MockSession> => takeSession(client),
+      );
+      MockDaemonSessionClient.resumeStandalone.mockReset();
+      MockDaemonSessionClient.resumeStandalone.mockImplementation(
+        async (client: unknown): Promise<MockSession> => takeSession(client),
       );
     },
   };
@@ -546,6 +592,1203 @@ describe('DaemonSessionProvider', () => {
       gitBranch: 'main',
     });
     expect(connection).not.toHaveProperty('sessionId');
+  });
+
+  it('loads standalone sessions without workspace fallback or metadata calls', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-1',
+        workspaceCwd: '/private/standalone-1',
+        session: {
+          sessionId: 'standalone-1',
+          workspaceCwd: '/private/standalone-1',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-1',
+          workingDirectory: { state: 'ready' },
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-1',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      'standalone-1',
+      { timeoutMs: 70_000 },
+      expect.any(String),
+    );
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        projectlessOutputDirectory: '/output/standalone-1',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+
+    await act(async () => {
+      await actions?.listSessions();
+    });
+    expect(sdkMocks.listStandaloneSessions).toHaveBeenCalledOnce();
+  });
+
+  it('resumes standalone sessions through the dedicated route', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-resumed',
+        workspaceCwd: '/private/standalone-resumed',
+        session: {
+          sessionId: 'standalone-resumed',
+          workspaceCwd: '/private/standalone-resumed',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-resumed',
+          workingDirectory: { state: 'ready' },
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => flushPromises());
+    let resume!: Promise<void>;
+    act(() => {
+      resume = requireActions(actions).resumeSession('standalone-resumed', {
+        sessionContext: { kind: 'standalone' },
+      });
+    });
+    await act(async () => flushPromises());
+    await expect(resume).resolves.toBeUndefined();
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.resumeStandalone,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      'standalone-resumed',
+      { timeoutMs: 70_000 },
+      expect.any(String),
+    );
+    expect(sdkMocks.MockDaemonSessionClient.resume).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-resumed',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+    });
+  });
+
+  it('keeps standalone working-directory failures target-scoped', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.MockDaemonSessionClient.loadStandalone.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_compromised', retryable: false },
+        'working directory compromised',
+      ),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-broken',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'standalone-broken',
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: {
+        errorCode: 'working_directory_compromised',
+      },
+    });
+    expect(connection?.workspaceCwd).toBeUndefined();
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
+  it('loads Live sessions through the unique trusted runtime without exposing its cwd', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/conversations',
+          kind: 'live',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'live-1',
+        workspaceCwd: '/conversations',
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'live-1',
+      sessionContext: { kind: 'live' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'live-1',
+      expect.objectContaining({ workspaceCwd: '/conversations' }),
+      expect.anything(),
+    );
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      sessionContext: { kind: 'live' },
+      workspaceCwd: undefined,
+    });
+  });
+
+  it('fails a Live load once when runtime ownership is ambiguous', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['multi_workspace_sessions'],
+      workspaces: [
+        {
+          id: 'live-a',
+          cwd: '/conversations/a',
+          kind: 'live',
+          primary: false,
+          trusted: true,
+        },
+        {
+          id: 'live-b',
+          cwd: '/conversations/b',
+          kind: 'live',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      sessionId: 'live-ambiguous',
+      sessionContext: { kind: 'live' },
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+      await flushPromises();
+    });
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      error: 'Daemon advertises multiple Live session runtimes',
+      sessionContext: { kind: 'live' },
+    });
+    expect(sdkMocks.capabilities).toHaveBeenCalledOnce();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-workspace context combined with workspaceCwd before connecting', async () => {
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      workspaceCwd: '/primary',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+    expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await expect(requireActions(actions).createSession()).rejects.toThrow(
+        'standalone session context cannot include workspaceCwd',
+      );
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+  });
+
+  it('does not start a controlled load for conflicting context props', async () => {
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-conflict',
+      workspaceCwd: '/primary',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).not.toHaveBeenCalled();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
+  it('keeps a connected session attached when controlled props become conflicting', async () => {
+    const activeSession = createMockSession({
+      sessionId: 'workspace-active',
+      workspaceCwd: '/workspace/active',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(activeSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'workspace-active',
+      sessionContext: { kind: 'workspace', cwd: '/workspace/active' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId="standalone-conflict"
+          workspaceCwd="/workspace/active"
+          sessionContext={{ kind: 'standalone' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).not.toHaveBeenCalled();
+    expect(activeSession.detach).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('/session/workspace-active/detach'),
+      expect.anything(),
+    );
+
+    await act(async () => {
+      await expect(requireActions(actions).createSession()).rejects.toThrow(
+        'standalone session context cannot include workspaceCwd',
+      );
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+    expect(activeSession.detach).not.toHaveBeenCalled();
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId="workspace-active"
+          sessionContext={{ kind: 'workspace', cwd: '/workspace/active' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('/session/workspace-active/detach'),
+      expect.anything(),
+    );
+  });
+
+  it('updates an empty controlled provider when its session context changes', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'workspace', cwd: '/primary' },
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/primary' },
+        }),
+      );
+    });
+
+    sdkMocks.workspaceProviders.mockClear();
+    sdkMocks.workspaceSkills.mockClear();
+    sdkMocks.workspaceByCwd.mockClear();
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionContext={{ kind: 'standalone' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionContext: { kind: 'standalone' },
+          workspaceCwd: undefined,
+        }),
+      );
+    });
+
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
+    expect(connection?.models).toBeUndefined();
+    expect(connection?.providers).toBeUndefined();
+    expect(connection?.currentModel).toBeUndefined();
+    expect(connection?.currentMode).toBeUndefined();
+    expect(connection?.gitBranch).toBeUndefined();
+    expect(connection?.gitStatus).toBeUndefined();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('does not reconnect for an equivalent inline session context', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(sdkMocks.capabilities).toHaveBeenCalledOnce();
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionContext={{ kind: 'standalone' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(sdkMocks.capabilities).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a baseUrl-only session when its connected id is echoed as a prop', async () => {
+    const keepConnected = createDeferred<void>();
+    const createdSession = createMockSession({
+      sessionId: 'session-echo',
+      events: createPendingEvents(keepConnected),
+    });
+    sdkMocks.sessions.push(createdSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => requireActions(actions).newSession());
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'session-echo',
+        }),
+      );
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId={connection?.sessionId}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledOnce();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-echo',
+    });
+    expect(createdSession.detach).not.toHaveBeenCalled();
+    keepConnected.resolve();
+  });
+
+  it('reloads a controlled standalone session once after a baseUrl change', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-controlled',
+        workspaceCwd: '/private/standalone-controlled',
+        session: {
+          sessionId: 'standalone-controlled',
+          workspaceCwd: '/private/standalone-controlled',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+      }),
+      createMockSession({
+        sessionId: 'standalone-controlled',
+        workspaceCwd: '/private/standalone-controlled',
+        session: {
+          sessionId: 'standalone-controlled',
+          workspaceCwd: '/private/standalone-controlled',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+      }),
+    );
+
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-controlled',
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4171"
+          autoConnect
+          sessionId="standalone-controlled"
+          sessionContext={{ kind: 'standalone' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledTimes(2);
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-controlled',
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(sdkMocks.daemonClientOptions).toContainEqual({
+      baseUrl: 'http://127.0.0.1:4171',
+      token: undefined,
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('settles a workspace load when the daemon reports a canonical cwd', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'workspace-canonical',
+        workspaceCwd: '/private/tmp',
+        events: createIdleEvents(),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    let loadPromise!: Promise<void>;
+    await act(async () => {
+      loadPromise = requireActions(actions).loadSession('workspace-canonical', {
+        workspaceCwd: '/tmp',
+      });
+      await flushPromises();
+    });
+    await expect(loadPromise).resolves.toBeUndefined();
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'workspace-canonical',
+      sessionContext: { kind: 'workspace', cwd: '/private/tmp' },
+      workspaceCwd: '/private/tmp',
+    });
+  });
+
+  it('does not inherit a failed controlled target in a baseUrl-only provider', async () => {
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new Error('load failed'),
+    );
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let failedLoad!: Promise<void>;
+    await act(async () => {
+      failedLoad = requireActions(actions).loadSession('failed-target', {
+        workspaceCwd: '/failed-target',
+      });
+      void failedLoad.catch(() => undefined);
+      await flushPromises();
+    });
+    await expect(failedLoad).rejects.toThrow('load failed');
+
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'primary-target',
+        workspaceCwd: '/mock-workspace',
+        events: createIdleEvents(),
+      }),
+    );
+    let primaryLoad!: Promise<void>;
+    await act(async () => {
+      primaryLoad = requireActions(actions).loadSession('primary-target');
+      await flushPromises();
+    });
+    await expect(primaryLoad).resolves.toBeUndefined();
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'primary-target',
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
+      expect.any(String),
+    );
+  });
+
+  it('creates a fresh standalone session without the generic route', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-fresh',
+        workspaceCwd: '/private/standalone-fresh',
+        session: {
+          sessionId: 'standalone-fresh',
+          workspaceCwd: '/private/standalone-fresh',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-fresh',
+          workingDirectory: { state: 'ready' },
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await actions?.newSession();
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      sessionId: 'standalone-fresh',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        projectlessOutputDirectory: '/output/standalone-fresh',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+  });
+
+  it('surfaces direct standalone create recovery without retrying', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const sessionId = '019cf000-0000-7000-8000-000000000003';
+    const originalError = new DaemonHttpError(
+      503,
+      { code: 'standalone_session_creating' },
+      'outcome unknown',
+    );
+    sdkMocks.MockDaemonSessionClient.createStandalone.mockRejectedValueOnce(
+      new DaemonStandaloneCreationOutcomeUnknownError(
+        sessionId,
+        { state: 'creating', sessionId },
+        originalError,
+      ),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => flushPromises());
+    await act(async () => {
+      await requireActions(actions).newSession();
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionId,
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        creationRecovery: { state: 'creating', sessionId },
+        errorCode: 'standalone_session_creating',
+      },
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionContext={{ kind: 'standalone' }}
+          createSessionRequest={{ modelServiceId: 'next-model' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionId,
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: {
+        creationRecovery: { state: 'creating', sessionId },
+      },
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+
+    const recoveredSession = createMockSession({
+      sessionId,
+      workspaceCwd: '/private/recovered-standalone',
+      session: {
+        sessionId,
+        workspaceCwd: '/private/recovered-standalone',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/recovered-standalone',
+        workingDirectory: { state: 'ready' },
+      },
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(recoveredSession);
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId={sessionId}
+          sessionContext={{ kind: 'standalone' }}
+          createSessionRequest={{ modelServiceId: 'next-model' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+    expect(connection?.status).toBe('connected');
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId,
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: {
+        projectlessOutputDirectory: '/output/recovered-standalone',
+      },
+    });
+  });
+
+  it('preserves action-created standalone recovery across baseUrl-only dependency churn', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const sessionId = '019cf000-0000-7000-8000-000000000004';
+    const originalError = new DaemonHttpError(
+      503,
+      { code: 'standalone_session_creating' },
+      'outcome unknown',
+    );
+    sdkMocks.MockDaemonSessionClient.createStandalone.mockRejectedValueOnce(
+      new DaemonStandaloneCreationOutcomeUnknownError(
+        sessionId,
+        { state: 'creating', sessionId },
+        originalError,
+      ),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+    await act(async () => {
+      await expect(
+        requireActions(actions).createSession({
+          sessionContext: { kind: 'standalone' },
+        }),
+      ).rejects.toBeInstanceOf(DaemonStandaloneCreationOutcomeUnknownError);
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          createSessionRequest={{ modelServiceId: 'next-model' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionId,
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: {
+        creationRecovery: { state: 'creating', sessionId },
+      },
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it('clears stale standalone identity after a plain fresh-create failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const activeSession = createMockSession({
+      sessionId: 'standalone-active',
+      workspaceCwd: '/private/standalone-active',
+      session: {
+        sessionId: 'standalone-active',
+        workspaceCwd: '/private/standalone-active',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-active',
+        workingDirectory: { state: 'ready' },
+      },
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(activeSession);
+    sdkMocks.MockDaemonSessionClient.createStandalone.mockRejectedValueOnce(
+      new Error('create failed'),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-active',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+    await act(async () => requireActions(actions).newSession());
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      error: 'create failed',
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.displayName).toBeUndefined();
+    expect(connection?.standaloneSession?.creationRecovery).toBeUndefined();
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId="standalone-active"
+          sessionContext={{ kind: 'standalone' }}
+          createSessionRequest={{ modelServiceId: 'next-model' }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      error: 'create failed',
+      standaloneSession: { errorCode: undefined },
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces a standalone create capability failure without fallback', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.MockDaemonSessionClient.createStandalone.mockRejectedValueOnce(
+      new DaemonCapabilityMissingError(
+        'standalone_sessions_v1',
+        'standalone sessions are unavailable',
+      ),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => requireActions(actions).newSession());
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: { errorCode: 'standalone_sessions_v1' },
+    });
+    expect(connection?.workspaceCwd).toBeUndefined();
+  });
+
+  it('fails a standalone load once when its capability is unavailable', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.MockDaemonSessionClient.loadStandalone.mockRejectedValueOnce(
+      new DaemonCapabilityMissingError(
+        'standalone_sessions_v1',
+        'standalone sessions are unavailable',
+      ),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      sessionId: 'standalone-missing-capability',
+      sessionContext: { kind: 'standalone' },
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('error'));
+    });
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledOnce();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: { errorCode: 'standalone_sessions_v1' },
+    });
+    expect(connection?.workspaceCwd).toBeUndefined();
   });
 
   it('keeps model preview separate until live reasoning context is authoritative', async () => {
@@ -1178,6 +2421,213 @@ describe('DaemonSessionProvider', () => {
       }),
       expect.any(String),
     );
+  });
+
+  it('keeps an explicit standalone context through detached create and attach', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const standaloneSession = createMockSession({
+      sessionId: 'standalone-created',
+      workspaceCwd: '/private/standalone-created',
+      session: {
+        sessionId: 'standalone-created',
+        workspaceCwd: '/private/standalone-created',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-created',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    sdkMocks.sessions.push(standaloneSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      createSessionRequest: { approvalMode: 'yolo' },
+    });
+    sdkMocks.workspaceProviders.mockClear();
+    sdkMocks.workspaceSkills.mockClear();
+    sdkMocks.workspaceByCwd.mockClear();
+
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession({
+        sessionContext: { kind: 'standalone' },
+      });
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).toHaveBeenCalledWith(expect.anything(), { approvalMode: 'yolo' });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-created',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        projectlessOutputDirectory: '/output/standalone-created',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          createSessionRequest={{
+            approvalMode: 'yolo',
+            modelServiceId: 'next-model',
+          }}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => flushPromises());
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-created',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        projectlessOutputDirectory: '/output/standalone-created',
+      },
+    });
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-created',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+    });
+    expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+    expect(standaloneSession.supportedCommands).toHaveBeenCalledOnce();
+  });
+
+  it('returns to the workspace prop after clearing a standalone restore', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(undefined, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/workspace',
+      features: ['standalone_sessions_v1'],
+    });
+    const initialWorkspace = createMockSession({
+      sessionId: 'workspace-initial',
+      workspaceCwd: '/workspace',
+      events: createIdleEvents(),
+    });
+    const loadedStandalone = createMockSession({
+      sessionId: 'standalone-loaded',
+      workspaceCwd: '/private/standalone-loaded',
+      session: {
+        sessionId: 'standalone-loaded',
+        workspaceCwd: '/private/standalone-loaded',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-loaded',
+        workingDirectory: { state: 'ready' },
+      },
+      events: createIdleEvents(),
+    });
+    const createdWorkspace = createMockSession({
+      sessionId: 'workspace-created',
+      workspaceCwd: '/workspace',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(initialWorkspace);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'workspace-initial',
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+    });
+    sdkMocks.sessions.push(loadedStandalone, createdWorkspace);
+    let loadStandalone!: Promise<void>;
+    act(() => {
+      loadStandalone = requireActions(actions).loadSession(
+        'standalone-loaded',
+        {
+          sessionContext: { kind: 'standalone' },
+        },
+      );
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await expect(loadStandalone).resolves.toBeUndefined();
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection?.sessionContext).toEqual({ kind: 'standalone' }),
+      );
+    });
+    let newWorkspaceSession!: Promise<void>;
+    act(() => {
+      newWorkspaceSession = requireActions(actions).newSession();
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await expect(newWorkspaceSession).resolves.toBeUndefined();
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'workspace-created',
+          sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        }),
+      );
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledOnce();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
   });
 
   it('can send immediately after creating a session from the empty state', async () => {
@@ -3338,6 +4788,74 @@ describe('DaemonSessionProvider', () => {
       settingsVersion: 1,
       mcpVersion: 1,
       artifactsVersion: 1,
+      initVersion: 0,
+      authVersion: 0,
+    });
+  });
+
+  it('does not invalidate workspace data from standalone session events', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-signals',
+        workspaceCwd: '/private/standalone-signals',
+        session: {
+          sessionId: 'standalone-signals',
+          workspaceCwd: '/private/standalone-signals',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+        events: async function* standaloneWorkspaceEvents() {
+          yield {
+            id: 21,
+            v: 1,
+            type: 'memory_changed',
+            data: {
+              scope: 'workspace',
+              filePath: '/private/standalone-signals/QWEN.md',
+              mode: 'append',
+              bytesWritten: 12,
+            },
+          } satisfies DaemonEvent;
+          yield {
+            id: 22,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'ui.theme',
+              scope: 'workspace',
+              value: 'Qwen Dark',
+            },
+          } satisfies DaemonEvent;
+        },
+      }),
+    );
+    let signals: DaemonWorkspaceEventSignals | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-signals',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => flushPromises());
+
+    expect(signals).toMatchObject({
+      memoryVersion: 0,
+      agentsVersion: 0,
+      toolsVersion: 0,
+      settingsVersion: 0,
+      skillsVersion: 0,
+      mcpVersion: 0,
+      artifactsVersion: 0,
       initVersion: 0,
       authVersion: 0,
     });
@@ -6970,6 +8488,88 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('streaming');
   });
 
+  it('reloads standalone sessions through the standalone route after resync', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'standalone-resync',
+      workspaceCwd: '/private/standalone-resync',
+      session: {
+        sessionId: 'standalone-resync',
+        workspaceCwd: '/private/standalone-resync',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-resync',
+        workingDirectory: { state: 'ready' },
+      },
+      events: async function* standaloneEpochReset() {
+        yield {
+          id: 6,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'standalone-resync',
+      workspaceCwd: '/private/standalone-resync',
+      session: {
+        sessionId: 'standalone-resync',
+        workspaceCwd: '/private/standalone-resync',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-resync',
+        workingDirectory: { state: 'ready' },
+      },
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-resync',
+      sessionContext: { kind: 'standalone' },
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      sdkMocks.MockDaemonSessionClient.loadStandalone,
+    ).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'standalone-resync',
+      { timeoutMs: 70_000 },
+      expect.any(String),
+    );
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'standalone-resync',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+      standaloneSession: {
+        workingDirectory: { state: 'ready' },
+      },
+    });
+  });
+
   it('clears restored active prompts when epoch reload is idle', async () => {
     const reloaded = createDeferred<void>();
     const firstSession = createMockSession({
@@ -9349,6 +10949,117 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('retains standalone identity after transient heartbeat failures', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat', 'standalone_sessions_v1'],
+      modelServices: [],
+      workspaceCwd: '/primary',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw new Error('heartbeat lost');
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-heartbeat',
+        workspaceCwd: '/private/standalone-heartbeat',
+        session: {
+          sessionId: 'standalone-heartbeat',
+          workspaceCwd: '/private/standalone-heartbeat',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-heartbeat',
+          workingDirectory: { state: 'ready' },
+        },
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-heartbeat',
+      sessionContext: { kind: 'standalone' },
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      sessionId: 'standalone-heartbeat',
+      sessionContext: { kind: 'standalone' },
+      standaloneSession: { workingDirectory: { state: 'ready' } },
+      error: 'heartbeat lost',
+    });
+  });
+
+  it('clears standalone identity after a terminal heartbeat failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat', 'standalone_sessions_v1'],
+      modelServices: [],
+      workspaceCwd: '/primary',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw Object.assign(new Error('session gone'), { status: 410 });
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-gone',
+        workspaceCwd: '/private/standalone-gone',
+        session: {
+          sessionId: 'standalone-gone',
+          workspaceCwd: '/private/standalone-gone',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-gone',
+          workingDirectory: { state: 'ready' },
+        },
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'standalone-gone',
+      sessionContext: { kind: 'standalone' },
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      missingSession: true,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.sessionContext).toEqual({ kind: 'standalone' });
+    expect(connection?.workspaceCwd).toBeUndefined();
+    expect(connection?.standaloneSession).toBeUndefined();
+  });
+
   it('ignores a late heartbeat failure from a replaced same-id attachment', async () => {
     vi.stubGlobal(
       'fetch',
@@ -10508,6 +12219,35 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({ sessionId: 'session-a' });
   });
 
+  it('publishes the loaded workspace instead of the primary fallback', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        workspaceCwd: '/secondary-workspace',
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-a',
+      sessionContext: {
+        kind: 'workspace',
+        cwd: '/secondary-workspace',
+      },
+      workspaceCwd: '/secondary-workspace',
+    });
+  });
+
   it('does not duplicate the initial controlled load when workspace is set', async () => {
     sdkMocks.sessions.push(
       createMockSession({ sessionId: 'session-a', clientId: 'client-a' }),
@@ -11150,6 +12890,83 @@ describe('DaemonSessionProvider', () => {
       });
     },
   );
+
+  it('clears standalone session metadata after an auth failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const streamFailure = createDeferred<void>();
+    const streamStarted = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'standalone-auth',
+        workspaceCwd: '/private/standalone-auth',
+        session: {
+          sessionId: 'standalone-auth',
+          workspaceCwd: '/private/standalone-auth',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          projectlessOutputDirectory: '/output/standalone-auth',
+          workingDirectory: { state: 'ready' },
+        },
+        context: vi.fn(async () => sessionContextWithModels('standalone-auth')),
+        supportedCommands: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'standalone-auth',
+          availableCommands: [
+            { name: '/context', description: 'Show context', input: null },
+          ],
+          availableSkills: ['review'],
+        })),
+        events: async function* authFailureEvents() {
+          streamStarted.resolve();
+          await streamFailure.promise;
+          yield* [];
+          throw new DaemonHttpError(401, {}, 'Unauthorized');
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      sessionId: 'standalone-auth',
+      sessionContext: { kind: 'standalone' },
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(connection?.status).toBe('connected'));
+      await streamStarted.promise;
+    });
+    expect(connection?.commands?.length).toBeGreaterThan(0);
+    expect(connection?.models).toHaveLength(1);
+
+    streamFailure.resolve();
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      sessionContext: { kind: 'standalone' },
+      error: 'Unauthorized',
+      errorStatus: 401,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
+    expect(connection?.models).toBeUndefined();
+    expect(connection?.supportedCommands).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.standaloneSession).toBeUndefined();
+  });
 
   it.each([
     [
@@ -12140,6 +13957,7 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('preserves session and uses delta resume after a retriable SSE error', async () => {
+    const resumeDelivered = createDeferred<void>();
     let callCount = 0;
     const events = vi.fn(async function* retriableEvents(
       opts: { signal?: AbortSignal } = {},
@@ -12171,6 +13989,7 @@ describe('DaemonSessionProvider', () => {
           },
         },
       } satisfies DaemonEvent;
+      resumeDelivered.resolve();
       await new Promise<void>((resolve) => {
         if (opts.signal?.aborted) {
           resolve();
@@ -12196,8 +14015,9 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(20);
+      await resumeDelivered.promise;
       await flushPromises();
+      await flushTranscriptDispatch();
     });
 
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
@@ -15226,6 +17046,13 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     replayPartial: opts.replayPartial ?? false,
     replayError: opts.replayError,
     eventEpoch: opts.eventEpoch ?? 'epoch-1',
+    session:
+      opts.session ??
+      ({
+        sessionId: opts.sessionId ?? 'session-1',
+        workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
+        sourceType: 'default',
+      } as Record<string, unknown>),
     lastEventId: opts.lastEventId,
     setLastEventId:
       opts.setLastEventId ??

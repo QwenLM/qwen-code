@@ -12,9 +12,10 @@ interface ModelDialogProps {
   onSelect: (modelId: string) => void;
   models?: ModelDialogModel[];
   currentModelId?: string;
+  filterModel?: (model: ModelDialogModel) => boolean;
 }
 
-interface ModelDialogModel {
+export interface ModelDialogModel {
   id: string;
   baseModelId?: string;
   label?: string;
@@ -96,13 +97,15 @@ export function ModelDialog({
   onSelect,
   models,
   currentModelId,
+  filterModel,
 }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = currentModelId ?? connection.currentModel ?? '';
-  const availableModels = useMemo(
-    () => models ?? ((connection.models ?? []) as ModelDialogModel[]),
-    [models, connection.models],
-  );
+  const availableModels = useMemo(() => {
+    const candidates =
+      models ?? ((connection.models ?? []) as ModelDialogModel[]);
+    return filterModel ? candidates.filter(filterModel) : candidates;
+  }, [models, connection.models, filterModel]);
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';

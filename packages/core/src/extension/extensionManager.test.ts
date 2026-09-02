@@ -82,6 +82,30 @@ vi.mock('./github.js', async (importOriginal) => {
   };
 });
 
+// Wraps the real implementation (not a stub) so every existing scenario keeps
+// its actual validation behavior; only call-site wiring is asserted on.
+// afterEach's vi.restoreAllMocks() resets a bare vi.fn() back to a no-op, so
+// the real implementation is held here and re-attached in beforeEach on
+// every test, not just set once at module load.
+const mockAssertDirectorySymlinksAreSafe = vi.hoisted(() => vi.fn());
+const realAssertDirectorySymlinksAreSafe = vi.hoisted(() => ({
+  current: undefined as
+    | undefined
+    | (typeof import('./archive-safety.js'))['assertDirectorySymlinksAreSafe'],
+}));
+vi.mock('./archive-safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./archive-safety.js')>();
+  realAssertDirectorySymlinksAreSafe.current =
+    actual.assertDirectorySymlinksAreSafe;
+  mockAssertDirectorySymlinksAreSafe.mockImplementation(
+    actual.assertDirectorySymlinksAreSafe,
+  );
+  return {
+    ...actual,
+    assertDirectorySymlinksAreSafe: mockAssertDirectorySymlinksAreSafe,
+  };
+});
+
 vi.mock('./npm.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./npm.js')>();
   return {
@@ -238,6 +262,13 @@ describe('extension tests', () => {
     mockExtractArchiveFile.mockReset();
     mockDownloadFromNpmRegistry.mockReset();
     mockGit.revparse.mockResolvedValue('sample-commit');
+    // vi.restoreAllMocks() in afterEach resets this bare vi.fn() back to a
+    // no-op, so the real passthrough implementation must be re-attached
+    // every test, not just cleared.
+    mockAssertDirectorySymlinksAreSafe.mockReset();
+    mockAssertDirectorySymlinksAreSafe.mockImplementation(
+      realAssertDirectorySymlinksAreSafe.current!,
+    );
   });
 
   afterEach(() => {
@@ -558,11 +589,15 @@ describe('extension tests', () => {
       ).toBe(false);
     });
 
-    it('installs an anonymous public GitHub extension through the old-Git archive fallback', async () => {
+    it('materializes validated Agent Plugin symlinks from the old-Git archive fallback', async () => {
       mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
       mockDownloadPublicGitHubArchiveFallback.mockImplementation(
         async (_metadata: ExtensionInstallMetadata, destination: string) => {
-          writeExtractedExtension(destination, 'old-git-extension');
+          createAgentPlugin(destination, { name: 'old-git-agent-plugin' });
+          fs.writeFileSync(path.join(destination, 'CLAUDE.md'), '# agents\n');
+          if (process.platform !== 'win32') {
+            fs.symlinkSync('CLAUDE.md', path.join(destination, 'AGENTS.md'));
+          }
           return '0123456789abcdef0123456789abcdef01234567';
         },
       );
@@ -572,27 +607,140 @@ describe('extension tests', () => {
       const installed = await manager.installExtension(
         {
           type: 'git',
-          source: 'https://github.com/obra/superpowers',
+          source: 'https://github.com/example/agent-plugin',
         },
         async () => {},
       );
 
+      expect(installed.name).toBe('old-git-agent-plugin');
       expect(installed.installMetadata).toMatchObject({
         type: 'git',
-        source: 'https://github.com/obra/superpowers',
+        source: 'https://github.com/example/agent-plugin',
         gitCommit: '0123456789abcdef0123456789abcdef01234567',
+        originSource: 'AgentPlugins',
       });
+      if (process.platform !== 'win32') {
+        const installedAgents = path.join(installed.path, 'AGENTS.md');
+        expect(fs.lstatSync(installedAgents).isFile()).toBe(true);
+        expect(fs.readFileSync(installedAgents, 'utf8')).toBe('# agents\n');
+      }
       // Releases stay preferred over the archive fallback on older Git.
       expect(mockDownloadFromGitHubRelease).toHaveBeenCalled();
       expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'git',
-          source: 'https://github.com/obra/superpowers',
+          source: 'https://github.com/example/agent-plugin',
         }),
         expect.any(String),
         undefined,
       );
       expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
+    it('re-validates symlinks on the post-conversion tree when the old-Git archive fallback feeds a converter', async () => {
+      // The archive-fallback validation only ever proves
+      // sourceBeforeConversion safe. When conversion actually relocates the
+      // tree (unlike the AgentPlugins case above, which never does), the
+      // post-conversion directory must be re-validated rather than trusted
+      // on the strength of a check that ran against a different directory.
+      let fallbackDestination: string | undefined;
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadPublicGitHubArchiveFallback.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          fallbackDestination = destination;
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'old-git-gemini-extension',
+              version: '1.0.0',
+            }),
+          );
+          return '0123456789abcdef0123456789abcdef01234567';
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+
+      const installed = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/gemini-extension',
+        },
+        async () => {},
+      );
+
+      expect(installed.name).toBe('old-git-gemini-extension');
+      expect(installed.installMetadata).toMatchObject({
+        originSource: 'Gemini',
+      });
+      expect(fallbackDestination).toBeDefined();
+      // Real Gemini conversion always copies to a fresh temp dir, so this
+      // only passes when the guard's
+      // `localSourcePath !== sourceBeforeConversion` half is reachable —
+      // gating it on `isAgentPlugin` as well (the bug this test guards
+      // against) would make it structurally unreachable, since AgentPlugins
+      // conversion never relocates the tree.
+      // Escape regex metacharacters before building the pattern: on Windows
+      // fallbackDestination contains backslashes (e.g. `C:\Users\...`),
+      // which a raw RegExp would read as escape sequences rather than path
+      // separators, silently matching nothing and passing regardless of
+      // what path the guard was actually called with.
+      const escapedFallbackDestination = fallbackDestination!.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      expect(mockAssertDirectorySymlinksAreSafe).toHaveBeenCalledWith(
+        expect.not.stringMatching(
+          new RegExp(`^${escapedFallbackDestination}$`),
+        ),
+        undefined,
+      );
+    });
+
+    it('aborts the install when post-conversion re-validation rejects the relocated tree', async () => {
+      // The guard above only pins that re-validation is CALLED on the
+      // relocated directory. This pins the other half: when that
+      // re-validation actually rejects (the stale-trust scenario the guard
+      // exists to catch), the install must abort rather than silently
+      // proceeding with the unsafe tree.
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadPublicGitHubArchiveFallback.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'old-git-gemini-extension-unsafe',
+              version: '1.0.0',
+            }),
+          );
+          return '0123456789abcdef0123456789abcdef01234567';
+        },
+      );
+      mockAssertDirectorySymlinksAreSafe.mockRejectedValueOnce(
+        new Error('Tar archive contains unsupported link entry: escape'),
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          {
+            type: 'git',
+            source: 'https://github.com/example/gemini-extension-unsafe',
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow('unsupported link entry');
+
+      expect(
+        fs.existsSync(
+          path.join(
+            userExtensionsDir,
+            'old-git-gemini-extension-unsafe',
+            EXTENSIONS_CONFIG_FILENAME,
+          ),
+        ),
+      ).toBe(false);
     });
 
     it('keeps release installs ahead of the old-Git archive fallback', async () => {
@@ -4115,7 +4263,7 @@ describe('extension tests', () => {
         const mockSettingsMcpServers = { server: { command: 'cmd' } };
 
         const mockConfig = {
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             isInitialized: () => false,
             setTools: vi.fn(),
           }),

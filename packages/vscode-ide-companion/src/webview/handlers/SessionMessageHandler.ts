@@ -93,6 +93,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return [
       'sendMessage',
       'editMessage',
+      'exportSession',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -169,6 +170,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data?.attachments as ImageAttachment[] | undefined,
           data?.inlineFiles as InlineFilePayload[] | undefined,
           data?.targetTurnIndex as number | undefined,
+        );
+        break;
+
+      case 'exportSession':
+        await this.handleWebShellExport(
+          (data?.text as string) || '',
+          (data?.sessionId as string) || undefined,
         );
         break;
 
@@ -465,11 +473,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
   private async handleExportCommand(
     format: SessionExportFormat,
+    explicitSessionId?: string,
   ): Promise<void> {
     // Prefer the active ACP session id. The local conversation id may still be
     // a webview-only `conv_*` placeholder after starting a fresh session.
     const sessionId =
-      this.agentManager.currentSessionId ?? this.currentConversationId;
+      explicitSessionId ??
+      this.agentManager.currentSessionId ??
+      this.currentConversationId;
     if (!sessionId) {
       const errorMsg = 'No active session found to export.';
       this.sendToWebView({
@@ -502,12 +513,36 @@ export class SessionMessageHandler extends BaseMessageHandler {
           localOnly: true,
         },
       });
+      this.sendToWebView({
+        type: 'exportCompleted',
+        data: {
+          format: formatLabel,
+          filename: result.filename,
+          filePath: result.uri.fsPath,
+        },
+      });
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
       logger.error('[SessionMessageHandler] Failed to export session:', error);
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
+  }
+
+  private async handleWebShellExport(
+    text: string,
+    sessionId?: string,
+  ): Promise<void> {
+    try {
+      const format = parseExportSlashCommand(text);
+      if (!format) return;
+      await this.handleExportCommand(format, sessionId);
+    } catch (error) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: this.getErrorMessage(error) },
       });
     }
   }
@@ -697,9 +732,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
           await this.agentManager.rewindSession(editTargetTurnIndex);
         editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
         editAcpMutationApplied = true;
-        const retainedConversation = await this.conversationStore.getConversation(
-          this.currentConversationId,
-        );
+        const retainedConversation =
+          await this.conversationStore.getConversation(
+            this.currentConversationId,
+          );
         this.sendToWebView({
           type: 'conversationRewound',
           data: {
@@ -741,7 +777,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     // Generate title for first message, but only if it hasn't been set yet
-    if (isFirstMessage && !this.isTitleSet) {
+    if (isFirstMessage && (!this.isTitleSet || editTargetTurnIndex === 0)) {
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {

@@ -43,7 +43,17 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 export type PeerMessagePriority = 'now' | 'next';
 
 /** Terminal states a sent message can reach on the receiving side. */
-export type PeerDeliveryStatus = 'held' | 'denied' | 'expired' | 'delivered';
+export type PeerDeliveryStatus =
+  | 'held'
+  | 'denied'
+  | 'expired'
+  | 'delivered'
+  /**
+   * The frame named a session id the receiver does not hold: the sender's
+   * directory was stale (the address changed hands, or the peer ran
+   * /clear). Distinct from `denied` — nobody decided anything.
+   */
+  | 'misaddressed';
 
 export interface PeerUserFrame {
   msgV: number;
@@ -59,6 +69,14 @@ export interface PeerUserFrame {
    * treats as the cautious case rather than as a match.
    */
   fromMode?: 'bypass' | 'prompting';
+  /**
+   * Session id of the intended recipient. The address a sender dials is
+   * keyed by PID, and PIDs get reused, so a receiver whose session id
+   * differs refuses the frame: it was written for whoever held this
+   * address when the sender last looked, not for the session holding it
+   * now. Absent means the sender did not say, which older senders don't.
+   */
+  toSessionId?: string;
   priority: PeerMessagePriority;
   message: { role: 'user'; content: string };
 }
@@ -147,6 +165,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
 
     const priority = parsed['priority'];
     const fromMode = parsed['fromMode'];
+    const toSessionId = optionalString(parsed['toSessionId']);
     return {
       msgV,
       msgId,
@@ -156,6 +175,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }
         : {}),
+      ...(toSessionId !== undefined ? { toSessionId } : {}),
       priority: priority === 'now' ? 'now' : 'next',
       message: { role: 'user', content },
     };
@@ -168,7 +188,8 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       status !== 'held' &&
       status !== 'denied' &&
       status !== 'expired' &&
-      status !== 'delivered'
+      status !== 'delivered' &&
+      status !== 'misaddressed'
     ) {
       return null;
     }
@@ -200,6 +221,7 @@ export interface BuildUserFrameFields {
   from?: string;
   fromName?: string;
   fromMode?: 'bypass' | 'prompting';
+  toSessionId?: string;
   priority?: PeerMessagePriority;
 }
 
@@ -211,6 +233,9 @@ export function buildUserFrame(fields: BuildUserFrameFields): PeerUserFrame {
     ...(fields.from !== undefined ? { from: fields.from } : {}),
     ...(fields.fromName !== undefined ? { fromName: fields.fromName } : {}),
     ...(fields.fromMode !== undefined ? { fromMode: fields.fromMode } : {}),
+    ...(fields.toSessionId !== undefined
+      ? { toSessionId: fields.toSessionId }
+      : {}),
     priority: fields.priority ?? 'next',
     message: { role: 'user', content: fields.content },
   };
@@ -231,6 +256,8 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':
       return 'Your message was released to the recipient session.';
+    case 'misaddressed':
+      return 'That address now belongs to a different session than the one you addressed; it was not delivered. List the agents again before re-sending.';
     default: {
       const exhaustive: never = status;
       return exhaustive;

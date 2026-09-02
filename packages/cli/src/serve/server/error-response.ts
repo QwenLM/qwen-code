@@ -22,6 +22,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -213,6 +214,18 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
   if (err instanceof BridgeChannelQuarantinedError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
     // Quarantine lasts until the channel drains, which is strictly longer than
@@ -252,7 +265,11 @@ export function sendBridgeError(
         : err.code === 'standalone_session_not_found'
           ? 404
           : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back'
+              err.code === 'standalone_creation_rolled_back' ||
+              err.code === 'standalone_session_operation_failed' ||
+              err.code === 'transcript_deletion_failed' ||
+              err.code === 'transcript_deletion_outcome_unknown' ||
+              err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
     if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
@@ -288,9 +305,7 @@ export function sendBridgeError(
   }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
-    res
-      .status(skillError.code === 'skill_not_found' ? 404 : 409)
-      .json(skillError);
+    res.status(404).json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {

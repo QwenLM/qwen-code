@@ -127,4 +127,88 @@ describe('on-demand subagent transcript projection', () => {
       },
     });
   });
+
+  it('retains executionMode in the projected task_execution output', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ]);
+
+    // Summary-mode clients classify from executionMode starting with the
+    // first running update; the projection must not strip the field.
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+      },
+    });
+  });
+
+  it('retains the foreground executionMode literal in the projected output', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'foreground',
+        },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'foreground',
+      },
+    });
+  });
+
+  it('drops an unknown executionMode literal from the projected output', () => {
+    // The whitelist fails closed: only the two known literals may reach
+    // summary-mode clients; anything else falls back to the legacy
+    // argument/status heuristic downstream instead of forcing a mode.
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'detached',
+        },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+      },
+    });
+    expect(result).not.toHaveProperty('rawOutput.executionMode');
+  });
 });

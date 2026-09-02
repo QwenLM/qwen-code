@@ -7,7 +7,7 @@
 /** @vitest-environment jsdom */
 
 import { act } from 'react';
-import type { ComponentType } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   afterEach,
@@ -18,7 +18,6 @@ import {
   it,
   vi,
 } from 'vitest';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -39,127 +38,78 @@ const mocks = vi.hoisted(() => ({
     getState: vi.fn(() => ({})),
     setState: vi.fn(),
   },
-  session: {
-    qwenSessions: [
-      { id: 'session-1', title: 'Session one', messageCount: 2 },
-    ] as Array<Record<string, unknown>>,
-    currentSessionId: 'session-1' as string | null,
-    currentSessionTitle: 'Session one',
-    showSessionSelector: false,
-    sessionSearchQuery: '',
-    filteredSessions: [
-      { id: 'session-1', title: 'Session one', messageCount: 2 },
-    ] as Array<Record<string, unknown>>,
-    hasMore: true,
-    isLoading: false,
-    isSwitchingSession: false,
-    setSessionSearchQuery: vi.fn(),
-    setShowSessionSelector: vi.fn(),
-    handleLoadQwenSessions: vi.fn(),
-    handleLoadMoreSessions: vi.fn(),
-    handleSwitchSession: vi.fn(),
-    handleNewQwenSession: vi.fn(),
-    handleDeleteSession: vi.fn(),
-    handleRenameSession: vi.fn(),
-    setQwenSessions: vi.fn(),
-    setCurrentSessionId: vi.fn(),
-    setCurrentSessionTitle: vi.fn(),
-    setNextCursor: vi.fn(),
-    setHasMore: vi.fn(),
-    setIsLoading: vi.fn(),
-    setIsSwitchingSession: vi.fn(),
-  },
-  fileContext: {
-    activeFileName: 'editor.ts',
-    activeFilePath: '/workspace/editor.ts',
-    activeSelection: { startLine: 3, endLine: 5 },
-    workspaceFiles: [],
-    hasRequestedFiles: true,
-    getFileReferences: vi.fn(() => [
-      { name: 'main.ts', value: '/workspace/src/main.ts' },
-    ]),
-    searchWorkspaceFiles: vi.fn(async () => []),
-    clearFileReferences: vi.fn(),
-    addFileReference: vi.fn(),
-    requestWorkspaceFiles: vi.fn(),
-    requestActiveEditor: vi.fn(),
-    focusActiveEditor: vi.fn(),
-    setActiveFileName: vi.fn(),
-    setActiveFilePath: vi.fn(),
-    setActiveSelection: vi.fn(),
-    setWorkspaceFiles: vi.fn(),
-    setWorkspaceFilesFromResponse: vi.fn(),
-  },
-  messageHandling: {
-    messages: [] as Array<{
-      role: 'assistant';
-      content: string;
-      timestamp: number;
-      localOnly?: boolean;
-    }>,
-    isStreaming: false,
-    isWaitingForResponse: false,
-    setWaitingForResponse: vi.fn(),
-    clearWaitingForResponse: vi.fn(),
-    endStreaming: vi.fn(),
-    addMessage: vi.fn(),
-    clearMessages: vi.fn(),
-    setMessages: vi.fn(),
-  },
-  tools: {
-    inProgressToolCalls: [],
-    handleToolCallUpdate: vi.fn(),
-    clearToolCalls: vi.fn(),
-    rewindToolCallsToTimestamp: vi.fn(),
-  },
-  blocks: {
-    current: [
-      {
-        id: 'assistant-1',
-        kind: 'assistant',
-        text: 'assistant reply',
-      } as unknown as DaemonTranscriptBlock,
-    ],
-  },
   embeddedProps: { current: null as CapturedProps | null },
-  webViewMessageProps: { current: null as CapturedProps | null },
+  connectionError: { current: undefined as string | undefined },
+  errorNotifications: { current: 0 },
 }));
 
-vi.mock('@qwen-code/web-shell', () => ({
-  EmbeddedWebShell: (props: CapturedProps) => {
-    mocks.embeddedProps.current = props;
-    return null;
+const sdkMocks = vi.hoisted(() => ({
+  listWorkspaceSessionsPage: vi.fn(),
+}));
+
+vi.mock('@qwen-code/sdk/daemon', () => ({
+  DaemonClient: class {
+    workspaceByCwd() {
+      return {
+        listWorkspaceSessionsPage: sdkMocks.listWorkspaceSessionsPage,
+        updateSessionMetadata: vi.fn(async () => ({})),
+        deleteSessionsData: vi.fn(async () => ({})),
+      };
+    }
+    getRewindSnapshots = vi.fn(async () => ({ snapshots: [] }));
+    rewindSession = vi.fn(async () => ({}));
   },
 }));
+
+vi.mock('@qwen-code/web-shell', async () => {
+  const { useEffect, useMemo, useRef, useState } = await import('react');
+  return {
+    WebShellWithProviders: (props: CapturedProps) => {
+      mocks.embeddedProps.current = props;
+      // Mirror App.tsx's error-notification effect: while a connection error
+      // persists, each distinct error value is reported once. Hosts may pass
+      // an onError whose identity changes on every render, which re-runs the
+      // effect without re-delivering the already-reported error.
+      const onError = props.onError as ((error: Error) => void) | undefined;
+      const lastReportedError = useRef<string | undefined>(undefined);
+      const [churn, setChurn] = useState(0);
+      // A fresh wrapper identity whenever the host's onError identity
+      // changes mirrors a host passing an inline onError; the churn state
+      // below additionally forces the effect to re-run after a delivery,
+      // like the host re-render that delivering the error triggers.
+      const unstableOnError = useMemo(
+        () => (onError ? (error: Error) => onError(error) : undefined),
+        [onError],
+      );
+      useEffect(() => {
+        const message = mocks.connectionError.current;
+        if (!message) {
+          lastReportedError.current = undefined;
+          return;
+        }
+        if (lastReportedError.current === message) return;
+        // App.tsx returns before stamping when no handler is attached, so a
+        // handler that appears later still receives the persistent error.
+        if (!unstableOnError) return;
+        lastReportedError.current = message;
+        mocks.errorNotifications.current += 1;
+        if (mocks.errorNotifications.current > 3) {
+          // Value-dedup makes a notify loop impossible; fail fast if this
+          // mirror ever regresses instead of hanging.
+          throw new Error('onError notified in a loop');
+        }
+        unstableOnError(new Error(message));
+        // Delivering an error re-renders the host; force one extra effect
+        // run under a fresh callback identity to mirror that churn.
+        if (churn < 1) setChurn((count) => count + 1);
+      }, [unstableOnError, churn]);
+      return null;
+    },
+  };
+});
 
 vi.mock('./hooks/useVSCode.js', () => ({
   useVSCode: () => mocks.vscode,
-}));
-
-vi.mock('./hooks/session/useSessionManagement.js', () => ({
-  useSessionManagement: () => mocks.session,
-}));
-
-vi.mock('./hooks/file/useFileContext.js', () => ({
-  useFileContext: () => mocks.fileContext,
-}));
-
-vi.mock('./hooks/message/useMessageHandling.js', () => ({
-  useMessageHandling: () => mocks.messageHandling,
-}));
-
-vi.mock('./hooks/useToolCalls.js', () => ({
-  useToolCalls: () => mocks.tools,
-}));
-
-vi.mock('./hooks/useAcpTranscript.js', () => ({
-  useAcpTranscript: () => mocks.blocks.current,
-}));
-
-vi.mock('./hooks/useWebViewMessages.js', () => ({
-  useWebViewMessages: (props: CapturedProps) => {
-    mocks.webViewMessageProps.current = props;
-  },
 }));
 
 const mounted: RenderedApp[] = [];
@@ -171,17 +121,7 @@ async function renderApp(): Promise<CapturedProps> {
   await act(async () => {
     root.render(<EmbeddedApp />);
     await Promise.resolve();
-    await Promise.resolve();
   });
-  for (
-    let attempt = 0;
-    attempt < 5 && !mocks.embeddedProps.current;
-    attempt++
-  ) {
-    await act(async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    });
-  }
   mounted.push({ container, root });
   const props = mocks.embeddedProps.current;
   expect(props).not.toBeNull();
@@ -193,35 +133,31 @@ function callback<T extends (...args: never[]) => unknown>(
   name: string,
 ): T {
   const value = props[name];
-  expect(value).toEqual(expect.any(Function));
+  expect(typeof value).toBe('function');
   return value as T;
 }
 
-function postMessagesOfType(type: string): unknown[] {
+function postMessagesOfType(
+  type: string,
+): Array<{ type?: string; data?: unknown }> {
   return mocks.vscode.postMessage.mock.calls
     .map(([message]) => message as { type?: string })
-    .filter((message) => message.type === type)
-    .map((message) => message);
+    .filter((message) => message.type === type);
 }
 
 beforeAll(async () => {
+  document.body.dataset.qwenDaemonBaseUrl = 'http://localhost:4141';
+  document.body.dataset.qwenWorkspaceCwd = '/workspace';
+  document.body.dataset.qwenSessionId = 'session-1';
+  document.body.dataset.qwenHostKind = 'panel';
   ({ EmbeddedApp } = await import('./EmbeddedApp.js'));
 });
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.embeddedProps.current = null;
-  mocks.webViewMessageProps.current = null;
-  mocks.messageHandling.messages = [];
-  mocks.messageHandling.isStreaming = false;
-  mocks.messageHandling.isWaitingForResponse = false;
-  mocks.blocks.current = [
-    {
-      id: 'assistant-1',
-      kind: 'assistant',
-      text: 'assistant reply',
-    } as unknown as DaemonTranscriptBlock,
-  ];
+  mocks.connectionError.current = undefined;
+  mocks.errorNotifications.current = 0;
 });
 
 afterEach(() => {
@@ -232,230 +168,443 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
-  it('maps composer submissions to the existing ACP sendMessage contract', async () => {
+  it('attributes its sessions to the VS Code channel', async () => {
     const props = await renderApp();
-    const submit = callback<
-      (submission: {
-        text: string;
-        images?: Array<{ data: string; media_type: string }>;
-        files?: Array<{ name: string; media_type: string; text?: string }>;
-        inputAnnotations?: unknown[];
-      }) => boolean
-    >(props, 'onSubmit');
-
-    expect(
-      submit({
-        text: 'Explain @main.ts',
-        images: [{ data: 'aGVsbG8=', media_type: 'image/png' }],
-        files: [
-          { name: 'notes.md', media_type: 'text/markdown', text: '# Notes' },
-        ],
-        inputAnnotations: [{ type: 'file', text: '@main.ts' }],
-      }),
-    ).toBe(true);
-
-    const message = postMessagesOfType('sendMessage').at(-1) as {
-      data: {
-        text: string;
-        context: Array<Record<string, unknown>>;
-        attachments: Array<Record<string, unknown>>;
-        inlineFiles: Array<Record<string, unknown>>;
-        fileContext: Record<string, unknown>;
-        inputAnnotations: unknown[];
-      };
-    };
-    expect(message.data.text).toBe('Explain @main.ts');
-    expect(message.data.context).toEqual([
-      {
-        type: 'file',
-        name: 'main.ts',
-        value: '/workspace/src/main.ts',
-        isImage: false,
-      },
-      {
-        type: 'file',
-        name: 'editor.ts',
-        value: '/workspace/editor.ts',
-        startLine: 3,
-        endLine: 5,
-        isImage: false,
-      },
-    ]);
-    expect(message.data.fileContext).toEqual({
-      fileName: 'editor.ts',
-      filePath: '/workspace/editor.ts',
-      startLine: 3,
-      endLine: 5,
-    });
-    expect(message.data.attachments[0]).toMatchObject({
-      type: 'image/png',
-      data: 'aGVsbG8=',
-    });
-    expect(message.data.inlineFiles).toEqual([
-      { name: 'notes.md', mediaType: 'text/markdown', text: '# Notes' },
-    ]);
-    expect(message.data.inputAnnotations).toEqual([
-      { type: 'file', text: '@main.ts' },
-    ]);
-    expect(mocks.messageHandling.setWaitingForResponse).toHaveBeenCalledOnce();
-    expect(mocks.fileContext.clearFileReferences).toHaveBeenCalledOnce();
+    // The daemon is shared with the CLI and the browser Web Shell for this
+    // workspace; without a distinct source type the panel cannot tell its own
+    // conversations apart from theirs.
+    expect(props['sessionSourceType']).toBe('vscode');
   });
 
-  it('maps permission, question, history, model, mode, and copy host actions', async () => {
+  it('injects the active editor reference into prepared submissions', async () => {
     await renderApp();
-    const webViewProps = mocks.webViewMessageProps.current as CapturedProps;
-    const handlePermissionRequest = callback<(request: unknown) => void>(
-      webViewProps,
-      'handlePermissionRequest',
-    );
-    const handleAskUserQuestion = callback<(request: unknown) => void>(
-      webViewProps,
-      'handleAskUserQuestion',
-    );
 
     await act(async () => {
-      callback<(authenticated: boolean) => void>(
-        webViewProps,
-        'setIsAuthenticated',
-      )(true);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      handlePermissionRequest({
-        options: [
-          { name: 'Allow once', kind: 'allow_once', optionId: 'proceed_once' },
-          { name: 'Reject', kind: 'reject_once', optionId: 'cancel' },
-        ],
-        toolCall: {
-          toolCallId: 'tool-1',
-          kind: 'bash',
-          title: 'Run command',
-          rawInput: { command: 'npm test' },
-          content: [],
-        },
-      });
-      handleAskUserQuestion({
-        sessionId: 'session-1',
-        questions: [
-          {
-            header: 'Keep?',
-            question: 'Keep current changes?',
-            multiSelect: false,
-            options: [{ label: 'Keep', description: 'Keep current changes' }],
-          },
-        ],
-      });
-      callback<(path: string | null) => void>(
-        webViewProps,
-        'setInsightReportPath',
-      )('/workspace/insight.md');
-      await Promise.resolve();
-    });
-
-    const props = mocks.embeddedProps.current as CapturedProps;
-    expect(props.style).toMatchObject({
-      '--background': 'var(--vscode-sideBar-background)',
-      '--foreground': 'var(--vscode-foreground)',
-      '--chat-editor-bg-primary': 'var(--vscode-input-background)',
-    });
-    expect(props.pendingPermission).toMatchObject({
-      id: 'tool-1',
-      kind: 'bash',
-      options: [
-        { id: 'proceed_once', kind: 'allow_once' },
-        { id: 'cancel', kind: 'reject_once' },
-      ],
-    });
-    expect(props.pendingQuestion).toMatchObject({
-      id: 'session-1',
-      kind: 'ask_user_question',
-      rawInput: expect.objectContaining({ questions: expect.any(Array) }),
-    });
-    expect(props.notices).toContainEqual({
-      id: 'insight-report',
-      message: 'Insight report: /workspace/insight.md',
-      actionLabel: 'Open report',
-    });
-
-    await act(async () => {
-      callback<(requestId: string, optionId: string) => void>(
-        props,
-        'onPermissionResponse',
-      )('tool-1', 'proceed_once');
-      await callback<
-        (
-          requestId: string,
-          optionId: string,
-          answers?: Record<string, string>,
-        ) => Promise<boolean>
-      >(props, 'onQuestionResponse')('session-1', 'proceed_once', {
-        '0': 'Keep',
-      });
-    });
-    expect(postMessagesOfType('permissionResponse').at(-1)).toEqual({
-      type: 'permissionResponse',
-      data: { optionId: 'proceed_once' },
-    });
-    expect(postMessagesOfType('askUserQuestionResponse').at(-1)).toEqual({
-      type: 'askUserQuestionResponse',
-      data: { answers: { '0': 'Keep' }, cancelled: false },
-    });
-    callback<(noticeId: string) => void>(
-      props,
-      'onNoticeAction',
-    )('insight-report');
-    expect(postMessagesOfType('openInsightReport').at(-1)).toEqual({
-      type: 'openInsightReport',
-      data: { path: '/workspace/insight.md' },
-    });
-
-    const historyOpenChange = callback<(open: boolean) => void>(
-      props,
-      'onHistoryOpenChange',
-    );
-    historyOpenChange(true);
-    callback<(sessionId: string) => void>(
-      props,
-      'onSessionSelect',
-    )('session-2');
-    callback<() => void>(props, 'onLoadMoreSessions')();
-    callback<(modelId: string) => void>(props, 'onSelectModel')('qwen-next');
-    callback<(modeId: string) => void>(props, 'onSelectMode')('yolo');
-    expect(mocks.session.handleLoadQwenSessions).toHaveBeenCalledOnce();
-    expect(mocks.session.handleSwitchSession).toHaveBeenCalledWith('session-2');
-    expect(mocks.session.handleLoadMoreSessions).toHaveBeenCalledOnce();
-    expect(mocks.vscode.postMessage).toHaveBeenCalledWith({
-      type: 'setModel',
-      data: { modelId: 'qwen-next' },
-    });
-    expect(mocks.vscode.postMessage).toHaveBeenCalledWith({
-      type: 'setApprovalMode',
-      data: { modeId: 'yolo' },
-    });
-
-    const host = document.createElement('div');
-    host.setAttribute('data-web-shell-embedded-host', '');
-    const row = document.createElement('div');
-    row.setAttribute('data-message-row-key', 'msg:assistant-1');
-    host.appendChild(row);
-    document.body.appendChild(host);
-    expect(row).not.toBeNull();
-    act(() =>
-      row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })),
-    );
-    expect(postMessagesOfType('contextMenuTriggered')).toHaveLength(1);
-    act(() => {
       window.dispatchEvent(
         new MessageEvent('message', {
-          data: { type: 'copyCommand', data: { action: 'copyMessage' } },
+          data: {
+            type: 'activeEditorChanged',
+            data: {
+              fileName: 'editor.ts',
+              filePath: '/workspace/editor.ts',
+              selection: { startLine: 3, endLine: 5 },
+            },
+          },
         }),
       );
+      await Promise.resolve();
     });
-    expect(postMessagesOfType('copyToClipboard').at(-1)).toEqual({
-      type: 'copyToClipboard',
-      data: { text: 'assistant reply' },
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        sessionId?: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    await expect(
+      prepareSubmit({ prompt: 'Explain this', inputAnnotations: [] }),
+    ).resolves.toEqual({
+      prompt: '@editor.ts (selected lines 3-5) Explain this',
+      inputAnnotations: [
+        expect.objectContaining({
+          type: 'reference',
+          start: 0,
+          end: '@editor.ts'.length,
+          reference: expect.objectContaining({
+            kind: 'file',
+            label: 'editor.ts',
+            value: '/workspace/editor.ts',
+          }),
+        }),
+      ],
     });
-    host.remove();
+  });
+
+  it('keeps an authenticated session visible when auth is cancelled', async () => {
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: true } },
+        }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', { data: { type: 'authCancelled' } }),
+      );
+      await Promise.resolve();
+    });
+
+    // The live session must not be swapped for the onboarding screen.
+    expect(container.textContent).not.toContain('Get Started');
+  });
+
+  it('still shows onboarding when an unauthenticated flow is cancelled', async () => {
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'authState', data: { authenticated: false } },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Get Started');
+  });
+
+  it('keeps an explicit active-file exclusion across same-file editor changes', async () => {
+    await renderApp();
+
+    const dispatchEditorChanged = (fileName: string, filePath: string) =>
+      act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'activeEditorChanged',
+              data: { fileName, filePath },
+            },
+          }),
+        );
+        await Promise.resolve();
+      });
+
+    await dispatchEditorChanged('editor.ts', '/workspace/editor.ts');
+
+    // The composer chip lives in a render prop consumed by the (mocked)
+    // shell, so render it standalone to click it.
+    const renderToolbar = callback<
+      (args: { disabled: boolean; currentModel?: string }) => ReactNode
+    >(
+      mocks.embeddedProps.current as CapturedProps,
+      'renderComposerToolbarStart',
+    );
+    const toolbarContainer = document.createElement('div');
+    document.body.appendChild(toolbarContainer);
+    const toolbarRoot = createRoot(toolbarContainer);
+
+    try {
+      await act(async () => {
+        toolbarRoot.render(
+          renderToolbar({ disabled: false, currentModel: 'm' }),
+        );
+        await Promise.resolve();
+      });
+      const chip = toolbarContainer.querySelector('.qwen-vscode-active-file');
+      if (!chip) throw new Error('active-file chip did not render');
+      await act(async () => {
+        chip.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      // A selection-only change for the same file must not re-arm inclusion.
+      await dispatchEditorChanged('editor.ts', '/workspace/editor.ts');
+      const prepareSubmitAfterSameFile = callback<
+        (submission: {
+          prompt: string;
+          inputAnnotations: unknown[];
+        }) => Promise<
+          { prompt: string; inputAnnotations: unknown[] } | undefined
+        >
+      >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+      await expect(
+        prepareSubmitAfterSameFile({ prompt: 'hi', inputAnnotations: [] }),
+      ).resolves.toBeUndefined();
+
+      // Switching to a different file re-arms inclusion.
+      await dispatchEditorChanged('other.ts', '/workspace/other.ts');
+      const prepareSubmitAfterSwitch = callback<
+        (submission: {
+          prompt: string;
+          inputAnnotations: unknown[];
+        }) => Promise<
+          { prompt: string; inputAnnotations: unknown[] } | undefined
+        >
+      >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+      await expect(
+        prepareSubmitAfterSwitch({ prompt: 'hi', inputAnnotations: [] }),
+      ).resolves.toMatchObject({ prompt: '@other.ts hi' });
+    } finally {
+      act(() => toolbarRoot.unmount());
+      toolbarContainer.remove();
+    }
+  });
+
+  it('treats a workspace-relative mention annotation as already included', async () => {
+    await renderApp();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'activeEditorChanged',
+            data: { fileName: 'editor.ts', filePath: '/workspace/editor.ts' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    const mention = {
+      type: 'reference',
+      start: 8,
+      end: 18,
+      text: '@editor.ts',
+      reference: {
+        id: 'mention-1',
+        kind: 'file',
+        label: 'editor.ts',
+        value: 'editor.ts',
+        serialized: '@editor.ts',
+      },
+    };
+
+    await expect(
+      prepareSubmit({
+        prompt: 'Explain @editor.ts',
+        inputAnnotations: [mention],
+      }),
+    ).resolves.toEqual({
+      prompt: 'Explain @editor.ts',
+      inputAnnotations: [expect.objectContaining({ start: 8, end: 18 })],
+    });
+  });
+
+  it('matches typed active-file references on a whole-reference boundary', async () => {
+    await renderApp();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'activeEditorChanged',
+            data: { fileName: 'editor.ts', filePath: '/workspace/editor.ts' },
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const prepareSubmit = callback<
+      (submission: {
+        prompt: string;
+        inputAnnotations: unknown[];
+      }) => Promise<{ prompt: string; inputAnnotations: unknown[] } | undefined>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+
+    // A sibling-file mention must not suppress the active-file injection.
+    await expect(
+      prepareSubmit({ prompt: '@editor.tsx hi', inputAnnotations: [] }),
+    ).resolves.toMatchObject({ prompt: '@editor.ts @editor.tsx hi' });
+
+    // An exact mention is recognized and annotated, not duplicated.
+    const prepared = await prepareSubmit({
+      prompt: '@editor.ts hi',
+      inputAnnotations: [],
+    });
+    expect(prepared).toMatchObject({ prompt: '@editor.ts hi' });
+    expect(prepared?.inputAnnotations).toHaveLength(1);
+    expect(prepared?.inputAnnotations[0]).toMatchObject({
+      start: 0,
+      end: '@editor.ts'.length,
+    });
+  });
+
+  it('opens permission diffs only from authoritative tool-call content', async () => {
+    const props = await renderApp();
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+
+    await act(async () => {
+      onTranscriptChange([
+        {
+          id: 'perm-write',
+          kind: 'permission',
+          requestId: 'req-write',
+          title: 'Write new.ts',
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/new.ts',
+                oldText: 'header\nconst value = 1;\nfooter',
+                newText: 'header\nconst value = 2;\nfooter',
+              },
+            ],
+          },
+        },
+        {
+          id: 'perm-mined',
+          kind: 'permission',
+          requestId: 'req-mined',
+          title: 'update a.txt',
+          options: [],
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            _meta: { toolName: 'edit_file' },
+            file_path: 'a.txt',
+            original_content: 'X',
+            new_content: 'Y',
+          },
+        },
+      ]);
+      await Promise.resolve();
+    });
+
+    const openDiffs = postMessagesOfType('openDiff');
+    expect(openDiffs).toHaveLength(1);
+    expect(openDiffs[0]).toEqual({
+      type: 'openDiff',
+      data: {
+        path: '/workspace/new.ts',
+        oldText: 'header\nconst value = 1;\nfooter',
+        newText: 'header\nconst value = 2;\nfooter',
+        source: 'web-shell',
+      },
+    });
+  });
+
+  it('routes auth and session-change host actions to the extension', async () => {
+    const props = await renderApp();
+
+    const onSlashCommand = callback<
+      (command: { command: string; input: string }) => boolean | void
+    >(props, 'onSlashCommand');
+    expect(onSlashCommand({ command: 'auth', input: '' })).toBe(true);
+    expect(onSlashCommand({ command: 'account', input: '' })).toBe(true);
+
+    callback<(sessionId: string | undefined) => void>(
+      props,
+      'onSessionIdChange',
+    )('session-2');
+    callback<(session: { sessionId?: string; sessionName?: string }) => void>(
+      props,
+      'onSessionInfoChange',
+    )({ sessionId: 'session-2', sessionName: 'My Title' });
+
+    expect(postMessagesOfType('auth')).toHaveLength(1);
+    expect(postMessagesOfType('getAccountInfo')).toHaveLength(1);
+    expect(postMessagesOfType('webShellSessionChanged').at(-1)).toEqual({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'session-2', workspaceCwd: '/workspace' },
+    });
+    expect(postMessagesOfType('updatePanelTitle').at(-1)).toEqual({
+      type: 'updatePanelTitle',
+      data: { title: 'My Title' },
+    });
+  });
+
+  it('notifies once when a connection error persists instead of looping', async () => {
+    mocks.connectionError.current = 'daemon connection lost';
+
+    // The mirrored effect re-runs under a fresh onError identity on every
+    // re-render (like a host passing an inline onError); the value-dedup
+    // must still deliver the persistent error exactly once. The mock trips
+    // after three notifications instead of hanging if that ever regresses.
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    expect(mocks.errorNotifications.current).toBe(1);
+    const alerts = container.querySelectorAll('[role="alert"]');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].textContent).toContain('daemon connection lost');
+  });
+
+  it('does not report or stamp an error while no onError handler is attached', async () => {
+    mocks.connectionError.current = 'daemon connection lost';
+    const { WebShellWithProviders } = await import('@qwen-code/web-shell');
+    const WebShell =
+      WebShellWithProviders as unknown as ComponentType<CapturedProps>;
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(<WebShell />);
+      await Promise.resolve();
+    });
+    // App.tsx returns before stamping when no handler exists; the mirror must
+    // leave the error unreported and unstamped here.
+    expect(mocks.errorNotifications.current).toBe(0);
+
+    // Because nothing was stamped, a handler attached later still receives
+    // the persistent error exactly once.
+    await act(async () => {
+      root.render(<WebShell onError={() => {}} />);
+      await Promise.resolve();
+    });
+    expect(mocks.errorNotifications.current).toBe(1);
+  });
+
+  it('releases the panel when a session switch times out', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [
+        {
+          sessionId: 'session-2',
+          workspaceCwd: '/workspace',
+          displayName: 'Other session',
+        },
+      ],
+      nextCursor: undefined,
+    });
+    vi.useFakeTimers();
+    try {
+      await renderApp();
+      const { container } = mounted[mounted.length - 1];
+
+      const historyButton = container.querySelector(
+        'button[aria-haspopup="dialog"]',
+      ) as HTMLButtonElement;
+      expect(historyButton).not.toBeNull();
+      await act(async () => {
+        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      const row = document.querySelector(
+        '[data-session-id="session-2"]',
+      ) as HTMLElement;
+      expect(row).not.toBeNull();
+      await act(async () => {
+        row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain('Loading conversation…');
+
+      // A retriable connection failure that never settles must not lock the
+      // panel behind the overlay forever.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+
+      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(container.textContent).toContain(
+        'The conversation switch timed out. Try again.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
