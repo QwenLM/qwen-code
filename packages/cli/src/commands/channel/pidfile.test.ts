@@ -117,32 +117,38 @@ vi.mock('proper-lockfile', () => ({
   },
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: {
-    getGlobalQwenDir: () => mockGlobalQwenDir,
-  },
-  readProcStartToken: () =>
-    processIdentity.tokenReads.length > 0
-      ? processIdentity.tokenReads.shift()!
-      : processIdentity.currentToken,
-  readLocalBootId: () => processIdentity.localBootId,
-  readPidNamespaceId: () => processIdentity.pidNamespace,
-  isSameProcess: (pid: number, procStart: string | null | undefined) => {
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return false;
-    }
-    const currentToken =
-      processIdentity.tokenReads.length > 0
+vi.mock('@qwen-code/qwen-code-core', () => {
+  // Core builds every token from the boot id, so an unreadable boot id makes
+  // each read return null and degrades `isSameProcess` to a plain liveness
+  // check (process-liveness.ts). Model that coupling, not a stricter one.
+  const nextToken = () =>
+    processIdentity.localBootId === null
+      ? null
+      : processIdentity.tokenReads.length > 0
         ? processIdentity.tokenReads.shift()!
         : processIdentity.currentToken;
-    return (
-      procStart == null || currentToken == null || procStart === currentToken
-    );
-  },
-}));
+
+  return {
+    Storage: {
+      getGlobalQwenDir: () => mockGlobalQwenDir,
+    },
+    readProcStartToken: () => nextToken(),
+    readLocalBootId: () => processIdentity.localBootId,
+    readPidNamespaceId: () => processIdentity.pidNamespace,
+    isSameProcess: (pid: number, procStart: string | null | undefined) => {
+      if (!Number.isInteger(pid) || pid <= 0) return false;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+      const currentToken = nextToken();
+      return (
+        procStart == null || currentToken == null || procStart === currentToken
+      );
+    },
+  };
+});
 
 import {
   readServiceInfo,
@@ -224,6 +230,14 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(getPidFilePath() in fsStore).toBe(false);
   });
 
+  it('refuses to write a Linux pidfile while the boot id is unreadable', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    processIdentity.localBootId = null;
+
+    expect(() => writeServiceInfo(['dingtalk'])).toThrow('process start token');
+    expect(getPidFilePath() in fsStore).toBe(false);
+  });
+
   it('keeps the tokenless fallback on non-Linux platforms', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     processIdentity.currentToken = null;
@@ -297,6 +311,22 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(filePath in fsStore).toBe(true);
   });
 
+  it('keeps a foreign-namespace record whose PID collides with a live local process', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:current-start',
+      pidNs: 4026532999,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
   it('keeps a tokenized pidfile while the local boot id is unreadable', () => {
     const filePath = getPidFilePath();
     processIdentity.localBootId = null;
@@ -308,6 +338,44 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
+  it('sweeps a dead record written without a PID namespace or token', () => {
+    const filePath = getPidFilePath();
+    processIdentity.pidNamespace = null;
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: null,
+      pidNs: null,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    process.kill = vi.fn(() => {
+      throw new Error('ESRCH');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(false);
+  });
+
+  it('keeps a tokenized pidfile while the local PID namespace is unreadable', () => {
+    const filePath = getPidFilePath();
+    processIdentity.pidNamespace = null;
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      pidNs: 4026532999,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    process.kill = vi.fn(() => {
+      throw new Error('ESRCH');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
 
     expect(readServiceInfo()).toBeNull();
     expect(filePath in fsStore).toBe(true);
@@ -413,6 +481,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
     expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
       procStart: 'boot-id:current-start',
+      pidNs: 4026531836,
     });
   });
 
@@ -616,6 +685,9 @@ describe('writeServiceInfo + readServiceInfo', () => {
       servePid: 4321,
     });
 
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      pidNs: 4026531836,
+    });
     expect(() =>
       reserveServeServiceInfo({
         channels: ['telegram'],
@@ -646,6 +718,39 @@ describe('writeServiceInfo + readServiceInfo', () => {
       servePid: 4321,
       channels: ['telegram'],
     });
+  });
+
+  it('names the unverifiable record blocking an exclusive create', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      pidNs: 4026532999,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    process.kill = vi.fn(() => {
+      throw new Error('ESRCH');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    for (const create of [
+      () => writeServiceInfo(['dingtalk']),
+      () => reserveServeServiceInfo({ channels: ['dingtalk'], servePid: 4321 }),
+    ]) {
+      let thrown: NodeJS.ErrnoException | undefined;
+      try {
+        create();
+      } catch (err) {
+        thrown = err as NodeJS.ErrnoException;
+      }
+
+      expect(thrown?.code).toBe('channel_service_conflict');
+      expect(thrown?.message).toContain(filePath);
+      expect(thrown?.message).toContain('delete');
+    }
+
+    expect(filePath in fsStore).toBe(true);
   });
 
   it('returns null when no PID file exists', () => {

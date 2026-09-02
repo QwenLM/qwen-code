@@ -203,7 +203,8 @@ function withPidFileLock<T>(operation: (filePath: string) => T): T {
 
 /**
  * Read the PID file and return service info if the process is still alive.
- * Returns null if no file, invalid file, or stale (dead process).
+ * Returns null if no file, invalid file, stale (dead process), or a record
+ * another boot, machine, or PID namespace wrote.
  * Automatically cleans up stale PID files.
  */
 export function readServiceInfo(): ServiceInfo | null {
@@ -226,11 +227,17 @@ export function readServiceInfo(): ServiceInfo | null {
       return null;
     }
 
+    if (!isLocalIdentity(info)) {
+      // Another boot, machine, or PID namespace wrote this record: a local
+      // probe of its PID proves nothing about the writer — the number can be
+      // free here and alive there, or alive here and owned by an unrelated
+      // process. Leave it for a reader on its own side.
+      return null;
+    }
+
     if (!isSameProcess(info.pid, info.procStart)) {
       // Stale PID or recycled PID — clean up without signalling its new owner.
-      // A record another machine or namespace wrote is left for a reader on
-      // its own side: sweeping it would hide a live service from itself.
-      if (isLocalIdentity(info)) unlinkPidFile(filePath);
+      unlinkPidFile(filePath);
       return null;
     }
 
@@ -257,6 +264,39 @@ function fileExistsError(message: string): NodeJS.ErrnoException {
   return err;
 }
 
+/**
+ * Exclusive creates are the only writes that can meet a record this side keeps
+ * but can never resolve: callers read first, so a live local record is already
+ * reported as a conflict and a dead one is swept before the write. What is left
+ * was written before a reboot, or by another machine or PID namespace sharing
+ * this home. It is kept on purpose and no retry clears it, so name the file
+ * instead of letting callers report a concurrent startup.
+ */
+function writeInfoExclusive(info: ServiceInfo): void {
+  const filePath = pidFilePath();
+  try {
+    writeInfo(info, 'wx');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+
+    let existing: ServiceInfo | null = null;
+    try {
+      existing = parseServiceInfo(JSON.parse(readFileSync(filePath, 'utf-8')));
+    } catch {
+      throw err;
+    }
+    if (!existing || isLocalIdentity(existing)) throw err;
+
+    // The code serve's channel routes already answer with a 409 carrying this
+    // message; an unmapped one would be replaced by a generic failure.
+    const conflict = new Error(
+      `Channel service pidfile ${filePath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no channel service is running, then delete that file to start again.`,
+    ) as NodeJS.ErrnoException;
+    conflict.code = 'channel_service_conflict';
+    throw conflict;
+  }
+}
+
 function readPidfileProcessToken(pid: number): string | null {
   let procStart = readProcStartToken(pid);
   if (process.platform !== 'linux' || procStart !== null) return procStart;
@@ -281,7 +321,7 @@ export function writeServiceInfo(channels: string[]): void {
     channels,
   };
 
-  withPidFileLock(() => writeInfo(info, 'wx'));
+  withPidFileLock(() => writeInfoExclusive(info));
 }
 
 export function writeServeServiceInfo({
@@ -375,7 +415,7 @@ export function reserveServeServiceInfo({
     servePid,
   };
 
-  withPidFileLock(() => writeInfo(info, 'wx'));
+  withPidFileLock(() => writeInfoExclusive(info));
 }
 
 /** Delete the PID file. */
