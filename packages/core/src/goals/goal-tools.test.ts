@@ -17,7 +17,6 @@ import {
 import {
   type GetGoalToolParams,
   GetGoalTool,
-  PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
   PROPOSE_GOAL_NO_TURN_MESSAGE,
   PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
   PROPOSE_GOAL_PENDING_MESSAGE,
@@ -1723,18 +1722,34 @@ describe('ProposeGoalTool', () => {
     expect(host.started).toHaveLength(0);
   });
 
-  it('sets nothing when the dialog was cancelled', async () => {
+  it('parks nothing when the dialog is cancelled', async () => {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+
+    // The real path: the scheduler settles a cancelled confirmation without
+    // calling `execute()` at all, so a decline must already have parked
+    // nothing by the time the dialog resolves.
+    await confirm(tool, ToolConfirmationOutcome.Cancel);
+
+    expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
+    expect(config.pending()).toBeUndefined();
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('refuses if a host runs it anyway after a cancelled dialog', async () => {
     const { runtime, host } = idleRuntime();
     const config = proposeConfig(runtime);
     const tool = new ProposeGoalTool(config);
 
     const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
     const result = await execute(invocation);
+
     expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
     expect(config.pending()).toBeUndefined();
-
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-    expect(result.llmContent).toBe(PROPOSE_GOAL_NOT_APPROVED_MESSAGE);
+    expect(String(result.llmContent)).toContain('The Goal was not set');
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
   });
