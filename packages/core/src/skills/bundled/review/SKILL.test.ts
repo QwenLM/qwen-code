@@ -1743,3 +1743,44 @@ describe('bundled review skill — the decided-stop composed verdict (#9908)', (
     expect(body).not.toContain('When the cached ledger has no open findings');
   });
 });
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
+    );
+  });
+});

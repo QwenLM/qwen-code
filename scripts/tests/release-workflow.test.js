@@ -1305,8 +1305,26 @@ describe('release workflow', () => {
 
   it('stages every integration package manifest after versioning', () => {
     expect(workflow).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json',
+      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
+  });
+
+  it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
+    const publishSteps = releaseYaml.jobs.publish.steps;
+    const mem0Step = publishSteps.find(
+      (step) => step.name === 'Publish @qwen-code/external-context-mem0',
+    );
+    const audioStepIndex = publishSteps.findIndex(
+      (step) => step.name === 'Publish @qwen-code/audio-capture',
+    );
+
+    expect(mem0Step.if).toContain(
+      "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    expect(mem0Step['working-directory']).toBe(
+      'integrations/external-context-mem0',
+    );
+    expect(publishSteps.indexOf(mem0Step)).toBeLessThan(audioStepIndex);
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {

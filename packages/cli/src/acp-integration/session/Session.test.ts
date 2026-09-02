@@ -925,6 +925,9 @@ describe('Session', () => {
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),

@@ -130,6 +130,12 @@ export interface QwenCodeAdaptorOptions {
   defaultCwd?: string;
   /** Stable client identity used for permission-vote attribution. */
   clientId?: string;
+  /**
+   * Backend name (what the voice model sees in session_list). Defaults to
+   * 'qwen-code'; a configured name lets two qwen-code backends coexist
+   * without colliding in the registry's byName map or the scoped-id keys.
+   */
+  name?: string;
   /** Injection seam for unit tests. */
   client?: DaemonClientLike;
 }
@@ -313,7 +319,7 @@ function sanitizeTitleLine(title: string): string {
 }
 
 export class QwenCodeAdaptor implements BackendAdaptor {
-  readonly name = ADAPTOR_NAME;
+  readonly name: string;
 
   private readonly client: DaemonClientLike;
   private readonly options: QwenCodeAdaptorOptions;
@@ -324,6 +330,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
 
   constructor(options: QwenCodeAdaptorOptions) {
     this.options = options;
+    this.name = options.name ?? ADAPTOR_NAME;
     this.client =
       options.client ??
       (new DaemonClient({
@@ -415,7 +422,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         state.clientId,
       );
     }
-    return { id: session.sessionId, adaptor: ADAPTOR_NAME };
+    return { id: session.sessionId, adaptor: this.name };
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -439,7 +446,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         const label = raw['displayName'];
         const hasActivePrompt = raw['hasActivePrompt'];
         summaries.set(sessionId, {
-          handle: { id: sessionId, adaptor: ADAPTOR_NAME },
+          handle: { id: sessionId, adaptor: this.name },
           ...(typeof label === 'string' ? { label } : {}),
           cwd,
           state: tracked
@@ -767,6 +774,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'permission_request': {
         const requestId = data['requestId'];
         if (typeof requestId !== 'string') return [];
+        const jobRef = envelope.promptId ?? state.activeJobRef;
         const rawOptions = Array.isArray(data['options'])
           ? data['options']
           : [];
@@ -793,6 +801,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         return [
           {
             type: 'permission_request',
+            ...(jobRef !== undefined ? { jobRef } : {}),
             requestId,
             title: describeToolCall(data['toolCall']),
             options,
