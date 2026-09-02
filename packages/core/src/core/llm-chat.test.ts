@@ -15219,13 +15219,33 @@ describe('LlmChat', async () => {
 
     it('surfaces a recovery abort after preserving delivered output', async () => {
       const recordAssistantTurn = vi.fn();
-      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const recordGoalTurnUsage = vi.fn();
+      const recordingChat = chatWithRecorder(
+        recordAssistantTurn,
+        recordGoalTurnUsage,
+      );
       const abortError = new DOMException('Aborted', 'AbortError');
+      const initialUsage = {
+        promptTokenCount: 10,
+        candidatesTokenCount: 5,
+        totalTokenCount: 15,
+      };
+      const recoveryUsage = {
+        promptTokenCount: 20,
+        candidatesTokenCount: 2,
+        totalTokenCount: 22,
+      };
       const streams = [
-        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([
+          Object.assign(makeChunk([{ text: 'Hello' }], 'MAX_TOKENS'), {
+            usageMetadata: initialUsage,
+          }),
+        ]),
         (async function* () {
           yield makeChunk([{ text: ' world' }]);
-          yield makeChunk([], 'STOP');
+          yield Object.assign(makeChunk([], 'STOP'), {
+            usageMetadata: recoveryUsage,
+          });
           throw abortError;
         })(),
       ];
@@ -15238,6 +15258,7 @@ describe('LlmChat', async () => {
         'gemini-3-pro',
         { message: 'essay' },
         'recovery-terminal-abort',
+        { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
       );
       await expect(
         (async () => {
@@ -15250,6 +15271,13 @@ describe('LlmChat', async () => {
       expect(recordingChat.getLastModelMessageText()).toBe('Hello world');
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('Hello world');
+      expect(recordGoalTurnUsage.mock.calls.map((call) => call[1])).toEqual([
+        initialUsage,
+        recoveryUsage,
+      ]);
+      expect(
+        recordAssistantTurn.mock.calls[0]![0].goalTokensAlreadyAccumulated,
+      ).toBe(true);
     });
 
     it('does not duplicate an escalated turn after a terminal abort', async () => {
@@ -16410,6 +16438,41 @@ describe('LlmChat', async () => {
       expect(recordAssistantTurn.mock.calls[0]![0].tokens).toEqual(
         expectedUsage,
       );
+      expect(
+        recordAssistantTurn.mock.calls[0]![0].usageMetadataIsEstimated,
+      ).toBe(true);
+      expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
+    it('restores the truncated turn when escalation fails without output', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'truncated' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield* makeStream([]);
+          throw new Error('provider disconnected');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'essay' },
+        'escalated-provider-error-without-output',
+      );
+      await expect(async () => {
+        for await (const _event of stream) {
+          // Consume until the provider error propagates.
+        }
+      }).rejects.toThrow('provider disconnected');
+
+      expect(recordingChat.getLastModelMessageText()).toBe('truncated');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('truncated');
     });
 
     it('persists visible executable code when the provider fails', async () => {
@@ -19461,6 +19524,82 @@ describe('LlmChat', async () => {
       expect(recordingChat.getHistory()[1]?.parts).toEqual([{ text: 'Hello' }]);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('Hello');
+      await iterator.return?.(undefined);
+    });
+
+    it('revokes a delivered recovery tool call after a history mutation', async () => {
+      let releaseContinuation!: () => void;
+      const continuationGate = new Promise<void>((resolve) => {
+        releaseContinuation = resolve;
+      });
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([
+            {
+              functionCall: {
+                id: 'call_recovery_mutation',
+                name: 'read_file',
+                args: { path: '/tmp/a.txt' },
+              },
+            },
+          ]);
+          await continuationGate;
+          throw new Error('recovery failed after mutation');
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'recovery-function-call-mutation-abort',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const result = await iterator.next();
+        expect(result.done).toBe(false);
+        if (
+          result.value?.type === StreamEventType.CHUNK &&
+          result.value.value.functionCalls?.some(
+            (call: { id?: string }) => call.id === 'call_recovery_mutation',
+          )
+        ) {
+          break;
+        }
+      }
+
+      const pending = iterator.next();
+      chat.addHistory({ role: 'user', parts: [{ text: 'interloper' }] });
+      releaseContinuation();
+      const afterMutation: StreamEvent[] = [];
+      let result = await pending;
+      while (!result.done) {
+        afterMutation.push(result.value!);
+        if (
+          result.value?.type === StreamEventType.CHUNK &&
+          result.value.value.candidates?.[0]?.finishReason === FinishReason.STOP
+        ) {
+          break;
+        }
+        result = await iterator.next();
+      }
+
+      expect(
+        afterMutation.some(
+          (event) =>
+            event.type === StreamEventType.RETRY && event.isContinuation,
+        ),
+      ).toBe(true);
+      const terminal = afterMutation.at(-1);
+      expect(
+        terminal?.type === StreamEventType.CHUNK
+          ? terminal.value.candidates?.[0]?.finishReason
+          : undefined,
+      ).toBe(FinishReason.STOP);
       await iterator.return?.(undefined);
     });
 
@@ -22912,7 +23051,10 @@ describe('LlmChat', async () => {
 
       expect(chatWithRecording.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'kick off' }] },
+        { role: 'model', parts: [{ text: 'partial answer' }] },
       ]);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('partial answer');
 
       const recordedHasPartial = recordAssistantTurn.mock.calls.some((call) => {
         const message = (

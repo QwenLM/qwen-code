@@ -717,18 +717,15 @@ export class LoopDetectionService {
       return false;
     }
 
-    // A retry or model fallback re-streams the failed attempt's tool calls,
-    // which would double-count against both always-on guards. Roll the
+    // A retry re-streams the failed attempt's tool calls, which would
+    // double-count against both always-on guards. Roll the
     // per-turn cap back to the last committed round-trip (never below it —
     // prior round-trips stay) and drop the consecutive-identical streak so
     // the replayed attempt cannot push it over the threshold. The adaptive
     // cap's repeat tracker is cleared (consistent with how the heuristic path
     // clears globalToolCallCounts on retry): the replayed calls re-populate
     // it, and a stuck pattern simply re-accumulates toward the threshold.
-    if (
-      event.type === LlmEventType.Retry ||
-      event.type === LlmEventType.ModelFallback
-    ) {
+    if (event.type === LlmEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
@@ -742,6 +739,13 @@ export class LoopDetectionService {
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
       }
+      return false;
+    }
+
+    // Model fallback is emitted only before the failed attempt exposes a
+    // chunk, so it has no repetition evidence to discard.
+    if (event.type === LlmEventType.ModelFallback) {
+      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       return false;
     }
 

@@ -4543,16 +4543,27 @@ export class LlmChat {
             ({ modelContent }) => modelContent === recoveryBase,
           );
           if (previousDeferredRecord) {
+            const committedAttemptRecord = self.activeRecoveryModelContent
+              ? self.deferredMaxTokensRecords.findLast(
+                  ({ modelContent }) =>
+                    modelContent === self.activeRecoveryModelContent,
+                )
+              : undefined;
+            const goalTokensAlreadyAccumulated =
+              committedAttemptRecord?.record.goalTokensAlreadyAccumulated ===
+              true;
             const abandonedRecord: Parameters<
               ChatRecordingService['recordAssistantTurn']
             >[0] = {
               ...previousDeferredRecord.record,
               tokens: activeRecoveryVisibleTokens,
               usageMetadataIsEstimated: true,
-              goalTokensAlreadyAccumulated: undefined,
+              goalTokensAlreadyAccumulated:
+                goalTokensAlreadyAccumulated || undefined,
             };
             self.lastPromptTokenCountIsEstimated = true;
             if (
+              !goalTokensAlreadyAccumulated &&
               activeRecoveryVisibleTokens &&
               turnGoalContext &&
               self.chatRecordingService
@@ -4882,6 +4893,9 @@ export class LlmChat {
                   0,
                   truncatedModelContent,
                 );
+                for (const deferred of truncatedDeferredRecords) {
+                  deferred.modelContent = truncatedModelContent;
+                }
                 self.deferredMaxTokensRecords = truncatedDeferredRecords;
                 self.deferredMaxTokensRecordTarget = truncatedModelContent;
                 self.recoveryDisplayContent = truncatedModelContent;
@@ -4929,6 +4943,7 @@ export class LlmChat {
                     modelContent.parts ?? [],
                   ),
                   tokens: escalatedVisibleTokens,
+                  usageMetadataIsEstimated: true,
                   contextWindowSize: cgConfigForThresholds?.contextWindowSize,
                   ...(turnGoalContext
                     ? { goalContext: { ...turnGoalContext } }
@@ -4942,6 +4957,7 @@ export class LlmChat {
                       : String(recordErr)),
                 );
               }
+              self.lastPromptTokenCountIsEstimated = true;
               escalatedAttemptCommitted = true;
               escalatedVisibleParts = [];
               escalatedVisibleTokens = undefined;
@@ -5060,12 +5076,16 @@ export class LlmChat {
                 );
               }
               abandonEscalatedAttempt?.();
+              const redisplayEvents = !escalatedAttemptCommitted
+                ? restoreTruncatedTurnOnAbort()
+                : [];
               if (exposedFunctionCall) {
                 yield {
                   type: StreamEventType.RETRY,
                   isContinuation: true,
                 };
               }
+              for (const event of redisplayEvents) yield event;
               throw escalationError;
             }
             escalatedAttemptCommitted = true;
@@ -5422,6 +5442,9 @@ export class LlmChat {
             } catch (recoveryError) {
               let exposedFunctionCall = false;
               if (!activeRecoveryAttemptIsCurrent()) {
+                exposedFunctionCall = activeRecoveryVisibleParts.some(
+                  (part) => part.functionCall !== undefined,
+                );
                 discardRecoveryDeliveryChunks();
                 rollbackActiveRecoveryAttempt();
               } else {

@@ -2364,17 +2364,14 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['retry', retryEvent],
-      ['model fallback', modelFallbackEvent],
-    ])('rolls back a failed attempt on %s', (_name, restartEvent) => {
+    it('rolls back a failed attempt on retry', () => {
       service.reset('');
       // Attempt makes 6 calls, then the API restarts it (no round-trip
       // committed yet, so the rollback floor is 0).
       for (let i = 0; i < 6; i++) {
         service.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i }));
       }
-      service.checkAlwaysOnSafeties(restartEvent);
+      service.checkAlwaysOnSafeties(retryEvent);
       // The 6 discarded calls must not count: a full hard cap's worth of fresh
       // diverse calls stays under the limit, and only the (hardCap+1)-th fires.
       // (If the rollback had failed, the 6 prior calls would push the fire
@@ -2392,6 +2389,18 @@ describe('LoopDetectionService', () => {
         ),
       ).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves committed repetition evidence on model fallback', () => {
+      service.reset('');
+      const sameCall = createToolCallRequestEvent('t', { same: true });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(sameCall)).toBe(false);
+        expect(service.checkAlwaysOnSafeties(finishedEvent)).toBe(false);
+      }
+
+      expect(service.checkAlwaysOnSafeties(modelFallbackEvent)).toBe(false);
+      expect(service.checkAlwaysOnSafeties(sameCall)).toBe(true);
     });
 
     it('rolls back the stuck-repetition signal on retry', () => {
