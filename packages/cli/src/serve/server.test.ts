@@ -26439,6 +26439,50 @@ describe('createServeApp', () => {
       expect(JSON.stringify(res.body)).toContain('flushed transcript');
     });
 
+    it('continues a backward read when the live flush fails', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaad';
+      await writeTranscriptSession(sid);
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 0,
+          hasTurnError: false,
+        }),
+        flushSessionTranscriptImpl: async () => {
+          throw new Error('workspace timeout');
+        },
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(
+          `/workspaces/primary-id/session/${sid}/transcript?direction=backward`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(JSON.stringify(res.body)).toContain('hello transcript');
+    });
+
     it('reads and exports the active copy of an exact persisted conflict', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
       await writeTranscriptSession(sid);

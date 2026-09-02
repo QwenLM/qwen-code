@@ -457,8 +457,8 @@ const DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS = [
   'gitBranch',
 ] as const satisfies readonly ComposerToolbarAction[];
 const MAX_ARTIFACT_PANEL_SESSION_STATES = 20;
-// ponytail: malformed pagination stops at 250k events; add a targeted daemon
-// lookup if real sessions approach this ceiling.
+// Malformed pagination stops at 250k events; add a targeted daemon lookup if
+// real sessions approach this ceiling.
 const MAX_ARTIFACT_PANEL_TRANSCRIPT_PAGES = 1_000;
 interface ArtifactPanelSessionState {
   open: boolean;
@@ -2011,6 +2011,22 @@ function serializeArtifactPanelTabs(
       }
     }
   });
+}
+
+function mergePersistedArtifactPanelTabs(
+  tabs: readonly PersistedArtifactPanelTab[],
+  retainedTabs: readonly PersistedArtifactPanelTab[],
+  previousOrder: readonly PersistedArtifactPanelTab[] = retainedTabs,
+): PersistedArtifactPanelTab[] {
+  const byId = new Map(retainedTabs.map((tab) => [tab.id, tab]));
+  for (const tab of tabs) byId.set(tab.id, tab);
+  const merged = previousOrder.flatMap((tab) => {
+    const current = byId.get(tab.id);
+    if (!current) return [];
+    byId.delete(tab.id);
+    return [current];
+  });
+  return [...merged, ...byId.values()];
 }
 
 function readStoredArtifactPanelStates(
@@ -4318,7 +4334,6 @@ export function App({
       artifactPanelPersistedStatesRef.current[logicalSessionKey];
     delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
     const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
-    const serializedTabIds = new Set(serializedTabs.map((tab) => tab.id));
     const deferredTabs =
       artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
       [];
@@ -4331,10 +4346,11 @@ export function App({
         )
           ? (previousPersistedState?.activeTabId ?? null)
           : null),
-      tabs: [
-        ...deferredTabs.filter((tab) => !serializedTabIds.has(tab.id)),
-        ...serializedTabs,
-      ],
+      tabs: mergePersistedArtifactPanelTabs(
+        serializedTabs,
+        deferredTabs,
+        previousPersistedState?.tabs,
+      ),
     };
     writeStoredArtifactPanelStates(
       RIGHT_PANEL_STATE_STORAGE_KEY,
@@ -4551,11 +4567,25 @@ export function App({
               ? { ...bucketTab, sessionId }
               : bucketTab,
           );
+          const previousPersistedState =
+            artifactPanelPersistedStatesRef.current[sessionKey];
+          const retainedTabs = [
+            ...(state.pendingRestore
+              ? (previousPersistedState?.tabs ?? [])
+              : []),
+            ...(artifactPanelDeferredPersistedTabsRef.current.get(sessionKey) ??
+              []),
+          ];
+          const serializedTabs = serializeArtifactPanelTabs(state.tabs);
           delete artifactPanelPersistedStatesRef.current[sessionKey];
           artifactPanelPersistedStatesRef.current[sessionKey] = {
             open: state.open,
             activeTabId: state.activeTabId,
-            tabs: serializeArtifactPanelTabs(state.tabs),
+            tabs: mergePersistedArtifactPanelTabs(
+              serializedTabs,
+              retainedTabs,
+              previousPersistedState?.tabs,
+            ),
           };
           writeStoredArtifactPanelStates(
             RIGHT_PANEL_STATE_STORAGE_KEY,
@@ -5179,18 +5209,13 @@ export function App({
       );
       try {
         let restored: ArtifactPanelTab | undefined;
+        let restoredArtifact: DaemonSessionArtifact | undefined;
         if (tab.targetKind === 'artifact') {
           const artifact = (
             await workspace.client.listSessionArtifacts(tab.sourceSessionId)
           ).artifacts.find((item) => item.id === tab.artifactId);
           if (artifact) {
-            setArtifactPanelExtraArtifacts((current) =>
-              current.some((item) => item.id === artifact.id)
-                ? current.map((item) =>
-                    item.id === artifact.id ? artifact : item,
-                  )
-                : [...current, artifact],
-            );
+            restoredArtifact = artifact;
             restored = {
               id: tab.id,
               kind: 'artifact',
@@ -5383,6 +5408,15 @@ export function App({
           throw new Error(t('rightPanel.savedContentUnavailable'));
         }
         if (!owner.isCurrent()) return;
+        if (restoredArtifact) {
+          setArtifactPanelExtraArtifacts((current) =>
+            current.some((item) => item.id === restoredArtifact.id)
+              ? current.map((item) =>
+                  item.id === restoredArtifact.id ? restoredArtifact : item,
+                )
+              : [...current, restoredArtifact],
+          );
+        }
         setArtifactPanelTabs((tabs) =>
           tabs.map((item) => (item.id === tab.id ? restored : item)),
         );
