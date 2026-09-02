@@ -526,6 +526,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
   private readonly queuedDirectMessages = new Map<string, Promise<void>>();
+  // Replay-started direct dispatches only. The cap must not be consumed by
+  // live or followup traffic, whose queue entries outlive their turn.
+  private readonly replayDirectDispatches = new Map<string, Promise<void>>();
   private readonly directConversationTails = new Map<
     string,
     DirectConversationTail
@@ -840,6 +843,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     this.sessionReactionKeys.clear();
     this.queuedDirectMessages.clear();
+    this.replayDirectDispatches.clear();
     for (const resolve of this.directMessageStartResolvers.values()) resolve();
     this.directMessageStartResolvers.clear();
     this.directConversationTails.clear();
@@ -2117,10 +2121,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       const key = messageKey(pending.message);
       if (pending.source.kind === 'direct') {
         if (this.queuedDirectMessages.has(key)) continue;
-        if (this.queuedDirectMessages.size >= MAX_DIRECT_REPLAY_DISPATCHES) {
+        if (this.replayDirectDispatches.size >= MAX_DIRECT_REPLAY_DISPATCHES) {
           continue;
         }
-        this.scheduleDirectMessage(pending.source, pending.message, key, true);
+        const dispatched = this.scheduleDirectMessage(
+          pending.source,
+          pending.message,
+          key,
+          true,
+        );
+        this.replayDirectDispatches.set(key, dispatched);
+        void dispatched
+          .finally(() => {
+            if (this.replayDirectDispatches.get(key) === dispatched) {
+              this.replayDirectDispatches.delete(key);
+            }
+          })
+          .catch(() => undefined);
         continue;
       }
       try {

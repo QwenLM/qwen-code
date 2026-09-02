@@ -438,6 +438,24 @@ class TestableDwsChannel extends DwsChannel {
     ).queuedDirectMessages.get(key);
   }
 
+  directConversationTailIds(): string[] {
+    return [
+      ...(
+        this as unknown as {
+          directConversationTails: Map<string, unknown>;
+        }
+      ).directConversationTails.keys(),
+    ];
+  }
+
+  replayDirectDispatchCount(): number {
+    return (
+      this as unknown as {
+        replayDirectDispatches: Map<string, Promise<void>>;
+      }
+    ).replayDirectDispatches.size;
+  }
+
   replaceQueuedDirectMessage(key: string, task: Promise<void>): void {
     (
       this as unknown as {
@@ -468,6 +486,16 @@ class PolicyDwsChannel extends DwsChannel {
         queuedDirectMessages: Map<string, Promise<void>>;
       }
     ).queuedDirectMessages.size;
+  }
+
+  directConversationTailIds(): string[] {
+    return [
+      ...(
+        this as unknown as {
+          directConversationTails: Map<string, unknown>;
+        }
+      ).directConversationTails.keys(),
+    ];
   }
 
   documentSetSize(): number {
@@ -1522,6 +1550,61 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps direct-message order past the second turn and frees the tail', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let promptCount = 0;
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      promptCount += 1;
+      if (promptCount === 1) await firstBlocked;
+      if (promptCount === 2) await secondBlocked;
+      return 'response';
+    });
+    const emit = (messageId: string, content: string) =>
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', messageId, content, {
+          conversationId: 'conversation-ordered',
+        }),
+      );
+
+    const first = emit('ordered-1', 'first request');
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const second = emit('ordered-2', 'second request');
+
+    // Turn 1 settles while turn 2 becomes the conversation tail. Without the
+    // identity guard, turn 1's cleanup clears turn 2's entry, so the running
+    // conversation loses the tail that later turns must queue behind.
+    releaseFirst();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    expect(channel.directConversationTailIds()).toEqual([
+      'conversation-ordered',
+    ]);
+
+    const third = emit('ordered-3', 'third request');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+
+    releaseSecond();
+    await Promise.all([first, second, third]);
+    expect(bridge.prompt).toHaveBeenCalledTimes(3);
+    // A drained conversation must not keep a resolved tail around.
+    await vi.waitFor(() =>
+      expect(channel.directConversationTailIds()).toEqual([]),
+    );
+  });
+
   it('preserves default steer order while the first message is classified', async () => {
     const client = new FakeDwsClient();
     let finishClassification!: (result: {
@@ -1612,6 +1695,48 @@ describe('DwsChannel', () => {
     await vi.waitFor(() => expect(channel.pendingMessageIds()).toHaveLength(9));
   });
 
+  it('does not let a live followup backlog starve parked replay dispatches', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    // One parked failed direct message, in a conversation of its own. Replay is
+    // its only redelivery surface, so a starved replay pass strands it.
+    channel.seedPendingMessages(1);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+
+    // A single conversation's backlog fills queuedDirectMessages to the cap
+    // while only the head turn actually runs.
+    const deliveries = Array.from({ length: 16 }, (_unused, index) =>
+      client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `backlog-${index}`,
+          `request ${index}`,
+          { conversationId: 'conversation-backlog' },
+        ),
+      ),
+    );
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    expect(channel.pendingMessageIds()).toHaveLength(17);
+
+    await channel.poll();
+
+    // The parked entry belongs to another conversation, so it dispatches
+    // immediately once the cap stops counting the backlog.
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
+    expect(channel.replayDirectDispatchCount()).toBe(1);
+
+    release();
+    await Promise.all(deliveries);
+  });
+
   it('clears queued direct messages when disconnected', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -1636,6 +1761,53 @@ describe('DwsChannel', () => {
     expect(channel.queuedDirectMessage(key)).toBeUndefined();
     release();
     await delivery;
+  });
+
+  it('drops conversation tails on disconnect so reconnects do not chain onto them', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+
+    const stranded = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'tail-before-disconnect',
+        'first request',
+        { conversationId: 'conversation-tail' },
+      ),
+    );
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    expect(channel.directConversationTailIds()).toEqual(['conversation-tail']);
+
+    channel.disconnect();
+    expect(channel.directConversationTailIds()).toEqual([]);
+
+    await channel.connect();
+    const afterReconnect = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'tail-after-reconnect',
+        'second request',
+        { conversationId: 'conversation-tail' },
+      ),
+    );
+
+    // The pre-disconnect turn is still blocked. Had its tail survived, the new
+    // message would chain behind a promise from the previous lifecycle and
+    // never start.
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
+
+    release();
+    await Promise.all([stranded, afterReconnect]);
   });
 
   it('rejects full-capacity admission without waiting', async () => {
@@ -5434,6 +5606,46 @@ describe('DwsChannel', () => {
     expect(channel.inbound).toEqual([
       expect.objectContaining({ messageId: 'ambient-disconnect' }),
     ]);
+  });
+
+  it('retains a capacity-blocked failed ambient message across a disconnect', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.seedPendingMessages(5_000);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-capacity-disconnect',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    const failedDelivery =
+      expect(delivery).rejects.toThrow('agent unavailable');
+    await vi.waitFor(() =>
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+    );
+
+    // disconnect() releases the capacity waiters. Ambient group messages have
+    // no history fallback, so parking must still happen on that exit.
+    channel.disconnect();
+    await failedDelivery;
+    expect(channel.pendingMessageIds()).toContain(
+      'ambient-capacity-disconnect',
+    );
+
+    channel.inboundError = undefined;
+    await channel.connect();
+    await channel.poll();
+    await vi.waitFor(() =>
+      expect(channel.inbound).toContainEqual(
+        expect.objectContaining({ messageId: 'ambient-capacity-disconnect' }),
+      ),
+    );
   });
 
   it('replays a failed ambient group message after restart', async () => {
