@@ -37,7 +37,7 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test'];
+const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 // The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
@@ -305,6 +305,16 @@ describe('post-merge push lane', () => {
     expect(triggers.push).toEqual({ branches: ['main'] });
   });
 
+  it("lint_and_static shares test's exact gate", () => {
+    // The split exists so this job can become a required check on its own;
+    // its gate is therefore as security-relevant as test's. One equality
+    // rides on test's whole-literal pin below: if the two gates ever
+    // diverge — someone widening or narrowing the lint lane independently —
+    // this fails before the divergence ships, and the literal pin still
+    // guards the shared shape.
+    expect(condOf('lint_and_static')).toBe(condOf('test'));
+  });
+
   it('classify_pr admits push in its event allowlist', () => {
     // `test` reads `needs.classify_pr.outputs.ubuntu_runner`. If classify_pr
     // stops accepting push, `test` still runs but that output is empty and
@@ -336,7 +346,7 @@ describe('post-merge push lane', () => {
     );
   });
 
-  it('keeps a post-merge run to exactly classify_pr and test', () => {
+  it('keeps a post-merge run to exactly its expected jobs', () => {
     // The mirror of the nightly assertion, through the same helper: a `push:`
     // trigger fires the whole workflow, so every other job must exclude push
     // outright or gate on an allowlist that cannot contain it. Otherwise a

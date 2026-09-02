@@ -7,13 +7,13 @@ on:
   # merged tree before it lands. No queue is enabled (none since 2026-07-02),
   # so nothing validated that tree on either side of a merge: `main` had no
   # gate before one and nothing faster than the ~40-minute E2E after one.
-  # Only `test` and the `classify_pr` it depends on accept it (see their
-  # `if`s); every other job excludes push, so a post-merge run is exactly
-  # Classify PR + Test. The no-AK integration gate is its own
+  # `test`, `lint_and_static`, and the `classify_pr` they depend on accept
+  # it (see their `if`s); every other job excludes push, so a post-merge run
+  # is exactly those three. The no-AK integration gate is its own
   # `integration_no_ak` job on pull_request / merge_group, so this lane is
   # lint, static analysis and unit tests. Removing it once the queue is
-  # enabled means dropping the trigger AND the push arm from BOTH those
-  # `if`s: a half-removal leaves every merge running Classify PR alone,
+  # enabled means dropping the trigger AND the push arm from ALL THREE
+  # `if`s: a partial removal leaves every merge running the survivors alone,
   # publishing outputs nothing consumes.
   push:
     branches:
@@ -412,28 +412,9 @@ jobs:
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
-      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
-      # touches nothing but .github/ classifies as `github_ci_only`, and that
-      # is exactly the PR most likely to push a workflow file past GitHub's
-      # 500 KB start-runs limit — the limit that silently killed the autofix
-      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
-      - name: 'Check workflow file size'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        run: '.github/scripts/check-workflow-size.sh'
-
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
         run: 'echo "Docs-only change; full CI skipped."'
-
-      - name: 'GitHub CI helper checks'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
-        timeout-minutes: 5
-        run: |-
-          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
-          node scripts/lint.js --setup
-          node scripts/lint.js --actionlint
-          node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -498,103 +479,6 @@ jobs:
           cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
-
-      - name: 'Audit critical runtime dependencies'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run audit:runtime:critical'
-
-      - name: 'Check lockfile'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:lockfile'
-
-      - name: 'Check desktop workspace isolation'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:desktop-isolation'
-
-      - name: 'Check TUI dependency direction'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:tui-dep-direction'
-
-      - name: 'Install linters'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --setup'
-
-      - name: 'Run ESLint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --eslint'
-
-      - name: 'Run actionlint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        timeout-minutes: 5
-        run: 'node scripts/lint.js --actionlint'
-
-      - name: 'Run shellcheck'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --shellcheck'
-
-      - name: 'Run yamllint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --yamllint'
-
-      - name: 'Run Prettier'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --prettier'
-
-      - name: 'Run sensitive keyword linter'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/lint.js --sensitive-keywords'
-
-      - name: 'Run i18n check'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check-i18n'
-
-      - name: 'Generate settings schema'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run generate:settings-schema'
-
-      - name: 'Check settings schema is up-to-date'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
-            echo "Error: settings.schema.json is out of date."
-            echo "Please run: npm run generate:settings-schema"
-            echo "Then commit the updated schema file."
-            git diff packages/vscode-ide-companion/schemas/settings.schema.json
-            exit 1
-          fi
-          echo "Settings schema is up-to-date"
-
-      - name: 'Generate VS Code companion notices'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
-
-      - name: 'Check VS Code companion notices are up-to-date'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
-            echo "Error: NOTICES.txt is out of date."
-            echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
-            echo "Then commit the updated file."
-            git diff --stat packages/vscode-ide-companion/NOTICES.txt
-            exit 1
-          fi
-          echo "NOTICES.txt is up-to-date"
-
-      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
-      # npm run test:ci only, so they intentionally do not repeat this
-      # platform-independent bundle closure check.
-      - name: 'Check serve fast-path bundle closure'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:serve-fast-path-bundle'
-
-      # The `github_ci_only` profile runs the .github/scripts helper tests, but a
-      # `full` PR that touches those scripts skips that path and `npm run
-      # test:ci` (vitest) does not collect `node:test` files — so run them here
-      # too, or a compositor/publisher change could pass CI without its
-      # regression tests. Linux-only (they're platform-independent).
-      - name: 'Run .github/scripts helper tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
 
       # The install-script packaging suite needs zip/unzip, and throws on a
       # CI host that ships neither, so a silent skip there is impossible.
@@ -752,6 +636,394 @@ jobs:
         with:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
+
+  #
+  # Lint & Static: everything that judges the tree without executing it.
+  #
+  lint_and_static:
+    name: 'Lint & Static (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    # Split out of `test` so this half can become a required status check on
+    # its own: these steps are deterministic (no test execution, no shared
+    # ECS worker contention), while the unit-test half of the old job was
+    # measured failing 41% of post-merge runs on flake alone in the week
+    # this split was made — one red gate must not hold the other's hostages.
+    # Same event surface as `test` (see its `if` for the reasoning), and the
+    # same release-sync convention: stay running on skip_ci PRs so a required
+    # context still reports, with the per-step guards making it a no-op pass.
+    if: "${{ !cancelled() && github.event_name != 'schedule' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    permissions:
+      contents: 'read'
+    steps:
+      # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
+      # verify) may leave root-owned, read-only files anywhere in the workspace.
+      # Restore ownership and write permission unconditionally so the checkout
+      # below can wipe the tree without EACCES. Do not gate this behind a
+      # .qwen/.git probe: poisoning is workspace-wide (root-owned node_modules/
+      # dist with no .qwen/.git), so a probe reports "healthy" and skips the
+      # recovery exactly when it is needed.
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ and its recovery backup left by a previous job so
+      # actions/checkout doesn't trip on restrictive permissions.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Pin push runs to the event SHA: the `github.ref` fallback resolves
+          # `refs/heads/main` at fetch time — a moving tip — while the check run
+          # attaches to the triggering commit, so the lane would validate a tree
+          # it does not report on. Nothing detects that (the checkout-head
+          # verifier is gated to pull_request / merge_group, and its ancestor
+          # check passes for a newer tip regardless), and merges land close
+          # enough together to hit it routinely. Regressions are still caught —
+          # the tested tree is a descendant — but attribution breaks: red on a
+          # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
+          # the event SHA by taking actions/checkout's default.
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          # Shallow: nothing here walks git history except on demand (the
+          # verify guard below checks head.sha == HEAD; the size gate and its
+          # vitest mirror fetch the PR's base commit at depth 1 when the
+          # baseline went stale; everything else touches only the working
+          # tree). On the in-repo ECS runner a full-history clone is the
+          # heaviest transfer and chokes the squid egress proxy, flaking
+          # checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Classify CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              # Fetch + classify through the shared wrapper (also used by the
+              # review workflow's docs-only gate) so the classifier's input
+              # contract lives in one place. Exit 2 = listing failed,
+              # 3 = classifier failed.
+              set +e
+              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+              classify_rc=$?
+              set -e
+              if [ "$classify_rc" -eq 2 ]; then
+                echo "::warning::Unable to list PR changed files; running full CI."
+                profile=full
+              elif [ "$classify_rc" -ne 0 ]; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
+            else
+              echo "Fork PR detected; running full CI."
+            fi
+          fi
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      # Fail fast on a saturated self-hosted host instead of dying on ENOSPC
+      # mid-install (#10035): the workspace cleaner skips busy runners, so a
+      # busy fleet can hit 100% while jobs keep being admitted. Gating before
+      # `npm ci` turns that into a clear, retryable reschedule onto a host
+      # with headroom, instead of a corrupted half-run.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}]" > "$DISK_SAMPLES" 2>/dev/null || true
+          sample_disk() {
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            echo "$sample"
+            echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
+          }
+          sample_disk
+          ( while sleep 10; do sample_disk; done ) &
+          SAMPLER_PID=$!
+          trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
+
+      - name: 'GitHub CI helper checks'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        timeout-minutes: 5
+        run: |-
+          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
+          node scripts/lint.js --setup
+          node scripts/lint.js --actionlint
+          node scripts/lint.js --yamllint
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+
+      - name: 'Audit critical runtime dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run audit:runtime:critical'
+
+      - name: 'Check lockfile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:lockfile'
+
+      - name: 'Check desktop workspace isolation'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:desktop-isolation'
+
+      - name: 'Check TUI dependency direction'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:tui-dep-direction'
+
+      - name: 'Install linters'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --setup'
+
+      - name: 'Run ESLint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --eslint'
+
+      - name: 'Run actionlint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        timeout-minutes: 5
+        run: 'node scripts/lint.js --actionlint'
+
+      - name: 'Run shellcheck'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --shellcheck'
+
+      - name: 'Run yamllint'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --yamllint'
+
+      - name: 'Run Prettier'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --prettier'
+
+      - name: 'Run sensitive keyword linter'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/lint.js --sensitive-keywords'
+
+      - name: 'Run i18n check'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check-i18n'
+
+      - name: 'Generate settings schema'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:settings-schema'
+
+      - name: 'Check settings schema is up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
+            echo "Error: settings.schema.json is out of date."
+            echo "Please run: npm run generate:settings-schema"
+            echo "Then commit the updated schema file."
+            git diff packages/vscode-ide-companion/schemas/settings.schema.json
+            exit 1
+          fi
+          echo "Settings schema is up-to-date"
+
+      - name: 'Generate VS Code companion notices'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
+
+      - name: 'Check VS Code companion notices are up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
+            echo "Error: NOTICES.txt is out of date."
+            echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
+            echo "Then commit the updated file."
+            git diff --stat packages/vscode-ide-companion/NOTICES.txt
+            exit 1
+          fi
+          echo "NOTICES.txt is up-to-date"
+
+      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
+      # npm run test:ci only, so they intentionally do not repeat this
+      # platform-independent bundle closure check.
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
+      # The `github_ci_only` profile runs the .github/scripts helper tests, but a
+      # `full` PR that touches those scripts skips that path and `npm run
+      # test:ci` (vitest) does not collect `node:test` files — so run them here
+      # too, or a compositor/publisher change could pass CI without its
+      # regression tests. Linux-only (they're platform-independent).
+      - name: 'Run .github/scripts helper tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
