@@ -2224,6 +2224,99 @@ describe('standalone release packaging', () => {
     },
   );
 
+  it('ships a thin opentui-preview installer pair', () => {
+    const previewInstallShell = readScript(
+      'scripts/installation/install-opentui-preview.sh',
+    );
+    expect(previewInstallShell).toContain('-opentui-preview.tar.gz');
+    expect(previewInstallShell).toContain(
+      'https://github.com/${REPO}/releases/download/${tag}',
+    );
+    expect(previewInstallShell).toContain('SHA256SUMS');
+    expect(previewInstallShell).toContain('sha256sum');
+    expect(previewInstallShell).toContain('shasum -a 256');
+    expect(previewInstallShell).toContain('tar -xzf');
+    expect(previewInstallShell).toContain(
+      'linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64',
+    );
+    // Scratch-directory install only: never touches PATH or the hosted
+    // installer chain.
+    expect(previewInstallShell).not.toContain('PATH=');
+    expect(previewInstallShell).not.toContain('install-qwen-standalone');
+
+    const previewInstallPs1 = readScript(
+      'scripts/installation/install-opentui-preview.ps1',
+    );
+    expect(previewInstallPs1).toContain('-opentui-preview.zip');
+    expect(previewInstallPs1).toContain('releases/download');
+    expect(previewInstallPs1).toContain('Get-FileHash -Algorithm SHA256');
+    expect(previewInstallPs1).toContain('Expand-Archive');
+    expect(previewInstallPs1).not.toContain('$env:PATH');
+  });
+
+  itOnUnix('installs a local preview archive with the thin installer', () => {
+    const installer = 'scripts/installation/install-opentui-preview.sh';
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-preview-install-'));
+
+    try {
+      const archiveRoot = path.join(tmpDir, 'pkg');
+      mkdirSync(path.join(archiveRoot, 'qwen-code', 'bin'), {
+        recursive: true,
+      });
+      writeFileSync(
+        path.join(archiveRoot, 'qwen-code', 'bin', 'qwen'),
+        '#!/usr/bin/env sh\n',
+      );
+      const archive = path.join(
+        tmpDir,
+        'qwen-code-linux-x64-opentui-preview.tar.gz',
+      );
+      execFileSync('tar', ['-czf', archive, '-C', archiveRoot, 'qwen-code'], {
+        env: { ...process.env, LC_ALL: 'C' },
+        stdio: 'ignore',
+      });
+
+      const installDir = path.join(tmpDir, 'install');
+      const output = execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        { encoding: 'utf8' },
+      );
+      expect(output).toContain(`run: ${installDir}/qwen-code/bin/qwen`);
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Reinstalling over an existing directory replaces it cleanly.
+      execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        {
+          stdio: 'ignore',
+        },
+      );
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Malformed tags/targets are rejected before any network access.
+      const badTag = spawnSync('sh', [installer, '--tag', '../evil'], {
+        encoding: 'utf8',
+      });
+      expect(badTag.status).not.toBe(0);
+      expect(badTag.stderr).toContain('--tag must look like');
+      const badTarget = spawnSync(
+        'sh',
+        [installer, '--tag', 'v0.0.1', '--target', 'win-x64'],
+        { encoding: 'utf8' },
+      );
+      expect(badTarget.status).not.toBe(0);
+      expect(badTarget.stderr).toContain('unsupported --target');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix('rejects incomplete explicit clipboard staging', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
