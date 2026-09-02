@@ -196,11 +196,22 @@ describe('autofix gate load clamps', () => {
 });
 
 describe('bundle-guard timeout ceiling', () => {
-  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', () => {
-    // The config reads RUNNER_NAME at import time, so the expectation must
-    // come from the same live expression, not an env stubbed after import.
-    expect(vscodeCompanionConfig.test?.testTimeout).toBe(
-      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 15_000,
-    );
+  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+    // The config reads RUNNER_NAME at import time, so re-import it under
+    // each stub to pin both branches, not only the ambient one.
+    for (const [runnerName, expected] of [
+      ['ecs-qwen-parity', 60_000],
+      ['ubuntu-latest-runner', 15_000],
+    ] as const) {
+      vi.stubEnv('RUNNER_NAME', runnerName);
+      vi.resetModules();
+      const mod = await import(
+        '../../packages/vscode-ide-companion/vitest.config.js'
+      );
+      expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
+        expected,
+      );
+      vi.unstubAllEnvs();
+    }
   });
 });
