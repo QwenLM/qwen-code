@@ -11364,6 +11364,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (metadata.displayName !== undefined) {
         if (
+          metadata.titleSource !== undefined &&
+          metadata.titleSource !== 'manual' &&
+          metadata.titleSource !== 'auto'
+        ) {
+          throw new InvalidSessionMetadataError(
+            'titleSource',
+            'must be either `manual` or `auto`',
+          );
+        }
+        if (
           typeof metadata.displayName !== 'string' ||
           metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
         ) {
@@ -11378,7 +11388,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             'must not contain control characters',
           );
         }
+        // An empty name would only clear the live entry: the `sessionTitle`
+        // persist below runs for truthy names, so no tombstone reaches the
+        // transcript. The persisted manual record would then resurface
+        // through the session-list merge (`live.displayName ??
+        // existing.displayName`) and be carried into a `/clear` successor as
+        // if the clear never happened. Reject the clear instead of serving a
+        // name the catalog no longer backs. Mirrors the workspace-scoped
+        // metadata route, which rejects empty names for the same reason.
+        if (metadata.displayName.trim() === '') {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not be empty',
+          );
+        }
         const nextDisplayName = metadata.displayName || undefined;
+        const titleSource = metadata.titleSource ?? 'manual';
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
           // The catalog exposes display names; an actual rename is a
@@ -11397,7 +11422,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
                 sessionId,
                 displayName: nextDisplayName,
-                titleSource: 'manual',
+                titleSource,
               })
               .then((res: unknown) => {
                 const r = res as { persisted?: boolean } | undefined;
@@ -11418,7 +11443,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              data: { sessionId, displayName: entry.displayName },
+              data: {
+                sessionId,
+                displayName: entry.displayName,
+                ...(entry.displayName ? { titleSource } : {}),
+              },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }
                 : {}),

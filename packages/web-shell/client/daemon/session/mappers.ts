@@ -380,9 +380,22 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        const displayName = getString(data, 'displayName');
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : // A metadata event that echoes the unchanged name without an
+                // explicit provenance (the bridge's pr-only publish) does not
+                // change the title, so it must not strip the provenance the
+                // `/clear` carry reads. Only a changed name of unknown
+                // provenance resets it.
+                displayName && displayName === current.displayName
+                ? current.titleSource
+                : undefined,
         }));
       }
       break;

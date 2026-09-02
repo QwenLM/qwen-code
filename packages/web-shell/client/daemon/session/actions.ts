@@ -283,6 +283,7 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
+    delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
@@ -776,6 +777,7 @@ export function createDaemonSessionActions({
           standaloneSession: undefined,
           clientId: undefined,
           displayName: undefined,
+          titleSource: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,

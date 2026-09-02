@@ -28997,9 +28997,98 @@ describe('createAcpSessionBridge', () => {
         (e) => e.type === 'session_metadata_updated',
       );
       expect(metaEvent).toBeDefined();
-      expect((metaEvent?.data as { displayName: string }).displayName).toBe(
-        'Test Session',
+      expect(metaEvent?.data).toMatchObject({
+        displayName: 'Test Session',
+        titleSource: 'manual',
+      });
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('uses automatic provenance for programmatic renames', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const event of sub) events.push(event);
+      })();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+      await vi.waitFor(() =>
+        expect(
+          events.find((event) => event.type === 'session_metadata_updated')
+            ?.data,
+        ).toMatchObject({
+          displayName: 'Voice chat',
+          titleSource: 'auto',
+        }),
       );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('rejects an empty displayName instead of clearing only the live entry', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Payments bug',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      // A clear is never persisted (the `sessionTitle` persist skips
+      // falsy names), so accepting it would let the stale manual record
+      // resurface through the session-list merge and the `/clear` carry.
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, { displayName: '' }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: '   ',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await new Promise((r) => setImmediate(r));
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        displayName: 'Payments bug',
+      });
+      expect(
+        events.filter((e) => e.type === 'session_metadata_updated'),
+      ).toHaveLength(0);
 
       await bridge.closeSession(session.sessionId);
       await drain;
