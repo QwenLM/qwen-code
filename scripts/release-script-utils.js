@@ -59,8 +59,15 @@ export function readOptionValue(argv, index, optionName) {
 }
 
 export function isMainModule(importMetaUrl) {
-  const filename = fileURLToPath(importMetaUrl);
-  return process.argv[1] && path.resolve(process.argv[1]) === filename;
+  if (!process.argv[1]) return false;
+  // path.resolve keeps symlinks, but Node realpath-resolves the ESM entry
+  // module — compared as-is, any invocation through a symlinked path (stock
+  // macOS, where os.tmpdir() links into /private/var, is one) makes the
+  // guard false and the caller's entry point silently never runs.
+  return (
+    fs.realpathSync(path.resolve(process.argv[1])) ===
+    fs.realpathSync(fileURLToPath(importMetaUrl))
+  );
 }
 
 /**

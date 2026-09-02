@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -238,6 +239,22 @@ describe('createStreamConsumer', () => {
     // The passthrough stays byte-identical whatever the decoding did.
     expect(Buffer.concat(written).equals(bytes)).toBe(true);
   });
+
+  it('counts a FAIL line that ends stderr without a trailing newline', () => {
+    // A suite killed mid-line leaves its last stderr fragment unterminated;
+    // that fragment can carry the run's only FAIL text, and dropping it
+    // reports the failure as "no failing test".
+    const sink = { write: () => true };
+    const consumer = createStreamConsumer(createRunClassifier());
+
+    consumer.write(
+      Buffer.from(' FAIL x.test.ts > a case', 'utf8'),
+      sink,
+      'err',
+    );
+
+    expect(consumer.finish().hasFailingTests).toBe(true);
+  });
 });
 
 describe('describeSilentFailure', () => {
@@ -298,7 +315,7 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
    * `home`, puts a stub `npm` recording argv on PATH, and runs the wrapper the
    * way the workflow step does.
    */
-  function runEntry(home, { exitCode = 0, output = '' } = {}) {
+  function runEntry(home, { exitCode = 0, output = '', entry } = {}) {
     mkdirSync(home, { recursive: true });
     for (const name of [
       'run-release-workspace-tests.js',
@@ -318,7 +335,7 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
     return spawnSync(
       process.execPath,
       [
-        path.join(home, 'run-release-workspace-tests.js'),
+        entry ?? path.join(home, 'run-release-workspace-tests.js'),
         '--',
         '--shard=1/3',
         '--passWithNoTests',
@@ -362,6 +379,21 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
     // `file://` + argv[1]: false for any path with a space, and a false guard
     // means the wrapper exits 0 having run nothing at all.
     const result = runEntry(path.join(dir, 'spaced dir'), { exitCode: 3 });
+
+    expect(result.stdout).toContain('test:release:workspaces');
+    expect(result.status).toBe(3);
+  });
+
+  it('still spawns the suite when invoked through a symlink', () => {
+    // path.resolve(argv[1]) keeps symlinks while Node realpath-resolves the
+    // ESM entry module: compared as-is the guard is false for any symlinked
+    // invocation — stock macOS, where os.tmpdir() links into /private/var,
+    // is one — and the wrapper exits 0 having run nothing at all.
+    const home = path.join(dir, 'linked');
+    const link = path.join(dir, 'wrapper-link.js');
+    symlinkSync(path.join(home, 'run-release-workspace-tests.js'), link);
+
+    const result = runEntry(home, { exitCode: 3, entry: link });
 
     expect(result.stdout).toContain('test:release:workspaces');
     expect(result.status).toBe(3);
