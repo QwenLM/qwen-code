@@ -540,3 +540,194 @@ test('runCli plan --existing merges recorded recurrences from the file', () => {
   assert.ok(planned.body.includes('[run 302]'));
   assert.equal(planned.title, analysis.title);
 });
+
+// A lane that dies before printing any test result — the case the per-commit
+// path exists for — still reports which job and which step failed. That identity
+// is the only thing standing between an actionable issue and a stub naming
+// nothing but a commit.
+const WINDOWS_JOB = {
+  name: 'Test (windows-latest, Node 22.x)',
+  steps: ['Run tests and generate reports'],
+};
+
+function captureStdout(argv) {
+  let output = '';
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    output += chunk;
+    return true;
+  };
+  try {
+    runCli(argv);
+  } finally {
+    process.stdout.write = original;
+  }
+  return output;
+}
+
+test('the per-commit body names the failing job and step', () => {
+  const analysis = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  assert.ok(body.includes('- Failed jobs:'));
+  assert.ok(
+    body.includes(
+      '  - `Test (windows-latest, Node 22.x)` — failed in step `Run tests and generate reports`',
+    ),
+  );
+  // Naming the job does not turn this into the deduped path: same marker, same
+  // title, still no recurrence machinery.
+  assert.ok(body.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`));
+  assert.ok(body.includes('tracked per commit'));
+  assert.ok(body.includes(`- Run: ${OCCURRENCE.runUrl}`));
+  assert.ok(!body.includes(OCCURRENCE_MARKER));
+  assert.equal(
+    renderIssueTitle({ analysis, occurrence: OCCURRENCE }),
+    'Main CI failed: Qwen Code CI on af7a9ec12722',
+  );
+});
+
+test('a job with several failed steps lists every one of them', () => {
+  const analysis = analyzeLogs(
+    'Qwen Code CI',
+    [],
+    [
+      {
+        name: 'Test (ubuntu-latest, Node 22.x)',
+        steps: ['Run ESLint', 'Run tests and generate reports'],
+      },
+    ],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(
+    body.includes(
+      'failed in steps `Run ESLint`, `Run tests and generate reports`',
+    ),
+  );
+});
+
+test('a job whose failed step is unknown is still named', () => {
+  const analysis = analyzeLogs(
+    'Qwen Code CI',
+    [],
+    [{ name: 'Test (macos-latest, Node 22.x)', steps: [] }],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(body.includes('  - `Test (macos-latest, Node 22.x)`'));
+  assert.ok(!body.includes('failed in step'));
+});
+
+test('every failed job of a multi-lane run is named', () => {
+  const analysis = analyzeLogs(
+    'Qwen Code CI',
+    [],
+    [
+      WINDOWS_JOB,
+      {
+        name: 'Test (macos-latest, Node 22.x)',
+        steps: ['Install dependencies'],
+      },
+    ],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(body.includes('`Test (windows-latest, Node 22.x)`'));
+  assert.ok(body.includes('`Test (macos-latest, Node 22.x)`'));
+});
+
+test('the per-commit body names no job when the run reported none', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  assert.deepEqual(analysis.failedJobs, []);
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(!body.includes('- Failed jobs:'));
+});
+
+test('runCli analyze parses the failed-jobs TSV the workflow writes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-jobs-'));
+  const jobsPath = join(dir, 'failed-jobs.tsv');
+  // A blank line (and one carrying nothing but a tab) must not become an empty
+  // bullet, and a job with no failed step must survive without one.
+  writeFileSync(
+    jobsPath,
+    [
+      'Test (windows-latest, Node 22.x)\tRun tests and generate reports',
+      // jq joins several failed steps with ", ", so every step after the
+      // first arrives with a leading space.
+      'Test (ubuntu-latest, Node 22.x)\tRun ESLint, Run Prettier',
+      '\t',
+      'Test (macos-latest, Node 22.x)\t',
+      '',
+    ].join('\n'),
+  );
+
+  const analysis = JSON.parse(
+    captureStdout([
+      'analyze',
+      '--workflow',
+      'Qwen Code CI',
+      '--jobs',
+      jobsPath,
+    ]),
+  );
+
+  assert.deepEqual(analysis.failedJobs, [
+    {
+      name: 'Test (windows-latest, Node 22.x)',
+      steps: ['Run tests and generate reports'],
+    },
+    {
+      name: 'Test (ubuntu-latest, Node 22.x)',
+      steps: ['Run ESLint', 'Run Prettier'],
+    },
+    { name: 'Test (macos-latest, Node 22.x)', steps: [] },
+  ]);
+  assert.deepEqual(analysis.tests, []);
+});
+
+test('runCli analyze still plans when the jobs file is missing', () => {
+  const analysis = JSON.parse(
+    captureStdout([
+      'analyze',
+      '--workflow',
+      'Qwen Code CI',
+      '--jobs',
+      join(tmpdir(), 'sig-jobs-no-such-file.tsv'),
+    ]),
+  );
+  assert.deepEqual(analysis.failedJobs, []);
+});
+
+test('runCli plan renders the named job into the filed body', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-plan-'));
+  const analysisPath = join(dir, 'analysis.json');
+  writeFileSync(
+    analysisPath,
+    JSON.stringify(
+      analyzeLogs('Qwen Code CI', ['npm error code ERESOLVE'], [WINDOWS_JOB]),
+    ),
+  );
+
+  const planned = JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ]),
+  );
+
+  assert.ok(planned.body.includes('`Test (windows-latest, Node 22.x)`'));
+  assert.deepEqual(planned.searchMarkers, [
+    `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
+  ]);
+});

@@ -90,6 +90,15 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('${HEAD_SHA}');
   });
 
+  it('hands the helper the failed job and step of a run with no test result', () => {
+    // A lane that dies before printing any test result leaves no failing test to
+    // dedupe on, so the issue falls back to one per commit — and without the job
+    // list the fallback body named nothing but the commit, which is what made a
+    // standing red lane undiagnosable from its own issue.
+    expect(workflow).toContain('failed-jobs.tsv');
+    expect(workflow).toContain('--jobs "${RUNNER_TEMP}/failed-jobs.tsv"');
+  });
+
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
     expect(workflow).toContain('gh issue view "${existing_issue}"');
     expect(workflow).toContain('--existing "${existing_body}"');

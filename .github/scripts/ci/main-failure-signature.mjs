@@ -85,6 +85,29 @@ export function testKey(testId) {
 }
 
 /**
+ * Parse the `name<TAB>step, step` lines the workflow writes from the run's
+ * failed-job list. A lane that dies before printing any test result still
+ * reports which job and which step failed — the only identity left for the
+ * per-commit issue to carry.
+ */
+export function parseFailedJobs(tsv) {
+  const jobs = [];
+  for (const rawLine of String(tsv ?? '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [name, steps] = line.split('\t');
+    jobs.push({
+      name,
+      steps: (steps ?? '')
+        .split(',')
+        .map((step) => step.trim())
+        .filter(Boolean),
+    });
+  }
+  return jobs;
+}
+
+/**
  * A signature over the whole failure set, recorded in the body for humans
  * comparing two issues. Matching is done with the per-test markers, which
  * tolerate a failure set that grows or shrinks between runs.
@@ -113,7 +136,7 @@ export function shortenForTitle(testId, limit = 110) {
     : `${collapsed.slice(0, limit - 1)}…`;
 }
 
-export function analyzeLogs(workflowName, logTexts) {
+export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
   const tests = [];
   for (const logText of logTexts) {
     for (const id of extractFailingTests(logText)) {
@@ -126,6 +149,7 @@ export function analyzeLogs(workflowName, logTexts) {
   return {
     workflow: workflowName,
     tests,
+    failedJobs,
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -183,10 +207,19 @@ function splitOccurrenceBlock(body) {
   return { head, lines, tail: rest.slice(cursor).join('\n').trim() };
 }
 
+function failedJobLines(failedJobs) {
+  return failedJobs.map((job) => {
+    if (!job.steps.length) return `  - \`${job.name}\``;
+    const steps = job.steps.map((step) => `\`${step}\``).join(', ');
+    return `  - \`${job.name}\` — failed in ${job.steps.length === 1 ? 'step' : 'steps'} ${steps}`;
+  });
+}
+
 /**
  * A run that failed before any test result was reported — an install or build
  * break — has nothing to dedupe on, so it keeps the original per-commit marker
- * and title.
+ * and title. The failed job and step still go in the body: they are what tells
+ * a reader which lane broke when no test name survived to say so.
  */
 function renderPerCommitBody({ analysis, occurrence }) {
   return [
@@ -196,6 +229,9 @@ function renderPerCommitBody({ analysis, occurrence }) {
     'reported, so this issue is tracked per commit.',
     '',
     `- Workflow: ${analysis.workflow}`,
+    ...(analysis.failedJobs.length
+      ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+      : []),
     `- Run: ${occurrence.runUrl}`,
     `- Run ID: ${occurrence.runId}`,
     `- Commit: ${occurrence.sha}`,
@@ -335,6 +371,17 @@ function parseArgs(argv) {
   return { options, positional };
 }
 
+function readFailedJobs(path) {
+  if (!path) return [];
+  try {
+    return parseFailedJobs(readFileSync(path, 'utf8'));
+  } catch {
+    // A missing jobs file costs the same precision a missing log does: the
+    // per-commit body falls back to naming nothing but the run.
+    return [];
+  }
+}
+
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
@@ -342,7 +389,13 @@ export function runCli(argv) {
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));
     process.stdout.write(
-      `${JSON.stringify(analyzeLogs(options.workflow ?? '', logTexts))}\n`,
+      `${JSON.stringify(
+        analyzeLogs(
+          options.workflow ?? '',
+          logTexts,
+          readFailedJobs(options.jobs),
+        ),
+      )}\n`,
     );
     return;
   }

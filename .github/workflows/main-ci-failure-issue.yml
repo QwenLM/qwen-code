@@ -67,6 +67,16 @@ jobs:
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
+          # A lane that dies before printing any test result leaves the helper
+          # nothing to dedupe on, but the jobs list read just above still names
+          # the job and the step that failed — the one identity the per-commit
+          # issue can carry. Tolerated like a missing log: it costs precision,
+          # never the issue.
+          gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
+            --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure") | [.name, ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))] | @tsv' \
+            > "${RUNNER_TEMP}/failed-jobs.tsv" || true
+
           for job_id in "${job_ids[@]}"; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
               > "${log_dir}/${job_id}.log"; then
@@ -95,7 +105,8 @@ jobs:
 
           helper='.github/scripts/ci/main-failure-signature.mjs'
           analysis="${RUNNER_TEMP}/analysis.json"
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" "${logs[@]}" \
+          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
+            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" \
             > "${analysis}"
           echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
           jq -r '.tests[].id' "${analysis}"
