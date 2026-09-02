@@ -1,8 +1,5 @@
 import { useEffect, useRef } from 'react';
-import {
-  useDaemonSessionOwnerGuard,
-  useWorkspaceEventSignals,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useWorkspaceEventSignals } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type {
   WebShellSessionArtifactsChange,
@@ -65,23 +62,18 @@ export function useSessionArtifactsChange({
   artifactsByTurn,
   onChange,
 }: SessionArtifactsChangeOptions): void {
-  const ownerGuard = useDaemonSessionOwnerGuard();
-  const ownerRef = useRef(ownerGuard.capture());
-  if (!ownerRef.current.isCurrent()) ownerRef.current = ownerGuard.capture();
-  const owner = ownerRef.current;
   const artifactsVersion = useWorkspaceEventSignals()?.artifactsVersion;
   const stateRef = useRef<{
     sessionId?: string;
-    owner: typeof owner;
     artifactsVersion?: number;
     pendingReason?: WebShellSessionArtifactsChangeReason;
     reconciliationArtifacts?: readonly DaemonSessionArtifact[];
+    reconciliationRefreshStarted?: boolean;
     lastSignature?: string;
     lastArtifactIds: ReadonlySet<string>;
     sequence: number;
   }>({
     sessionId,
-    owner,
     artifactsVersion,
     lastArtifactIds: new Set(),
     sequence: 0,
@@ -92,14 +84,12 @@ export function useSessionArtifactsChange({
     if (state.sessionId !== sessionId) {
       state = {
         sessionId,
-        owner,
         artifactsVersion,
         lastArtifactIds: new Set(),
         sequence: 0,
       };
       stateRef.current = state;
     } else {
-      state.owner = owner;
       const previousVersion = state.artifactsVersion;
       state.artifactsVersion = artifactsVersion;
       if (
@@ -112,6 +102,9 @@ export function useSessionArtifactsChange({
     }
     if (reconciling && state.lastSignature !== undefined) {
       state.reconciliationArtifacts ??= artifacts;
+    }
+    if (state.reconciliationArtifacts && !reconciling && !ready) {
+      state.reconciliationRefreshStarted = true;
     }
     if (!sessionId || !onChange || !ready || !hydrated) return;
 
@@ -131,8 +124,12 @@ export function useSessionArtifactsChange({
     }
     if (state.lastSignature === signature) {
       state.pendingReason = undefined;
-      if (state.reconciliationArtifacts !== artifacts) {
+      if (
+        state.reconciliationArtifacts !== artifacts ||
+        state.reconciliationRefreshStarted
+      ) {
         state.reconciliationArtifacts = undefined;
+        state.reconciliationRefreshStarted = false;
       }
       return;
     }
@@ -164,9 +161,8 @@ export function useSessionArtifactsChange({
     state.lastSignature = signature;
     state.lastArtifactIds = new Set(artifacts.map((artifact) => artifact.id));
     state.pendingReason = undefined;
-    if (state.reconciliationArtifacts !== artifacts) {
-      state.reconciliationArtifacts = undefined;
-    }
+    state.reconciliationArtifacts = undefined;
+    state.reconciliationRefreshStarted = false;
     try {
       onChange(change);
     } catch (error) {
@@ -181,7 +177,6 @@ export function useSessionArtifactsChange({
     artifactsByTurn,
     hydrated,
     onChange,
-    owner,
     ready,
     reconciling,
     sessionId,

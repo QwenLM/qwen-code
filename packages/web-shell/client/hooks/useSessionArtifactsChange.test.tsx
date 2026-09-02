@@ -10,13 +10,10 @@ import { useSessionArtifactsChange } from './useSessionArtifactsChange';
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const sdkMock = vi.hoisted(() => ({
-  ownerVersion: 0,
   artifactsVersion: 0,
-  ownerGuard: { capture: vi.fn() },
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: sdkMock.artifactsVersion,
   }),
@@ -47,6 +44,7 @@ function artifact(
     status: 'available',
     title: id,
     workspacePath: `${id}.html`,
+    retention: 'restorable',
     clientRetained: false,
     createdAt: '2026-09-02T00:00:00.000Z',
     updatedAt: '2026-09-02T00:00:00.000Z',
@@ -87,12 +85,7 @@ function props(
 }
 
 beforeEach(() => {
-  sdkMock.ownerVersion = 0;
   sdkMock.artifactsVersion = 0;
-  sdkMock.ownerGuard.capture.mockImplementation(() => {
-    const version = sdkMock.ownerVersion;
-    return { isCurrent: () => sdkMock.ownerVersion === version };
-  });
 });
 
 afterEach(async () => {
@@ -118,7 +111,6 @@ describe('useSessionArtifactsChange', () => {
     });
 
     const historical = artifact('historical', { toolCallId: 'tool-old' });
-    sdkMock.ownerVersion += 1;
     await render(
       props(onChange, {
         sessionId: 'session-b',
@@ -175,7 +167,7 @@ describe('useSessionArtifactsChange', () => {
     );
     const updated = artifact('first', {
       title: 'Updated',
-      metadata: { z: 1, nested: { b: 2, a: 1 } },
+      metadata: { z: 1, b: 2, a: 1 },
       updatedAt: '2026-09-02T00:01:00.000Z',
     });
     sdkMock.artifactsVersion = 2;
@@ -205,7 +197,7 @@ describe('useSessionArtifactsChange', () => {
         artifacts: [
           {
             ...updated,
-            metadata: { nested: { a: 1, b: 2 }, z: 1 },
+            metadata: { a: 1, b: 2, z: 1 },
           },
           second,
         ],
@@ -259,6 +251,118 @@ describe('useSessionArtifactsChange', () => {
         reason: 'change',
         sequence: 2,
         artifacts: [first, missed],
+      }),
+    );
+
+    sdkMock.artifactsVersion = 2;
+    const late = artifact('late', { toolCallId: 'tool-late' });
+    await render(props(onChange, { artifacts: [first, missed, late] }));
+    expect(onChange).toHaveBeenCalledTimes(2);
+
+    await render(
+      props(onChange, {
+        artifacts: [first, missed, late],
+        artifactsByTurn: new Map([['turn-late', [late]]]),
+      }),
+    );
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'change',
+        sequence: 3,
+      }),
+    );
+  });
+
+  it('re-arms the projection gate when reconciliation refresh fails', async () => {
+    const onChange = vi.fn();
+    const first = artifact('first');
+    const baseline = [first];
+    await render(props(onChange, { artifacts: baseline }));
+    await render(
+      props(onChange, {
+        reconciling: true,
+        ready: false,
+        artifacts: baseline,
+      }),
+    );
+    await render(props(onChange, { artifacts: baseline }));
+    await render(props(onChange, { ready: false, artifacts: baseline }));
+    await render(props(onChange, { artifacts: baseline }));
+
+    sdkMock.artifactsVersion = 1;
+    const generated = artifact('generated', { toolCallId: 'tool-new' });
+    await render(props(onChange, { artifacts: [first, generated] }));
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    await render(
+      props(onChange, {
+        artifacts: [first, generated],
+        artifactsByTurn: new Map([['turn-new', [generated]]]),
+      }),
+    );
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'change',
+        sequence: 2,
+      }),
+    );
+  });
+
+  it('ignores unprojected tool artifacts already present in the baseline', async () => {
+    const onChange = vi.fn();
+    const historical = artifact('historical', { toolCallId: 'tool-old' });
+    await render(props(onChange, { artifacts: [historical] }));
+
+    sdkMock.artifactsVersion = 1;
+    const fresh = artifact('fresh');
+    await render(props(onChange, { artifacts: [historical, fresh] }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'change',
+        sequence: 2,
+        artifacts: [historical, fresh],
+      }),
+    );
+  });
+
+  it('does not let initial reconciliation bypass the projection gate', async () => {
+    const onChange = vi.fn();
+    const historical = artifact('historical', { toolCallId: 'tool-old' });
+    await render(
+      props(onChange, {
+        reconciling: true,
+        ready: false,
+        artifacts: [historical],
+      }),
+    );
+    await render(props(onChange, { artifacts: [historical] }));
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    sdkMock.artifactsVersion = 1;
+    const generated = artifact('generated', { toolCallId: 'tool-new' });
+    await render(props(onChange, { artifacts: [historical, generated] }));
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits until ready before delivering a changed snapshot', async () => {
+    const onChange = vi.fn();
+    await render(props(onChange));
+    const generated = artifact('generated');
+    sdkMock.artifactsVersion = 1;
+    await render(
+      props(onChange, {
+        ready: false,
+        hydrated: true,
+        artifacts: [generated],
+      }),
+    );
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    await render(props(onChange, { artifacts: [generated] }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'change',
+        sequence: 2,
       }),
     );
   });
