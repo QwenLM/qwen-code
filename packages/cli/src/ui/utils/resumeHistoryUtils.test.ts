@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   stripSuppressOnRestore,
   expandCollapsedHistory,
 } from './resumeHistoryUtils.js';
@@ -1950,5 +1951,93 @@ describe('expandCollapsedHistory', () => {
         SUPERSEDED_FINDINGS_MESSAGE,
       );
     });
+  });
+});
+
+describe('computeResumedPromptCountSeed', () => {
+  const makeSeedSession = (
+    messages: Array<Record<string, unknown>>,
+    fileHistorySnapshots?: Array<Record<string, unknown>>,
+  ) =>
+    ({
+      conversation: { messages },
+      ...(fileHistorySnapshots ? { fileHistorySnapshots } : {}),
+    }) as unknown as ResumedSessionData;
+
+  const userRecord = (promptId?: string) => ({
+    type: 'user',
+    message: { role: 'user', parts: [{ text: 'hi' }] },
+    ...(promptId ? { promptId } : {}),
+  });
+
+  it('returns 0 for sessions persisted before promptIds existed', () => {
+    expect(computeResumedPromptCountSeed(makeSeedSession([userRecord()]))).toBe(
+      0,
+    );
+  });
+
+  it('seeds one past the only minted suffix', () => {
+    expect(
+      computeResumedPromptCountSeed(
+        makeSeedSession([userRecord('session-1########0')]),
+      ),
+    ).toBe(1);
+  });
+
+  it('seeds one past the largest suffix when surviving records are sparse', () => {
+    // Rewind re-roots the record chain: turns 0..2 were minted, the turn
+    // carrying suffix 1 was rewound away, and only 0 and 2 survive. Seeding
+    // from the surviving-record count (2) would re-mint `...########2` and
+    // collide with the surviving turn's persisted identity.
+    expect(
+      computeResumedPromptCountSeed(
+        makeSeedSession([
+          userRecord('session-1########0'),
+          { type: 'assistant', message: { role: 'model', parts: [] } },
+          userRecord('session-1########2'),
+        ]),
+      ),
+    ).toBe(3);
+  });
+
+  it('counts identities retained in compression payloads', () => {
+    expect(
+      computeResumedPromptCountSeed(
+        makeSeedSession([
+          {
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: {
+              compressedHistory: [],
+              promptIds: ['session-1########4', null],
+            },
+          },
+          userRecord('session-1########5'),
+        ]),
+      ),
+    ).toBe(6);
+  });
+
+  it('counts restored file-history snapshots', () => {
+    expect(
+      computeResumedPromptCountSeed(
+        makeSeedSession(
+          [userRecord('session-1########0')],
+          [{ promptId: 'session-1########7' }],
+        ),
+      ),
+    ).toBe(8);
+  });
+
+  it('ignores ids without a numeric counter suffix', () => {
+    expect(
+      computeResumedPromptCountSeed(
+        makeSeedSession([
+          userRecord('session-1########0'),
+          userRecord('session-1########cron1720000000000'),
+          userRecord('no-delimiter'),
+        ]),
+      ),
+    ).toBe(1);
   });
 });

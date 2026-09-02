@@ -9,6 +9,7 @@ import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
   ConversationRecord,
+  ChatCompressionRecordPayload,
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
@@ -785,4 +786,60 @@ export function applyCollapsePolicyAndSummary(
   }
 
   return uiHistoryItems;
+}
+
+const PROMPT_ID_SUFFIX_DELIMITER = '########';
+
+/**
+ * Extracts the numeric counter suffix from a minted promptId
+ * (`<sessionId>########<count>`). Returns -1 for ids outside that shape —
+ * e.g. cron/notification ids carrying non-numeric suffixes — so they never
+ * move the seed.
+ */
+function numericPromptIdSuffix(promptId: string | null | undefined): number {
+  if (!promptId) return -1;
+  const delimiterIndex = promptId.lastIndexOf(PROMPT_ID_SUFFIX_DELIMITER);
+  if (delimiterIndex === -1) return -1;
+  const suffix = promptId.slice(
+    delimiterIndex + PROMPT_ID_SUFFIX_DELIMITER.length,
+  );
+  if (!/^\d+$/.test(suffix)) return -1;
+  return Number(suffix);
+}
+
+/**
+ * Computes the prompt-counter seed for a resumed session: one past the
+ * largest promptId suffix still persisted anywhere in the session. User
+ * records, compression-payload identities, and file-history snapshots all
+ * share the `sessionId########count` mint space, and the next post-resume
+ * prompt must not re-mint any of them — a collision marks two API history
+ * entries with the same identity and the rewind lookup fails closed on the
+ * duplicate.
+ *
+ * Counting surviving user records instead under-seeds once that space is
+ * sparse: rewind re-roots the record chain so rewound-away turns vanish
+ * from the loaded conversation, and teammate sends advance the counter
+ * without writing a user record. Returns 0 when nothing carries a promptId
+ * (e.g. sessions recorded before identities were persisted); no seeding is
+ * needed then because no identity can be collided with.
+ */
+export function computeResumedPromptCountSeed(
+  sessionData: ResumedSessionData,
+): number {
+  let maxSuffix = -1;
+  for (const record of sessionData.conversation.messages) {
+    maxSuffix = Math.max(maxSuffix, numericPromptIdSuffix(record.promptId));
+    if (record.type === 'system' && record.subtype === 'chat_compression') {
+      const payload = record.systemPayload as
+        | ChatCompressionRecordPayload
+        | undefined;
+      for (const promptId of payload?.promptIds ?? []) {
+        maxSuffix = Math.max(maxSuffix, numericPromptIdSuffix(promptId));
+      }
+    }
+  }
+  for (const snapshot of sessionData.fileHistorySnapshots ?? []) {
+    maxSuffix = Math.max(maxSuffix, numericPromptIdSuffix(snapshot.promptId));
+  }
+  return maxSuffix + 1;
 }

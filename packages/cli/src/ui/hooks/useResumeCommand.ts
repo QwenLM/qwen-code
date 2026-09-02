@@ -15,6 +15,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -244,20 +245,16 @@ export function useResumeCommand(
         startNewSession(sessionId);
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
-        // Seed the prompt counter from the resumed conversation, mirroring
-        // the startup --resume path in AppContainer: the startNewSession
-        // above reset it to 0, and without seeding the first post-resume
-        // prompt would mint `sessionId########0`, colliding with the
-        // resumed first turn's persisted promptId and tripping the rewind
-        // fail-closed branch for duplicated identities.
-        const userTurnCount = sessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount?.(userTurnCount);
+        // Seed the prompt counter from the resumed session, mirroring the
+        // startup --resume path in AppContainer: the startNewSession
+        // above reset it to 0, and the seed must sit one past the largest
+        // persisted promptId suffix. Counting surviving user records
+        // under-seeds once rewind/teammate turns make the mint space
+        // sparse, and the re-minted collision trips the rewind fail-closed
+        // branch for duplicated identities.
+        const promptCountSeed = computeResumedPromptCountSeed(sessionData);
+        if (promptCountSeed > 0) {
+          seedPromptCount?.(promptCountSeed);
         }
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();

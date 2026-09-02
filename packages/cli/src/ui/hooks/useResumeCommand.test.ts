@@ -456,8 +456,11 @@ describe('useResumeCommand', () => {
       { role: 'user', parts: [{ text: 'second' }] },
       { role: 'model', parts: [{ text: 'reply-2' }] },
     ]);
-    // Subtyped user records are not rewindable prompt turns and must not
-    // count toward the seed.
+    const seedRecords = conversation.messages as Array<{ promptId?: string }>;
+    seedRecords[0]!.promptId = 'session-2########0';
+    seedRecords[2]!.promptId = 'session-2########1';
+    // Subtyped user records share their parent turn's identity and must not
+    // push the seed past it.
     const baseRecord = conversation.messages[0]!;
     conversation.messages.push(
       {
@@ -486,6 +489,97 @@ describe('useResumeCommand', () => {
     expect(seedPromptCount.mock.invocationCallOrder[0]).toBeGreaterThan(
       startNewSession.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('handleResume seeds one past the largest promptId suffix when surviving records are sparse', async () => {
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
+    const llmClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getLlmClient: () => llmClient,
+      startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-2');
+    });
+
+    // Turns minted `session-2########0..2`; the middle turn was rewound
+    // away, so only the sparse identities 0 and 2 survive. Seeding from the
+    // surviving-record count (2) would re-mint `session-2########2` for the
+    // first post-resume prompt, colliding with the surviving turn's
+    // persisted identity and tripping the rewind fail-closed branch for
+    // duplicated promptIds.
+    const conversation = resumeMocks.makeConversation([
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'model', parts: [{ text: 'reply-1' }] },
+      { role: 'user', parts: [{ text: 'third-after-rewind' }] },
+      { role: 'model', parts: [{ text: 'reply-3' }] },
+    ]);
+    const sparseRecords = conversation.messages as Array<{
+      promptId?: string;
+    }>;
+    sparseRecords[0]!.promptId = 'session-2########0';
+    sparseRecords[2]!.promptId = 'session-2########2';
+    resumeMocks.resolvePendingLoadSession({ conversation });
+    await act(async () => {
+      await resumePromise;
+    });
+
+    expect(seedPromptCount).toHaveBeenCalledTimes(1);
+    expect(seedPromptCount).toHaveBeenCalledWith(3);
   });
 
   it('handleResume skips prompt-counter seeding for a session without user turns', async () => {

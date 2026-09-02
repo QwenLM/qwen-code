@@ -81,6 +81,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -1085,7 +1086,9 @@ export const AppContainer = (props: AppContainerProps) => {
           const durableTasks = await readCronTasks(config.getProjectRoot());
           activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
         } catch (error) {
-          debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
+          debugLogger.warn(
+            `Failed to read scheduled tasks at startup: ${error}`,
+          );
         }
       }
       const scheduledTasksWarning = getScheduledTasksStartupWarning(
@@ -1144,16 +1147,17 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
+        // Seed the prompt counter from the resumed session so new
+        // promptIds don't collide with restored file history snapshots or
+        // surviving records' persisted identities. The seed must sit one
+        // past the largest persisted promptId suffix — counting surviving
+        // user records under-seeds once rewind/teammate turns make the
+        // mint space sparse, and a re-minted collision trips the rewind
+        // fail-closed branch for duplicated identities.
+        const promptCountSeed =
+          computeResumedPromptCountSeed(resumedSessionData);
+        if (promptCountSeed > 0) {
+          seedPromptCount(promptCountSeed);
         }
 
         const recovered = await config.loadPausedBackgroundAgents(
