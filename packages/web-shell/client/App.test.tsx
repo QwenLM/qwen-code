@@ -2786,6 +2786,41 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
   });
 
+  it('stops polling when persisted subagents are complete', async () => {
+    mockConnection.capabilities.features = ['session_agents'];
+    vi.useFakeTimers();
+    mockWorkspace.client.sessionAgents.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          label: 'Completed agent',
+          status: 'completed',
+          startTime: 1_000,
+          endTime: 2_000,
+          runtimeMs: 1_000,
+          isBackgrounded: true,
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await flush();
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+
+    expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledOnce();
+  });
+
   it('backs off repeated subagent refresh failures without repeated warnings', async () => {
     mockConnection.capabilities.features = ['session_agents'];
     vi.useFakeTimers();
