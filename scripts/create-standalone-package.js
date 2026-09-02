@@ -169,7 +169,7 @@ async function main() {
     fs.mkdirSync(packageRoot, { recursive: true });
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
-    copyRuntimeAssets(packageRoot, outDir);
+    copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
     if (args.runtime === 'bun') {
@@ -337,11 +337,16 @@ function readPackageVersion() {
   return packageJson.version;
 }
 
-function copyRuntimeAssets(packageRoot, outDir) {
+function copyRuntimeAssets(packageRoot, outDir, runtime) {
   const libDir = path.join(packageRoot, 'lib');
   const skippedDistEntry = topLevelDistEntryForPath(outDir);
   fs.mkdirSync(libDir, { recursive: true });
 
+  // Classic Node packaging carries no renderer payload: the OpenTUI backend
+  // needs bun:ffi, and cross-built archives would hold another platform's
+  // native library, so the all-or-nothing asset gate could never activate.
+  // (--runtime=bun copies it here and prunes it to the target's libraries in
+  // copyOpenTuiAddon.)
   for (const entry of fs.readdirSync(distDir)) {
     // Standalone rebuilds a clean, target-trimmed lib/node_modules via the
     // native addon copy steps. If a local dist/node_modules exists from older
@@ -351,6 +356,7 @@ function copyRuntimeAssets(packageRoot, outDir) {
       entry === skippedDistEntry ||
       entry === '.DS_Store' ||
       entry === 'node_modules' ||
+      (entry === 'opentui-assets' && runtime !== 'bun') ||
       DIST_NPM_PACKAGE_ONLY_ENTRIES.has(entry)
     ) {
       continue;
@@ -541,6 +547,25 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
         path.join(packageSrc, library),
         path.join(assetDestDir, library),
       );
+    }
+  }
+
+  // The relocated tree ships the BUILD host's platform library; any other
+  // platform package directory is dead weight the runtime can never load.
+  if (packageNames.length > 0) {
+    const targetBasenames = new Set(
+      packageNames.map((packageName) => packageName.split('/')[1]),
+    );
+    const scopeDir = path.join(assetRoot, '@opentui');
+    if (fs.existsSync(scopeDir)) {
+      for (const entry of fs.readdirSync(scopeDir)) {
+        if (/^core-/.test(entry) && !targetBasenames.has(entry)) {
+          fs.rmSync(path.join(scopeDir, entry), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
     }
   }
 
