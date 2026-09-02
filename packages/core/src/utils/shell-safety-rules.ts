@@ -13,20 +13,31 @@ const SED_ADDRESS_AT =
   /\s*(?:(?:\d+|\$)(?:\s*,\s*(?:\d+|\$))?|\/(?:\\[\s\S]|[^/\\])*\/)?\s*/y;
 const SAFE_SED_COMMAND = /^[dDgGhHlnNpPqQxz=]$/;
 const SAFE_SUBSTITUTION_FLAGS = /^[0-9gIpM]*$/;
-const SAFE_SED_OPTION = /^(?:-[nElrsuz]|--(?:quiet|silent|line-length(?:=.*)?))$/;
-const SED_VALUE_OPTIONS = '-f --file -e --expression -l --line-length'.split(' ');
+const SAFE_SED_OPTION =
+  /^(?:-[nElrsuz]|--(?:quiet|silent|line-length(?:=.*)?))$/;
+const SED_VALUE_OPTIONS = '-f --file -e --expression -l --line-length'.split(
+  ' ',
+);
 const AWK_STATIC_WRITE =
   /^\s*(?:print|printf)\b(?!\s*\()(?:(?:"(?:\\[\s\S]|[^"\\])*")|[^">|])*>>?\s*"[^"]*"\s*$/;
 const AWK_UNKNOWN_OPERATION = /(?:system|close)\s*\(|getline\b/;
 const AWK_PRINT = /\b(?:print|printf)\b/;
 
-function scanDelimitedSection(script: string, start: number, delimiter: string): number {
+function scanDelimitedSection(
+  script: string,
+  start: number,
+  delimiter: string,
+): number {
   let escaped = false;
   for (let i = start; i < script.length; i++) {
     const char = script[i]!;
-    if (escaped) escaped = false;
-    else if (char === '\\') escaped = true;
-    else if (char === delimiter) return i + 1;
+    if (escaped) {
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === delimiter) {
+      return i + 1;
+    }
   }
   return -1;
 }
@@ -35,6 +46,7 @@ function classifySingleSedCommandSafety(script: string): SedScriptSafety {
   const compatibilityUnknown = /(?:^|[^\\])[ewr]\s/.test(script);
   const commandOffset = SED_ADDRESS.exec(script)?.[0].length ?? 0;
   if (commandOffset === script.length) return 'read-only';
+
   const command = script[commandOffset]!;
   if (command === 'w' || command === 'W')
     return script.slice(commandOffset + 1).trim() ? 'write' : 'unknown';
@@ -42,11 +54,21 @@ function classifySingleSedCommandSafety(script: string): SedScriptSafety {
 
   if (command === 's') {
     const delimiter = script[commandOffset + 1];
-    if (!delimiter || delimiter === '\\' || /\s/.test(delimiter)) return 'unknown';
-    const replacementStart = scanDelimitedSection(script, commandOffset + 2, delimiter);
+    if (!delimiter || delimiter === '\\' || /\s/.test(delimiter))
+      return 'unknown';
+    const replacementStart = scanDelimitedSection(
+      script,
+      commandOffset + 2,
+      delimiter,
+    );
     if (replacementStart < 0) return 'unknown';
-    const flagsStart = scanDelimitedSection(script, replacementStart, delimiter);
+    const flagsStart = scanDelimitedSection(
+      script,
+      replacementStart,
+      delimiter,
+    );
     if (flagsStart < 0) return 'unknown';
+
     const flags = script.slice(flagsStart).trim();
     if (/[;\n{}]/.test(flags)) return 'unknown';
     const writeFlag = flags.indexOf('w');
@@ -79,6 +101,7 @@ export function classifySedScriptSafety(script: string): SedScriptSafety {
     const commandOffset = SED_ADDRESS_AT.lastIndex;
     if (commandOffset === script.length) return result;
     const command = script[commandOffset]!;
+
     if (command === 'w' || command === 'W') {
       const writer = classifySingleSedCommandSafety(script.slice(start));
       return writer === 'write' ? 'write' : 'unknown';
@@ -89,17 +112,28 @@ export function classifySedScriptSafety(script: string): SedScriptSafety {
     let separator: number;
     if (command === 's') {
       const delimiter = script[commandOffset + 1];
-      if (!delimiter || delimiter === '\\' || /\s/.test(delimiter)) return 'unknown';
-      const replacementStart = scanDelimitedSection(script, commandOffset + 2, delimiter);
+      if (!delimiter || delimiter === '\\' || /\s/.test(delimiter))
+        return 'unknown';
+      const replacementStart = scanDelimitedSection(
+        script,
+        commandOffset + 2,
+        delimiter,
+      );
       if (replacementStart < 0) return 'unknown';
-      const flagsStart = scanDelimitedSection(script, replacementStart, delimiter);
+      const flagsStart = scanDelimitedSection(
+        script,
+        replacementStart,
+        delimiter,
+      );
       if (flagsStart < 0) return 'unknown';
       separator = nextSedSeparator(script, flagsStart);
     } else {
       separator = nextSedSeparator(script, commandOffset + 1);
     }
 
-    const current = classifySingleSedCommandSafety(script.slice(start, separator));
+    const current = classifySingleSedCommandSafety(
+      script.slice(start, separator),
+    );
     if (current === 'write') return 'write';
     if (current === 'unknown') result = 'unknown';
     if (separator === script.length) return result;
@@ -117,7 +151,8 @@ export function classifySedCommandSafety(args: string[]): SedScriptSafety {
         /^(?:--help|--version)$/i.test(arg) &&
         !SED_VALUE_OPTIONS.includes(options[index - 1]!),
     )
-  ) return 'unknown';
+  )
+    return 'unknown';
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -152,9 +187,11 @@ export function classifySedCommandSafety(args: string[]): SedScriptSafety {
       if (script.startsWith('-')) return 'unknown';
       scripts.push(script);
       scriptArguments.add(i);
-    } else if (/^--(?!line-length(?:=|$))/.test(arg)) return 'unknown';
-    else if (arg.startsWith('-') && !SAFE_SED_OPTION.test(arg)) return 'unknown';
-    else if (!arg.startsWith('-') && scripts.length === 0) {
+    } else if (/^--(?!line-length(?:=|$))/.test(arg)) {
+      return 'unknown';
+    } else if (arg.startsWith('-') && !SAFE_SED_OPTION.test(arg)) {
+      return 'unknown';
+    } else if (!arg.startsWith('-') && scripts.length === 0) {
       scripts.push(arg);
       scriptArguments.add(i);
     }
@@ -167,7 +204,9 @@ export function classifySedCommandSafety(args: string[]): SedScriptSafety {
     if (current === 'unknown') result = 'unknown';
   }
   const remainingArgs = args.filter((_, index) => !scriptArguments.has(index));
-  return /(?:^|[^\\])[ewr]\s/.test(remainingArgs.join(' ')) ? 'unknown' : result;
+  return /(?:^|[^\\])[ewr]\s/.test(remainingArgs.join(' '))
+    ? 'unknown'
+    : result;
 }
 
 function splitAwkStatements(script: string): {
@@ -186,12 +225,30 @@ function splitAwkStatements(script: string): {
 
   for (let i = 0; i < script.length; i++) {
     const char = script[i]!;
-    if (escaped) { escaped = false; continue; }
-    if ((inString || inRegex) && char === '\\') { escaped = true; continue; }
-    if (inString) { if (char === '"') inString = false; continue; }
-    if (inRegex) { if (char === '/') inRegex = false; continue; }
-    if (char === '"') { inString = true; continue; }
-    if (char === '/' && (!previousSignificant || '({[=,:;!~?&|'.includes(previousSignificant))) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if ((inString || inRegex) && char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (inString) {
+      if (char === '"') inString = false;
+      continue;
+    }
+    if (inRegex) {
+      if (char === '/') inRegex = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (
+      char === '/' &&
+      (!previousSignificant || '({[=,:;!~?&|'.includes(previousSignificant))
+    ) {
       inRegex = true;
       continue;
     }
@@ -219,18 +276,27 @@ function splitAwkStatements(script: string): {
 }
 
 export function classifyAwkScriptSafety(script: string): AwkScriptSafety {
-  const { statements, ambiguousSlash, unsupportedAt } = splitAwkStatements(script);
-  if (!ambiguousSlash && statements.some((statement) => AWK_STATIC_WRITE.test(statement)))
+  const { statements, ambiguousSlash, unsupportedAt } =
+    splitAwkStatements(script);
+  if (
+    !ambiguousSlash &&
+    statements.some((statement) => AWK_STATIC_WRITE.test(statement))
+  )
     return 'write';
   if (unsupportedAt || AWK_UNKNOWN_OPERATION.test(script)) return 'unknown';
-  return AWK_PRINT.test(script) && /[>|]/.test(script) ? 'unknown' : 'read-only';
+  return AWK_PRINT.test(script) && /[>|]/.test(script)
+    ? 'unknown'
+    : 'read-only';
 }
 
 export function classifyAwkCommandSafety(args: string[]): AwkScriptSafety {
   let programIndex = -1;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === '--') { programIndex = i + 1; break; }
+    if (arg === '--') {
+      programIndex = i + 1;
+      break;
+    }
     if (arg === '-F' || arg === '-v') {
       if (!args[++i]) return 'unknown';
       continue;
@@ -245,7 +311,9 @@ export function classifyAwkCommandSafety(args: string[]): AwkScriptSafety {
   if (program === undefined) return 'unknown';
   const result = classifyAwkScriptSafety(program);
   if (result !== 'read-only') return result;
-  return classifyAwkScriptSafety(args.join(' ')) === 'read-only' ? 'read-only' : 'unknown';
+  return classifyAwkScriptSafety(args.join(' ')) === 'read-only'
+    ? 'read-only'
+    : 'unknown';
 }
 
 export function hasShellBraceExpansion(text: string): boolean {
@@ -267,9 +335,10 @@ export function hasShellBraceExpansion(text: string): boolean {
 }
 
 export function hasShellPatternExpansion(text: string): boolean {
-  // Unquoted backslash escapes are resolved by the shell after tree-sitter has
-  // produced raw token text. Treat them conservatively so escaped Git helper
-  // options cannot evade the AST's exact option matchers. `%G` is likewise a
-  // Git pretty-format signature trigger regardless of the following letter.
-  return /[[*?]/.test(text) || /\\./.test(text) || /%G/.test(text) || hasShellBraceExpansion(text);
+  return (
+    /[[*?]/.test(text) ||
+    /\\./.test(text) ||
+    /%G/.test(text) ||
+    hasShellBraceExpansion(text)
+  );
 }
