@@ -2032,6 +2032,17 @@ function mergePersistedArtifactPanelTabs(
   return [...merged, ...byId.values()];
 }
 
+function findReviewChangesByToolCallIds(
+  changesByTurn: ReadonlyMap<string, readonly TurnOutputFileChange[]>,
+  toolCallIds: readonly string[] | undefined,
+): readonly TurnOutputFileChange[] | undefined {
+  if (!toolCallIds?.length) return undefined;
+  const ids = new Set(toolCallIds);
+  return [...changesByTurn.values()].find((changes) =>
+    changes.some((change) => ids.has(change.toolCallId)),
+  );
+}
+
 function readStoredArtifactPanelStates(
   key: string,
 ): Record<string, ArtifactPanelPersistedState> {
@@ -2620,7 +2631,15 @@ export function mergeAgentTrace(
 ): EnvironmentAgentTask[] {
   if (!trace) return [...liveAgents];
   const liveById = new Map(liveAgents.map((task) => [task.id, task]));
+  const liveByToolUseId = new Map(
+    liveAgents.flatMap((task) =>
+      task.toolUseId ? [[task.toolUseId, task] as const] : [],
+    ),
+  );
   const tracedIds = new Set(trace.nodes.map((node) => node.agentId));
+  const tracedToolUseIds = new Set(
+    trace.nodes.flatMap((node) => (node.toolUseId ? [node.toolUseId] : [])),
+  );
   const traced = [...trace.nodes]
     .sort(
       (left, right) =>
@@ -2628,7 +2647,9 @@ export function mergeAgentTrace(
         left.agentId.localeCompare(right.agentId),
     )
     .map((node): EnvironmentAgentTask => {
-      const live = liveById.get(node.agentId);
+      const live =
+        liveById.get(node.agentId) ??
+        (node.toolUseId ? liveByToolUseId.get(node.toolUseId) : undefined);
       const {
         parentAgentId: _liveParentAgentId,
         depth: _liveDepth,
@@ -2668,7 +2689,11 @@ export function mergeAgentTrace(
     });
   return reorderChildrenUnderParents([
     ...traced,
-    ...liveAgents.filter((task) => !tracedIds.has(task.id)),
+    ...liveAgents.filter(
+      (task) =>
+        !tracedIds.has(task.id) &&
+        (!task.toolUseId || !tracedToolUseIds.has(task.toolUseId)),
+    ),
   ]);
 }
 
@@ -4199,6 +4224,16 @@ export function App({
   // transcript moves (a sent message is the only way the store gains
   // attachments) — throttled so streaming appends do not hammer the route.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
+  const sessionAttachmentsRequestEligibleRef = useRef(false);
+  sessionAttachmentsRequestEligibleRef.current =
+    environmentPanelReachable &&
+    environmentPanelItems.includes('attachments') &&
+    environmentPanelOpen &&
+    connection.status === 'connected' &&
+    Boolean(connection.sessionId && logicalSessionKey) &&
+    connection.capabilities?.features.includes(
+      SESSION_ATTACHMENT_LIST_FEATURE,
+    ) === true;
   useEffect(() => {
     const attachmentsSectionEnabled =
       environmentPanelReachable &&
@@ -4253,7 +4288,10 @@ export function App({
       const listing = sessionActions.listAttachments();
       void listing
         .then((attachments) => {
-          if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
+          if (
+            sessionAttachmentsOwner.isCurrent() &&
+            sessionAttachmentsRequestEligibleRef.current
+          ) {
             attachmentRetryCountRef.current.delete(logicalSessionKey);
             setBoundedMapEntry(
               sessionAttachmentsBySessionRef.current,
@@ -5360,12 +5398,11 @@ export function App({
               ),
               tab.workspaceCwd ?? '',
             );
-            const matchedChanges = [...changesByTurn.values()]
-              .flat()
-              .filter((change) => reviewToolCallIds.has(change.toolCallId));
             const changes =
-              changesByTurn.get(tab.sourceTurnId ?? '') ??
-              (matchedChanges.length > 0 ? matchedChanges : undefined);
+              findReviewChangesByToolCallIds(
+                changesByTurn,
+                tab.sourceToolCallIds,
+              ) ?? changesByTurn.get(tab.sourceTurnId ?? '');
             if (changes) {
               restored = {
                 id: tab.id,
@@ -5429,7 +5466,9 @@ export function App({
           );
         }
         setArtifactPanelTabs((tabs) =>
-          tabs.map((item) => (item.id === tab.id ? restored : item)),
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === 'pending' ? restored : item,
+          ),
         );
       } catch (error) {
         if (!owner.isCurrent()) return;
@@ -5479,6 +5518,7 @@ export function App({
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
     const nextSessionId = logicalSessionKey;
+    setArtifactPanelRestoring(false);
     if (
       previousSessionId &&
       previousSessionId !== nextSessionId &&
@@ -5574,6 +5614,17 @@ export function App({
       return;
     }
     if (artifactsLoading) {
+      if (artifactPanelRestoredSessionKeyRef.current === nextSessionId) {
+        const currentState = artifactPanelSessionStateRef.current;
+        if (currentState) {
+          artifactPanelStateBySessionRef.current.delete(nextSessionId);
+          artifactPanelStateBySessionRef.current.set(
+            nextSessionId,
+            currentState,
+          );
+        }
+      }
+      artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
         artifactPanelStateBySessionRef.current.get(nextSessionId) ??
         artifactPanelPersistedStatesRef.current[nextSessionId];
@@ -5586,15 +5637,14 @@ export function App({
       return;
     }
 
-    const savedState =
-      artifactPanelStateBySessionRef.current.get(nextSessionId);
-    const savedRuntimeTabs =
+    let savedState = artifactPanelStateBySessionRef.current.get(nextSessionId);
+    let savedRuntimeTabs =
       savedState?.tabs.filter(
         (tab) =>
-          savedState.pendingRestore ||
+          savedState?.pendingRestore ||
           (tab.kind === 'side_task' && !tab.sessionId),
       ) ?? [];
-    const persisted =
+    let persisted =
       artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
     if (!persisted && savedRuntimeTabs.length === 0) {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
@@ -5646,6 +5696,16 @@ export function App({
       const taskSnapshot = needsTasks
         ? await sessionActions.getTasks({ silent: true }).catch(() => null)
         : undefined;
+      if (cancelled) return;
+      savedState = artifactPanelStateBySessionRef.current.get(nextSessionId);
+      savedRuntimeTabs =
+        savedState?.tabs.filter(
+          (tab) =>
+            savedState?.pendingRestore ||
+            (tab.kind === 'side_task' && !tab.sessionId),
+        ) ?? [];
+      persisted =
+        artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
       const restoreInputs = artifactPanelRestoreInputsRef.current;
       const restoredTabs = (
         await Promise.all(
@@ -5664,9 +5724,14 @@ export function App({
                       sourceSessionId: tab.sourceSessionId,
                     };
                   }
-                  const changes = tab.sourceTurnId
-                    ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
-                    : restoreInputs.latestReviewChanges;
+                  const changes =
+                    findReviewChangesByToolCallIds(
+                      restoreInputs.fileChangesByTurn,
+                      tab.sourceToolCallIds,
+                    ) ??
+                    (tab.sourceTurnId
+                      ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
+                      : restoreInputs.latestReviewChanges);
                   const sourceSessionId =
                     tab.sourceSessionId ?? connection.sessionId;
                   return changes
@@ -6557,7 +6622,11 @@ export function App({
           });
         }
         consecutiveFailures = 0;
-        if (agents.some((task) => task.status === 'running')) {
+        if (
+          agents.some(
+            (task) => task.status === 'running' || task.status === 'paused',
+          )
+        ) {
           timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
         }
       } catch (error) {

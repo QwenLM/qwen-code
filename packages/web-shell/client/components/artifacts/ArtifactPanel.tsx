@@ -747,7 +747,7 @@ export function ArtifactPanel({
             )}
           </button>
         )}
-        {restoring ? (
+        {restoring && !activeTab ? (
           <div
             className="flex flex-col gap-4 p-5"
             data-testid="right-panel-loading-skeleton"
@@ -963,7 +963,9 @@ export function ArtifactPanel({
             }}
           />
         ) : activeTab.kind === 'file' ? (
-          activeTab.attachmentId && !activeTab.previewData ? (
+          activeTab.attachmentId &&
+          !activeTab.previewData &&
+          activeTab.previewContent === undefined ? (
             <div
               className={styles.empty}
               role={activeTab.loadError ? 'alert' : 'status'}

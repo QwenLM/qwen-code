@@ -390,10 +390,17 @@ export function normalizeResumedAgentDepth(
  * Best-effort — a failed sidecar write must not break the agent launch path.
  */
 export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
+  const tempPath = `${metaPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(metaPath), { recursive: true });
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.writeFileSync(tempPath, JSON.stringify(meta, null, 2), 'utf8');
+    fs.renameSync(tempPath, metaPath);
   } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup after the write failed.
+    }
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
     return;
   }

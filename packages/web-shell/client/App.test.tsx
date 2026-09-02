@@ -2700,6 +2700,41 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps polling while a persisted subagent is paused', async () => {
+    mockConnection.capabilities.features = ['session_agents'];
+    vi.useFakeTimers();
+    mockWorkspace.client.sessionAgents.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          label: 'Paused agent',
+          description: 'Waiting to resume',
+          status: 'paused',
+          startTime: 1_000,
+          runtimeMs: 500,
+          isBackgrounded: true,
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(mockWorkspace.client.sessionAgents).toHaveBeenCalledTimes(2);
+  });
+
   it('backs off repeated subagent refresh failures without repeated warnings', async () => {
     mockConnection.capabilities.features = ['session_agents'];
     vi.useFakeTimers();
@@ -7723,6 +7758,54 @@ describe('environment agent tasks', () => {
         label: 'Live child',
         status: 'running',
         runtimeMs: 500,
+      },
+    ]);
+  });
+
+  it('matches live trace fields by tool call id', () => {
+    expect(
+      mergeAgentTrace(
+        [
+          {
+            kind: 'agent',
+            id: 'call-1',
+            toolUseId: 'call-1',
+            label: 'Live agent',
+            description: 'Live task',
+            status: 'running',
+            startTime: 1_000,
+            runtimeMs: 500,
+            isBackgrounded: false,
+          },
+        ],
+        {
+          v: 1,
+          sessionId: 'session-1',
+          rootAgentIds: ['agent-1'],
+          warnings: [],
+          nodes: [
+            {
+              agentId: 'agent-1',
+              agentType: 'reviewer',
+              description: 'Stored task',
+              parentSessionId: 'session-1',
+              parentAgentId: null,
+              rootAgentId: 'agent-1',
+              toolUseId: 'call-1',
+              status: 'running',
+              createdAt: '1970-01-01T00:00:01.000Z',
+              lineageState: 'complete',
+            },
+          ],
+        },
+        2_000,
+      ),
+    ).toMatchObject([
+      {
+        id: 'agent-1',
+        label: 'Live agent',
+        status: 'running',
+        isBackgrounded: false,
       },
     ]);
   });

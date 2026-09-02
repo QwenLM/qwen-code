@@ -7831,7 +7831,11 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionAgentsStatus> {
     const session = this.sessionOrThrow(sessionId);
-    return await buildSessionAgentsStatus(sessionId, session.getConfig());
+    const status = await buildSessionAgentsStatus(
+      session.getConfig().getSessionId(),
+      session.getConfig(),
+    );
+    return { ...status, sessionId };
   }
 
   private async buildSessionAgentTrace(
@@ -7839,9 +7843,10 @@ class QwenAgent implements Agent {
     rootAgentId?: string,
   ): Promise<ServeSessionAgentTrace> {
     const session = this.sessionOrThrow(sessionId);
+    const persistedSessionId = session.getConfig().getSessionId();
     const trace = await readAgentTrace(
       session.getConfig().storage.getProjectDir(),
-      sessionId,
+      persistedSessionId,
       rootAgentId,
     );
     return { v: STATUS_SCHEMA_VERSION, sessionId, ...trace };

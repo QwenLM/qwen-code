@@ -4574,19 +4574,6 @@ export function registerSessionRoutes(
               }
             };
             const activePromptBeforeRead = hasActivePrompt();
-            if (direction === 'backward') {
-              try {
-                await runtime.bridge.flushSessionTranscript?.(sessionId);
-              } catch (error) {
-                if (!(error instanceof SessionNotFoundError)) {
-                  daemonLog?.warn('session transcript flush failed', {
-                    sessionId,
-                    error:
-                      error instanceof Error ? error.message : String(error),
-                  });
-                }
-              }
-            }
             let page;
             try {
               page = await reader.readPage(sessionId, {
