@@ -5806,7 +5806,17 @@ export class Config {
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
+    // The pr-bound callback is registered once at session init; relocation
+    // resets the service, so carry it onto the replacement instance — a
+    // later `gh pr create` in this session must still reach the bridge.
+    const sessionPrBoundCallback =
+      this.sessionService?.getSessionPrBoundCallback();
     this.sessionService = undefined;
+    if (sessionPrBoundCallback) {
+      this.getSessionService().setSessionPrBoundCallback(
+        sessionPrBoundCallback,
+      );
+    }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 

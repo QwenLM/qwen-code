@@ -2451,7 +2451,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -5932,9 +5932,15 @@ export function registerSessionRoutes(
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
+                { ...pr, source: 'create' },
               )
             ).map(toSessionPrInfo);
+            // Reconcile the live entry to the authoritative persisted
+            // list: the bridge merge capped positionally while the
+            // sidecar caps by provenance authority — past the cap the
+            // two stores evict different entries, and every later event
+            // or rename response would serve the diverged list.
+            runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6095,10 +6101,13 @@ export function registerSessionRoutes(
                       sessionId,
                       'active',
                     ),
-                    pr,
+                    { ...pr, source: 'create' },
                   )
                 ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
+                // Reconcile the live entry to the authoritative persisted
+                // list (see the primary metadata route).
+                runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
@@ -6120,7 +6129,7 @@ export function registerSessionRoutes(
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
+                  { ...pr, source: 'create' },
                 );
                 assertRuntimeGenerationOpen?.();
                 effective.prs = persisted.map(toSessionPrInfo);
