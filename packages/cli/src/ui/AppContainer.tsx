@@ -2595,7 +2595,11 @@ export const AppContainer = (props: AppContainerProps) => {
         {
           type: MessageType.INFO,
           text:
-            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `Held a message from ${
+              newest.selfSent
+                ? 'a process this session started'
+                : 'another session'
+            } (${describeHoldCause(newest.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),
