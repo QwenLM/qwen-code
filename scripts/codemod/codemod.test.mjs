@@ -4,20 +4,27 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { format } from 'prettier';
 import { transformSource } from './ink-to-opentui.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const codemod = join(here, 'ink-to-opentui.mjs');
 const before = readFileSync(join(here, 'fixtures', 'before.tsx'), 'utf8');
 const after = readFileSync(join(here, 'fixtures', 'after.tsx'), 'utf8');
+const config = JSON.parse(
+  readFileSync(join(here, '..', '..', '.prettierrc.json'), 'utf8'),
+);
+// The fixture is the codemod output plus prettier formatting, so compare after
+// normalizing both sides (prettier 3's format() is async-only).
+const normalize = (src) => format(src, { ...config, parser: 'typescript' });
 
 let failures = 0;
 let count = 0;
 
-function test(name, fn) {
+async function test(name, fn) {
   count++;
   try {
-    fn();
+    await fn();
     console.log(`ok ${count} - ${name}`);
   } catch (err) {
     failures++;
@@ -30,20 +37,20 @@ function runCli(args) {
   return spawnSync(process.execPath, [codemod, ...args], { encoding: 'utf8' });
 }
 
-test('fixture: transform matches after.tsx', () => {
+await test('fixture: transform matches after.tsx', async () => {
   const res = transformSource(before);
   assert.equal(res.changed, true);
-  assert.equal(res.output, after);
+  assert.equal(await normalize(res.output), await normalize(after));
   assert.equal(res.notes.length, 0);
 });
 
-test('fixture: idempotent on after.tsx', () => {
+await test('fixture: idempotent on after.tsx', () => {
   const res = transformSource(after);
   assert.equal(res.changed, false);
   assert.equal(res.output, after);
 });
 
-test('fixture: stats count renamed elements and collected props', () => {
+await test('fixture: stats count renamed elements and collected props', () => {
   const res = transformSource(before);
   assert.equal(res.stats.box, 5);
   assert.equal(res.stats.text, 3);
@@ -56,7 +63,7 @@ mkdirSync(tmpDir, { recursive: true });
 const tmpFile = join(tmpDir, 'sample.tsx');
 
 try {
-  test('cli: default is dry-run and writes nothing', () => {
+  await test('cli: default is dry-run and writes nothing', () => {
     writeFileSync(tmpFile, before);
     const r = runCli([tmpFile]);
     assert.equal(r.status, 0, r.stderr);
@@ -65,23 +72,26 @@ try {
     assert.equal(readFileSync(tmpFile, 'utf8'), before);
   });
 
-  test('cli: --dry-run writes nothing', () => {
+  await test('cli: --dry-run writes nothing', () => {
     writeFileSync(tmpFile, before);
     const r = runCli(['--dry-run', tmpFile]);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(readFileSync(tmpFile, 'utf8'), before);
   });
 
-  test('cli: --apply rewrites to fixture after.tsx', () => {
+  await test('cli: --apply rewrites to fixture after.tsx', async () => {
     writeFileSync(tmpFile, before);
     const r = runCli(['--apply', tmpFile]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /\[apply\]/);
     assert.match(r.stdout, /written/);
-    assert.equal(readFileSync(tmpFile, 'utf8'), after);
+    assert.equal(
+      await normalize(readFileSync(tmpFile, 'utf8')),
+      await normalize(after),
+    );
   });
 
-  test('cli: directory input is scanned', () => {
+  await test('cli: directory input is scanned', () => {
     writeFileSync(tmpFile, before);
     const r = runCli(['--dry-run', tmpDir]);
     assert.equal(r.status, 0, r.stderr);
@@ -92,14 +102,14 @@ try {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
-test('manual: spread attribute keeps props, still renames', () => {
+await test('manual: spread attribute keeps props, still renames', () => {
   const src = 'const x = <Box {...rest} padding={1}>hi</Box>;';
   const res = transformSource(src);
   assert.equal(res.output, 'const x = <box {...rest} padding={1}>hi</box>;');
   assert.ok(res.notes.some((nt) => /spread/.test(nt.msg)));
 });
 
-test('manual: malformed attribute leaves file unchanged', () => {
+await test('manual: malformed attribute leaves file unchanged', () => {
   const src = 'const x = <Box padding=1>bad</Box>;';
   const res = transformSource(src);
   assert.equal(res.output, src);
@@ -107,7 +117,7 @@ test('manual: malformed attribute leaves file unchanged', () => {
   assert.equal(res.notes.length, 1);
 });
 
-test('manual: existing style with spread renames only', () => {
+await test('manual: existing style with spread renames only', () => {
   const src = 'const x = <Box style={{ ...base }} padding={1}>hi</Box>;';
   const res = transformSource(src);
   assert.equal(
@@ -119,7 +129,7 @@ test('manual: existing style with spread renames only', () => {
   );
 });
 
-test('manual: conflicting key in existing style object', () => {
+await test('manual: conflicting key in existing style object', () => {
   const src = 'const x = <Box style={{ padding: 4 }} padding={1}>x</Box>;';
   const res = transformSource(src);
   assert.equal(
@@ -129,7 +139,7 @@ test('manual: conflicting key in existing style object', () => {
   assert.ok(res.notes.some((nt) => /already present/.test(nt.msg)));
 });
 
-test('manual: non-object style expression is not merged', () => {
+await test('manual: non-object style expression is not merged', () => {
   const src = 'const x = <Box style={baseStyle} padding={1}>x</Box>;';
   const res = transformSource(src);
   assert.equal(
@@ -139,14 +149,14 @@ test('manual: non-object style expression is not merged', () => {
   assert.ok(res.notes.length >= 1);
 });
 
-test('manual: mismatched closing tag leaves file unchanged', () => {
+await test('manual: mismatched closing tag leaves file unchanged', () => {
   const src = 'const x = <Box>a</Text>;';
   const res = transformSource(src);
   assert.equal(res.output, src);
   assert.ok(res.notes.length >= 1);
 });
 
-test('ignore: generics, foreign tags and strings untouched', () => {
+await test('ignore: generics, foreign tags and strings untouched', () => {
   const src = [
     'const r = useRef<Box>(null);',
     'const v = <div className="a"><span>hi</span></div>;',
@@ -158,7 +168,7 @@ test('ignore: generics, foreign tags and strings untouched', () => {
   assert.equal(res.output, src);
 });
 
-test('regex mask: closing-tag slash is not a regex start', () => {
+await test('regex mask: closing-tag slash is not a regex start', () => {
   const src =
     'const a = <Box>x</Box>; const b = <Text>y</Text>; const half = n / 2;';
   const res = transformSource(src);
@@ -170,14 +180,14 @@ test('regex mask: closing-tag slash is not a regex start', () => {
   assert.equal(res.notes.length, 0);
 });
 
-test('manual: string style value with backslash is not copied verbatim', () => {
+await test('manual: string style value with backslash is not copied verbatim', () => {
   const src = 'const x = <Box margin="a\\b" padding={1}>x</Box>';
   const res = transformSource(src);
   assert.equal(res.output, 'const x = <box margin="a\\b" padding={1}>x</box>');
   assert.ok(res.notes.some((nt) => /escape\/entity semantics/.test(nt.msg)));
 });
 
-test('manual: string style value with HTML entity is not copied verbatim', () => {
+await test('manual: string style value with HTML entity is not copied verbatim', () => {
   const src = 'const x = <Box margin="1&nbsp;2">x</Box>';
   const res = transformSource(src);
   assert.equal(res.output, 'const x = <box margin="1&nbsp;2">x</box>');
