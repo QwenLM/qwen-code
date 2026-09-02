@@ -391,10 +391,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
         // ink parity (use-llm-stream processQuery): `@path` mentions expand
         // into file content for the model, while the raw composer text rides
-        // along as UserPromptSubmit provenance (`submitted_prompt`).
+        // along as UserPromptSubmit provenance (`submitted_prompt`). Skipped
+        // mid-turn because a submission that arrives during a turn becomes
+        // steering, which carries text only — the expansion would be read and
+        // then dropped.
         const query = text.trim();
         let content: PartListUnion = query;
-        if (isAtCommand(query)) {
+        if (!streaming && isAtCommand(query)) {
           const atResult = await handleAtCommand({
             query,
             config,
@@ -405,6 +408,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             signal: new AbortController().signal,
           });
           if (!atResult.shouldProceed || atResult.processedQuery === null) {
+            // The one decline path is a failed file read, which reports why on
+            // the tool display it appends last.
+            const failure = atResult.toolDisplays?.at(-1)?.resultDisplay;
+            if (typeof failure === 'string') notify(failure);
             return;
           }
           content = atResult.processedQuery;
