@@ -487,3 +487,20 @@ describe('/peers', () => {
     expect((await run(fake, 'accept bbbbbb')).content).toContain('Released');
   });
 });
+
+describe("formatHeldList for the session's own process", () => {
+  it('names an address-less self-sent entry as the own process', () => {
+    // A hook injecting into its own session rarely listens for a reply, so
+    // it has no `from`; the listing should not call it an unknown session.
+    const entry = held({
+      msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+      content: 'build finished',
+      cause: 'explicit-setting',
+    });
+    const frame = { ...entry.frame };
+    delete frame.from;
+    const out = formatHeldList([{ ...entry, frame, selfSent: true }]);
+    expect(out).toContain('own process');
+    expect(out).not.toContain('unknown session');
+  });
+});

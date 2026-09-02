@@ -66,6 +66,8 @@ const isWindows = process.platform === 'win32';
  * observable yet — can authenticate to the inbox under test.
  */
 const TEST_TOKEN = 'test-inbox-token';
+/** The token children get; see `childToken` on PeerMessagingOptions. */
+const TEST_CHILD_TOKEN = 'test-child-token';
 
 function send(
   socketPath: string,
@@ -135,6 +137,7 @@ async function start(
     getPolicySetting: () => undefined,
     updateSessionRegistryIpcPath: async () => {},
     ipcToken: TEST_TOKEN,
+    childToken: TEST_CHILD_TOKEN,
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -1090,13 +1093,15 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
         published.push([ipcPath, ipcToken]);
       },
       ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
 
     expect(published).toEqual([[started.socketPath, TEST_TOKEN]]);
     expect(process.env[MESSAGING_SOCKET_ENV]).toBe(started.socketPath);
-    expect(process.env[MESSAGING_TOKEN_ENV]).toBe(TEST_TOKEN);
+    // Children are handed the child token, never the published one.
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBe(TEST_CHILD_TOKEN);
 
     await started.close();
     messaging = null;
@@ -1222,7 +1227,10 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
 
     const token = published[0][1];
     expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(process.env[MESSAGING_TOKEN_ENV]).toBe(token);
+    const childToken = process.env[MESSAGING_TOKEN_ENV];
+    expect(childToken).toMatch(/^[0-9a-f]{64}$/);
+    // Two independent draws: a child must not be able to pass as a peer.
+    expect(childToken).not.toBe(token);
 
     // And it is the token the inbox actually requires.
     await sendPeerFrame(
@@ -1231,5 +1239,75 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
       { authToken: token },
     );
     await settle();
+  });
+
+  it("delivers a child-token message the parity rule would hold, as the session's own", async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
+    await send(m.socketPath!, buildUserFrame({ content: 'build finished' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    expect(m.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain(
+      '<cross_session_message from="own process" origin="own-process">',
+    );
+    expect(submitted[0].modelText).not.toContain('another Qwen Code session');
+    expect(submitted[0].displayText).toBe(
+      'Message from a process this session started (own process): build finished',
+    );
+  });
+
+  it('holds the same frame when it arrives on the published token', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
+    await send(
+      m.socketPath!,
+      buildUserFrame({ content: 'build finished', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(1);
+    expect(m.getHeld()[0].selfSent).toBeUndefined();
+  });
+
+  it('parks a child-token message under an explicit hold', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'hold',
+    });
+    await send(m.socketPath!, buildUserFrame({ content: 'build finished' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ selfSent: true }]);
+    // Released as itself: the envelope still says whose process it was.
+    expect(m.decide(m.getHeld()[0].frame.msgId, 'approve')).toBe('done');
+    expect(submitted[0].modelText).toContain('origin="own-process"');
+  });
+
+  it("keeps a child-token message's origin across the pre-submit buffer", async () => {
+    // start() wires the submit function at once; here it is withheld so
+    // the message waits in the buffer, and the origin must survive the wait.
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    await send(started.socketPath!, buildUserFrame({ content: 'early' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain('origin="own-process"');
   });
 });
