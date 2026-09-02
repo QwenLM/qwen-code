@@ -273,6 +273,19 @@ describe('formatHeldList', () => {
     const out = formatHeldList([held({ msgId: 'task\u0007' })]);
     expect(out).not.toContain('\u0007');
   });
+
+  it('keeps a peer-supplied own-process label distinct from a real one', () => {
+    const peer = held({
+      msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+      fromName: 'own process',
+    });
+    const peerOut = formatHeldList([peer]);
+    const selfOut = formatHeldList([{ ...peer, selfSent: true }]);
+
+    expect(peerOut).toContain('[peer] own process');
+    expect(selfOut).toContain('[own process] own process');
+    expect(peerOut).not.toBe(selfOut);
+  });
 });
 
 describe('/peers', () => {
@@ -485,5 +498,22 @@ describe('/peers', () => {
     await run(fake, '');
     expect((await run(fake, 'accept aaaaaa')).content).toContain('Released');
     expect((await run(fake, 'accept bbbbbb')).content).toContain('Released');
+  });
+});
+
+describe("formatHeldList for the session's own process", () => {
+  it('names an address-less self-sent entry as the own process', () => {
+    // A hook injecting into its own session rarely listens for a reply, so
+    // it has no `from`; the listing should not call it an unknown session.
+    const entry = held({
+      msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+      content: 'build finished',
+      cause: 'explicit-setting',
+    });
+    const frame = { ...entry.frame };
+    delete frame.from;
+    const out = formatHeldList([{ ...entry, frame, selfSent: true }]);
+    expect(out).toContain('[own process] this session');
+    expect(out).not.toContain('unknown session');
   });
 });
