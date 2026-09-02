@@ -737,6 +737,7 @@ describe('Storage – runtime base dir async context isolation', () => {
 describe('Storage – cleanOrphanProjectDirs', () => {
   let baseDir: string;
   let projectsDir: string;
+  let tmpdirSpy: ReturnType<typeof vi.spyOn>;
 
   const STALE_AGE_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -780,6 +781,13 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   beforeEach(() => {
     delete process.env['QWEN_RUNTIME_DIR'];
+    tmpdirSpy = vi
+      .spyOn(os, 'tmpdir')
+      .mockReturnValue(
+        process.platform === 'win32'
+          ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'Temp')
+          : '/tmp',
+      );
     mockRealpathSync.mockImplementation((p: unknown) =>
       actualFs.realpathSync(String(p)),
     );
@@ -802,6 +810,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   afterEach(() => {
+    tmpdirSpy.mockRestore();
     Storage.setRuntimeBaseDir(null);
     if (originalRuntimeEnv !== undefined) {
       process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
