@@ -409,10 +409,7 @@ describe('AgentQueueFlusher FAILED delivery gate (#10315 review)', () => {
     } as unknown as AgentInteractive;
   }
 
-  function renderQueuedFailedAgent(
-    agent: AgentInteractive,
-    source?: 'arena' | 'team',
-  ) {
+  function renderQueuedFailedAgent() {
     const config = makeConfig();
     const probeActions: {
       registerAgent?: (
@@ -421,7 +418,6 @@ describe('AgentQueueFlusher FAILED delivery gate (#10315 review)', () => {
         modelId: string,
         color: string,
         modelName?: string,
-        src?: 'arena' | 'team',
       ) => void;
       setAgentMessageQueue?: (agentId: string, queue: string[]) => void;
     } = {};
@@ -440,23 +436,15 @@ describe('AgentQueueFlusher FAILED delivery gate (#10315 review)', () => {
         <Probe />
       </AgentViewProvider>,
     );
-    return { app, probeActions, source };
+    return { app, probeActions };
   }
 
   const seedAndQueue = async (
     probeActions: ReturnType<typeof renderQueuedFailedAgent>['probeActions'],
     agent: AgentInteractive,
-    source?: 'arena' | 'team',
   ) => {
     await act(async () => {
-      probeActions.registerAgent?.(
-        'agent-a',
-        agent,
-        'm',
-        'c',
-        undefined,
-        source,
-      );
+      probeActions.registerAgent?.('agent-a', agent, 'm', 'c', undefined);
     });
     await act(async () => {
       probeActions.setAgentMessageQueue?.('agent-a', ['queued follow-up']);
@@ -470,35 +458,26 @@ describe('AgentQueueFlusher FAILED delivery gate (#10315 review)', () => {
     // runOneRound early-returns on `!this.chat`, silently consuming the
     // message and settling FAILED → IDLE (erasing the failure state).
     const agent = makeFailedAgent('Failed to create chat session');
-    const { app, probeActions } = renderQueuedFailedAgent(agent);
+    const { app, probeActions } = renderQueuedFailedAgent();
     await seedAndQueue(probeActions, agent);
 
     expect(agent.enqueueMessage).not.toHaveBeenCalled();
     expect(app.lastFrame()).toContain('a:[]');
   });
 
-  it('drops the queue without delivering when a FAILED team-managed agent settles', async () => {
-    // TeamManager tears a teammate down synchronously on terminal status
-    // (TEAMMATE_EXITED, event bridge detached, per-agent state dropped —
-    // "a terminated teammate can never reach IDLE again"), so delivering
-    // would resurrect a deaf agent.
+  it('drops the queue without delivering when a FAILED agent whose round merely errored settles', async () => {
+    // Recoverable flavor (lastRoundError set, error undefined). Tempting to
+    // deliver — core's unguarded enqueueMessage does restart the run loop —
+    // but at the FAILED settle the backend's one-shot watcher already ran
+    // releaseAgentResources (monitor routing gone) and fired the exit
+    // callback, and ArenaManager discards FAILED → RUNNING, so the revived
+    // round would run outside every record (core InProcessBackend.ts /
+    // ArenaManager.ts).
     const agent = makeFailedAgent(undefined);
-    const { app, probeActions } = renderQueuedFailedAgent(agent, 'team');
-    await seedAndQueue(probeActions, agent, 'team');
-
-    expect(agent.enqueueMessage).not.toHaveBeenCalled();
-    expect(app.lastFrame()).toContain('a:[]');
-  });
-
-  it('still delivers to a FAILED arena agent whose round merely errored', async () => {
-    // Recoverable flavor: no fatal error, not team-managed — core's
-    // intentionally unguarded enqueueMessage restarts the run loop.
-    const agent = makeFailedAgent(undefined);
-    const { app, probeActions } = renderQueuedFailedAgent(agent);
+    const { app, probeActions } = renderQueuedFailedAgent();
     await seedAndQueue(probeActions, agent);
 
-    expect(agent.enqueueMessage).toHaveBeenCalledTimes(1);
-    expect(agent.enqueueMessage).toHaveBeenCalledWith('queued follow-up');
+    expect(agent.enqueueMessage).not.toHaveBeenCalled();
     expect(app.lastFrame()).toContain('a:[]');
   });
 });

@@ -14,9 +14,10 @@
  * Also covers #10148 -- delivery must not depend on the keyed composer
  * being mounted: queued follow-ups are flushed when the agent settles to
  * idle even while the user is on another teammate tab, and the queue is
- * dropped only at COMPLETED/CANCELLED (delivery is genuinely impossible
- * there; a FAILED agent still processes queued follow-ups — core's
- * enqueueMessage restarts the run loop — so those must be delivered).
+ * dropped at every terminal status (COMPLETED/CANCELLED/FAILED — a FAILED
+ * agent has already been released by the backend's one-shot terminal
+ * watcher, so delivery would revive it outside ArenaManager's records;
+ * see the gate in AgentViewContext).
  */
 
 import { render } from 'ink-testing-library';
@@ -222,13 +223,15 @@ describe('Agent View queued follow-ups (#10069, #10148)', () => {
     expect(app.lastFrame()).not.toContain('follow-up while away');
   });
 
-  // Only COMPLETED/CANCELLED are terminal for delivery: a FAILED agent's
-  // enqueueMessage restarts the run loop (core agent-interactive.ts), so
-  // its queued follow-ups must be delivered, not dropped.
+  // Every terminal status is terminal for delivery. For FAILED in
+  // particular: the backend has already released the agent's resources at
+  // the FAILED settle (core InProcessBackend.ts) and ArenaManager discards
+  // FAILED → RUNNING, so the queued follow-ups must be dropped, not
+  // delivered to a revived round nobody records.
   it.each([
     { status: AgentStatus.COMPLETED, delivered: false },
     { status: AgentStatus.CANCELLED, delivered: false },
-    { status: AgentStatus.FAILED, delivered: true },
+    { status: AgentStatus.FAILED, delivered: false },
   ])(
     'handles the queue when the agent reaches $status (#10148)',
     async ({ status, delivered }) => {

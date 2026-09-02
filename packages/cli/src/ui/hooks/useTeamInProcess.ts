@@ -111,10 +111,6 @@ export function useTeamInProcess(
               member.name,
               member.color ?? nextColor(),
               member.name,
-              // TeamManager owns this agent's lifecycle: terminal statuses
-              // (FAILED included) are torn down synchronously, so the queue
-              // flusher must not deliver to it once failed.
-              'team',
             );
             ownedAgentIds.add(member.agentId);
           }
@@ -140,7 +136,6 @@ export function useTeamInProcess(
               event.name,
               event.color ?? nextColor(),
               event.name,
-              'team',
             );
             ownedAgentIds.add(event.agentId);
             return;
