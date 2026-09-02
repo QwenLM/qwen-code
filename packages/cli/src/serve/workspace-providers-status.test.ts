@@ -316,6 +316,60 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it.each([
+    {
+      persisted: 'medium' as const,
+      thinkingMandatory: false,
+      currentValue: 'medium',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: false,
+      currentValue: 'none',
+    },
+    {
+      persisted: 'max' as const,
+      thinkingMandatory: false,
+      currentValue: 'xhigh',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: true,
+      currentValue: 'xhigh',
+    },
+  ])(
+    'projects persisted reasoning $persisted as $currentValue when mandatory=$thinkingMandatory',
+    async ({ persisted, thinkingMandatory, currentValue }) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'qwen3.8-max', reasoningEffort: persisted },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              generationConfig: { thinkingMandatory },
+            },
+          ],
+        },
+      });
+
+      const result = await provider(workspace, false);
+      const stable = result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'qwen3.8-max');
+      expect(stable?.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue,
+          }),
+        ]),
+      );
+    },
+  );
+
   it('does not project reasoning preview onto opaque route models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

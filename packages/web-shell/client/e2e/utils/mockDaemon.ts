@@ -17,6 +17,9 @@ import {
   type DaemonSessionCatalogVersion,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonRestoredStandaloneSession,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
   type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
@@ -77,11 +80,18 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  standaloneSessions: DaemonStandaloneSessionSummary[];
+  standaloneCreateError?: {
+    status: number;
+    code: string;
+    message: string;
+  };
   sessionGroups: DaemonSessionGroup[];
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
   contextDelayMs?: number;
+  providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -408,6 +418,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
       generation: 'web-shell-e2e',
@@ -416,6 +428,7 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -702,6 +715,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/open\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -713,6 +727,8 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
@@ -727,6 +743,10 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    path === '/standalone/sessions' ||
+    /^\/standalone\/sessions\/[^/]+(?:\/(?:load|resume|repair-directory|metadata|export))?\/?$/.test(
+      path,
+    ) ||
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
@@ -791,6 +811,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -810,6 +833,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
   ) {
     return true;
   }
@@ -881,6 +911,38 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
+  if (
+    path === '/standalone/sessions' &&
+    (method === 'GET' || method === 'POST')
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/standalone\/sessions\/[^/]+(?:\/export)?\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'POST' &&
+    /^\/standalone\/sessions\/[^/]+\/(load|resume|repair-directory)\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'PATCH' &&
+    /^\/standalone\/sessions\/[^/]+\/metadata\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/goals') return true;
   if (
     (method === 'GET' || method === 'POST') &&
@@ -950,7 +1012,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && path === '/workspace/skills') {
@@ -1076,7 +1144,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
@@ -1128,6 +1202,17 @@ async function handleDaemonRoute(
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
         })),
     });
+    return;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
+  ) {
+    // Content search scans transcript bodies server-side; scenarios don't
+    // model those, so answer with no hits and let the client fall back to
+    // its local title/id/git filter.
+    await json(route, { results: [] });
     return;
   }
   if (
@@ -1331,6 +1416,10 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    await json(route, { kind: 'workspace-local-open', opened: true });
+    return;
+  }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
     await json(
       route,
@@ -1515,6 +1604,162 @@ async function handleDaemonRoute(
         'feat(web-shell): add git branch picker and commit dialog\n\n## What this PR does\nAdds branch picker, commit dialog, and create PR flow to the web shell.\n\n## Why it is needed\nCompletes the git workflow in the browser.',
     });
     return;
+  }
+  if (path === '/standalone/sessions') {
+    if (method === 'GET') {
+      const archiveState = searchParams.get('archiveState') ?? 'active';
+      await json(route, {
+        sessions: scenario.standaloneSessions.filter((session) =>
+          archiveState === 'archived'
+            ? session.isArchived === true
+            : session.isArchived !== true,
+        ),
+      });
+      return;
+    }
+    if (scenario.standaloneCreateError) {
+      await json(
+        route,
+        {
+          code: scenario.standaloneCreateError.code,
+          message: scenario.standaloneCreateError.message,
+        },
+        scenario.standaloneCreateError.status,
+      );
+      return;
+    }
+    const sessionId = readStringField(body, 'sessionId');
+    if (!sessionId) {
+      await badRequest(route, 'Standalone sessionId is required.');
+      return;
+    }
+    let summary = scenario.standaloneSessions.find(
+      (session) => session.sessionId === sessionId,
+    );
+    if (!summary) {
+      summary = standaloneSummary(scenario, sessionId);
+      scenario.standaloneSessions.unshift(summary);
+    }
+    await json(route, standaloneSessionEnvelope(scenario, summary, false), 201);
+    return;
+  }
+
+  const standaloneBatchMatch = path.match(
+    /^\/standalone\/sessions\/(archive|unarchive|delete)\/?$/,
+  );
+  if (method === 'POST' && standaloneBatchMatch) {
+    const action = standaloneBatchMatch[1];
+    const sessionIds = readStringArrayField(body, 'sessionIds');
+    const found = sessionIds.filter((sessionId) =>
+      scenario.standaloneSessions.some(
+        (session) => session.sessionId === sessionId,
+      ),
+    );
+    const notFound = sessionIds.filter(
+      (sessionId) => !found.includes(sessionId),
+    );
+    if (action === 'delete') {
+      scenario.standaloneSessions = scenario.standaloneSessions.filter(
+        (session) => !found.includes(session.sessionId),
+      );
+      await json(route, {
+        removed: found,
+        notFound,
+        errors: [],
+        fileCleanupPending: [],
+      });
+      return;
+    }
+    const targetArchived = action === 'archive';
+    const changed: string[] = [];
+    const unchanged: string[] = [];
+    scenario.standaloneSessions = scenario.standaloneSessions.map((session) => {
+      if (!found.includes(session.sessionId)) return session;
+      if (Boolean(session.isArchived) === targetArchived) {
+        unchanged.push(session.sessionId);
+        return session;
+      }
+      changed.push(session.sessionId);
+      return { ...session, isArchived: targetArchived, updatedAt: now };
+    });
+    await json(
+      route,
+      action === 'archive'
+        ? {
+            archived: changed,
+            alreadyArchived: unchanged,
+            notFound,
+            errors: [],
+          }
+        : {
+            unarchived: changed,
+            alreadyActive: unchanged,
+            notFound,
+            errors: [],
+          },
+    );
+    return;
+  }
+
+  const standaloneMatch = path.match(
+    /^\/standalone\/sessions\/([^/]+)(?:\/(load|resume|repair-directory|metadata|export))?\/?$/,
+  );
+  if (standaloneMatch) {
+    const sessionId = decodeURIComponent(standaloneMatch[1]);
+    const action = standaloneMatch[2];
+    const index = scenario.standaloneSessions.findIndex(
+      (session) => session.sessionId === sessionId,
+    );
+    const summary = scenario.standaloneSessions[index];
+    if (!summary) {
+      await json(
+        route,
+        {
+          code: 'standalone_session_not_found',
+          message: `Standalone session ${sessionId} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (method === 'GET' && !action) {
+      await json(route, summary);
+      return;
+    }
+    if (method === 'POST' && (action === 'load' || action === 'resume')) {
+      await json(route, restoredStandaloneSessionEnvelope(scenario, summary));
+      return;
+    }
+    if (method === 'POST' && action === 'repair-directory') {
+      await json(route, {
+        sessionId,
+        projectlessOutputDirectory: standaloneOutputDirectory(sessionId),
+        workingDirectory: { state: 'ready' },
+      });
+      return;
+    }
+    if (method === 'PATCH' && action === 'metadata') {
+      const displayName = readStringField(body, 'displayName') ?? '';
+      scenario.standaloneSessions[index] = {
+        ...summary,
+        displayName,
+        updatedAt: now,
+      };
+      await json(route, { sessionId, displayName });
+      return;
+    }
+    if (method === 'GET' && action === 'export') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        headers: {
+          'access-control-allow-origin': '*',
+          'content-disposition': `attachment; filename="${sessionId}.html"`,
+        },
+        body: `<p>${summary.displayName ?? sessionId}</p>`,
+      });
+      return;
+    }
   }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
@@ -1705,7 +1950,12 @@ async function handleDaemonRoute(
     if (action === 'config-option') {
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
-      if (configId !== 'reasoning_effort' || !value) {
+      const persist = getRecordValue(body, 'persist');
+      if (
+        configId !== 'reasoning_effort' ||
+        !value ||
+        (persist !== undefined && typeof persist !== 'boolean')
+      ) {
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
@@ -1718,23 +1968,37 @@ async function handleDaemonRoute(
       const allowedValues = isRecord(reasoningOption)
         ? reasoningOption['options']
         : undefined;
+      const reasoningMeta = isRecord(reasoningOption)
+        ? getRecordValue(reasoningOption, '_meta')
+        : undefined;
+      const qwenReasoningMeta = isRecord(reasoningMeta)
+        ? getRecordValue(reasoningMeta, 'qwenCode/reasoning')
+        : undefined;
+      const defaultEffort = isRecord(qwenReasoningMeta)
+        ? readStringField(qwenReasoningMeta, 'defaultEffort')
+        : undefined;
+      const selectedValue =
+        value === 'default' && defaultEffort ? defaultEffort : value;
       if (
         !Array.isArray(allowedValues) ||
-        !allowedValues.some(
-          (option) =>
-            isRecord(option) && readStringField(option, 'value') === value,
-        )
+        ((value !== 'default' || !defaultEffort) &&
+          !allowedValues.some((option) => {
+            return (
+              isRecord(option) &&
+              readStringField(option, 'value') === selectedValue
+            );
+          }))
       ) {
         await badRequest(route, 'Unsupported config-option value.');
         return;
       }
       const configOptions = currentConfigOptions.map((option) =>
         isRecord(option) && option['id'] === configId
-          ? { ...option, currentValue: value }
+          ? { ...option, currentValue: selectedValue }
           : option,
       );
       scenario.state.configOptions = configOptions;
-      await json(route, { configOptions });
+      await json(route, { configOptions, persisted: persist === true });
       return;
     }
     if (action === 'approval-mode') {
@@ -1807,6 +2071,60 @@ function sessionEnvelope(
     clientId: scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
+  };
+}
+
+function standaloneOutputDirectory(sessionId: string): string {
+  return `/tmp/qwen-web-shell-standalone/${sessionId}`;
+}
+
+function standaloneSummary(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonStandaloneSessionSummary {
+  return {
+    sessionId,
+    workspaceCwd: standaloneOutputDirectory(sessionId),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    createdAt: now,
+    updatedAt: now,
+    displayName: `Standalone ${scenario.standaloneSessions.length + 1}`,
+    clientCount: 1,
+    hasActivePrompt: false,
+    isArchived: false,
+  };
+}
+
+function standaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+  attached: boolean,
+): DaemonStandaloneSession {
+  return {
+    sessionId: summary.sessionId,
+    workspaceCwd: summary.workspaceCwd,
+    attached,
+    clientId: scenario.clientId,
+    createdAt: summary.createdAt ?? now,
+    hasActivePrompt: false,
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    projectlessOutputDirectory: standaloneOutputDirectory(summary.sessionId),
+    workingDirectory: { state: 'ready' },
+  };
+}
+
+function restoredStandaloneSessionEnvelope(
+  scenario: WebShellDaemonScenario,
+  summary: DaemonStandaloneSessionSummary,
+): DaemonRestoredStandaloneSession {
+  return {
+    ...standaloneSessionEnvelope(scenario, summary, true),
+    state: { ...scenario.state, displayName: summary.displayName },
+    compactedReplay: [],
+    liveJournal: [],
+    lastEventId: 0,
   };
 }
 
@@ -1936,6 +2254,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function readStringArrayField(body: unknown, key: string): string[] {
+  const value = getRecordValue(body, key);
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
 }
 
 function nextRevision(revision: string): string {
