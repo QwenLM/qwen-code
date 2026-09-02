@@ -17,9 +17,24 @@ import {
 import {
   type GetGoalToolParams,
   GetGoalTool,
+  PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
+  PROPOSE_GOAL_NO_TURN_MESSAGE,
+  PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
+  PROPOSE_GOAL_PENDING_MESSAGE,
+  PROPOSE_GOAL_PLAN_MODE_MESSAGE,
+  PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
+  PROPOSE_GOAL_UNTRUSTED_MESSAGE,
+  ProposeGoalTool,
+  type PendingGoalProposal,
+  type ProposeGoalToolConfig,
+  applyPendingGoalProposal,
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
+import { ApprovalMode } from '../config/config.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   emptyGoalSnapshot,
@@ -1508,5 +1523,414 @@ describe('UpdateGoalTool', () => {
 
     expect(dispatch).not.toHaveBeenCalled();
     expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+});
+
+describe('ProposeGoalTool', () => {
+  const TURN_KEY = 'user-turn-key';
+  /** Runs the tool inside the prompt-id context established by the scheduler. */
+  const execute = (invocation: ReturnType<ProposeGoalTool['build']>) =>
+    promptIdContext.run(TURN_KEY, () =>
+      invocation.execute(new AbortController().signal),
+    );
+
+  const objective =
+    'Outcome: auth tests pass. Done when: 1) `npm test` exits 0 (paste the summary line). Must not: edit test files. Budget: stop as blocked after 20 turns. On block: report the blocker.';
+
+  function proposeConfig(
+    runtime: Partial<GoalRuntime> | (() => never),
+    overrides: Partial<ProposeGoalToolConfig> = {},
+  ): ProposeGoalToolConfig & {
+    pending: () => PendingGoalProposal | undefined;
+  } {
+    let parked: PendingGoalProposal | undefined;
+    const setPendingGoalProposal = vi.fn((proposal: PendingGoalProposal) => {
+      if (parked) return false;
+      parked = proposal;
+      return true;
+    });
+    const getGoalRuntime =
+      typeof runtime === 'function'
+        ? runtime
+        : vi.fn(() => runtime as GoalRuntime);
+    return {
+      getGoalRuntime,
+      getGoalRuntimeReady: async () => getGoalRuntime(),
+      isTrustedFolder: () => true,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      hasPendingGoalProposal: () => parked !== undefined,
+      setPendingGoalProposal,
+      pending: () => parked,
+      ...overrides,
+    };
+  }
+
+  function idleRuntime() {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    const host = fakeHost();
+    runtime.bindHost(host);
+    return { runtime, host };
+  }
+
+  async function confirm(
+    tool: ProposeGoalTool,
+    outcome: ToolConfirmationOutcome,
+    params = { objective },
+  ) {
+    const invocation = tool.build(params);
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await details.onConfirm(outcome);
+    return { invocation, details };
+  }
+
+  it('uses the canonical name, stays visible, and always goes through the dialog', async () => {
+    const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
+    expect(tool.name).toBe(ToolNames.PROPOSE_GOAL);
+    expect(tool.displayName).toBe(ToolDisplayNames.PROPOSE_GOAL);
+    expect(tool.shouldDefer).toBe(false);
+
+    const invocation = tool.build({ objective });
+    // Consent for an autonomous loop cannot come from a rule or an approval
+    // mode; YOLO and AUTO_EDIT would otherwise approve an `info` dialog.
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    expect(await invocation.getDefaultPermission()).toBe('ask');
+    expect(invocation.getDescription()).toContain(objective);
+  });
+
+  it('validates the objective', () => {
+    const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
+    expect(tool.validateToolParams({ objective: '   ' })).not.toBeNull();
+    expect(
+      tool.validateToolParams({
+        objective: 'x'.repeat(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS + 1),
+      }),
+    ).not.toBeNull();
+    expect(tool.validateToolParams({ objective })).toBeNull();
+  });
+
+  it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+
+    const { invocation, details } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') return;
+    expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.prompt).toContain('Set this as the session Goal?');
+    expect(details.prompt).toContain(objective);
+
+    const result = await execute(invocation);
+    expect(result.error).toBeUndefined();
+    const payload = JSON.parse(result.llmContent as string);
+    expect(payload.approved).toBe(true);
+    expect(payload.objective).toBe(objective);
+    expect(payload.next).toContain('the moment this turn ends');
+    expect(result.returnDisplay).toContain('Goal approved');
+
+    // Parked, not set: setting it mid-turn would strip the rest of the
+    // proposing turn of its Goal permit. The client applies it at the
+    // turn boundary (see applyPendingGoalProposal below).
+    expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
+    expect(config.pending()).toEqual({ objective, turnKey: 'user-turn-key' });
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+
+    const applied = await applyPendingGoalProposal(runtime, config.pending()!);
+    expect(applied.applied).toBe(true);
+    if (!applied.applied) return;
+    const goal = runtime.getSnapshot().goal;
+    expect(goal?.goalId).toBe(applied.goal.goalId);
+    expect(goal?.status).toBe('active');
+    expect(goal?.objective).toBe(objective);
+    // The runtime, not the tool, drives the first Goal turn.
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('does not silently replace an already approved pending proposal', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+    const firstObjective = 'Outcome: ship the first approved Goal.';
+    const secondObjective = 'Outcome: ship a different Goal.';
+
+    const first = await confirm(tool, ToolConfirmationOutcome.ProceedOnce, {
+      objective: firstObjective,
+    });
+    const second = await confirm(tool, ToolConfirmationOutcome.ProceedOnce, {
+      objective: secondObjective,
+    });
+
+    expect(await execute(first.invocation)).not.toHaveProperty('error');
+    const secondResult = await execute(second.invocation);
+
+    expect(secondResult.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(config.pending()?.objective).toBe(firstObjective);
+    await expect(
+      tool
+        .build({ objective: 'Outcome: ask a third time.' })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow(PROPOSE_GOAL_PENDING_MESSAGE);
+  });
+
+  it('refuses when the parking slot is taken between the re-check and the park', async () => {
+    // Two approved invocations in one turn can both pass the
+    // hasPendingGoalProposal() re-check before either parks; the set-once
+    // slot refuses the second, and execute() must surface that refusal
+    // instead of reporting "approved".
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime, {
+      hasPendingGoalProposal: () => false,
+      setPendingGoalProposal: vi.fn(() => false),
+    });
+    const tool = new ProposeGoalTool(config);
+
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const result = await execute(invocation);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_PENDING_MESSAGE);
+    expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('refuses to park an approval it cannot bind to a turn', async () => {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // No scheduler prompt-id context: the settle boundary could not tell this
+    // approval apart from a stale one, so it is refused instead of parked.
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_NO_TURN_MESSAGE);
+    expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('sets nothing when the dialog was cancelled', async () => {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+
+    const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
+    const result = await execute(invocation);
+    expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
+    expect(config.pending()).toBeUndefined();
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_NOT_APPROVED_MESSAGE);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('refuses before the dialog in plan mode, in an untrusted folder, and without persistence', async () => {
+    const { runtime } = idleRuntime();
+    const signal = new AbortController().signal;
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(runtime, { getApprovalMode: () => ApprovalMode.PLAN }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_PLAN_MODE_MESSAGE);
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(runtime, { isTrustedFolder: () => false }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNTRUSTED_MESSAGE);
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(() => {
+          throw new Error('no persistence');
+        }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
+
+    expect(runtime.getSnapshot().goal).toBeNull();
+  });
+
+  it('refuses before the dialog when Goal persistence failed to become ready', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    Object.assign(config, {
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new Error('restore failed')),
+    });
+
+    await expect(
+      new ProposeGoalTool(config)
+        .build({ objective })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
+  });
+
+  it('refuses to replace an active Goal and points at /goal edit', async () => {
+    const { runtime } = await activeRuntime();
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+
+    await expect(
+      tool
+        .build({ objective })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow('/goal edit');
+    expect(runtime.getSnapshot().goal?.objective).toBe('Ship Goal v3');
+  });
+
+  it('rechecks the active Goal after the dialog before parking approval', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const { invocation } = await confirm(
+      new ProposeGoalTool(config),
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
+
+    const result = await execute(invocation);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(config.pending()).toBeUndefined();
+    expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
+  });
+
+  it('replaces a stopped Goal when the parked approval is applied', async () => {
+    const { runtime, host } = idleRuntime();
+    await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
+    const paused = runtime.getSnapshot().goal!;
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: paused.goalId,
+      expectedRevision: paused.revision,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    const startedBefore = host.started.length;
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+
+    const { invocation, details } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    if (details.type !== 'info') throw new Error('expected info');
+    expect(details.prompt).toContain('Replace the paused Goal');
+
+    const result = await execute(invocation);
+    const payload = JSON.parse(result.llmContent as string);
+    expect(payload.replacesGoalId).toBe(paused.goalId);
+    expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
+
+    const applied = await applyPendingGoalProposal(runtime, config.pending()!);
+    expect(applied).toMatchObject({ applied: true });
+    const goal = runtime.getSnapshot().goal;
+    expect(goal?.goalId).not.toBe(paused.goalId);
+    expect(goal?.status).toBe('active');
+    expect(goal?.objective).toBe(objective);
+    expect(host.started.length).toBe(startedBefore + 1);
+  });
+
+  it('does not set a parked approval over a Goal that became active meanwhile', async () => {
+    const { runtime } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await execute(invocation);
+
+    // The user typed `/goal set …` before the proposing turn ended.
+    await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
+
+    const applied = await applyPendingGoalProposal(runtime, config.pending()!);
+    expect(applied.applied).toBe(false);
+    if (applied.applied) return;
+    expect(applied.reason).toContain('became active');
+    expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
+  });
+
+  it('does not replace a paused Goal resumed ahead of the proposal dispatch', async () => {
+    const { runtime } = idleRuntime();
+    await runtime.dispatch({ action: 'create', objective: 'Paused by user' });
+    const original = runtime.getSnapshot().goal!;
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: original.goalId,
+      expectedRevision: original.revision,
+    });
+
+    const resumed = runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: original.goalId,
+      expectedRevision: original.revision,
+    });
+    const applied = applyPendingGoalProposal(runtime, {
+      objective,
+      turnKey: 'user-turn-key',
+    });
+
+    await expect(resumed).resolves.toMatchObject({
+      snapshot: {
+        goal: {
+          goalId: original.goalId,
+          revision: original.revision,
+          status: 'active',
+        },
+      },
+    });
+    await expect(applied).resolves.toMatchObject({ applied: false });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      goalId: original.goalId,
+      objective: 'Paused by user',
+      status: 'active',
+    });
+  });
+
+  it('reports a conflict instead of throwing when the expected version moved', async () => {
+    const { runtime } = idleRuntime();
+    await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
+    const first = runtime.getSnapshot().goal!;
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: first.goalId,
+      expectedRevision: first.revision,
+    });
+    const paused = runtime.getSnapshot().goal!;
+    const stale = {
+      getSnapshot: () => ({
+        ...runtime.getSnapshot(),
+        goal: { ...paused, revision: paused.revision - 1 },
+      }),
+      dispatch: runtime.dispatch.bind(runtime),
+    };
+
+    const applied = await applyPendingGoalProposal(stale, {
+      objective,
+      turnKey: 'user-turn-key',
+    });
+    expect(applied.applied).toBe(false);
+    expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
   });
 });
