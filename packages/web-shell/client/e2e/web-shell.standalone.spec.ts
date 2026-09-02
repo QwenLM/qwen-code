@@ -17,7 +17,19 @@ const standaloneFeatures = [
   'standalone_sessions_v1',
 ];
 
-test('global New task creates an exact standalone session @smoke', async ({
+const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
+
+/** Standalone creation calls, ignoring the Recents list reads. */
+function standaloneCreates(
+  daemon: MockDaemonController,
+): DaemonRequestRecord[] {
+  return daemon.requests.filter(
+    (request) =>
+      request.method === 'POST' && request.path === '/standalone/sessions',
+  );
+}
+
+test('the Recents entry point creates an exact standalone session @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -25,7 +37,7 @@ test('global New task creates an exact standalone session @smoke', async ({
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoNewTask(page);
+  await gotoNewStandaloneChat(page);
   await fillComposer(page, 'Start a standalone conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -52,13 +64,82 @@ test('global New task creates an exact standalone session @smoke', async ({
   );
 });
 
-test('global New task preserves the legacy primary route without the capability @smoke', async ({
+test('the sidebar New task keeps the primary workspace route on a capable daemon @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoNewTask(page);
+  await fillComposer(page, 'Start a workspace conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  const create = await waitForRequest(
+    daemon,
+    (request) => request.method === 'POST' && request.path === '/session',
+  );
+  expect(requestBody(create)['cwd']).toBe(scenario.workspaceCwd);
+  expect(standaloneCreates(daemon)).toEqual([]);
+});
+
+test('keeps workspace navigation reachable inside a standalone chat @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: WORKSPACE_CWD,
+    capabilities: {
+      features: standaloneFeatures,
+      workspaces: [
+        { id: 'primary', cwd: WORKSPACE_CWD, primary: true, trusted: true },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoNewStandaloneChat(page);
+
+  // One New task for the sidebar itself plus one on the workspace row: a
+  // projectless chat must not strand the user away from their workspaces.
+  const sidebar = page.getByRole('complementary');
+  const newTaskButtons = sidebar.getByRole('button', {
+    name: 'New task',
+    exact: true,
+  });
+  await expect(newTaskButtons).toHaveCount(2);
+
+  // Row actions stay hidden until the row is hovered.
+  const workspaceRow = sidebar.getByRole('button', {
+    name: /^qwen-web-shell-e2e/,
+  });
+  await expect(workspaceRow).toBeVisible();
+  await workspaceRow.hover();
+  await newTaskButtons.last().click();
+
+  await fillComposer(page, 'Back to the workspace');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  const create = await waitForRequest(
+    daemon,
+    (request) => request.method === 'POST' && request.path === '/session',
+  );
+  expect(requestBody(create)['cwd']).toBe(WORKSPACE_CWD);
+});
+
+test('hides the standalone entry point without the capability @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoNewTask(page);
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'New standalone chat', exact: true }),
+  ).toHaveCount(0);
+
+  await clickNewTask(page);
   await fillComposer(page, 'Start a legacy conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -66,11 +147,7 @@ test('global New task preserves the legacy primary route without the capability 
     daemon,
     (request) => request.method === 'POST' && request.path === '/session',
   );
-  expect(
-    daemon.requests.filter((request) =>
-      request.path.startsWith('/standalone/sessions'),
-    ),
-  ).toEqual([]);
+  expect(standaloneCreates(daemon)).toEqual([]);
 });
 
 test('an uncertain standalone create stays recoverable and is never retried @smoke', async ({
@@ -86,7 +163,7 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoNewTask(page);
+  await gotoNewStandaloneChat(page);
   await fillComposer(page, 'Do not duplicate this conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -102,10 +179,12 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   );
 
   await expect(page.locator('[data-web-shell-composer-submit]')).toBeDisabled();
+  // Both new-chat entry points are blocked while the outcome is unknown, so
+  // neither may start a second create.
   await page
-    .getByRole('button', { name: 'New task', exact: true })
-    .first()
+    .getByRole('button', { name: 'New standalone chat', exact: true })
     .click();
+  await clickNewTask(page);
   expect(
     daemon.requests.filter(
       (request) =>
@@ -205,14 +284,29 @@ async function installScenario(
   });
 }
 
-async function gotoNewTask(page: Page): Promise<void> {
-  await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+async function clickNewTask(page: Page): Promise<void> {
   const newTask = page
     .getByRole('button', { name: 'New task', exact: true })
     .first();
   await expect(newTask).toBeEnabled();
   await newTask.click();
+}
+
+async function gotoNewTask(page: Page): Promise<void> {
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await clickNewTask(page);
+}
+
+async function gotoNewStandaloneChat(page: Page): Promise<void> {
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  const newChat = page.getByRole('button', {
+    name: 'New standalone chat',
+    exact: true,
+  });
+  await expect(newChat).toBeEnabled();
+  await newChat.click();
 }
 
 async function fillComposer(page: Page, text: string): Promise<void> {

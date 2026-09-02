@@ -1170,6 +1170,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
       onNewSession?: (workspaceCwd?: string) => Promise<boolean> | boolean;
+      onNewStandaloneSession?: () => Promise<boolean> | boolean;
       onNewWorktreeSession?: (
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
@@ -1221,6 +1222,19 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           },
           'new session',
         ),
+        ...(props.onNewStandaloneSession
+          ? [
+              React.createElement(
+                'button',
+                {
+                  'data-testid': 'new-standalone-session',
+                  type: 'button',
+                  onClick: () => void props.onNewStandaloneSession?.(),
+                },
+                'new standalone session',
+              ),
+            ]
+          : []),
         React.createElement(
           'button',
           {
@@ -11089,6 +11103,89 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
     );
+  });
+
+  it('keeps the sidebar New task on the primary workspace on a capable daemon', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('workspace prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      }),
+    );
+    expect(mockSessionActions.createSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('creates a standalone session from the sidebar standalone entry point', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-standalone-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('omits the sidebar standalone entry point without the capability', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="new-standalone-session"]'),
+    ).toBeNull();
   });
 
   it('retries failed capabilities before routing a global new session', async () => {

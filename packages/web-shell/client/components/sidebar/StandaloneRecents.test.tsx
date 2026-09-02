@@ -119,6 +119,7 @@ describe('StandaloneRecents', () => {
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onNewSession?: () => void;
     } = {},
   ) {
     const onError = options.onError ?? vi.fn();
@@ -129,6 +130,7 @@ describe('StandaloneRecents', () => {
           collapsed={false}
           onExpand={vi.fn()}
           onLoadSession={options.onLoadSession ?? vi.fn()}
+          onNewSession={options.onNewSession}
           onError={onError}
           onRenameSession={onRenameSession}
           onNotice={vi.fn()}
@@ -151,6 +153,29 @@ describe('StandaloneRecents', () => {
     expect(mocks.list).not.toHaveBeenCalledWith(
       expect.objectContaining({ archiveState: 'archived' }),
     );
+  });
+
+  it('offers an explicit new-chat entry point when the host provides one', async () => {
+    const onNewSession = vi.fn();
+    await render({ onNewSession });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="sidebar.newStandaloneSession"]',
+    );
+
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+
+    expect(onNewSession).toHaveBeenCalledOnce();
+  });
+
+  it('hides the new-chat entry point when the host cannot create one', async () => {
+    await render();
+
+    expect(
+      container.querySelector(
+        'button[aria-label="sidebar.newStandaloneSession"]',
+      ),
+    ).toBeNull();
   });
 
   it('loads archived chats only after the archived lane is expanded', async () => {

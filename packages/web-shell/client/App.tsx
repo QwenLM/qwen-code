@@ -14062,15 +14062,21 @@ export function App({
                       );
                     }
                   }}
+                  // A cwd-less New task inherits the current context: a
+                  // workspace chat stays in its workspace and a cold draft
+                  // lands on the primary one. Projectless chats use the
+                  // explicit entry point below.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                        : { kind: 'inherit' },
                     )
                   }
-                  globalNewSessionUsesStandalone={
+                  onNewStandaloneSession={
                     standaloneSessionsSupported && !lockedWorkspaceCwd
+                      ? () => createNewSession({ kind: 'global' })
+                      : undefined
                   }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();

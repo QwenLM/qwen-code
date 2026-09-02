@@ -119,6 +119,15 @@ The entry-point behavior is fixed:
 | Current-session **New Chat**                     | Inherit explicit context |
 | Live Voice                                       | `live`                   |
 
+> **Amended 2026-09-02.** The WebShell sidebar's top-level **New Chat** is
+> project navigation rather than a global entry point, so it inherits the
+> current explicit context: a workspace chat stays in its workspace and a cold
+> draft lands on the primary workspace. Standalone creation keeps its own
+> explicit entry point in the **Recents** group header. The workspace
+> navigation tree also stays rendered inside a standalone chat — the hiding
+> rule below applies to the chat surface and to project-only controls, and
+> dropping the tree left a standalone chat with no way back to a workspace.
+
 Standalone sessions appear in a top-level **Recents** group separate from Live
 and project groups. Their chat surface hides workspace selection, Git status,
 branch and worktree controls, project files, project settings, pin/group
@@ -1327,7 +1336,9 @@ the daemon contract.
 
 - Global/Home New Chat creates standalone on a capable daemon; project,
   locked-project, Goals, and Git New Chat remain workspace-bound;
-  current-session New Chat inherits explicit context.
+  current-session New Chat inherits explicit context. Amended 2026-09-02: the
+  WebShell sidebar's top-level New Chat inherits as well, leaving the host API
+  and missing-session recovery as the remaining global entry points.
 - An old daemon without capability preserves legacy primary behavior, and an old
   client against a new daemon retains generic primary behavior.
 - Capable-daemon errors, owner contention, and compromised roots never silently

@@ -12,6 +12,7 @@ import {
   MessageSquareIcon,
   PencilIcon,
   RotateCcwIcon,
+  SquarePenIcon,
   Trash2Icon,
 } from 'lucide-react';
 import {
@@ -40,6 +41,9 @@ interface StandaloneRecentsProps {
   onExpand: () => void;
   currentSessionId?: string;
   onLoadSession: (sessionId: string) => Promise<void> | void;
+  /** Starts a standalone chat. Omitted when the host cannot create one. */
+  onNewSession?: () => void;
+  newSessionDisabled?: boolean;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onError: (error: unknown, fallback: string) => void;
   onNotice: (message: string) => void;
@@ -104,6 +108,8 @@ export function StandaloneRecents({
   onExpand,
   currentSessionId,
   onLoadSession,
+  onNewSession,
+  newSessionDisabled,
   onRenameSession,
   onError,
   onNotice,
@@ -406,7 +412,22 @@ export function StandaloneRecents({
       <section className="px-2 pb-3" aria-label={t('sidebar.recents')}>
         <div className="flex items-center justify-between px-2 py-1 text-xs font-medium text-muted-foreground">
           <span>{t('sidebar.recents')}</span>
-          {loading && <span>{t('common.loading')}</span>}
+          <span className="flex items-center gap-1">
+            {loading && <span>{t('common.loading')}</span>}
+            {onNewSession && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                title={t('sidebar.newStandaloneSession')}
+                aria-label={t('sidebar.newStandaloneSession')}
+                disabled={newSessionDisabled}
+                onClick={onNewSession}
+              >
+                <SquarePenIcon />
+              </Button>
+            )}
+          </span>
         </div>
         <div className="flex flex-col gap-0.5">
           {active.map((session) => {
