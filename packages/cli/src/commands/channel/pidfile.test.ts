@@ -169,6 +169,21 @@ function getPidFilePath() {
   return join(mockGlobalQwenDir, 'channels', 'service.pid');
 }
 
+/** A serve reservation another machine wrote into this shared home. */
+function seedForeignServeReservation(): string {
+  const foreign = JSON.stringify({
+    owner: 'serve',
+    pid: 4321,
+    procStart: 'foreign-boot-id:4321-start',
+    pidNs: 4026532999,
+    startedAt: '2026-08-26T08:35:25.541Z',
+    channels: ['dingtalk'],
+    servePid: 4321,
+  });
+  fsStore[getPidFilePath()] = foreign;
+  return foreign;
+}
+
 beforeEach(() => {
   for (const k of Object.keys(fsStore)) delete fsStore[k];
   fsFds.next = 3;
@@ -653,6 +668,19 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
   });
 
+  it('does not let a colliding serve pid overwrite a foreign reservation', () => {
+    const reserved = seedForeignServeReservation();
+
+    expect(() =>
+      writeServeServiceInfo({
+        channels: ['telegram'],
+        servePid: 4321,
+        workerPid: 8765,
+      }),
+    ).toThrow('Channel service pidfile is owned by another process.');
+    expect(fsStore[getPidFilePath()]).toBe(reserved);
+  });
+
   it('does not let serve metadata updates overwrite corrupt pidfiles', () => {
     const filePath = getPidFilePath();
     fsStore[filePath] = 'not-json!!!';
@@ -960,6 +988,13 @@ describe('removeServeServiceInfo', () => {
       owner: 'channel',
       pid: process.pid,
     });
+  });
+
+  it('does not remove a foreign serve reservation with a colliding pid', () => {
+    const reserved = seedForeignServeReservation();
+
+    expect(removeServeServiceInfo(4321)).toBe(false);
+    expect(fsStore[getPidFilePath()]).toBe(reserved);
   });
 
   it('returns false when the owned pidfile cannot be unlinked', () => {

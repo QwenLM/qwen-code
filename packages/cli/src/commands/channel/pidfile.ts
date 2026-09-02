@@ -193,6 +193,26 @@ function isLocalIdentity(info: ServiceInfo): boolean {
 }
 
 /**
+ * True when `info` is the serve reservation `servePid` made from this side.
+ * Another boot, machine, or PID namespace sharing this home can hold the same
+ * PID number, so the number alone does not authorize replacing or deleting the
+ * record. The recorded token is deliberately not compared: the update path
+ * carries a reservation's token forward, and a legacy record has none.
+ */
+function isOwnServeReservation(
+  info: ServiceInfo | null,
+  servePid: number,
+): info is ServiceInfo {
+  return (
+    info !== null &&
+    info.owner === 'serve' &&
+    info.pid === servePid &&
+    info.servePid === servePid &&
+    isLocalIdentity(info)
+  );
+}
+
+/**
  * Serialize all pidfile readers and writers. `proper-lockfile` uses an atomic
  * lock directory and recovers abandoned locks after their acquisition is stale.
  */
@@ -376,12 +396,7 @@ export function writeServeServiceInfo({
         // Treat corrupt data as owned by another process. This updater must only
         // replace the serve reservation it created earlier in startup.
       }
-      if (
-        !existing ||
-        existing.owner !== 'serve' ||
-        existing.pid !== servePid ||
-        existing.servePid !== servePid
-      ) {
+      if (!isOwnServeReservation(existing, servePid)) {
         throw fileExistsError(
           'Channel service pidfile is owned by another process.',
         );
@@ -457,13 +472,7 @@ export function removeServeServiceInfo(
       return false;
     }
 
-    const info = parseServiceInfo(parsed);
-    if (
-      !info ||
-      info.owner !== 'serve' ||
-      info.servePid !== servePid ||
-      info.pid !== servePid
-    ) {
+    if (!isOwnServeReservation(parseServiceInfo(parsed), servePid)) {
       return false;
     }
 
