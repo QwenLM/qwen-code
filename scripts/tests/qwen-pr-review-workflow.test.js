@@ -53,6 +53,19 @@ const hasMkfifo = (() => {
   }
 })();
 
+// The truthful id(1) for the watcher-replay pin: production captures it
+// before the $proxy_bin prepend; a hardcoded path is not portable to the
+// BSD lane, so resolve it once like the mkfifo probe above.
+const realIdPath = (() => {
+  try {
+    return execFileSync('bash', ['-c', 'command -v id'], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return 'id';
+  }
+})();
+
 describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the agent pool', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
@@ -462,6 +475,19 @@ function runScenario(
           // utilities so proxyPlants shadow bare-command resolution only.
           QWEN_CI_REAL_RM: '/bin/rm',
           QWEN_CI_REAL_TEE: '/bin/tee',
+          // The review lane exports this marker path into the agent
+          // environment (R21-1); inherited through the spread, the
+          // retry-branch reset rm-rfs and the watcher rewrite writes the
+          // PARENT run's live marker. Empty restores plain-lane behaviour
+          // (every in-window consumer is a :- / [ -f ] gate) while
+          // extraEnv's scenario overrides still win after the spread.
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: '',
+          // Same for the R21-2 sleep pin: inherited from a review lane
+          // that exports the production capture, the real sleep 60 would
+          // stall every armWatcher replay's poll loop; the harness stub is
+          // the replay's truthful sleep (pkill/id stay inherited-harmless:
+          // the armWatcher's REVIEW_URL pattern matches nothing here).
+          QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
           PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
           SCENARIO: scenario,
           ATT: attemptFile,
@@ -4606,6 +4632,7 @@ describe('review supersede salvage (#10110)', () => {
     realGhHead = null,
     sleepFailAfter = null,
     forgeDateOffset = null,
+    proxyPlants = {},
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
@@ -4632,6 +4659,18 @@ describe('review supersede salvage (#10110)', () => {
       }
       const bin = join(side, 'bin');
       mkdirSync(bin);
+      // Production launches the watcher AFTER configure_qwen_network
+      // prepends the agent-writable $proxy_bin to PATH, so the watcher
+      // inherits the prepend (R21-2). The replay mirrors that layout:
+      // plants here resolve ahead of the harness bin, exactly like a
+      // hijacked agent's.
+      const proxyBin = join(side, 'proxy-bin');
+      mkdirSync(proxyBin);
+      for (const [name, body] of Object.entries(proxyPlants)) {
+        const plant = join(proxyBin, name);
+        writeFileSync(plant, body);
+        chmodSync(plant, 0o755);
+      }
       const pkillLog = join(side, 'pkills');
       // The deletion dual of the planted-signal findings: SALVAGE_DIR is
       // agent-derivable and can vanish mid-run; the watcher must still
@@ -4771,7 +4810,15 @@ describe('review supersede salvage (#10110)', () => {
             // fallback; the R14-1 spread below still overrides when armed
             // (R16-1).
             QWEN_CI_REAL_GH: '',
-            PATH: `${bin}:${process.env.PATH}`,
+            // The watcher's sleep/pkill/id resolve through these pins in
+            // production, captured before the prepend; the replay pins the
+            // harness stubs and the truthful id so proxyPlants shadow
+            // bare-command resolution only (and an inherited review-lane
+            // export cannot redirect the poll at the real sleep 60).
+            QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
+            QWEN_CI_REAL_PKILL: join(bin, 'pkill'),
+            QWEN_CI_REAL_ID: realIdPath,
+            PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
             ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
             ...(realDatePath !== null
               ? { QWEN_CI_REAL_DATE: realDatePath }
@@ -5054,6 +5101,18 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.superseded, plant).toBe('head-b');
       expect(r.marker, plant).toBeNull();
     }
+    // R21-3: the guard bounded only the low side — any 10-digit FUTURE
+    // epoch passed it and set the eligibility clock, making elapsed
+    // negative and flipping KEEP to CEDE at a depth that must KEEP. The
+    // pinned-clock upper bound falls back to the run start exactly like
+    // the low side, so the truthful depth still decides KEEP.
+    const future = runWatcher({
+      attemptStartRaw: String(Math.floor(Date.now() / 1000) + 86400),
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+    });
+    expect(future.marker).toBe('head-a');
+    expect(future.superseded).toBeNull();
   });
 
   it('keeps a late retry attempt salvage-eligible against its own budget (replayed watcher)', () => {
@@ -5106,6 +5165,33 @@ describe('review supersede salvage (#10110)', () => {
     expect(r.marker).toBeNull();
     expect(r.movedTo).toBeNull();
     expect(r.pkilled).toBe(false);
+  });
+
+  it('keeps the watcher deciding through proxy-bin sleep/pkill/id plants (replayed watcher)', () => {
+    // R21-2: the watcher launches AFTER configure_qwen_network prepends
+    // the agent-writable $proxy_bin to PATH and inherits the prepend —
+    // bare sleep/pkill/id resolve through it. An exit-1 planted sleep
+    // must not end the one-shot watcher before its first poll (a dead
+    // watcher drops every later head move at the attempt boundary), and
+    // a no-op pkill with a bogus-uid id must not leave the superseded
+    // tree alive — the decision and the kill must ride the captures
+    // taken before the prepend.
+    const sleepPlant = runWatcher({
+      proxyPlants: { sleep: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(sleepPlant.superseded).toBe('head-b');
+    expect(sleepPlant.marker).toBeNull();
+    expect(sleepPlant.pkilled).toBe(true);
+
+    const killPlant = runWatcher({
+      proxyPlants: {
+        pkill: '#!/bin/bash\nexit 0\n',
+        id: '#!/bin/bash\necho 424242\n',
+      },
+    });
+    expect(killPlant.superseded).toBe('head-b');
+    expect(killPlant.marker).toBeNull();
+    expect(killPlant.pkilled).toBe(true);
   });
 
   it('stops acting past the budget plus grace (replayed watcher)', () => {
@@ -5520,6 +5606,35 @@ describe('review supersede salvage (#10110)', () => {
       });
       expect(r.attempts).toBe(2);
       expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never touches a lane-exported salvage marker from the replay (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // R21-1: this workflow's own review lane exports
+      // QWEN_CI_REVIEW_SALVAGE_OK_FILE into the agent environment, and
+      // the replay spreads process.env — the retry-branch reset would
+      // rm -rf the PARENT run's live marker (an armed one-shot watcher
+      // can never re-arm, so the loss is permanent). runScenario pins
+      // the variable empty ahead of extraEnv, so the canary survives
+      // while the scenarios' own overrides still win.
+      const canary = join(dir, 'parent-salvage-ok');
+      writeFileSync(canary, 'head-a');
+      process.env.QWEN_CI_REVIEW_SALVAGE_OK_FILE = canary;
+      try {
+        const r = runScenario('compose_latch_reset', {
+          extraEnv: { OBS: obs },
+        });
+        expect(r.attempts).toBe(2);
+        expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+        expect(existsSync(canary)).toBe(true);
+      } finally {
+        delete process.env.QWEN_CI_REVIEW_SALVAGE_OK_FILE;
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6029,11 +6144,13 @@ describe('review supersede salvage (#10110)', () => {
   it('bounds and scopes the watcher kill', () => {
     // -U scopes to the runner user; the trailing ($|[^0-9]) keeps PR 123
     // from matching PR 1234's URL; TERM first, KILL after a grace period.
+    // Both resolve through the pre-prepend captures (R21-2); the replayed
+    // proxy-bin plant arms witness the pins.
     expect(run).toContain(
-      'pkill -U "$(id -u)" -TERM -f "${REVIEW_URL}($|[^0-9])"',
+      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -TERM -f "${REVIEW_URL}($|[^0-9])"',
     );
     expect(run).toContain(
-      'pkill -U "$(id -u)" -KILL -f "${REVIEW_URL}($|[^0-9])"',
+      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -KILL -f "${REVIEW_URL}($|[^0-9])"',
     );
     // Self-bounded past the budget, and reaped on every exit path — a
     // watcher outliving the step on a reused self-hosted runner could kill
