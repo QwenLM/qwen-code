@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -68,6 +68,13 @@ export const ToolConfirmationMessage: React.FC<
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const editorAvailable = useMemo(
+    () =>
+      confirmationDetails.type === 'edit' &&
+      preferredEditor !== undefined &&
+      isEditorAvailable(preferredEditor),
+    [confirmationDetails.type, preferredEditor],
+  );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -260,7 +267,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      isEditorAvailable(preferredEditor)
+      editorAvailable
     ) {
       options.push({
         label: t('Modify with external editor'),
