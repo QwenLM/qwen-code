@@ -11,6 +11,7 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_BTW_METHOD = 'qwen/control/session/btw';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).
 // channel-base keeps a minimal dependency footprint, so the wire contract is
@@ -171,6 +172,11 @@ export interface ChannelAgentBridgePromptOptions {
   displayText?: string;
 }
 
+export interface ChannelBtwResult {
+  sessionId: string;
+  answer: string | null;
+}
+
 /**
  * Resolves the ordered `images` contract, falling back to the legacy
  * single-image pair, and normalizes MIME types in one place: channel
@@ -236,6 +242,11 @@ export interface ChannelAgentBridge {
     text: string,
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
@@ -256,6 +267,16 @@ export interface ChannelAgentBridge {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  /**
+   * Answer a side question without interrupting the session's active turn.
+   * The result must echo the request's sessionId. Bridges whose agent
+   * connection cannot answer side questions omit it and channels fail closed.
+   */
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
 }

@@ -12,6 +12,7 @@ import {
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -46,6 +47,10 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  btw?(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ChannelBtwResult>;
   uploadAttachment?(
     data: Blob,
     name: string,
@@ -702,6 +707,18 @@ export class DaemonChannelBridge
         });
       }
     }
+  }
+
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    const session = this.ensureSession(sessionId);
+    if (!session.btw) {
+      throw new Error('BTW is not supported by this daemon session');
+    }
+    return session.btw(question, signal ? { signal } : undefined);
   }
 
   async shellCommand(

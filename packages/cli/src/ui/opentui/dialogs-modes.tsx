@@ -19,7 +19,6 @@ import {
   APPROVAL_MODES,
   BUILT_IN_OUTPUT_STYLES,
   REASONING_EFFORT_TIERS,
-  resolveMainSessionOutputStyle,
   type ApprovalMode,
   type OutputStyleDefinition,
   type ReasoningEffort,
@@ -256,7 +255,7 @@ export function OpenTuiOutputStyleDialog(props: {
   // Unlike /effort, "no style configured" genuinely is the first entry
   // (default), so pre-selecting index 0 in that case tells the truth (ink
   // OutputStyleDialog parity).
-  const current = resolveMainSessionOutputStyle(config)?.name;
+  const current = config.getOutputStyle()?.name;
   const [sel, setSel] = useState(
     Math.max(
       0,

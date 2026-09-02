@@ -8,12 +8,14 @@ export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
   BackgroundResponseContext,
   BridgeSessionInfo,
+  ChannelBtwResult,
   ChannelAgentBridge,
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
