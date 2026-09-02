@@ -115,6 +115,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | -------------------- | ------------------------------------------------------------------------ |
 | `Attachment`         | Structured file/image/audio/video attachment                             |
 | `AvailableCommand`   | Agent command advertised through the bridge                              |
+| `ChannelBtwResult`   | BTW result `{ sessionId, answer }`; `answer` can be `null`               |
 | `ChannelAgentBridge` | Adapter-facing bridge contract used by `ChannelBase` and `SessionRouter` |
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
