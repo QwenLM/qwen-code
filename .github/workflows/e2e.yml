@@ -395,9 +395,9 @@ jobs:
       # QWEN_TUI_RENDERER=opentui (plus QWEN_TUI_RENDERER_STRICT) for every
       # spawned CLI, so a boot that silently fell back to ink fails the leg
       # instead of passing as a false green. The version matches
-      # DEFAULT_BUN_VERSION in scripts/build-standalone-release.js (the Bun
-      # standalone archives ship) and is pinned, not 'latest', so an upstream
-      # Bun release cannot flip this gating leg red on its own.
+      # DEFAULT_BUN_VERSION in scripts/build-standalone-release.js (the
+      # --runtime=bun archive flavor) and is pinned, not 'latest', so an
+      # upstream Bun release cannot flip this gating leg red on its own.
       - name: 'Set up Bun'
         uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:

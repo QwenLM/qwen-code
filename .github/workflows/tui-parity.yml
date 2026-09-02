@@ -18,8 +18,8 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-      # Pinned to DEFAULT_BUN_VERSION (scripts/build-standalone-release.js),
-      # the Bun standalone archives ship: a gating parity check must not
+      # Pinned to DEFAULT_BUN_VERSION (scripts/build-standalone-release.js,
+      # the --runtime=bun archive flavor): a gating parity check must not
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:
@@ -49,8 +49,8 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-      # Pinned to DEFAULT_BUN_VERSION (scripts/build-standalone-release.js),
-      # the Bun standalone archives ship: a gating parity check must not
+      # Pinned to DEFAULT_BUN_VERSION (scripts/build-standalone-release.js,
+      # the --runtime=bun archive flavor): a gating parity check must not
       # silently follow 'latest'.
       - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2.2.0
         with:

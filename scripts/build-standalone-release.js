@@ -57,10 +57,10 @@ const RELEASE_TARGETS = [
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
 
-// Temporary OpenTUI preview: standalone archives ship the Bun runtime by
-// default because the OpenTUI renderer needs bun:ffi (Node without FFI falls
-// back to ink). Pass --runtime=node to restore classic Node.js packaging.
-const DEFAULT_RUNTIME = 'bun';
+// Classic Node.js packaging stays the default. --runtime=bun opts into the
+// temporary OpenTUI preview (the renderer needs bun:ffi; Node without FFI
+// falls back to ink).
+const DEFAULT_RUNTIME = 'node';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 
@@ -125,9 +125,9 @@ async function main() {
     await downloadFile(`${runtimeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
     const nativeModulesDir = stageClipboardPackages(runtimeDir);
-    // Only the bun runtime consumes the staged OpenTUI packages; the
-    // --runtime=node escape hatch must not install them (nor fail on a
-    // missing lockfile entry) at all.
+    // Only the bun runtime consumes the staged OpenTUI packages; the classic
+    // Node packaging must not install them (nor fail on a missing lockfile
+    // entry) at all.
     const opentuiModulesDir =
       runtime === 'bun' ? stageOpenTuiPackages(runtimeDir) : undefined;
 
@@ -486,8 +486,8 @@ Options:
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
-  --runtime RUNTIME      Runtime to bundle: "bun" (default, temporary OpenTUI
-                         preview) or "node" (classic packaging).
+  --runtime RUNTIME      Runtime to bundle: "node" (classic packaging) or
+                         "bun" (temporary OpenTUI preview).
   --bun-version VERSION  Bun version to download. Defaults to ${DEFAULT_BUN_VERSION}.
 `);
 }
