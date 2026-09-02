@@ -383,7 +383,14 @@ export function updateConnectionFromDaemonEvent(
           titleSource:
             displayName && (titleSource === 'manual' || titleSource === 'auto')
               ? titleSource
-              : undefined,
+              : // A metadata event that echoes the unchanged name without an
+                // explicit provenance (the bridge's pr-only publish) does not
+                // change the title, so it must not strip the provenance the
+                // `/clear` carry reads. Only a changed name of unknown
+                // provenance resets it.
+                displayName && displayName === current.displayName
+                ? current.titleSource
+                : undefined,
         }));
       }
       break;
