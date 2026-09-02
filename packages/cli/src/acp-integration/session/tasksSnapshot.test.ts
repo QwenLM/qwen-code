@@ -188,14 +188,14 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(snapshot.tasks).toEqual([]);
   });
 
-  it('exposes phase visits and dispatch dependencies from the workflow registry', () => {
+  it('uses the saved name before metadata is available and exposes the workflow graph', () => {
     const workflow = {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
       toolUseId: 'workflow-call-1',
-      description: 'Review and fix',
-      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      description: 'wf_graph',
+      meta: null,
       status: 'running',
       startTime: 1_000,
       isBackgrounded: true,

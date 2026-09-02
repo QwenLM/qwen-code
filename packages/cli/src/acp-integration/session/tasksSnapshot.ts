@@ -136,7 +136,11 @@ function serializeWorkflowTask(
     ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRunId', entry.sourceRunId),
     ...optionalField('startMode', entry.startMode),
-    label: entry.meta?.name ?? entry.description ?? entry.runId,
+    label:
+      entry.meta?.name ??
+      entry.workflowName ??
+      entry.description ??
+      entry.runId,
     description: entry.meta?.description ?? entry.description,
     status: entry.status,
     startTime: entry.startTime,
