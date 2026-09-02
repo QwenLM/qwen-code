@@ -29,6 +29,10 @@ import {
   useRef,
   useState,
 } from 'react';
+// Must evaluate before '@opentui/core': the asset-root side effect has to be
+// in place before @opentui/core's module evaluation resolves the native
+// library path (see opentui-assets.ts).
+import './opentui-assets.js';
 import {
   createCliRenderer,
   type CliRenderer,
