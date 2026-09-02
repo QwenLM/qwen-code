@@ -565,9 +565,10 @@ describe('release workflow', () => {
 
   it('passes --retry unless the operator switched it off', () => {
     // The flag reaches every workspace's vitest, where a command line option
-    // outranks the config. Passing --retry=0 on stable releases would switch
-    // off a workspace's own retry (packages/sdk-typescript) on this lane
-    // alone, so the stable path must omit the flag rather than zero it.
+    // outranks the config. Every schedule now retries by default; the only
+    // way off is the operator sentinel, and it must omit the flag rather
+    // than zero it — --retry=0 would switch off a workspace's own retry
+    // (packages/sdk-typescript) on this lane alone.
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );

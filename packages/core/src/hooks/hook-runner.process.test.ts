@@ -14,10 +14,14 @@ import { HookRunner } from './hookRunner.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookInput } from './types.js';
 
-// Every test here spawns real `node --import=tsx/esm` processes and then
-// waits on a wall-clock deadline. Process startup is not something a smarter
-// wait can speed up, so on a shared runner these deadlines are a coin flip
-// rather than a signal: size them for the busiest host, not the median one.
+// The tests here spawn real processes — `node --import=tsx/esm` where the
+// fixture imports HookRunner's TypeScript source, plain node over `node:`
+// builtins otherwise — and then wait on a wall-clock deadline. Process
+// startup is not something a smarter wait can speed up, so on a shared
+// runner these deadlines are a coin flip rather than a signal: size them for
+// the busiest host, not the median one. The budgets below are sized for the
+// tsx path, which pays seconds of loader startup the plain-node fixtures do
+// not, so they are generous rather than tight for those.
 // A genuine hang still fails, just later. The per-test timeouts below are
 // widened to match; they stay numeric literals so the call shape, and the
 // diff, stay unchanged.
