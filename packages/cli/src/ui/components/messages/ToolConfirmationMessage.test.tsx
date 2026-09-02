@@ -607,6 +607,40 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+
+      const props = {
+        confirmationDetails: editConfirmationDetails,
+        config: mockConfig,
+        availableTerminalHeight: 30,
+        contentWidth: 80,
+      };
+      const { lastFrame, rerender } = renderWithProviders(
+        <ToolConfirmationMessage {...props} />,
+        {
+          settings: {
+            merged: { general: { preferredEditor: 'vscode' } },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+
+      rerender(
+        <ToolConfirmationMessage {...props} availableTerminalHeight={31} />,
+      );
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT show "Modify with external editor" when the configured editor is unavailable', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+      isEditorAvailableMock.mockReturnValueOnce(false);
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -622,7 +656,8 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
-      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
     it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
