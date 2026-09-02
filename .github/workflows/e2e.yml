@@ -214,12 +214,13 @@ jobs:
 
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
               mkdir -p "${HOME}/.cache/qwen-code-ci"
+              daemon_lock="${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon-v2.lock"
               exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
               if ! flock --wait 1800 8; then
                 echo "::error::docker build coordinator lock not acquired within 30 minutes"
                 exit 1
               fi
-              exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+              exec 9>"$daemon_lock"
               if ! flock --shared --wait 1800 9; then
                 echo "::error::docker daemon read lock not acquired within 30 minutes"
                 exit 1
@@ -243,8 +244,10 @@ jobs:
             sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
             export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-              flock --shared 9
+              flock --unlock 9
+              exec 9>&-
               flock --unlock 8
+              exec 8>&-
             fi
           fi
 
@@ -265,7 +268,21 @@ jobs:
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            run_docker_shard() {
+              npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            }
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              export -f run_docker_shard
+              set +e
+              flock --conflict-exit-code 75 --shared --wait 1800 --close "$daemon_lock" bash -c run_docker_shard
+              test_rc=$?
+              set -e
+              if [ "$test_rc" -eq 75 ]; then
+                echo "::error::docker daemon read lock not acquired within 30 minutes"
+              fi
+              exit "$test_rc"
+            fi
+            run_docker_shard
           else
             run_shard() {
               QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
@@ -307,10 +324,14 @@ jobs:
           ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
-          exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
-          if flock --nonblock 9; then
+          daemon_lock="${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon-v2.lock"
+          prune_images() {
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
             docker image prune --force --filter 'until=24h' || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
+          }
+          export -f prune_images
+          if flock --nonblock --close "$daemon_lock" bash -c prune_images; then
+            :
           else
             echo "Docker cleanup skipped because the shared daemon is active"
           fi

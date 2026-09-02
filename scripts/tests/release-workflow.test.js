@@ -1262,7 +1262,7 @@ describe('release workflow', () => {
     );
     expect(testStep.run).toContain('flock --wait 1800 8');
     expect(testStep.run).toContain(
-      'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
+      'daemon_lock="${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon-v2.lock"',
     );
     expect(testStep.run).toContain('-release-${sandbox_revision}');
     expect(testStep.run).toContain('--no-prune -i "$sandbox_image"');
@@ -1270,7 +1270,11 @@ describe('release workflow', () => {
       'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
     );
     expect(testStep.run).toContain('flock --shared --wait 1800 9');
-    expect(testStep.run).toContain('flock --shared 9');
+    expect(testStep.run).toContain('exec 9>&-');
+    expect(testStep.run).toContain('exec 8>&-');
+    expect(testStep.run).toContain(
+      'flock --conflict-exit-code 75 --shared --wait 1800 --close "$daemon_lock"',
+    );
     expect(testStep.run).toContain('until flock --nonblock 9');
     expect(testStep.run).toContain('integration-tests cli');
     expect(testStep.run).toContain('integration-tests interactive');

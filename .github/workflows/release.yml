@@ -724,12 +724,13 @@ jobs:
 
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
             mkdir -p "${HOME}/.cache/qwen-code-ci"
+            daemon_lock="${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon-v2.lock"
             exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
             if ! flock --wait 1800 8; then
               echo "::error::docker build coordinator lock not acquired within 30 minutes"
               exit 1
             fi
-            exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+            exec 9>"$daemon_lock"
             if ! flock --shared --wait 1800 9; then
               echo "::error::docker daemon read lock not acquired within 30 minutes"
               exit 1
@@ -747,14 +748,30 @@ jobs:
           sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
           export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-            flock --shared 9
+            flock --unlock 9
+            exec 9>&-
             flock --unlock 8
+            exec 8>&-
           fi
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          run_docker_tests() {
+            QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
+            QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          }
+          if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+            export -f run_docker_tests
+            set +e
+            flock --conflict-exit-code 75 --shared --wait 1800 --close "$daemon_lock" bash -c run_docker_tests
+            test_rc=$?
+            set -e
+            if [ "$test_rc" -eq 75 ]; then
+              echo "::error::docker daemon read lock not acquired within 30 minutes"
+            fi
+            exit "$test_rc"
+          fi
+          run_docker_tests
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'

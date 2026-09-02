@@ -49,7 +49,7 @@ describe('e2e workflow', () => {
       );
       expect(runStep.run).toContain('flock --wait 1800 8');
       expect(runStep.run).toContain(
-        'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
+        'daemon_lock="${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon-v2.lock"',
       );
       expect(runStep.run).toContain('flock --shared --wait 1800 9');
       expect(runStep.run).toContain(
@@ -86,14 +86,25 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
-    it('keeps the shared lock continuously through concurrent tests', () => {
+    it('keeps the shared lock out of test descendants', () => {
       const imageIdIndex = runStep.run.indexOf('sandbox_image_id=');
-      const downgradeIndex = runStep.run.indexOf('flock --shared 9');
-      const testIndex = runStep.run.indexOf('vitest run');
+      const releaseIndex = runStep.run.indexOf('exec 9>&-');
+      const testLockIndex = runStep.run.indexOf(
+        'flock --conflict-exit-code 75 --shared --wait 1800 --close "$daemon_lock"',
+      );
+      const testIndex = runStep.run.indexOf('bash -c run_docker_shard');
       expect(imageIdIndex).toBeGreaterThanOrEqual(0);
-      expect(downgradeIndex).toBeGreaterThan(imageIdIndex);
-      expect(testIndex).toBeGreaterThan(downgradeIndex);
+      expect(releaseIndex).toBeGreaterThan(imageIdIndex);
+      expect(testLockIndex).toBeGreaterThan(releaseIndex);
+      expect(testIndex).toBeGreaterThan(testLockIndex);
       expect(runStep.run).toContain('until flock --nonblock 9');
+      expect(runStep.run).toContain('exec 8>&-');
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Prune dangling docker images',
+      );
+      expect(cleanupStep.run).toContain(
+        'flock --nonblock --close "$daemon_lock"',
+      );
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
@@ -201,21 +212,14 @@ describe('e2e workflow', () => {
       expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
         1,
       );
-      // Structure, not just count: wrapping the docker command in a
-      // function and calling it twice keeps the literal count at one. The
-      // docker leg defines its own helper functions, so match by brace
-      // depth rather than any earlier definition: every `${...}` brace in
-      // the script is balanced, leaving the command at depth zero unless
-      // something wraps it.
-      const commandIndex = runStep.run.indexOf(
-        'QWEN_SANDBOX=docker vitest run',
+      const lockedCallIndex = runStep.run.indexOf(
+        'bash -c run_docker_shard',
       );
-      let depth = 0;
-      for (const ch of runStep.run.slice(0, commandIndex)) {
-        if (ch === '{') depth += 1;
-        if (ch === '}') depth -= 1;
-      }
-      expect(depth).toBe(0);
+      const selfHostedExitIndex = runStep.run.indexOf('exit "$test_rc"');
+      const hostedCallIndex = runStep.run.lastIndexOf('\n  run_docker_shard');
+      expect(lockedCallIndex).toBeGreaterThanOrEqual(0);
+      expect(selfHostedExitIndex).toBeGreaterThan(lockedCallIndex);
+      expect(hostedCallIndex).toBeGreaterThan(selfHostedExitIndex);
     });
   });
 
