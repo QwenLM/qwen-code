@@ -122,3 +122,17 @@ export function parseArgs(argv, definitions) {
 
   return args;
 }
+
+/**
+ * Escapes a value for a GitHub Actions workflow command payload.
+ *
+ * `%` goes first: escaping CR/LF before it would re-escape the `%` this
+ * function just introduced. Leaving either unescaped lets a value carrying a
+ * newline close the command and forge a second one.
+ */
+export function escapeWorkflowCommand(text) {
+  return String(text)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A');
+}

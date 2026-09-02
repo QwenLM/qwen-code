@@ -4,10 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { appendFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   classifyRunOutput,
   createRunClassifier,
@@ -111,6 +121,27 @@ describe('classifyRunOutput', () => {
   });
 });
 
+describe('classifyRunOutput — what must not look like a failure', () => {
+  it('does not read a passing test whose name contains FAIL as a failure', () => {
+    // A set flag suppresses the annotation, so a false positive here silently
+    // undoes the whole point of the script under an innocuous test name.
+    const green = [
+      ' ✓ src/ui/Banner.test.tsx (3 tests) 4ms',
+      '   ✓ Banner > renders FAIL banner for an expired token',
+      '      Tests  3 passed (3)',
+    ].join('\n');
+    expect(classifyRunOutput(green).hasFailingTests).toBe(false);
+  });
+
+  it('strips colour before reading a failed count', () => {
+    // Discriminating on purpose: the count line only matches once the colour
+    // codes are gone, so this goes red if the ANSI stripping is removed.
+    const coloured =
+      ' Test Files \u001b[31m2 failed\u001b[39m | 82 passed (84)';
+    expect(classifyRunOutput(coloured).hasFailingTests).toBe(true);
+  });
+});
+
 describe('createRunClassifier', () => {
   // The run is classified as it streams, so the wrapper never holds a
   // multi-megabyte log in memory outside a process that already runs under a
@@ -198,6 +229,116 @@ describe('escapeAnnotation', () => {
   });
 });
 
+const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+// The stub is a POSIX shell script and the entry is spawned directly, so these
+// stay on POSIX; Linux CI is the authoritative coverage for the release lane,
+// which is Linux-only.
+describe.skipIf(process.platform === 'win32')('CLI entry', () => {
+  let dir;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), 'release-wrapper-'));
+  });
+
+  /**
+   * Copies the wrapper (and the utils it imports) beside each other under
+   * `home`, puts a stub `npm` recording argv on PATH, and runs the wrapper the
+   * way the workflow step does.
+   */
+  function runEntry(home, { exitCode = 0, output = '' } = {}) {
+    mkdirSync(home, { recursive: true });
+    for (const name of [
+      'run-release-workspace-tests.js',
+      'release-script-utils.js',
+    ]) {
+      copyFileSync(path.join(SCRIPTS_DIR, name), path.join(home, name));
+    }
+    const binDir = path.join(dir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const stub = path.join(binDir, 'npm');
+    writeFileSync(
+      stub,
+      `#!/bin/sh\nprintf '%s\\0' "$@"\nprintf '%s' ${JSON.stringify(output)}\nexit ${exitCode}\n`,
+    );
+    chmodSync(stub, 0o755);
+
+    return spawnSync(
+      process.execPath,
+      [
+        path.join(home, 'run-release-workspace-tests.js'),
+        '--',
+        '--shard=1/3',
+        '--passWithNoTests',
+      ],
+      {
+        env: { ...process.env, PATH: `${binDir}:${process.env['PATH']}` },
+        encoding: 'utf8',
+      },
+    );
+  }
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('spawns the suite and forwards its exit code', () => {
+    const result = runEntry(path.join(dir, 'plain'), { exitCode: 7 });
+
+    // Exactly one `--`, in the position npm needs it: the entry drops only
+    // the separator npm itself consumed.
+    expect(result.stdout.split('\0').slice(0, 5)).toEqual([
+      'run',
+      'test:release:workspaces',
+      '--',
+      '--shard=1/3',
+      '--passWithNoTests',
+    ]);
+    expect(result.status).toBe(7);
+  });
+
+  it('still spawns the suite from a path containing a space', () => {
+    // The guard used to compare import.meta.url against a hand-built
+    // `file://` + argv[1]: false for any path with a space, and a false guard
+    // means the wrapper exits 0 having run nothing at all.
+    const result = runEntry(path.join(dir, 'spaced dir'), { exitCode: 3 });
+
+    expect(result.stdout).toContain('test:release:workspaces');
+    expect(result.status).toBe(3);
+  });
+
+  it('does not spawn anything when the module is only imported', async () => {
+    // The suite imports these functions; a guard that fired on import would
+    // launch the whole release suite inside the test run.
+    const home = path.join(dir, 'imported');
+    mkdirSync(home, { recursive: true });
+    for (const name of [
+      'run-release-workspace-tests.js',
+      'release-script-utils.js',
+    ]) {
+      copyFileSync(path.join(SCRIPTS_DIR, name), path.join(home, name));
+    }
+    const probe = path.join(home, 'probe.mjs');
+    writeFileSync(
+      probe,
+      "import './run-release-workspace-tests.js';\nprocess.stdout.write('imported');\n",
+    );
+    const binDir = path.join(dir, 'bin-import');
+    mkdirSync(binDir, { recursive: true });
+    const stub = path.join(binDir, 'npm');
+    writeFileSync(stub, '#!/bin/sh\nprintf spawned\n');
+    chmodSync(stub, 0o755);
+
+    const result = spawnSync(process.execPath, [probe], {
+      env: { ...process.env, PATH: `${binDir}:${process.env['PATH']}` },
+      encoding: 'utf8',
+    });
+
+    expect(result.stdout).toBe('imported');
+    expect(result.stdout).not.toContain('spawned');
+  });
+});
+
 describe('runAndReport', () => {
   // scripts/tests/test-setup.ts mocks appendFileSync repo-wide so script tests
   // cannot append to a real GITHUB_STEP_SUMMARY, so the job summary is asserted
@@ -262,6 +403,19 @@ describe('runAndReport', () => {
       summaryPath,
       expect.stringContaining('Workspace tests exited 1 with no failing test'),
     );
+  });
+
+  it('treats a signal-killed suite as a failure, not a pass', async () => {
+    // A vitest process OOM-killed on the release lane closes with code null.
+    // Reading that as 0 would ship a release on tests that never finished.
+    const exitCode = await runAndReport({
+      command: process.execPath,
+      args: ['-e', 'process.kill(process.pid, "SIGKILL");'],
+      stdout,
+      stderr,
+    });
+
+    expect(exitCode).toBe(1);
   });
 
   it('stays quiet when tests failed', async () => {

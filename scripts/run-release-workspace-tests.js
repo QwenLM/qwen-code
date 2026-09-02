@@ -23,6 +23,7 @@
 
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { escapeWorkflowCommand, isMainModule } from './release-script-utils.js';
 
 // Matching ESC is the point; the GitHub log API also renders it as a literal
 // "^[" pair, and both forms have to come out before the text is scanned.
@@ -32,7 +33,11 @@ const ANSI_RE = /(?:\x1b|\^\[)\[[0-9;]*m/g;
 // character opens the per-error sections inside the block.
 const RULE_RE = /^[⎯\s]+$/;
 const UNHANDLED_START_RE = /Unhandled Errors?/;
-const FAIL_LINE_RE = /(^|\s)FAIL(\s|$)/;
+// Anchored: vitest prints its failure header at the start of the line. A
+// whitespace-bounded match anywhere would let a passing test whose NAME
+// contains FAIL ("renders FAIL banner for expired token") set the flag, and a
+// set flag suppresses the annotation this script exists to emit.
+const FAIL_LINE_RE = /^\s*FAIL(\s|$)/;
 const FAILED_COUNT_RE = /^\s*(Test Files|Tests)\s+\d+\s+failed/;
 const SUMMARY_RE = /^\s*(Test Files|Tests)\s+\S/;
 // The block is bounded so a pathological run cannot turn one annotation into
@@ -153,13 +158,13 @@ export function classifyRunOutput(text) {
   return classifier.finish();
 }
 
-/** Escapes a value for a GitHub Actions annotation payload. */
-export function escapeAnnotation(value) {
-  return String(value)
-    .replace(/%/g, '%25')
-    .replace(/\r/g, '%0D')
-    .replace(/\n/g, '%0A');
-}
+/**
+ * Escapes a value for a GitHub Actions annotation payload.
+ *
+ * The escape contract lives once, in release-script-utils; two copies under
+ * two names drift the moment one of them is corrected.
+ */
+export const escapeAnnotation = escapeWorkflowCommand;
 
 /**
  * Builds what to say about a finished run. Returns null when the run needs no
@@ -234,6 +239,10 @@ export async function runAndReport({
     const child = spawn(command, args, {
       env,
       stdio: ['inherit', 'pipe', 'pipe'],
+      // Node >= 22 refuses to spawn a .cmd shim without a shell (the
+      // CVE-2024-27980 hardening, whose opt-out the 22 line removed), and the
+      // repo pins Node 22. scripts/dev.js spawns its shims the same way.
+      shell: process.platform === 'win32',
     });
     const consume = (chunk, sink, key) => {
       pending[key] = classifier.write(chunk.toString('utf8'), pending[key]);
@@ -274,7 +283,12 @@ export async function runAndReport({
   return exitCode;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `import.meta.url` is a percent-encoded WHATWG URL, so comparing it against a
+// hand-built `file://` + argv[1] is false for any checkout path holding a
+// space, `#`, `%` or non-ASCII byte, and false on Windows always. A false
+// guard skips this block entirely: the wrapper exits 0 having spawned
+// nothing, which is the silent green this script exists to prevent.
+if (isMainModule(import.meta.url)) {
   const passthrough = process.argv.slice(2).filter((arg, index, all) => {
     // `node script.js -- --shard=1/3` keeps npm's own separator out of the way;
     // drop only the leading one so a later `--` still reaches vitest.
