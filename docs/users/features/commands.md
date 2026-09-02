@@ -846,9 +846,12 @@ exchange tokens automatically through the same registry records they
 discover each other by. Sessions from a build without token support can
 receive from a newer one, but their sends to it are dropped.
 
-A session exports its own inbox address and token to child processes as
+A session exports its own inbox address and a token to child processes as
 `QWEN_CODE_MESSAGING_SOCKET` and `QWEN_CODE_MESSAGING_TOKEN`, so a script
-or hook the session runs can send a message back into it:
+or hook the session runs can send a message back into it. This is a
+second, _child_ token that is never published anywhere: only processes
+the session started can hold it, so a message that arrives with it is
+recognized as the session's own rather than as another session's.
 
 ```bash
 { printf '%s\n' \
@@ -861,7 +864,12 @@ Give every injection a fresh `msgId`. The receiving gate remembers the
 ids it has already settled, so a hook that reuses one is delivered the
 first time and silently deduplicated on every run after that.
 
-An injected message goes through the same inbound gate as one from
-another session: it is marked as not coming from the user, and
-`agents.crossSessionInbound` (or the mode-parity default) decides whether
-it is delivered or held for review.
+An injected message still goes through the inbound gate and is marked as
+not coming from the user, but the gate knows it came from the session's
+own process: under the mode-parity default it is delivered without review
+(a peer in the same position would be held), while an explicit
+`agents.crossSessionInbound` of `hold` or `refuse` applies to it as to
+anything else. The model sees it as
+`<cross_session_message from="own process" origin="own-process">` with a
+notice that it came from a script or hook the session ran, not from the
+user.

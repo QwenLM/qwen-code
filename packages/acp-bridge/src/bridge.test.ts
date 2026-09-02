@@ -56,6 +56,7 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
+import { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -12748,6 +12749,10 @@ describe('createAcpSessionBridge', () => {
     failures[1]!.resolve(
       Object.assign(new Error('bounded transport queue failed'), {
         code: 'ndjson_queue_limit_exceeded',
+        budget: 'INVALID budget <script>',
+        maxQueuedBytes: 1.9,
+        requiredBytes: -5,
+        availableBytes: Number.NaN,
       }),
     );
     await expect(restore).rejects.toBeInstanceOf(BridgeChannelClosedError);
@@ -12764,8 +12769,101 @@ describe('createAcpSessionBridge', () => {
             'ndjson_frame_too_large',
         }),
       );
+      expect(event).toHaveBeenCalledWith(
+        'channel.exited',
+        expect.objectContaining({
+          'qwen-code.daemon.channel.transport_error_code':
+            'ndjson_queue_limit_exceeded',
+          'qwen-code.daemon.channel.transport_error_detail':
+            'unknown:required=0:available=?:cap=1',
+        }),
+      );
     });
+    const frameExitAttributes = event.mock.calls.find(
+      ([name, attributes]) =>
+        name === 'channel.exited' &&
+        (attributes as Record<string, unknown>)[
+          'qwen-code.daemon.channel.transport_error_code'
+        ] === 'ndjson_frame_too_large',
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(frameExitAttributes).not.toHaveProperty(
+      'qwen-code.daemon.channel.transport_error_detail',
+    );
     bridge.killAllSync();
+  });
+
+  it('records which budget fired on a transport-guard channel exit', async () => {
+    const neverPrompt = deferred<never>();
+    const handle = makeChannel({ promptImpl: () => neverPrompt.promise });
+    const failure = deferred<unknown>();
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+      kill: () => deferred<never>().promise,
+    };
+    const event = vi.fn();
+    const channelLifecycle = vi.fn();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event,
+      injectPromptContext: (request) => request,
+      metrics: {
+        sessionLifecycle: vi.fn(),
+        channelLifecycle,
+        promptQueueWait: vi.fn(),
+        promptDuration: vi.fn(),
+        cancelled: vi.fn(),
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(first.sessionId, {
+        sessionId: first.sessionId,
+        prompt: [{ type: 'text', text: 'stay pending' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      failure.resolve(
+        new NdJsonQueueLimitError(
+          'prepared_response',
+          256,
+          67108864,
+          262144,
+          0,
+        ),
+      );
+      await expect(prompt).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      handle.crash({ exitCode: null, signalCode: 'SIGTERM' });
+      await vi.waitFor(() =>
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              'ndjson_queue_limit_exceeded',
+            'qwen-code.daemon.channel.transport_error_detail':
+              'prepared_response:required=262144:available=0:cap=67108864',
+          }),
+        ),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'transport_detail=prepared_response:required=262144:available=0:cap=67108864',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+      await bridge.shutdown();
+    }
   });
 
   it('does not publish a channel whose transport fails during initialize', async () => {
@@ -21327,6 +21425,7 @@ describe('createAcpSessionBridge', () => {
         modelServiceId: 'qwen-route:v1:abcdefghijklmnop',
       });
       expect(session.attached).toBe(false);
+      expect(session.modelApplied).toBe(true);
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
       expect(setModelCalls[0]?.modelId).toBe('qwen-route:v1:abcdefghijklmnop');
@@ -21355,8 +21454,9 @@ describe('createAcpSessionBridge', () => {
 
     it('does NOT call setSessionModel when modelServiceId is omitted', async () => {
       const { bridge, setModelCalls } = setup();
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
+      expect(session.modelApplied).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -21380,6 +21480,7 @@ describe('createAcpSessionBridge', () => {
         modelServiceId: 'definitely-not-a-real-model',
       });
       expect(session.attached).toBe(false);
+      expect(session.modelApplied).toBe(false);
       expect(bridge.sessionCount).toBe(1);
       // The model_switch_failed event must be on the bus for any
       // subscriber that subscribes with `lastEventId: 0` (replay).
@@ -28896,9 +28997,98 @@ describe('createAcpSessionBridge', () => {
         (e) => e.type === 'session_metadata_updated',
       );
       expect(metaEvent).toBeDefined();
-      expect((metaEvent?.data as { displayName: string }).displayName).toBe(
-        'Test Session',
+      expect(metaEvent?.data).toMatchObject({
+        displayName: 'Test Session',
+        titleSource: 'manual',
+      });
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('uses automatic provenance for programmatic renames', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const event of sub) events.push(event);
+      })();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+      await vi.waitFor(() =>
+        expect(
+          events.find((event) => event.type === 'session_metadata_updated')
+            ?.data,
+        ).toMatchObject({
+          displayName: 'Voice chat',
+          titleSource: 'auto',
+        }),
       );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('rejects an empty displayName instead of clearing only the live entry', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Payments bug',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      // A clear is never persisted (the `sessionTitle` persist skips
+      // falsy names), so accepting it would let the stale manual record
+      // resurface through the session-list merge and the `/clear` carry.
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, { displayName: '' }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: '   ',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await new Promise((r) => setImmediate(r));
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        displayName: 'Payments bug',
+      });
+      expect(
+        events.filter((e) => e.type === 'session_metadata_updated'),
+      ).toHaveLength(0);
 
       await bridge.closeSession(session.sessionId);
       await drain;

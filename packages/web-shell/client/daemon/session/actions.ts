@@ -194,7 +194,7 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getConnection: () => DaemonConnectionState;
@@ -283,6 +283,7 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
+    delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
@@ -776,6 +777,7 @@ export function createDaemonSessionActions({
           standaloneSession: undefined,
           clientId: undefined,
           displayName: undefined,
+          titleSource: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -1482,6 +1484,7 @@ export function createDaemonSessionActions({
     async createSession(options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      modelServiceId?: string;
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
       worktree?: { slug?: string };
@@ -1538,6 +1541,14 @@ export function createDaemonSessionActions({
             'Standalone session creation does not support sourceType, worktree, or branch options',
           );
         }
+        if (
+          targetSessionContext?.kind !== 'standalone' &&
+          options?.modelServiceId !== undefined
+        ) {
+          throw new Error(
+            'Per-call modelServiceId is only supported for standalone session creation',
+          );
+        }
         // Fold the initial approval mode into the create request so the daemon
         // applies it atomically at spawn (`POST /session` →
         // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
@@ -1565,6 +1576,9 @@ export function createDaemonSessionActions({
           if (targetSessionContext?.kind === 'standalone') {
             const nextClient = await trackCreate(
               createDetachedStandaloneSession({
+                ...(options?.modelServiceId !== undefined
+                  ? { modelServiceId: options.modelServiceId }
+                  : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
@@ -1599,6 +1613,9 @@ export function createDaemonSessionActions({
         const trackedCreate = trackCreate(
           targetSessionContext?.kind === 'standalone'
             ? createDetachedStandaloneSession({
+                ...(options?.modelServiceId !== undefined
+                  ? { modelServiceId: options.modelServiceId }
+                  : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
