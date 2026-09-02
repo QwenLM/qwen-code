@@ -135,6 +135,37 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
 | IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
 
+## SWE-bench Verified
+
+### Evaluation Configuration
+
+| Configuration | Value |
+| ------------- | ----- |
+| Dataset | `princeton-nlp/SWE-bench_Verified`, 500 cases |
+| Runs | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions |
+| Harness / Scaffold | `Qwen Code` |
+| Model | `Qwen 3.8 Max` |
+| Sampling | `temperature=1`, `top_p=0.95` |
+| Thinking / Reasoning | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high` |
+| Context / Output Limits | `context_1m=true`, `model_context_length=1,000,000`, `max_tokens=64,000`, `model_max_tokens=65,535` |
+| Harness Limits | `max_iterations=500`, `runtime_timeout_sec=7,200`, `agent_timeout_multiplier=3.0` |
+
+### Scores by Qwen Code Version
+
+| Version | Avg Score | Pass Rate | pass@3 | pass^3 |
+| ------- | --------: | --------: | -----: | -----: |
+| 0.0.14 | **77.80%** | 84.6% | 84.6% | 69.2% |
+| 0.1.0 | **76.73%** | 84.6% | 84.6% | 68.0% |
+| 0.5.0 | **76.60%** | 83.0% | 83.0% | 68.4% |
+| 0.10.0 | **76.47%** | 84.4% | 84.4% | 67.4% |
+| 0.15.0 | **77.67%** | 84.6% | 84.6% | 68.6% |
+| 0.19.0 | **76.40%** | 85.0% | 85.0% | 65.8% |
+| 0.22.0 | **77.33%** | 84.4% | 84.4% | 68.0% |
+
+### Avg Score Trend
+
+![Qwen Code version Avg Score trend](./.github/assets/qwen-code-version-score-trend.svg)
+
 ## Ecosystem
 
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
