@@ -14,8 +14,9 @@
  * Also covers #10148 -- delivery must not depend on the keyed composer
  * being mounted: queued follow-ups are flushed when the agent settles to
  * idle even while the user is on another teammate tab, and the queue is
- * dropped when the agent reaches a terminal status (it can never be
- * delivered then, and a permanent "queued" display would remain otherwise).
+ * dropped only at COMPLETED/CANCELLED (delivery is genuinely impossible
+ * there; a FAILED agent still processes queued follow-ups — core's
+ * enqueueMessage restarts the run loop — so those must be delivered).
  */
 
 import { render } from 'ink-testing-library';
@@ -221,32 +222,49 @@ describe('Agent View queued follow-ups (#10069, #10148)', () => {
     expect(app.lastFrame()).not.toContain('follow-up while away');
   });
 
-  it('drops the queue when the agent reaches a terminal status (#10148)', async () => {
-    streamingByAgent.set(agentA, BUSY);
-    const app = await renderWithView('agent-a');
+  // Only COMPLETED/CANCELLED are terminal for delivery: a FAILED agent's
+  // enqueueMessage restarts the run loop (core agent-interactive.ts), so
+  // its queued follow-ups must be delivered, not dropped.
+  it.each([
+    { status: AgentStatus.COMPLETED, delivered: false },
+    { status: AgentStatus.CANCELLED, delivered: false },
+    { status: AgentStatus.FAILED, delivered: true },
+  ])(
+    'handles the queue when the agent reaches $status (#10148)',
+    async ({ status, delivered }) => {
+      streamingByAgent.set(agentA, BUSY);
+      const app = await renderWithView('agent-a');
 
-    submitCapture.current!('never delivered');
-    await switchTo(app, 'agent-a');
-    expect(app.lastFrame()).toContain('never delivered');
+      submitCapture.current!('queued at terminal');
+      await switchTo(app, 'agent-a');
+      expect(app.lastFrame()).toContain('queued at terminal');
 
-    // A fails while the user is on B; queued follow-ups can never arrive.
-    await switchTo(app, 'agent-b');
-    streamingByAgent.set(agentA, {
-      status: AgentStatus.FAILED,
-      streamingState: StreamingState.Idle,
-      isInputActive: false,
-      elapsedTime: 0,
-      lastPromptTokenCount: 0,
-    });
-    await switchTo(app, 'agent-b');
+      // The agent reaches the terminal status while the user is on B.
+      await switchTo(app, 'agent-b');
+      streamingByAgent.set(agentA, {
+        status,
+        streamingState: StreamingState.Idle,
+        isInputActive: false,
+        elapsedTime: 0,
+        lastPromptTokenCount: 0,
+      });
+      await switchTo(app, 'agent-b');
 
-    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
+      if (delivered) {
+        expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+        expect(agentA.enqueueMessage).toHaveBeenCalledWith(
+          'queued at terminal',
+        );
+      } else {
+        expect(agentA.enqueueMessage).not.toHaveBeenCalled();
+      }
 
-    // The undeliverable queue must be dropped, not shown as "queued" forever.
-    await switchTo(app, 'agent-a');
-    expect(app.lastFrame()).not.toContain('never delivered');
-    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
-  });
+      // Either way the queue is cleared — no permanent "queued" display.
+      await switchTo(app, 'agent-a');
+      expect(app.lastFrame()).not.toContain('queued at terminal');
+      expect(agentA.enqueueMessage).toHaveBeenCalledTimes(delivered ? 1 : 0);
+    },
+  );
 
   it('joins multiple queued follow-ups into one prompt after a tab switch', async () => {
     streamingByAgent.set(agentA, BUSY);

@@ -25,7 +25,7 @@ import {
   useState,
 } from 'react';
 import {
-  isTerminalStatus,
+  AgentStatus,
   type AgentInteractive,
   type ApprovalMode,
   type Config,
@@ -168,9 +168,13 @@ function AgentQueueFlusher({ agentId }: { agentId: string }) {
   const flushedQueueRef = useRef<readonly string[] | null>(null);
 
   useEffect(() => {
-    if (status !== undefined && isTerminalStatus(status)) {
-      // The agent can never accept these messages now; drop them so the
-      // display doesn't show undeliverable "queued" follow-ups forever.
+    if (status === AgentStatus.COMPLETED || status === AgentStatus.CANCELLED) {
+      // COMPLETED/CANCELLED agents can never accept these messages (master
+      // abort tripped / agent shut down), so drop them — otherwise the
+      // display shows undeliverable "queued" follow-ups forever. FAILED is
+      // not terminal for delivery: enqueueMessage has no terminal guard and
+      // restarts the run loop (core agent-interactive.ts), so a failed
+      // agent still processes queued follow-ups — fall through and deliver.
       if (messageQueue.length > 0) {
         setAgentMessageQueue(agentId, []);
       }
