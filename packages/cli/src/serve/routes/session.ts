@@ -466,7 +466,19 @@ export function describePromptTurnFailure(err: unknown): string {
     return `[${err.name}] ${detail}`;
   }
   const code = extractErrorCode(err);
-  return code === undefined ? detail : `[code ${code}] ${detail}`;
+  let rendered = detail;
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    (rendered === '' || rendered === String(err))
+  ) {
+    try {
+      rendered = JSON.stringify(err) ?? rendered;
+    } catch {
+      // Keep the extracted detail for non-serializable rejections.
+    }
+  }
+  return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
 function parseTranscriptLimitQuery(

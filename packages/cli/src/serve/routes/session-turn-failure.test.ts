@@ -16,6 +16,21 @@ describe('describePromptTurnFailure', () => {
     );
   });
 
+  it('extracts data details from Error rejections carrying JSON-RPC data', () => {
+    const err = Object.assign(new Error('Internal error'), {
+      name: 'RequestError',
+      data: { details: 'session not found' },
+    });
+    expect(describePromptTurnFailure(err)).toBe(
+      '[RequestError] session not found',
+    );
+  });
+
+  it('keeps the Error name prefix over a code prefix', () => {
+    const err = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    expect(describePromptTurnFailure(err)).toBe('[Error] write EPIPE');
+  });
+
   it('extracts message and code from a bare JSON-RPC error object', () => {
     expect(
       describePromptTurnFailure({ code: -32603, message: 'Internal error' }),
@@ -54,11 +69,14 @@ describe('describePromptTurnFailure', () => {
       { code: 'EPIPE', message: 'write failed' },
       { data: 'provider closed the stream' },
       { message: 'partial' },
+      { code: -32603 },
+      {},
+      { message: '' },
     ];
     for (const candidate of candidates) {
-      expect(describePromptTurnFailure(candidate)).not.toContain(
-        '[object Object]',
-      );
+      const rendered = describePromptTurnFailure(candidate);
+      expect(rendered).not.toBe('');
+      expect(rendered).not.toContain('[object Object]');
     }
   });
 
