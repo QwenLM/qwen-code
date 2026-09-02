@@ -27,7 +27,7 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
       - name: 'Build cli'
-        run: 'npm run build --workspace packages/cli'
+        run: 'npm run build'
       - name: 'Component parity snapshots (ink vs opentui)'
         run: 'bash scripts/tui-parity/component-parity.sh'
 
@@ -55,6 +55,6 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
       - name: 'Build cli'
-        run: 'npm run build --workspace packages/cli'
+        run: 'npm run build'
       - name: 'OpenTUI no-flicker gate (0 clears, balanced DEC2026)'
         run: 'bash scripts/tui-parity/accept-noflicker.sh'
