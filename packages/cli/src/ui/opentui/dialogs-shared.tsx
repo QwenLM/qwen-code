@@ -184,6 +184,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   const numberBuffer = useRef('');
   const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Last items array this hook synced its cursor against (see the items
+  // re-sync below). Declared before the resync block because a view swap
+  // must count as a sync too.
+  const itemsRef = useRef(items);
+
   // Resync during render when the key changes (React's adjust-state-during-
   // render pattern): consumers that swap views over one mounted hook get
   // the fresh initialIndex instead of the mount-time snapshot.
@@ -197,6 +202,9 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       numberTimer.current = null;
     }
     numberBuffer.current = '';
+    // The swapped-in items are already accounted for by this reset; the
+    // key-follow below must not override it with the previous view's key.
+    itemsRef.current = items;
     const next = computeInitialActiveIndex(initialIndex, items);
     setActiveIndexState(next);
     setScrollOffset(
@@ -209,6 +217,32 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // double-invokes them) and React re-renders keep the ref current.
   const latestRef = useRef({ items, activeIndex, onSelect });
   latestRef.current = { items, activeIndex, onSelect };
+
+  // Ink parity: useSelectionList re-runs its INITIALIZE reducer on every
+  // items change — the cursor follows the active item's key when it
+  // survives the change and falls back to the initial index otherwise, so
+  // a shrinking list (uninstalling the last extension) never strands the
+  // cursor beyond the end where Enter would read items[activeIndex] ===
+  // undefined.
+  if (itemsRef.current !== items) {
+    const prevItems = itemsRef.current;
+    itemsRef.current = items;
+    const prevKey = prevItems[activeIndex]?.key;
+    const followed =
+      prevKey === undefined
+        ? -1
+        : items.findIndex((item) => item.key === prevKey);
+    if (followed !== activeIndex) {
+      const next =
+        followed >= 0
+          ? followed
+          : computeInitialActiveIndex(initialIndex, items);
+      setActiveIndexState(next);
+      setScrollOffset(
+        getSelectionScrollOffset(next, items.length, maxItemsToShow),
+      );
+    }
+  }
 
   useEffect(
     () => () => {
