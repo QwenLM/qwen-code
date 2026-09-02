@@ -231,6 +231,14 @@ export interface BridgeOptions {
    */
   sessionAttachmentsRoot?: string;
   /**
+   * Fallback root for reading session attachments stored before
+   * `sessionAttachmentsRoot` was reconfigured (e.g. the previous default
+   * directory). Writes always go to `sessionAttachmentsRoot`; reads and
+   * removes that miss there consult this root so existing attachments
+   * survive a root switch.
+   */
+  sessionAttachmentsFallbackRoot?: string;
+  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.

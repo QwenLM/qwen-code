@@ -895,6 +895,84 @@ describe('AcpBridge', () => {
     expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual(kinds);
   });
 
+  it('forwards a refined tool update without creating another response boundary', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-web-fetch',
+        kind: 'other',
+        title: 'web_fetch',
+        status: 'pending',
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-web-fetch',
+        kind: 'fetch',
+        title: 'WebFetch: weather',
+        status: 'in_progress',
+      },
+    });
+
+    expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual([
+      'other',
+      'fetch',
+    ]);
+    expect(responseBoundary).toHaveBeenCalledOnce();
+  });
+
+  it('ignores meta-only shell progress heartbeats', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-shell',
+        kind: 'execute',
+        title: 'Run shell',
+        status: 'in_progress',
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-shell',
+        status: 'in_progress',
+        _meta: {
+          toolName: 'run_shell_command',
+          shellProgress: { type: 'shell_progress', elapsedMs: 1_000 },
+        },
+      },
+    });
+
+    expect(toolCall).toHaveBeenCalledOnce();
+    expect(toolCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: 'execute', title: 'Run shell' }),
+    );
+    expect(responseBoundary).toHaveBeenCalledOnce();
+  });
+
   it('preserves text when tool calls are not pending', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

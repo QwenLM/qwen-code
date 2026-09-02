@@ -2,7 +2,7 @@
 
 ## Goal
 
-Expose agent progress consistently on both the inbound DingTalk message and the interactive response card without changing the card template or exposing tool details.
+Expose agent progress consistently on both the inbound DingTalk message and the interactive response card without changing the card template or exposing raw tool input, output, or reasoning.
 
 ## Lifecycle
 
@@ -31,9 +31,11 @@ The same lifecycle mapping drives a replaceable first line in the interactive re
 | `switch_mode`      | `switching` | `🔄 Switching mode` | `🔄 切换模式中` |
 | `other` or unknown | `working`   | `🛠️ Working`        | `🛠️ 处理中`     |
 
-The projection first exactly matches standard ACP kinds, then uses legacy and third-party Bridge aliases. `other` remains the final fallback. Reactions and active card bodies use the same localized phase label. Distinguishing ACP `Agent` from `Other` requires new protocol metadata; the current protocol normalizes both to `other`. This version does not change the tool-title display policy.
+The projection first exactly matches standard ACP kinds, then uses legacy and third-party Bridge aliases. `other` remains the final fallback. Reactions and active card bodies use the same localized phase label. Distinguishing ACP `Agent` from `Other` requires new protocol metadata; the current protocol normalizes both to `other`.
 
-The running card's `statusLine` contains only the configured model and elapsed time. On completion, the process line is removed from the body so only the final assistant response remains; the existing terminal state, model, and elapsed time stay in `statusLine`. Tool titles, descriptions, paths, commands, parameters, output, and model reasoning are never added to lifecycle events or card content.
+The running card may append the current lifecycle event's `title` to the phase line, for example `🌐 Fetching · WebFetch: latest news`. The title is collapsed to one line, capped at 60 Unicode code points, and escaped for DingTalk Markdown. It is presentation metadata supplied by ACP and is not derived from `rawInput` or `rawOutput`. Reactions remain phase-only. A kindless partial `tool_call_update`, including shell-progress heartbeats, is ignored by the local bridge so that it cannot clear or downgrade the current phase; a kindful update is forwarded without creating another response boundary.
+
+The running card's `statusLine` contains only the configured model and elapsed time. On completion, the process line is removed from the body so only the final assistant response remains; the existing terminal state, model, and elapsed time stay in `statusLine`. Tool descriptions, paths, commands, parameters, raw input, raw output, and model reasoning are never added to card content.
 
 Phase and terminal labels use the effective Qwen display language after environment override, configured-language selection, and `auto` system-language detection. Presentation language never changes the agent prompt or tool-call schema.
 

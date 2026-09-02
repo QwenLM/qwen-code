@@ -1,5 +1,7 @@
 # 钉钉工具类型精细阶段实施计划
 
+> 状态说明：后续产品评审批准了在活动卡片阶段行展示受限的工具 title，并要求最小化修复 `AcpBridge` partial heartbeat 回归。最终契约以 `docs/design/dingtalk-dynamic-lifecycle-tags.md` 为准；下文保留最初的分步计划和当时的范围判断，不能作为当前实现边界。
+
 > **供执行 Agent 使用：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐项执行本计划。所有步骤使用复选框（`- [ ]`）跟踪进度。
 
 **目标：** 将钉钉对标准 ACP 初始 `tool_call` 工具类型的粗粒度兜底展示改为精确、本地化的生命周期阶段，同时保留现有的最新状态优先机制和旧 Bridge 兼容性。
@@ -31,18 +33,18 @@
 
 ## 目标映射
 
-| ACP kind | 内部阶段 | 英文标签 | 中文标签 |
-| --- | --- | --- | --- |
-| `read` | `reading` | `📖 Reading` | `📖 读取中` |
-| `edit` | `editing` | `🛠️ Editing` | `🛠️ 编辑中` |
-| `delete` | `deleting` | `🗑️ Deleting` | `🗑️ 删除中` |
-| `move` | `moving` | `📦 Moving` | `📦 移动中` |
-| `search` | `searching` | `🔎 Searching` | `🔎 搜索中` |
-| `execute` | `running` | `🖥️ Running` | `🖥️ 执行中` |
-| `think` | `thinking` | `🤔 Thinking` | `🤔 思考中` |
-| `fetch` | `fetching` | `🌐 Fetching` | `🌐 获取中` |
-| `switch_mode` | `switching` | `🔄 Switching mode` | `🔄 切换模式中` |
-| `other` 或未知值 | `working` | `🛠️ Working` | `🛠️ 处理中` |
+| ACP kind         | 内部阶段    | 英文标签            | 中文标签        |
+| ---------------- | ----------- | ------------------- | --------------- |
+| `read`           | `reading`   | `📖 Reading`        | `📖 读取中`     |
+| `edit`           | `editing`   | `🛠️ Editing`        | `🛠️ 编辑中`     |
+| `delete`         | `deleting`  | `🗑️ Deleting`       | `🗑️ 删除中`     |
+| `move`           | `moving`    | `📦 Moving`         | `📦 移动中`     |
+| `search`         | `searching` | `🔎 Searching`      | `🔎 搜索中`     |
+| `execute`        | `running`   | `🖥️ Running`        | `🖥️ 执行中`     |
+| `think`          | `thinking`  | `🤔 Thinking`       | `🤔 思考中`     |
+| `fetch`          | `fetching`  | `🌐 Fetching`       | `🌐 获取中`     |
+| `switch_mode`    | `switching` | `🔄 Switching mode` | `🔄 切换模式中` |
+| `other` 或未知值 | `working`   | `🛠️ Working`        | `🛠️ 处理中`     |
 
 对于实际到达 DingTalk 层的生命周期事件，优先级保持不变：
 
@@ -201,9 +203,7 @@ expect(lifecyclePresentationPhase(toolEvent('delete', 'completed'))).toBe(
 expect(presentationPhaseLabel('fetching', 'zh-CN')).toBe('🌐 获取中');
 expect(presentationPhaseLabel('deleting', 'en-US')).toBe('🗑️ Deleting');
 expect(presentationPhaseLabel('moving', 'zh')).toBe('📦 移动中');
-expect(presentationPhaseLabel('switching', 'en')).toBe(
-  '🔄 Switching mode',
-);
+expect(presentationPhaseLabel('switching', 'en')).toBe('🔄 Switching mode');
 
 // 保留此前已支持的非标准 Bridge kind。
 expect(lifecyclePresentationPhase(toolEvent('run_shell_command'))).toBe(
@@ -409,6 +409,6 @@ git diff --check origin/main
 
 ## 明确延期项
 
-- 本地 `AcpBridge` 消费并补全 `tool_call_update`，使工具完成和失败阶段可以准确回到 `thinking` 或进入 `retrying`。
+- 完整按 `toolCallId` 合并所有 partial `tool_call_update` 字段仍延期；当前最小修复只转发带 `kind` 的更新，并忽略不带 `kind` 的 heartbeat，避免空字段降级当前阶段。
 - 将 ACP `_meta.provenance` 或 `toolName` 安全地传到 Channel 生命周期，使 `Agent` 与普通 `Other` 可以区分。
 - 为 `plan` 事件定义单独的钉钉展示语义；本版本不把 TodoWrite 猜测为 `think`。

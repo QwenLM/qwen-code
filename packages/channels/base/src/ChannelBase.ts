@@ -2856,54 +2856,117 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const parameters = this.permissionParameterSummary(toolCall);
+    const approveLabel = this.permissionOptionLabel(
+      this.approvalOption(pending),
+      'allow once',
+    );
     const alwaysOption = this.approvalAlwaysOption(pending);
-    if (pending.taskName) {
-      const replies = [
-        `/approve ${pending.requestId}          allow once`,
-        ...(alwaysOption
-          ? [`/approve-always ${pending.requestId}   ${alwaysOption.label}`]
-          : []),
-        `/deny ${pending.requestId}             deny`,
-      ];
-      return [
-        'Permission required to run a tool',
-        `Request: ${pending.requestId}`,
-        '',
-        'Command:',
-        title,
-        '',
-        'Reply with:',
-        ...replies,
-      ].join('\n');
-    }
+    const denyLabel = this.permissionOptionLabel(
+      this.denialOption(pending),
+      'deny',
+    );
+    const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
+    const replyPadding = pending.taskName
+      ? { approve: '          ', always: '   ', deny: '             ' }
+      : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      '/approve        allow once',
-      ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           deny',
+      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      ...(alwaysOption
+        ? [
+            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+          ]
+        : []),
+      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
-    const lines = [
+    return [
       'Permission required to run a tool',
+      ...(pending.taskName ? [`Request: ${pending.requestId}`] : []),
       '',
-      'Command:',
-      title,
+      `Tool: ${this.permissionToolName(toolCall)}`,
+      `Action: ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`Parameters: ${parameters}`] : []),
       '',
       'Reply with:',
       ...replies,
-    ];
-    return lines.join('\n');
+    ].join('\n');
   }
 
-  private approvalOptionId(pending: PendingPermission): string | undefined {
+  private permissionTitle(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawTitle =
+      typeof toolCall.title === 'string' ? toolCall.title : undefined;
+    return sanitizeQuotedText(rawTitle || '', 160).trim() || 'Tool use';
+  }
+
+  private permissionToolName(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const meta = isRecord(rawToolCall['_meta'])
+      ? rawToolCall['_meta']
+      : undefined;
+    for (const candidate of [meta?.['toolName'], rawToolCall['kind']]) {
+      if (typeof candidate !== 'string') continue;
+      const name = sanitizeQuotedText(candidate, 120).trim();
+      if (name) return name;
+    }
+    return 'unknown';
+  }
+
+  private permissionParameterSummary(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string | undefined {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const rawInput = isRecord(rawToolCall['rawInput'])
+      ? rawToolCall['rawInput']
+      : undefined;
+    if (!rawInput) return undefined;
+
+    const entries = Object.entries(rawInput);
+    if (entries.length === 0) return undefined;
+    const visible = entries.slice(0, 4).map(([key, value]) => {
+      const safeKey = sanitizeQuotedText(key, 48).trim() || 'unknown';
+      if (Array.isArray(value)) {
+        return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
+      }
+      if (isRecord(value)) {
+        return `${safeKey} (object)`;
+      }
+      return safeKey;
+    });
+    if (entries.length > visible.length) {
+      visible.push(`+${entries.length - visible.length} more`);
+    }
+    return visible.join(', ');
+  }
+
+  private permissionOptionLabel(
+    option: PermissionOption | undefined,
+    fallback: string,
+  ): string {
+    const rawLabel = typeof option?.name === 'string' ? option.name : '';
+    const label = sanitizeQuotedText(rawLabel, 160).trim();
+    return label || fallback;
+  }
+
+  private approvalOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
     const options = pending.request.options;
     return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ??
+      options.find((option) => option.kind === 'allow_once') ??
       options.find(
         (option) =>
           option.optionId === 'proceed_once' &&
           (option as { kind?: string }).kind === undefined,
-      )?.optionId
+      )
     );
+  }
+
+  private approvalOptionId(pending: PendingPermission): string | undefined {
+    return this.approvalOption(pending)?.optionId;
   }
 
   private approvalAlwaysOption(
@@ -2921,7 +2984,10 @@ export abstract class ChannelBase {
     }
     return {
       optionId: option.optionId,
-      label: this.approvalAlwaysLabel(option),
+      label: this.permissionOptionLabel(
+        option,
+        this.approvalAlwaysLabel(option),
+      ),
     };
   }
 
@@ -2949,7 +3015,17 @@ export abstract class ChannelBase {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   } {
-    const option =
+    const option = this.denialOption(pending);
+    if (option) {
+      return { outcome: { outcome: 'selected', optionId: option.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  private denialOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
+    return (
       pending.request.options.find(
         (candidate) => candidate.kind === 'reject_once',
       ) ??
@@ -2957,11 +3033,8 @@ export abstract class ChannelBase {
         (candidate) =>
           candidate.optionId === 'cancel' &&
           (candidate as { kind?: string }).kind === undefined,
-      );
-    if (option) {
-      return { outcome: { outcome: 'selected', optionId: option.optionId } };
-    }
-    return { outcome: { outcome: 'cancelled' } };
+      )
+    );
   }
 
   private async handlePermissionResponseCommand(
@@ -3001,7 +3074,7 @@ export abstract class ChannelBase {
         .map((id) => {
           const pending = this.pendingPermissions.get(id);
           const title = pending
-            ? `: ${sanitizeQuotedText(pending.request.toolCall.title || 'Tool use', 160)}`
+            ? `: ${this.permissionTitle(pending.request.toolCall)}`
             : '';
           const task = pending?.taskName ? `Task ${pending.taskName} — ` : '';
           return `- ${task}${sanitizeQuotedText(id, 128)}${title}`;

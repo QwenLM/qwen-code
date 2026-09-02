@@ -424,16 +424,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         }
         break;
       }
-      case 'tool_call': {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const kind = (update['kind'] as string) || '';
+        if (type === 'tool_call_update' && !kind) break;
         const event: ToolCallEvent = {
           sessionId,
           toolCallId: update['toolCallId'] as string,
-          kind: (update['kind'] as string) || '',
+          kind,
           title: (update['title'] as string) || '',
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
-        if (event.status === 'pending' || event.status === 'in_progress') {
+        if (
+          type === 'tool_call' &&
+          (event.status === 'pending' || event.status === 'in_progress')
+        ) {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);

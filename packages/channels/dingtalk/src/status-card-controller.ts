@@ -5,6 +5,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   STATUS_CARD_TEMPLATE_ID,
+  isRetryableDingtalkCardError,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
@@ -18,12 +19,24 @@ import {
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
+const CONTENT_SYNC_INTERVAL_SECONDS = 5;
 const BREAKER_PROBE_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
+const INITIAL_RETRY_INTERVAL_MS = 1_000;
+const MAX_RETRY_INTERVAL_MS = 30_000;
+const PHASE_DETAIL_LIMIT = 60;
 export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
 type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
+
+interface TerminalIntent {
+  content: string;
+  isError: boolean;
+  /** Computed once so terminal retries do not inflate the elapsed time. */
+  statusLine: string;
+  streamFinalizeSettled: boolean;
+}
 
 interface StatusRecord {
   segmentId: string;
@@ -35,20 +48,35 @@ interface StatusRecord {
   content: string;
   sourcePrefix?: string;
   phase: DingtalkPresentationPhase;
+  phaseDetail?: string;
   startedAt: number;
   lastStatusSecond: number;
+  lastContentSyncSecond: number;
   ready: Promise<boolean>;
+  /** Settles when the current creation attempt does, before any backoff. */
+  creationAttempt: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
+  streamFailureVersion: number;
+  createRetryAttempt: number;
+  streamRetryAttempt: number;
+  terminalRetryAttempt: number;
   consecutiveStatusFailures: number;
   stopClaimed: boolean;
   forbiddenActors: Set<string>;
   lastWriteAt: number;
-  pendingSnapshot?: string;
+  contentVersion: number;
+  hasPendingWrite: boolean;
   flushTimer?: ReturnType<typeof setTimeout>;
+  createRetryTimer?: ReturnType<typeof setTimeout>;
+  /** Resolves the pending creation backoff early so `ready` settles. */
+  abandonCreation?: () => void;
+  streamRetryTimer?: ReturnType<typeof setTimeout>;
+  terminalRetryTimer?: ReturnType<typeof setTimeout>;
   statusTimer?: ReturnType<typeof setTimeout>;
   inFlight?: Promise<void>;
   writeChain: Promise<void>;
+  terminalIntent?: TerminalIntent;
 }
 
 export interface StatusCardControllerOptions {
@@ -71,8 +99,10 @@ function activeContent(
   content: string,
   language?: string,
   sourcePrefix?: string,
+  phaseDetail?: string,
 ): string {
-  const label = presentationPhaseLabel(phase, language);
+  const phaseLabel = presentationPhaseLabel(phase, language);
+  const label = phaseDetail ? `${phaseLabel} · ${phaseDetail}` : phaseLabel;
   const sanitized = sanitizeStreamingImageMarkers(content);
   const renderedSourcePrefix =
     sourcePrefix &&
@@ -96,11 +126,23 @@ function activeContent(
   )}`;
 }
 
+function renderPhaseDetail(detail?: string): string | undefined {
+  const normalized = detail?.replace(/\s+/gu, ' ').trim();
+  if (!normalized) return undefined;
+  const characters = [...normalized];
+  const bounded =
+    characters.length <= PHASE_DETAIL_LIMIT
+      ? normalized
+      : `${characters.slice(0, PHASE_DETAIL_LIMIT - 1).join('')}…`;
+  return escapeDingTalkMarkdown(bounded);
+}
+
 export class StatusCardController {
   private readonly recordsBySegment = new Map<string, StatusRecord>();
   private readonly recordsByOutTrack = new Map<string, StatusRecord>();
   private readonly segmentIdsByRun = new Map<string, Set<string>>();
   private readonly terminalSegmentIds = new Set<string>();
+  private disposed = false;
 
   constructor(private readonly options: StatusCardControllerOptions) {}
 
@@ -108,6 +150,7 @@ export class StatusCardController {
     segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
   ): void {
+    if (this.disposed) return;
     if (this.terminalSegmentIds.has(segment.segmentId)) return;
     if (!this.recordsBySegment.has(segment.segmentId)) {
       this.createRecord(segment, target);
@@ -119,6 +162,7 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
     content: string,
   ): void {
+    if (this.disposed) return;
     if (this.terminalSegmentIds.has(segment.segmentId)) return;
     const record = this.recordsBySegment.get(segment.segmentId);
     if (!record) {
@@ -127,13 +171,9 @@ export class StatusCardController {
     }
     if (record.terminal) return;
     record.content = boundContent(content);
+    record.contentVersion++;
     if (record.streamFailed) return;
-    record.pendingSnapshot = activeContent(
-      record.phase,
-      record.content,
-      this.options.language,
-      record.sourcePrefix,
-    );
+    record.hasPendingWrite = true;
     this.scheduleFlush(record);
   }
 
@@ -141,12 +181,15 @@ export class StatusCardController {
    * Whether a created, still-running status card is displaying content for
    * this segment. Awaits the in-flight creation so a boundary decision made
    * while creation is pending does not race it. A latched stream failure
-   * means the card can never show further content, so it is not live.
+   * means the card can never show further content, so it is not live. A
+   * creation that is backing off for a retry is not awaited either (see
+   * `awaitDelivery`).
    */
   async isCardLive(segmentId: string): Promise<boolean> {
+    if (this.disposed) return false;
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal || record.streamFailed) return false;
-    return record.ready;
+    return this.awaitDelivery(record);
   }
 
   /**
@@ -156,19 +199,58 @@ export class StatusCardController {
    * caller can fall back instead of claiming delivery.
    */
   async flushPending(segmentId: string): Promise<boolean> {
+    if (this.disposed) return false;
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
-    if (!(await record.ready)) return false;
+    if (!(await this.awaitDelivery(record))) return false;
     while (!record.terminal && !record.streamFailed) {
       if (record.flushTimer) {
         clearTimeout(record.flushTimer);
         record.flushTimer = undefined;
       }
+      if (record.streamRetryTimer) {
+        clearTimeout(record.streamRetryTimer);
+        record.streamRetryTimer = undefined;
+      }
+      const failureVersion = record.streamFailureVersion;
       this.flush(record);
       await record.writeChain;
-      if (record.pendingSnapshot === undefined) break;
+      if (record.streamFailureVersion !== failureVersion) return false;
+      if (!record.hasPendingWrite) break;
     }
     return !record.terminal && !record.streamFailed;
+  }
+
+  abandon(segmentId: string): void {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record || record.terminal) return;
+    record.terminal = true;
+    record.hasPendingWrite = false;
+    void record.ready.then((ready) => {
+      if (!ready) return;
+      void this.options.client
+        .updateInstance({
+          outTrackId: record.outTrackId,
+          cardParamMap: {
+            flowStatus: 3,
+            hasAction: 'false',
+            stop_action: 'false',
+          },
+        })
+        .catch(() => {});
+    });
+    this.removeRecord(record);
+  }
+
+  /**
+   * Resolves once the card is known to be delivered (or not) without waiting
+   * through a creation backoff: `creationAttempt` is the failed attempt until
+   * the retry actually starts, so a boundary reached mid-backoff falls back
+   * to text while the retry keeps running for later output.
+   */
+  private async awaitDelivery(record: StatusRecord): Promise<boolean> {
+    if (!(await record.creationAttempt)) return false;
+    return record.ready;
   }
 
   private createRecord(
@@ -191,13 +273,21 @@ export class StatusCardController {
       phase: 'thinking',
       startedAt: Date.now(),
       lastStatusSecond: 0,
+      lastContentSyncSecond: 0,
       ready: Promise.resolve(false),
+      creationAttempt: Promise.resolve(false),
       terminal: false,
       streamFailed: false,
+      streamFailureVersion: 0,
+      createRetryAttempt: 0,
+      streamRetryAttempt: 0,
+      terminalRetryAttempt: 0,
       consecutiveStatusFailures: 0,
       stopClaimed: false,
       forbiddenActors: new Set(),
       lastWriteAt: Date.now(),
+      contentVersion: 0,
+      hasPendingWrite: false,
       writeChain: Promise.resolve(),
     };
     this.recordsBySegment.set(record.segmentId, record);
@@ -227,33 +317,29 @@ export class StatusCardController {
     );
   }
 
-  async updateRunPhase(
+  updateRunPhase(
     runId: string,
     phase: DingtalkPresentationPhase,
-  ): Promise<void> {
-    const updates: Array<Promise<void>> = [];
+    detail?: string,
+  ): void {
+    if (this.disposed) return;
+    const phaseDetail = renderPhaseDetail(detail);
     for (const segmentId of this.segmentIdsByRun.get(runId) ?? []) {
       const record = this.recordsBySegment.get(segmentId);
       if (
         !record ||
         record.terminal ||
         record.streamFailed ||
-        record.phase === phase
+        (record.phase === phase && record.phaseDetail === phaseDetail)
       ) {
         continue;
       }
       record.phase = phase;
-      if (record.pendingSnapshot !== undefined) {
-        record.pendingSnapshot = activeContent(
-          record.phase,
-          record.content,
-          this.options.language,
-          record.sourcePrefix,
-        );
-      }
-      updates.push(this.updateActiveContent(record));
+      record.phaseDetail = phaseDetail;
+      record.contentVersion++;
+      record.hasPendingWrite = true;
+      this.scheduleFlush(record);
     }
-    await Promise.all(updates);
   }
 
   fail(segmentId: string, error: string): void {
@@ -261,6 +347,7 @@ export class StatusCardController {
   }
 
   cancelRun(runId: string, reason: ChannelTaskCancellationReason): void {
+    if (this.disposed) return;
     for (const segmentId of [...(this.segmentIdsByRun.get(runId) ?? [])]) {
       const record = this.recordsBySegment.get(segmentId);
       if (!record) continue;
@@ -274,6 +361,7 @@ export class StatusCardController {
   }
 
   claimStop(outTrackId: string, actorId: string): DingtalkCardCallbackResult {
+    if (this.disposed) return { kind: 'ignored', actorId };
     const record = this.recordsByOutTrack.get(outTrackId);
     if (!record || record.terminal || record.stopClaimed) {
       return { kind: 'ignored', actorId };
@@ -312,51 +400,93 @@ export class StatusCardController {
     record: StatusRecord,
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
-    try {
-      const initialContent = activeContent(
-        record.phase,
-        record.content,
-        this.options.language,
-        record.sourcePrefix,
-      );
-      await this.options.client.createAndDeliver({
-        templateId: STATUS_CARD_TEMPLATE_ID,
-        outTrackId: record.outTrackId,
-        target,
-        cardParamMap: {
-          content: initialContent,
-          flowStatus: 2,
-          statusLine: this.statusLine(record).text,
-          hasAction: 'true',
-          stop_action: 'true',
-        },
+    for (;;) {
+      let settleAttempt!: (delivered: boolean) => void;
+      record.creationAttempt = new Promise<boolean>((resolve) => {
+        settleAttempt = resolve;
       });
+      try {
+        await this.options.client.createAndDeliver({
+          templateId: STATUS_CARD_TEMPLATE_ID,
+          outTrackId: record.outTrackId,
+          target,
+          cardParamMap: {
+            content: activeContent(
+              record.phase,
+              record.content,
+              this.options.language,
+              record.sourcePrefix,
+              record.phaseDetail,
+            ),
+            flowStatus: 2,
+            statusLine: this.statusLine(record).text,
+            hasAction: 'true',
+            stop_action: 'true',
+          },
+        });
+        settleAttempt(true);
+        break;
+      } catch (error) {
+        settleAttempt(false);
+        this.options.onError?.('status card creation', error);
+        if (
+          this.disposed ||
+          record.terminal ||
+          !isRetryableDingtalkCardError(error)
+        ) {
+          return false;
+        }
+        if (!(await this.waitForCreationRetry(record))) return false;
+      }
+    }
+    if (this.disposed) return false;
+    if (this.recordsBySegment.get(record.segmentId) !== record) return true;
+
+    try {
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content: initialContent,
+        content: activeContent(
+          record.phase,
+          record.content,
+          this.options.language,
+          record.sourcePrefix,
+          record.phaseDetail,
+        ),
         finalize: false,
       });
-      return true;
     } catch (error) {
-      this.options.onError?.('status card creation', error);
-      await this.options.client
-        .updateInstance({
-          outTrackId: record.outTrackId,
-          cardParamMap: {
-            flowStatus: 3,
-            statusLine: this.statusStateLabel('Unavailable'),
-            hasAction: 'false',
-            stop_action: 'false',
-          },
-        })
-        .catch(() => {});
-      return false;
+      this.handleStreamFailure(record, error);
     }
+    return true;
+  }
+
+  /**
+   * Sleeps for the next creation backoff. Resolves false when finalization or
+   * disposal abandons the creation so `ready` settles without waiting.
+   */
+  private waitForCreationRetry(record: StatusRecord): Promise<boolean> {
+    const delay = this.retryDelay(record.createRetryAttempt++);
+    return new Promise<boolean>((resolve) => {
+      const settle = (resumed: boolean) => {
+        if (record.createRetryTimer) clearTimeout(record.createRetryTimer);
+        record.createRetryTimer = undefined;
+        record.abandonCreation = undefined;
+        resolve(resumed);
+      };
+      record.abandonCreation = () => settle(false);
+      record.createRetryTimer = setTimeout(() => settle(true), delay);
+    });
   }
 
   private scheduleFlush(record: StatusRecord): void {
-    if (record.flushTimer || record.inFlight || record.terminal) return;
+    if (
+      record.flushTimer ||
+      record.streamRetryTimer ||
+      record.inFlight ||
+      record.terminal
+    )
+      return;
     const delay = Math.max(
       0,
       FLUSH_INTERVAL_MS - (Date.now() - record.lastWriteAt),
@@ -369,32 +499,49 @@ export class StatusCardController {
 
   private flush(record: StatusRecord): void {
     if (
+      this.disposed ||
       record.terminal ||
+      record.streamFailed ||
       record.inFlight ||
-      record.pendingSnapshot === undefined
+      !record.hasPendingWrite
     )
       return;
-    const content = record.pendingSnapshot;
-    record.pendingSnapshot = undefined;
+    record.hasPendingWrite = false;
+    let sentVersion: number | undefined;
+    let contentWritten = false;
     const write = record.writeChain
       .then(async () => {
         const ready = await record.ready;
-        if (!ready || record.terminal) return;
+        if (!ready || record.terminal || record.streamFailed) return;
+        sentVersion = record.contentVersion;
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
-          content,
+          content: activeContent(
+            record.phase,
+            record.content,
+            this.options.language,
+            record.sourcePrefix,
+            record.phaseDetail,
+          ),
           finalize: false,
         });
-        await this.updateActiveStatus(record);
+        contentWritten = true;
+        record.streamRetryAttempt = 0;
+        await this.updateRunningStatus(record);
       })
-      .catch((error) => this.latchStreamFailure(record, error));
+      .catch((error) => this.handleStreamFailure(record, error));
     const tracked = write.finally(() => {
       if (record.inFlight === tracked) {
         record.inFlight = undefined;
       }
       record.lastWriteAt = Date.now();
-      if (record.pendingSnapshot !== undefined) this.scheduleFlush(record);
+      if (contentWritten && record.contentVersion === sentVersion) {
+        record.hasPendingWrite = false;
+      }
+      if (record.hasPendingWrite && record.contentVersion !== sentVersion) {
+        this.scheduleFlush(record);
+      }
     });
     record.inFlight = tracked;
     record.writeChain = tracked;
@@ -407,6 +554,7 @@ export class StatusCardController {
     isError: boolean,
     retainedContent?: (content: string) => string,
   ): Promise<boolean> {
+    if (this.disposed) return false;
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
     record.terminal = true;
@@ -418,65 +566,180 @@ export class StatusCardController {
     }
     if (record.flushTimer) clearTimeout(record.flushTimer);
     record.flushTimer = undefined;
+    if (record.streamRetryTimer) clearTimeout(record.streamRetryTimer);
+    record.streamRetryTimer = undefined;
     if (record.statusTimer) clearTimeout(record.statusTimer);
     record.statusTimer = undefined;
-    record.pendingSnapshot = undefined;
+    record.hasPendingWrite = false;
+    record.abandonCreation?.();
+    if (!(await record.ready)) {
+      this.removeRecord(record);
+      return false;
+    }
+    await record.writeChain;
+    const retained =
+      content ||
+      (retainedContent ? retainedContent(record.content) : record.content);
+    record.terminalIntent = {
+      content: boundContent(sanitizeStreamingImageMarkers(retained)),
+      isError,
+      statusLine: this.statusLine(record, state).text,
+      streamFinalizeSettled: false,
+    };
+    return this.attemptFinalization(record);
+  }
+
+  private async attemptFinalization(record: StatusRecord): Promise<boolean> {
+    if (this.disposed) return false;
+    if (this.recordsBySegment.get(record.segmentId) !== record) return false;
+    const intent = record.terminalIntent;
+    if (!intent) return false;
+
+    if (!intent.streamFinalizeSettled) {
+      try {
+        await this.options.client.openOrUpdateStream({
+          outTrackId: record.outTrackId,
+          key: 'content',
+          content: '',
+          finalize: true,
+          isError: intent.isError,
+        });
+        intent.streamFinalizeSettled = true;
+      } catch (error) {
+        if (!isRetryableDingtalkCardError(error)) {
+          intent.streamFinalizeSettled = true;
+        }
+        this.options.onError?.('status card finalization', error);
+      }
+    }
+    if (this.disposed) return false;
+
     try {
-      if (!(await record.ready)) return false;
-      await record.writeChain;
-      const retained =
-        content ||
-        (retainedContent ? retainedContent(record.content) : record.content);
-      const finalContent = boundContent(
-        sanitizeStreamingImageMarkers(retained),
-      );
-      await this.options.client.openOrUpdateStream({
-        outTrackId: record.outTrackId,
-        key: 'content',
-        content: '',
-        finalize: true,
-        isError,
-      });
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
         cardParamMap: {
           blockList: JSON.stringify([
             {
               type: 0,
-              markdown: finalContent,
+              markdown: intent.content,
             },
           ]),
-          content: finalContent,
-          copy_content: finalContent,
+          content: intent.content,
+          copy_content: intent.content,
           flowStatus: 3,
-          statusLine: this.statusLine(record, state).text,
+          statusLine: intent.statusLine,
           hasAction: 'false',
           stop_action: 'false',
         },
       });
       record.content = '';
+      this.removeRecord(record);
       return true;
     } catch (error) {
       this.options.onError?.('status card finalization', error);
+      if (isRetryableDingtalkCardError(error)) {
+        this.scheduleTerminalRetry(record);
+        return true;
+      } else {
+        this.removeRecord(record);
+      }
       return false;
-    } finally {
-      if (this.recordsBySegment.get(segmentId) === record) {
-        this.recordsBySegment.delete(segmentId);
-      }
-      if (this.recordsByOutTrack.get(record.outTrackId) === record) {
-        this.recordsByOutTrack.delete(record.outTrackId);
-      }
-      const segmentIds = this.segmentIdsByRun.get(record.runId);
-      segmentIds?.delete(segmentId);
-      if (segmentIds?.size === 0) {
-        this.segmentIdsByRun.delete(record.runId);
+    }
+  }
+
+  private scheduleStreamRetry(record: StatusRecord): void {
+    if (
+      this.disposed ||
+      record.terminal ||
+      record.streamFailed ||
+      record.streamRetryTimer
+    ) {
+      return;
+    }
+    const delay = this.retryDelay(record.streamRetryAttempt++);
+    record.streamRetryTimer = setTimeout(() => {
+      record.streamRetryTimer = undefined;
+      if (this.disposed || record.terminal || record.streamFailed) return;
+      this.flush(record);
+    }, delay);
+  }
+
+  private scheduleTerminalRetry(record: StatusRecord): void {
+    if (this.disposed || !record.terminalIntent || record.terminalRetryTimer) {
+      return;
+    }
+    const delay = this.retryDelay(record.terminalRetryAttempt++);
+    record.terminalRetryTimer = setTimeout(() => {
+      record.terminalRetryTimer = undefined;
+      if (this.disposed) return;
+      void this.attemptFinalization(record);
+    }, delay);
+  }
+
+  private handleStreamFailure(record: StatusRecord, error: unknown): void {
+    record.streamFailureVersion++;
+    if (
+      !this.disposed &&
+      !record.terminal &&
+      isRetryableDingtalkCardError(error)
+    ) {
+      record.hasPendingWrite = true;
+      this.scheduleStreamRetry(record);
+    } else if (!record.terminal) {
+      record.streamFailed = true;
+      record.hasPendingWrite = false;
+      if (record.statusTimer) {
+        clearTimeout(record.statusTimer);
+        record.statusTimer = undefined;
       }
     }
+    this.options.onError?.('status card streaming', error);
+  }
+
+  private retryDelay(attempt: number): number {
+    return Math.min(
+      INITIAL_RETRY_INTERVAL_MS * 2 ** Math.min(attempt, 10),
+      MAX_RETRY_INTERVAL_MS,
+    );
+  }
+
+  private removeRecord(record: StatusRecord): void {
+    record.abandonCreation?.();
+    if (record.flushTimer) clearTimeout(record.flushTimer);
+    if (record.streamRetryTimer) clearTimeout(record.streamRetryTimer);
+    if (record.terminalRetryTimer) clearTimeout(record.terminalRetryTimer);
+    if (record.statusTimer) clearTimeout(record.statusTimer);
+    record.flushTimer = undefined;
+    record.streamRetryTimer = undefined;
+    record.terminalRetryTimer = undefined;
+    record.statusTimer = undefined;
+    if (this.recordsBySegment.get(record.segmentId) === record) {
+      this.recordsBySegment.delete(record.segmentId);
+    }
+    if (this.recordsByOutTrack.get(record.outTrackId) === record) {
+      this.recordsByOutTrack.delete(record.outTrackId);
+    }
+    const segmentIds = this.segmentIdsByRun.get(record.runId);
+    segmentIds?.delete(record.segmentId);
+    if (segmentIds?.size === 0) {
+      this.segmentIdsByRun.delete(record.runId);
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const record of [...this.recordsBySegment.values()]) {
+      record.terminal = true;
+      record.hasPendingWrite = false;
+      this.removeRecord(record);
+    }
+    this.terminalSegmentIds.clear();
   }
 
   private statusLine(
     record: StatusRecord,
-    state?: string,
+    state?: Exclude<StatusState, 'Running'>,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -495,56 +758,45 @@ export class StatusCardController {
     };
   }
 
-  private statusStateLabel(state: string): string {
-    if (!isChinesePresentationLanguage(this.options.language)) {
-      return state;
-    }
+  private statusStateLabel(state: Exclude<StatusState, 'Running'>): string {
+    if (!isChinesePresentationLanguage(this.options.language)) return state;
     return (
       {
         Completed: '已完成',
         Failed: '已失败',
         Stopped: '已终止',
         Cancelled: '已取消',
-        Unavailable: '不可用',
       }[state] ?? state
     );
   }
 
-  private updateActiveContent(record: StatusRecord): Promise<void> {
-    const update = record.writeChain
-      .then(async () => {
-        if (!(await record.ready) || record.terminal || record.streamFailed) {
-          return;
-        }
-        await this.options.client.openOrUpdateStream({
-          outTrackId: record.outTrackId,
-          key: 'content',
-          content: activeContent(
-            record.phase,
-            record.content,
-            this.options.language,
-            record.sourcePrefix,
-          ),
-          finalize: false,
-        });
-      })
-      .catch((error) => {
-        this.latchStreamFailure(record, error);
-      });
-    record.writeChain = update;
-    return update;
-  }
-
-  private async updateActiveStatus(record: StatusRecord): Promise<void> {
-    if (record.terminal || record.streamFailed) return;
+  private async updateRunningStatus(record: StatusRecord): Promise<void> {
+    if (this.disposed || record.terminal || record.streamFailed) return;
     const status = this.statusLine(record);
     if (status.second === record.lastStatusSecond) return;
+    const syncContent =
+      status.second - record.lastContentSyncSecond >=
+      CONTENT_SYNC_INTERVAL_SECONDS;
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: { statusLine: status.text },
+        cardParamMap: {
+          ...(syncContent
+            ? {
+                content: activeContent(
+                  record.phase,
+                  record.content,
+                  this.options.language,
+                  record.sourcePrefix,
+                  record.phaseDetail,
+                ),
+              }
+            : {}),
+          statusLine: status.text,
+        },
       });
       record.lastStatusSecond = status.second;
+      if (syncContent) record.lastContentSyncSecond = status.second;
       record.consecutiveStatusFailures = 0;
       // A success revives the per-second chain even when only a low-frequency
       // breaker probe is scheduled.
@@ -559,28 +811,24 @@ export class StatusCardController {
     }
   }
 
-  private latchStreamFailure(record: StatusRecord, error: unknown): void {
-    record.streamFailed = true;
-    record.pendingSnapshot = undefined;
-    if (record.statusTimer) {
-      clearTimeout(record.statusTimer);
-      record.statusTimer = undefined;
-    }
-    this.options.onError?.('status card streaming', error);
-  }
-
   private scheduleStatusRefresh(
     record: StatusRecord,
     intervalMs = STATUS_REFRESH_INTERVAL_MS,
   ): void {
-    if (record.terminal || record.streamFailed || record.statusTimer) return;
+    if (
+      this.disposed ||
+      record.terminal ||
+      record.streamFailed ||
+      record.statusTimer
+    )
+      return;
     const elapsed = Math.max(0, Date.now() - record.startedAt);
     const delay = Math.max(50, intervalMs - (elapsed % intervalMs));
     record.statusTimer = setTimeout(() => {
       record.statusTimer = undefined;
-      if (record.terminal || record.streamFailed) return;
+      if (this.disposed || record.terminal || record.streamFailed) return;
       const refresh = record.writeChain.then(() =>
-        this.updateActiveStatus(record),
+        this.updateRunningStatus(record),
       );
       record.writeChain = refresh;
       void refresh.finally(() => {

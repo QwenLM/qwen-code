@@ -1,5 +1,7 @@
 # DingTalk Lifecycle Delivery Convergence Implementation Plan
 
+> Historical plan: later product review approved a bounded tool-title summary in the active card and a minimal `AcpBridge` partial-update fix. The final contract is `docs/design/dingtalk-dynamic-lifecycle-tags.md`; the phase-only steps below preserve the original implementation sequence rather than the final scope.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the approved phase-only DingTalk lifecycle prototype without exposing tool details, accumulating stale reactions, mis-resolving `auto` language, or dropping current-main source attribution.

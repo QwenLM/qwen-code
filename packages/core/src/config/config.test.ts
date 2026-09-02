@@ -24,6 +24,7 @@ import {
   GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
@@ -693,28 +694,53 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
-  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+  // Shared isolation for the debug-fallback tests below. The module-level
+  // vi.mock('node:fs') factory overrides only the sync fs API, so any
+  // un-spied fs.promises call the debug logger makes would hit the real
+  // filesystem (writing into the actual global debug dir). Spy the full
+  // surface the fallback/alias path touches — mkdir, appendFile, unlink,
+  // symlink AND readlink — in one place so the two tests can't drift out of
+  // lockstep, then restore env + logger state on the way out. The body reads
+  // the appendFile spy back via vi.mocked(fs.promises.appendFile) — passing it
+  // as a typed callback argument runs into vi.spyOn's generic-overload return
+  // type, which the concrete spy is not assignable to (TS2345).
+  async function withDebugFallbackIsolation(
+    run: () => Promise<void>,
+  ): Promise<void> {
     const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
-    const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
-    const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
-    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
-    const mkdirSpy = vi
-      .spyOn(fs.promises, 'mkdir')
-      .mockResolvedValue(undefined);
-    const appendFileSpy = vi
-      .spyOn(fs.promises, 'appendFile')
-      .mockResolvedValue(undefined);
-    const unlinkSpy = vi
-      .spyOn(fs.promises, 'unlink')
-      .mockResolvedValue(undefined);
-    const symlinkSpy = vi
-      .spyOn(fs.promises, 'symlink')
-      .mockResolvedValue(undefined);
-
+    const spies = [
+      vi.spyOn(fs.promises, 'mkdir').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'appendFile').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'unlink').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'symlink').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'readlink').mockResolvedValue(''),
+    ];
+    const restoreEnv = (key: string, previous: string | undefined) => {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    };
     try {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
       resetDebugLoggingState();
+      await run();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      restoreEnv('QWEN_DEBUG_LOG_FILE', previousDebugLogFileEnv);
+      restoreEnv('QWEN_CODE_SESSION_ID', previousSessionIdEnv);
+    }
+  }
+
+  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+    await withDebugFallbackIsolation(async () => {
+      const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
       new Config({ ...baseParams, sessionId: bootstrapSessionId });
       const daemonConfig = sessionIdContext.run(
         daemonSessionId,
@@ -728,35 +754,58 @@ describe('Server Config (config.ts)', () => {
       createDebugLogger('DAEMON_FALLBACK').info('process-scoped message');
 
       await vi.waitFor(() =>
-        expect(appendFileSpy).toHaveBeenCalledWith(
+        expect(vi.mocked(fs.promises.appendFile)).toHaveBeenCalledWith(
           Storage.getDebugLogPath(bootstrapSessionId),
           expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
           'utf8',
         ),
       );
-      expect(appendFileSpy).not.toHaveBeenCalledWith(
+      expect(vi.mocked(fs.promises.appendFile)).not.toHaveBeenCalledWith(
         Storage.getDebugLogPath(rotatedSessionId),
         expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
         'utf8',
       );
-    } finally {
-      mkdirSpy.mockRestore();
-      appendFileSpy.mockRestore();
-      unlinkSpy.mockRestore();
-      symlinkSpy.mockRestore();
-      resetDebugLoggingState();
-      setDebugLogSession(null);
-      if (previousDebugLogFileEnv === undefined) {
-        delete process.env['QWEN_DEBUG_LOG_FILE'];
-      } else {
-        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-      }
-      if (previousSessionIdEnv === undefined) {
-        delete process.env['QWEN_CODE_SESSION_ID'];
-      } else {
-        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
-      }
-    }
+    });
+  });
+
+  it('claims the global debug fallback on un-contexted rotation (single-session CLI)', async () => {
+    // The other direction of the guard above: a single-session CLI /clear
+    // rotates the Config OUTSIDE any sessionIdContext, and the process-wide
+    // debug session must follow the rotated id — otherwise post-rotation
+    // logs keep landing in the pre-rotation session's file.
+    await withDebugFallbackIsolation(async () => {
+      const initialSessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      // The fallback holds a live Config reference, so rotating the SAME
+      // Config reroutes writes even without the rotation-time claim. The
+      // claim is load-bearing for RE-claiming: another Config (transcript
+      // replay, bootstrap) may have taken the fallback since, and an
+      // un-contexted rotation must hand it back to the rotating CLI Config.
+      const cliConfig = new Config({
+        ...baseParams,
+        sessionId: initialSessionId,
+      });
+      const interloperSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      new Config({ ...baseParams, sessionId: interloperSessionId });
+
+      cliConfig.startNewSession(rotatedSessionId);
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      createDebugLogger('CLI_ROTATION').info('post-rotation message');
+
+      await vi.waitFor(() =>
+        expect(vi.mocked(fs.promises.appendFile)).toHaveBeenCalledWith(
+          Storage.getDebugLogPath(rotatedSessionId),
+          expect.stringContaining('[CLI_ROTATION] post-rotation message'),
+          'utf8',
+        ),
+      );
+      expect(vi.mocked(fs.promises.appendFile)).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath(interloperSessionId),
+        expect.stringContaining('[CLI_ROTATION] post-rotation message'),
+        'utf8',
+      );
+    });
   });
 
   describe('shell execution config', () => {
@@ -1096,6 +1145,177 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAutoSkillEnabled()).toBe(false);
       config.setAutoSkillEnabled(true);
       expect(config.getAutoSkillEnabled()).toBe(true);
+    });
+  });
+
+  describe('session workflow gate and plan revision', () => {
+    it('defaults off and clears the revision when disabled', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.isSessionWorkflowEnabled()).toBe(false);
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toBeUndefined();
+    });
+
+    it('hot-reloads the gate through its provider and clears context on disable', () => {
+      let enabled = true;
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+      });
+      config.setSessionWorkflowEnabledProvider(() => enabled);
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1', 'todo-2'],
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1', 'todo-2'],
+      });
+
+      enabled = false;
+      expect(config.isSessionWorkflowEnabled()).toBe(false);
+      expect(config.getSessionWorkflowPlanRevision()).toBeUndefined();
+    });
+
+    it('keeps gate reads pure so prototype wrappers never shadow the base revision', () => {
+      let enabled = false;
+      const config = new Config({ ...baseParams });
+      config.setSessionWorkflowEnabledProvider(() => enabled);
+      // Subagent/teammate runtimes wrap the session Config in
+      // Object.create(base) prototypes.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapper = Object.create(config) as any;
+
+      // A gate-off read through the wrapper must not materialize an OWN
+      // sessionWorkflowPlanRevision on it — that would permanently shadow
+      // the session-global base value once the gate flips on and a revision
+      // is approved.
+      expect(wrapper.isSessionWorkflowEnabled()).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          wrapper,
+          'sessionWorkflowPlanRevision',
+        ),
+      ).toBe(false);
+
+      enabled = true;
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(wrapper.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(wrapper.isSessionWorkflowTodoContextActive()).toBe(true);
+    });
+
+    it('accepts planning mode as workflow context before approval', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      expect(config.isSessionWorkflowTodoContextActive()).toBe(true);
+    });
+
+    it('stamps the bound revision approved on an approved plan exit', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      // A revision bound while drafting carries no approval stamp.
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+        approved: true,
+      });
+    });
+
+    it('does not stamp the revision on a manual PLAN exit', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+    });
+
+    it('does not let a derived config approve the session revision', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      const wrapper = Object.create(config) as Config;
+      Object.defineProperties(wrapper, {
+        approvalMode: { value: ApprovalMode.PLAN, writable: true },
+        setApprovalMode: { value: Config.prototype.setApprovalMode },
+      });
+      installSessionWorkflowRevisionWriteThrough(wrapper, config);
+
+      wrapper.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+    });
+
+    it('reads an approved revision as approved through a PLAN-mode wrapper', () => {
+      // Per-agent Config wrappers carry their OWN approvalMode (e.g. an
+      // `approvalMode: plan` subagent) while the revision is session-global.
+      // Approval must come from the revision's stamp, not the wrapper's mode.
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapper = Object.create(config) as any;
+      wrapper.approvalMode = ApprovalMode.PLAN;
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      // The wrapper reads the session-global revision through the prototype
+      // and sees the approval stamp despite its own PLAN mode.
+      expect(wrapper.getSessionWorkflowPlanRevision()?.approved).toBe(true);
     });
   });
 
@@ -3084,6 +3304,56 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('parks one approved proposal and hands it to the client once', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'first',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(true);
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'second',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(false);
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-2')).toBeUndefined();
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-1')).toEqual({
+        objective: 'first',
+        turnKey: 'turn-1',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'explicitly cleared',
+          turnKey: 'turn-3',
+        }),
+      ).toBe(true);
+      expect(config.takePendingGoalProposal()).toEqual({
+        objective: 'explicitly cleared',
+        turnKey: 'turn-3',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+    });
+
+    it('clears a parked proposal when the session Goal runtime is replaced', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      config.setPendingGoalProposal({
+        objective: 'stale approval',
+        turnKey: 'turn-1',
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -5023,6 +5293,68 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
+    it('registers propose_goal beside the Goal worker tools in interactive sessions', async () => {
+      const config = new Config({ ...baseParams, interactive: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+      expect(registeredNames).toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it.each([
+      ['ACP', { experimentalZedIntegration: true, interactive: true }],
+      [
+        'stream-json',
+        { inputFormat: InputFormat.STREAM_JSON, interactive: true },
+      ],
+    ] as const)(
+      'does not register propose_goal without a turn-boundary settlement path in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.GET_GOAL);
+        expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+        expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+      },
+    );
+    it('does not register propose_goal when goals.modelProposed is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        modelProposedGoals: 'disabled',
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('disabled');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it('does not register propose_goal in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
     it('does not register user-interaction tools in plain headless sessions', async () => {
       const config = new Config({
         ...baseParams,
@@ -9580,6 +9912,44 @@ describe('Server Config (config.ts)', () => {
 
       expect(registered).not.toContain(ToolNames.LS);
       expect(deferred).toContain(ToolNames.LS);
+    });
+
+    it('registers an enabled LS eagerly when tools.eager covers it (#10400)', async () => {
+      // Third cell of the LS x tools.eager matrix: enabled AND covered by
+      // the allowlist (via the ListFiles alias) -> registered eagerly via
+      // registerFactory, not demoted to deferred. Guards against a
+      // registerLazy mutant that demotes LS whenever an eager list is
+      // active, ignoring entry coverage (#10400).
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        lsToolEnabled: true,
+        eagerTools: ['Shell', 'ListFiles'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).toContain(ToolNames.LS);
+      expect(deferred).not.toContain(ToolNames.LS);
     });
 
     it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {

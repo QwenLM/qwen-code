@@ -10,7 +10,9 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
@@ -530,36 +532,43 @@ function mergeLiveSessionSummary(
 }
 
 function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
-  return sidecar.map(({ number, url, state }) => ({
-    number,
-    url,
-    ...(state ? { state } : {}),
-  }));
+  return sidecar.map(toSessionPrInfo);
 }
 
 /**
  * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
  * summary rendering: dedupe by number (live url wins, live-only bindings
- * sort latest). For `state` the persisted sidecar wins: the refresh timer
- * rewrites it there while the live entry is frozen at bind-time.
+ * sort latest). For `state` and `issues` the persisted sidecar wins: the
+ * refresh timer rewrites them there while the live entry is frozen at
+ * bind-time — but only for the same PR (same canonical url), as in every
+ * other merge site: between a cross-repository re-bind's live mutation and
+ * its sidecar write, the stale sidecar still names the other repository's
+ * same-numbered PR, whose snapshot must not attach to the new binding.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
   livePrs: readonly SessionPrInfo[] | undefined,
 ): SessionPrInfo[] {
   const live = livePrs ?? [];
-  const persistedByNumber = new Map(
-    (persistedPrs ?? []).map((p) => [p.number, p]),
-  );
   return [
     ...(persistedPrs ?? []).filter(
       (p) => !live.some((l) => l.number === p.number),
     ),
     ...live.map((l) => {
-      const persisted = persistedByNumber.get(l.number);
-      return persisted?.state !== undefined && persisted.state !== l.state
-        ? { ...l, state: persisted.state }
-        : l;
+      // Matched by url, not a number-keyed map: a hand-edited sidecar can
+      // hold two same-numbered entries, and a last-wins lookup would let
+      // the foreign one shadow the live binding's own snapshot.
+      const persisted = (persistedPrs ?? []).find(
+        (p) =>
+          p.number === l.number &&
+          canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(l.url),
+      );
+      if (!persisted) return l;
+      return {
+        ...l,
+        ...(persisted.state ? { state: persisted.state } : {}),
+        ...(persisted.issues ? { issues: persisted.issues } : {}),
+      };
     }),
   ];
 }
@@ -1478,6 +1487,77 @@ export async function listLiveWorkspaceSessionsForResponse(
       sessions: enriched,
       ...(nextCursor !== undefined ? { nextCursor } : {}),
     };
+  });
+}
+
+export interface SearchWorkspaceSessionsResult {
+  results: Array<{ session: BridgeSessionSummary; snippet: string }>;
+}
+
+/**
+ * Searches user/assistant message text across the workspace's persisted
+ * active sessions and returns one summary + snippet per matching session,
+ * most recently modified first. Persisted-only: live sessions without a
+ * flushed transcript have no searchable content yet, and read-only secondary
+ * runtimes may only inspect the persisted store.
+ */
+export async function searchWorkspaceSessionsForResponse(
+  workspaceCwd: string,
+  query: string,
+  options: { maxResults?: number } = {},
+  readOptions: ListWorkspaceSessionsReadOptions = {},
+): Promise<SearchWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+    const sessionService = new SessionService(workspaceCwd);
+    const hits = await sessionService.searchSessionContent(query, {
+      ...(options.maxResults !== undefined
+        ? { maxResults: options.maxResults }
+        : {}),
+      ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+    });
+    const bySessionId = new Map<string, BridgeSessionSummary>();
+    // Ghost hits (sessions the client's loaded catalog page doesn't carry)
+    // must render with the same organization state as catalog entries —
+    // pin/group/color — or they break the pin/group invariants downstream.
+    const organizationSnapshot =
+      await createSessionOrganizationService(workspaceCwd).readSnapshot();
+    readOptions.signal?.throwIfAborted();
+    for (const hit of hits) {
+      readOptions.signal?.throwIfAborted();
+      const item = await sessionService.getSessionListItem(hit.sessionId);
+      if (item)
+        bySessionId.set(
+          hit.sessionId,
+          applyOrganization(
+            toSummary(item),
+            organizationSnapshot.sessions.get(hit.sessionId),
+          ),
+        );
+    }
+    await enrichWorktreeSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    readOptions.signal?.throwIfAborted();
+    const results: SearchWorkspaceSessionsResult['results'] = [];
+    for (const hit of hits) {
+      const session = bySessionId.get(hit.sessionId);
+      if (session) results.push({ session, snippet: hit.snippet });
+    }
+    return { results };
   });
 }
 

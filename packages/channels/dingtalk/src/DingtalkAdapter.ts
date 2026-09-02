@@ -41,7 +41,10 @@ import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
-import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  DingtalkCardRequestError,
+  DingtalkInteractiveCardClient,
+} from './interactive-card-client.js';
 import {
   parseDingtalkCardActorId,
   parseDingtalkCardCallback,
@@ -605,7 +608,125 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+/**
+ * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
+ * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
+ * treated as transient so card recovery keeps retrying through it.
+ */
+const PERMANENT_TOKEN_ERROR_CODES = new Set([
+  40001, 40013, 40089, 40096, 90002, 90003,
+]);
 const REPLY_FETCH_TIMEOUT_MS = 15_000;
+
+interface InboundErrorPresentation {
+  status: string;
+  nextStep: string;
+}
+
+function presentInboundError(error: unknown): InboundErrorPresentation {
+  const parts: string[] = [];
+  let status: number | undefined;
+
+  try {
+    if (error instanceof Error) {
+      if (typeof error.name === 'string') parts.push(error.name);
+      if (typeof error.message === 'string') parts.push(error.message);
+    } else if (typeof error === 'string') {
+      parts.push(error);
+    }
+
+    if (typeof error === 'object' && error !== null) {
+      const record = error as Record<string, unknown>;
+      if (typeof record['code'] === 'string') parts.push(record['code']);
+      if (typeof record['status'] === 'number') status = record['status'];
+      const body = record['body'];
+      if (typeof body === 'string') {
+        parts.push(body);
+      } else if (typeof body === 'object' && body !== null) {
+        const bodyRecord = body as Record<string, unknown>;
+        for (const key of ['code', 'errorKind', 'message']) {
+          if (typeof bodyRecord[key] === 'string') parts.push(bodyRecord[key]);
+        }
+      }
+    }
+  } catch {
+    return {
+      status: 'Processing failed',
+      nextStep:
+        'Try again. If it keeps failing, contact the bot administrator.',
+    };
+  }
+
+  const diagnostic = parts.join(' ').slice(0, 2000).toLowerCase();
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthor|forbidden|authentication|credential|invalid.?token/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Bot configuration error',
+      nextStep: 'Contact the bot administrator.',
+    };
+  }
+  if (
+    status === 408 ||
+    status === 504 ||
+    /timeout|timed?\s+out|deadline/.test(diagnostic)
+  ) {
+    return {
+      status: 'Request timed out',
+      nextStep: 'Try again. For a large request, split it into smaller parts.',
+    };
+  }
+  if (/cancel|abort/.test(diagnostic)) {
+    return {
+      status: 'Request was cancelled',
+      nextStep: 'Send the request again if you still need it.',
+    };
+  }
+  if (
+    status === 429 ||
+    /overload|rate.?limit|queue.?full|too many|busy|pending prompts full/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Service is busy',
+      nextStep: 'Try again in a moment.',
+    };
+  }
+  if (
+    status === 502 ||
+    status === 503 ||
+    /unavailable|econn|enotfound|etimedout|network|socket|fetch failed|connection|session[_ ](?:not[ _]found|closing)|workspace[_ ]draining|transport closed/.test(
+      diagnostic,
+    )
+  ) {
+    return {
+      status: 'Service is temporarily unavailable',
+      nextStep:
+        'Try again in a moment. If it keeps failing, contact the bot administrator.',
+    };
+  }
+  return {
+    status: 'Processing failed',
+    nextStep: 'Try again. If it keeps failing, contact the bot administrator.',
+  };
+}
+
+function formatInboundErrorMessage(error: unknown, reference: string): string {
+  const presentation = presentInboundError(error);
+  return [
+    '**Unable to process this message**',
+    '',
+    `**Status:** ${presentation.status}`,
+    `**Next step:** ${presentation.nextStep}`,
+    `**Reference:** \`${reference}\``,
+  ].join('\n');
+}
+
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
 // extension-first: an extensionless name falls through to the binary content
@@ -833,6 +954,11 @@ export class DingtalkChannel extends ChannelBase {
       this.interactiveCardClient = new DingtalkInteractiveCardClient({
         robotCode: config.clientId,
         getAccessToken: () => this.getProactiveToken(),
+        invalidateAccessToken: (token) => {
+          if (this.proactiveToken?.token === token) {
+            this.proactiveToken = undefined;
+          }
+        },
       });
       if (
         this.interactiveCardConfig.statusCard.enabled &&
@@ -1409,8 +1535,9 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] access token request failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
       );
-      throw new Error(
+      throw new DingtalkCardRequestError(
         `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+        !PERMANENT_TOKEN_ERROR_CODES.has(Number(data.errcode)),
       );
     }
     this.proactiveToken = {
@@ -1629,6 +1756,7 @@ export class DingtalkChannel extends ChannelBase {
     for (const state of reactionStates) {
       this.finishReaction(state.chatId, state.messageId, state.sessionId);
     }
+    this.statusCardController?.dispose();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.reactionStates.clear();
@@ -1957,9 +2085,12 @@ export class DingtalkChannel extends ChannelBase {
     }
     const presentationPhase = lifecyclePresentationPhase(event);
     if (event.runId && presentationPhase) {
+      const phaseDetail =
+        event.type === 'tool_call' ? event.toolCall.title : undefined;
       this.interactionPresenter?.updateStatusCardPhase(
         event.runId,
         presentationPhase,
+        ...(phaseDetail ? [phaseDetail] : []),
       );
     }
     if (presentationPhase) {
@@ -2858,21 +2989,30 @@ export class DingtalkChannel extends ChannelBase {
           : this.handleInbound(envelope);
       processMessage.catch((err) => {
         // Don't await — stream callback should return quickly
+        const reference = randomUUID().slice(0, 8);
+        let errorSummary = 'Unknown error';
+        try {
+          errorSummary =
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        } catch {
+          // The user-facing fallback below must survive arbitrary rejections.
+        }
         process.stderr.write(
-          `[DingTalk:${this.name}] Error handling message: ${err}\n`,
+          `[DingTalk:${this.name}] Error handling message ref=${reference}: ${sanitizeLogText(
+            errorSummary,
+            300,
+          )}\n`,
         );
+        const fallbackMessage = formatInboundErrorMessage(err, reference);
         const sourceLabel = this.getInboundErrorSourceLabel(envelope);
         const delivery = sourceLabel
           ? this.sendThreadMessage(
               chatId,
               envelope.threadId,
-              'Sorry, something went wrong processing your message.',
+              fallbackMessage,
               sourceLabel,
             )
-          : this.sendMessage(
-              chatId,
-              'Sorry, something went wrong processing your message.',
-            );
+          : this.sendMessage(chatId, fallbackMessage);
         delivery.catch(() => {});
       });
     } catch (err) {

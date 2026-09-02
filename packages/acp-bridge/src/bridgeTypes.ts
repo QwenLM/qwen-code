@@ -790,11 +790,20 @@ export interface SessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /** Issues the PR closes, snapshotted by the daemon refresh; optional. */
+  issues?: SessionPrIssueInfo[];
+}
+
+export interface SessionPrIssueInfo {
+  number: number;
+  url: string;
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 export interface SessionMetadataUpdate {
   displayName?: string;
-  pr?: SessionPrInfo;
+  /** Issues are daemon-derived, never client-bound — the input omits them. */
+  pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */
   prs?: SessionPrInfo[];
 }
