@@ -358,8 +358,9 @@ describe('readMediaViaOmniDelivery result shape', () => {
     );
     const registry = new MediaResourceRegistry();
 
+    const filePath = await realFile('pic.png');
     const result = await readMediaViaOmniDelivery({
-      filePath: await realFile('pic.png'),
+      filePath,
       config: {
         ...deliveryConfig(),
         getOmniMemoryConfig: () => ({
@@ -374,12 +375,15 @@ describe('readMediaViaOmniDelivery result shape', () => {
 
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(3);
-    // Handle part FIRST — the hint/disclosure chain keeps its adjacency
-    // to the media part (D8), and the model learns the recall handle.
+    // Resource part FIRST — the hint/disclosure chain keeps its adjacency
+    // to the media part (D8). A model-visible local source is referenced by
+    // its ABSOLUTE PATH, not an opaque handle.
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】pic.png：');
-    const resourceId = handleText.split('：')[1]!;
-    expect(registry.resolve(resourceId)).toMatchObject({
+    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain(filePath);
+    expect(handleText).not.toContain('：media-');
+    // The session handle is still registered and recoverable from the path.
+    expect(registry.resolveByFileRef(filePath)).toMatchObject({
       mediaType: 'image',
     });
     expect(parts[1]!['text']).toContain('zoom_image');
@@ -1945,12 +1949,14 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.errorType).toBeUndefined();
   });
 
-  it('readMediaViaOmniDelivery keeps the recall handle on an omitted media', async () => {
+  it('readMediaViaOmniDelivery keeps the recall reference on an omitted media', async () => {
     // The omission branch is the one shape that puts NO media part in front
-    // of the model. Without the handle leading it, the withheld resource has
+    // of the model. Without a reference leading it, the withheld resource has
     // no identity the model can name — it can neither recall what memory
     // knows about it nor ask a policy tool to reprocess it into something
-    // deliverable, and paths are never surfaced (M §5.2).
+    // deliverable. For a model-visible local source that reference is the
+    // absolute path (recall still resolves it via resolveByFileRef); a
+    // path-less source would keep an opaque handle (M §5.2).
     const runMock = vi.fn().mockResolvedValue({
       deliveries: [
         {
@@ -1969,8 +1975,9 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     );
     const registry = new MediaResourceRegistry();
 
+    const filePath = await realFile('pic.png');
     const result = await mod.readMediaViaOmniDelivery({
-      filePath: await realFile('pic.png'),
+      filePath,
       config: {
         ...policyConfig({ maxUploadFileBytes: 500 }),
         getOmniMemoryConfig: () => ({
@@ -1984,13 +1991,16 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     });
 
     // With memory off this branch collapses to a bare notice string (test
-    // above); a bound handle must turn it into a part array led by the
-    // handle, with the notice standing in for the media behind it.
+    // above); a bound resource must turn it into a part array led by the
+    // resource reference, with the notice standing in for the media behind
+    // it. The local source is referenced by its absolute path.
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(2);
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】pic.png：');
-    expect(registry.resolve(handleText.split('：')[1]!)).toMatchObject({
+    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain(filePath);
+    expect(handleText).not.toContain('：media-');
+    expect(registry.resolveByFileRef(filePath)).toMatchObject({
       mediaType: 'image',
     });
     expect(parts[1]!['text']).toMatch(/^【媒体省略】pic\.png：/);

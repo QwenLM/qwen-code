@@ -13,7 +13,10 @@ import {
   type MediaMemoryCandidateSummary,
   type MediaMemoryRecallResult,
 } from '../services/media-memory/index.js';
-import { parseResourceHandleText } from './disclosure.js';
+import {
+  parseResourceHandleText,
+  parseResourcePathText,
+} from './disclosure.js';
 import { createMediaMemoryRecallService } from './memory-recall.js';
 
 const debugLogger = createDebugLogger('omni:memory');
@@ -88,7 +91,18 @@ export function extractRequestResourceIds(
     if (!text) continue;
     // Annotations may be embedded per-line inside a larger flattened part.
     for (const line of text.split('\n')) {
-      const resourceId = parseResourceHandleText(line.trim());
+      const trimmed = line.trim();
+      // The handle form (path-less media) names the resourceId directly. The
+      // path form (model-visible local media) names the absolute path, which
+      // the registry maps back to the SAME session handle it issued for that
+      // file (resolveByFileRef) — so passive recall keys on both forms.
+      let resourceId = parseResourceHandleText(trimmed);
+      if (!resourceId) {
+        const filePath = parseResourcePathText(trimmed);
+        resourceId = filePath
+          ? registry.resolveByFileRef(filePath)?.resourceId
+          : undefined;
+      }
       if (!resourceId || seen.has(resourceId)) continue;
       if (!registry.resolve(resourceId)) continue;
       seen.add(resourceId);

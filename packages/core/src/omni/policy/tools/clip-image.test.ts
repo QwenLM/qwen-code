@@ -143,14 +143,54 @@ describe('OmniClipImageTool', () => {
     probe({ width: 100, height: 100, frameCount: 1 });
     const result = await run();
     expect(result.error?.message).toMatch(/exceeds the image bounds/);
-    expect(mocks.sharpCreate).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
   });
 
   it('refuses a full-image no-op crop', async () => {
     probe({ width: 320, height: 220, frameCount: 1 });
     const result = await run({ x: 0, y: 0, width: 320, height: 220 });
     expect(result.error?.message).toMatch(/no-op/);
-    expect(mocks.sharpCreate).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
+  });
+
+  it('validates crop coordinates against EXIF-rotated dimensions', async () => {
+    probe({ width: 800, height: 1000, frameCount: 1 });
+    mocks.sharpCreate.mockReturnValue({
+      timeout,
+      metadata: vi.fn().mockResolvedValue({
+        pages: 1,
+        width: 800,
+        height: 1000,
+        orientation: 6,
+      }),
+    });
+    const result = await run({ x: 850, y: 20, width: 100, height: 200 });
+    expect(result.error).toBeUndefined();
+    expect(extract).toHaveBeenCalledWith({
+      left: 850,
+      top: 20,
+      width: 100,
+      height: 200,
+    });
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+      '原 1000×800/2MB',
+    );
+  });
+
+  it('rejects a crop outside the EXIF-rotated height', async () => {
+    probe({ width: 800, height: 1000, frameCount: 1 });
+    mocks.sharpCreate.mockReturnValue({
+      timeout,
+      metadata: vi.fn().mockResolvedValue({
+        pages: 1,
+        width: 800,
+        height: 1000,
+        orientation: 6,
+      }),
+    });
+    const result = await run({ x: 20, y: 850, width: 200, height: 100 });
+    expect(result.error?.message).toContain('(1000×800)');
+    expect(timeout).not.toHaveBeenCalled();
   });
 
   it('refuses animated images instead of cropping one frame', async () => {

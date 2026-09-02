@@ -38,12 +38,12 @@ describe('smart-resize', () => {
     const { width, height } = smartResize(1000, 700, { maxPixels: 512 * 784 });
     expect(width % 28).toBe(0);
     expect(height % 28).toBe(0);
-    expect(width * height).toBeLessThanOrEqual(512 * 784 + 28 * 28);
+    expect(width * height).toBeLessThanOrEqual(512 * 784);
   });
 
   it('downscales into the pixel budget, preserving aspect ratio on the grid', () => {
     const { width, height } = smartResize(4000, 2000, { maxPixels: 256 * 784 });
-    expect(width * height).toBeLessThanOrEqual(256 * 784 + 28 * 28);
+    expect(width * height).toBeLessThanOrEqual(256 * 784);
     // 2:1 aspect survives the grid rounding within one cell.
     expect(width / height).toBeGreaterThan(1.8);
     expect(width / height).toBeLessThan(2.2);
@@ -90,7 +90,7 @@ describe('smart-resize', () => {
       'large',
     );
     expect(budgetPixels).toBe(2048 * 784);
-    expect((width * height) / 784).toBeLessThanOrEqual(2048 + 2);
+    expect((width * height) / 784).toBeLessThanOrEqual(2048);
     expect(width % 28).toBe(0);
     expect(height % 28).toBe(0);
   });
@@ -102,11 +102,15 @@ describe('smart-resize', () => {
       'small',
     );
     expect(budgetPixels).toBe(80 * 784);
-    // Grid rounding (16:9 → 308×168) may land a few cells above the exact
-    // budget — the contract is "on the grid, near the budget", not "never
-    // a cell over".
-    expect((width * height) / 784).toBeLessThanOrEqual(80 + 8);
+    expect((width * height) / 784).toBeLessThanOrEqual(80);
     expect(width % 28).toBe(0);
     expect(height % 28).toBe(0);
+  });
+
+  it('keeps common widescreen image and frame sizes inside their tiers', () => {
+    const image = imageDimensionsForTokenBudget(1920, 1080, 'normal');
+    const frame = videoFrameDimensionsForTokenBudget(1920, 1080, 'small');
+    expect(image.width * image.height).toBeLessThanOrEqual(image.budgetPixels);
+    expect(frame.width * frame.height).toBeLessThanOrEqual(frame.budgetPixels);
   });
 });

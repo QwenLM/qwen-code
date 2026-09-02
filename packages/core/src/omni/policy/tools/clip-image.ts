@@ -107,10 +107,9 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
     try {
       const { inputSizeBytes } = await assertMediaPolicyIo(this.params);
 
-      // Probe BEFORE decoding (same stance as the other image tools):
-      // original dimensions validate the rectangle and feed the
-      // disclosure; animated inputs are refused outright — cropping the
-      // first frame would silently destroy the rest of the animation.
+      // Probe before decoding so animated inputs can fail without loading
+      // pixels; cropping only the first frame would silently destroy the
+      // rest of the animation.
       const probe = await probeMediaMetadata(
         this.params.inputPath,
         'image',
@@ -121,28 +120,6 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
           `animated image (${probe.frameCount} frames) is not supported by ${OMNI_CLIP_IMAGE_TOOL_NAME}`,
         );
       }
-      if (probe.width !== undefined && probe.height !== undefined) {
-        if (x + width > probe.width || y + height > probe.height) {
-          return mediaPolicyToolError(
-            `crop rectangle (${x},${y} ${width}×${height}) exceeds the image bounds (${probe.width}×${probe.height})`,
-          );
-        }
-        // Detectable full-image no-op: "cropping" to the whole image
-        // would only re-encode it while the disclosure falsely claims
-        // content outside the rectangle was discarded.
-        if (
-          x === 0 &&
-          y === 0 &&
-          width === probe.width &&
-          height === probe.height
-        ) {
-          return mediaPolicyToolError(
-            'the requested rectangle covers the entire image — a no-op ' +
-              'clip that would only re-encode (and damage) the input',
-          );
-        }
-      }
-
       let sharp: SharpModule;
       try {
         sharp = await loadSharp();
@@ -157,11 +134,37 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
 
       // Second, independent animated-input gate (same rationale as
       // omni_downsample_image / omni_convert_image).
-      const pages = (await sharp(this.params.inputPath).metadata()).pages;
+      const inputMetadata = await sharp(this.params.inputPath).metadata();
+      const pages = inputMetadata.pages;
       if (pages !== undefined && pages > 1) {
         return mediaPolicyToolError(
           `animated image (${pages} frames) is not supported by ${OMNI_CLIP_IMAGE_TOOL_NAME}`,
         );
+      }
+      const rawWidth = inputMetadata.width ?? probe.width;
+      const rawHeight = inputMetadata.height ?? probe.height;
+      const swapsAxes =
+        inputMetadata.orientation !== undefined &&
+        inputMetadata.orientation >= 5;
+      const displayedWidth = swapsAxes ? rawHeight : rawWidth;
+      const displayedHeight = swapsAxes ? rawWidth : rawHeight;
+      if (displayedWidth !== undefined && displayedHeight !== undefined) {
+        if (x + width > displayedWidth || y + height > displayedHeight) {
+          return mediaPolicyToolError(
+            `crop rectangle (${x},${y} ${width}×${height}) exceeds the image bounds (${displayedWidth}×${displayedHeight})`,
+          );
+        }
+        if (
+          x === 0 &&
+          y === 0 &&
+          width === displayedWidth &&
+          height === displayedHeight
+        ) {
+          return mediaPolicyToolError(
+            'the requested rectangle covers the entire image — a no-op ' +
+              'clip that would only re-encode (and damage) the input',
+          );
+        }
       }
 
       const outputFileName = policyOutputFileName({
@@ -193,8 +196,8 @@ class ClipImageInvocation extends BaseMediaPolicyToolInvocation<ClipImageParams>
       }
 
       const original =
-        probe.width !== undefined && probe.height !== undefined
-          ? `${probe.width}×${probe.height}/${formatBytesShort(inputSizeBytes)}`
+        displayedWidth !== undefined && displayedHeight !== undefined
+          ? `${displayedWidth}×${displayedHeight}/${formatBytesShort(inputSizeBytes)}`
           : formatBytesShort(inputSizeBytes);
       const disclosure = `原 ${original} → 裁剪区域 (${x},${y}) ${width}×${height}/${formatBytesShort(info.size)}，区域外内容全部丢弃`;
 

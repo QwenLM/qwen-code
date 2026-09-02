@@ -15,7 +15,10 @@ import {
   MediaMemoryService,
   MediaResourceRegistry,
 } from '../services/media-memory/index.js';
-import { formatResourceHandleText } from './disclosure.js';
+import {
+  formatResourceHandleText,
+  formatResourcePathText,
+} from './disclosure.js';
 import {
   extractRequestResourceIds,
   formatOmniMemorySideQueryReminder,
@@ -160,6 +163,27 @@ describe('omni memory sideQuery selector', () => {
     it('ignores handles this session never issued', () => {
       const parts = [
         { text: formatResourceHandleText('ghost.png', 'media-7-abcdef01') },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+    });
+
+    it('recovers the handle from a path-form annotation via resolveByFileRef', async () => {
+      // Model-visible local media is annotated with its absolute path, not
+      // the opaque handle; passive recall must still map that path back to
+      // the session handle so recall keys on both annotation forms.
+      const resourceId = await recordAndBind();
+      const parts = [
+        'plain user text',
+        { text: formatResourcePathText(path.join(tmpDir, 'pic.png')) },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('ignores a path-form annotation for a file this session never bound', () => {
+      const parts = [
+        { text: formatResourcePathText(path.join(tmpDir, 'never-seen.png')) },
       ];
       expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
     });

@@ -153,3 +153,38 @@ export function parseResourceHandleText(text: string): string | undefined {
   const match = /：(media-\d+-[0-9a-f]+)$/.exec(text);
   return match?.[1];
 }
+
+/**
+ * Model-facing resource annotation for media the model can re-read from a
+ * real local path: the ABSOLUTE PATH stands in for the opaque handle. Used
+ * when the source is a model-visible local file (the model already holds
+ * the path and can read_file it or point tools at it directly), so an
+ * opaque `media-<n>-<hex>` handle would be redundant noise. Passive recall
+ * still recovers the session handle from the path via
+ * `MediaResourceRegistry.resolveByFileRef` — the binding is registered
+ * regardless of which form is shown. Path-less sources (tool/URL media,
+ * whose real locator is an internal object-store path) keep the handle
+ * form ({@link formatResourceHandleText}): no usable path exists to show.
+ *
+ * Carries NO `：<payload>` separator, which is exactly how
+ * {@link parseResourcePathText} tells it apart from the handle form.
+ */
+export function formatResourcePathText(absolutePath: string): string {
+  return `${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}${escapeAnnotationName(absolutePath)}`;
+}
+
+/**
+ * Extract the absolute path from a path-form resource annotation emitted by
+ * {@link formatResourcePathText}, or undefined for any other text —
+ * including the handle form, which is disambiguated by its unescaped
+ * `：<resourceId>` separator (absolute paths never contain the full-width
+ * colon unescaped, and any that did would have been escaped by the writer).
+ */
+export function parseResourcePathText(text: string): string | undefined {
+  if (!text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) return undefined;
+  const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
+  // An unescaped separator marks the handle form (<name>：<resourceId>); the
+  // path form has none.
+  if (splitAnnotationBody(body) !== undefined) return undefined;
+  return unescapeAnnotationName(body);
+}

@@ -39,14 +39,14 @@ describe('omni-fixed-policies-preset.json', () => {
 
     const tools = [
       new OmniDownsampleImageTool(),
-      new OmniDownscaleVideoTool(),
-      new OmniDownsampleAudioTool(),
-      new OmniExtractKeyframesTool(),
-      new OmniExtractAudioTool(),
+      new OmniDownscaleVideoTool({}),
+      new OmniDownsampleAudioTool({}),
+      new OmniExtractKeyframesTool({}),
+      new OmniExtractAudioTool({}),
       new OmniTranscribeAudioTool(),
       new OmniOcrImageTool(),
-      new OmniClipVideoTool(),
-      new OmniClipAudioTool(),
+      new OmniClipVideoTool({}),
+      new OmniClipAudioTool({}),
       new OmniUnderstandVideoSegmentsTool(),
       new OmniCaptionImageTool(),
     ];
@@ -87,5 +87,16 @@ describe('omni-fixed-policies-preset.json', () => {
       ['>', ['field', 'resource.durationMs'], 1800000],
       ['==', ['field', 'memory.hasTranscript'], 0],
     ]);
+
+    expect(() =>
+      normalizeOmniProcessingConfig(
+        {
+          policyTools: {
+            omni_clip_video: { settings: { softClipBudget: 1 } },
+          },
+        },
+        lookup,
+      ),
+    ).not.toThrow();
   });
 });
