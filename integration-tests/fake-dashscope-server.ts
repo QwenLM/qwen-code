@@ -62,7 +62,7 @@ export interface FakeDashScopeConnection {
   send(message: JsonObject): void;
   /**
    * Simulate one finished user utterance:
-   * speech_started → speech_stopped → input_audio_buffer.committed →
+   * speech_started → speech_stopped → conversation.item.created →
    * conversation.item.input_audio_transcription.completed.
    * Returns the item id.
    */
@@ -281,7 +281,15 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
           item_id: itemId,
           audio_end_ms: 400,
         });
-        sendJson({ type: 'input_audio_buffer.committed', item_id: itemId });
+        sendJson({
+          type: 'conversation.item.created',
+          item: {
+            id: itemId,
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_audio' }],
+          },
+        });
         sendJson({
           type: 'conversation.item.input_audio_transcription.completed',
           item_id: itemId,

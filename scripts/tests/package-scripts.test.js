@@ -444,9 +444,19 @@ describe('package scripts', () => {
       buildJob,
       'Check Serve Fast Path Bundle',
     );
+    const packStep = getWorkflowStep(buildJob, 'Pack Build Outputs');
+    const uploadStep = getWorkflowStep(buildJob, 'Upload Build Outputs');
+    const verifyPackageStep = getWorkflowStep(
+      buildJob,
+      'Verify Prepared Package',
+    );
     const workspaceTestStep = getWorkflowStep(
       workspaceTestJob,
       'Run Workspace Tests',
+    );
+    const scriptsTestStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'quality_scripts'),
+      'Run Script Tests',
     );
 
     expect(buildJob).toContain("name: 'Check Serve Fast Path Bundle'");
@@ -454,17 +464,29 @@ describe('package scripts', () => {
     expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
       buildJob.indexOf(buildStep),
     );
+    expect(buildJob.indexOf(uploadStep)).toBeGreaterThan(
+      buildJob.indexOf(packStep),
+    );
+    expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
+      buildJob.indexOf(uploadStep),
+    );
+    expect(verifyPackageStep).toContain('npm run bundle');
+    expect(verifyPackageStep).toContain('dist/review-sources.sha256');
+    expect(verifyPackageStep).toContain('npm run prepare:package');
     expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
-    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
-      expect(workspaceTestStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
-      );
-    }
-    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
-      expect(workspaceTestStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
-      );
+    expect(scriptsTestStep).toContain('npm run test:scripts');
+    for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
+      for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+        );
+      }
+      for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+        );
+      }
     }
   });
 
