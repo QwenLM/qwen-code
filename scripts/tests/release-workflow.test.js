@@ -563,7 +563,7 @@ describe('release workflow', () => {
     }
   });
 
-  it('passes --retry only when the release schedule asks for one', () => {
+  it('passes --retry unless the operator switched it off', () => {
     // The flag reaches every workspace's vitest, where a command line option
     // outranks the config. Passing --retry=0 on stable releases would switch
     // off a workspace's own retry (packages/sdk-typescript) on this lane
@@ -576,6 +576,9 @@ describe('release workflow', () => {
     for (const [retry, expected] of [
       ['2', '--retry=2'],
       ['', null],
+      // 'off' must omit the flag, not pass --retry=0: that would outrank a
+      // workspace's own config-level retry.
+      ['off', null],
     ]) {
       const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
       try {

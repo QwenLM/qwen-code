@@ -548,15 +548,16 @@ jobs:
           # passed on the next attempt. Retrying hides nothing — a real
           # break fails all three attempts — it only stops a contended
           # runner from deciding whether a release ships. Operators can
-          # retune or disable this without a PR via the repository
-          # variable. The flag is still omitted rather than set to 0 when
-          # empty, because a command-line --retry=0 outranks the config and
-          # would disable a workspace's deliberate retry
-          # (packages/sdk-typescript) on the release lane alone.
+          # retune this without a PR via the repository variable, or set it
+          # to 'off' to omit the flag entirely. 'off' rather than '0': a
+          # command-line --retry=0 outranks the config and would disable a
+          # workspace's deliberate retry (packages/sdk-typescript) on the
+          # release lane alone, and an empty variable just falls back to the
+          # default.
           VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
         run: |-
           retry_arg=()
-          if [ -n "${VITEST_RETRY}" ]; then
+          if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
           npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"

@@ -48,11 +48,14 @@ const REPEATS = 5;
 // median inflates with the neighbours' load and the assertion stops being
 // about this code. Assert the fastest sample instead — the run least
 // contaminated by contention, and the closest thing to the intrinsic cost —
-// and give the shared lane a ceiling loose enough that only a real
-// regression, not a busy neighbour, can cross it.
+// and be honest about what the shared lane can check: not the budget —
+// a host that busy cannot say whether 100ms is met — but an order of
+// magnitude. A scan that has blown up still reddens the release; one that
+// merely drifted is caught by the strict bound off shared runners, where
+// the property this test is named for is actually asserted.
 const SHARED_CI = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
 const FAST_RESULT_CEILING_MS = SHARED_CI
-  ? INITIAL_BUDGET_MS * 3
+  ? INITIAL_BUDGET_MS * 10
   : INITIAL_BUDGET_MS / 2;
 
 let tempDir: string;

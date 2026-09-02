@@ -23,6 +23,7 @@ import type { HookInput } from './types.js';
 // diff, stay unchanged.
 const PROCESS_STARTUP_TIMEOUT_MS = 30_000;
 const PROCESS_REAP_TIMEOUT_MS = 15_000;
+const HOOK_GROUP_TIMEOUT_MS = 5000;
 
 const waitFor = async (
   predicate: () => boolean | Promise<boolean>,
@@ -912,15 +913,19 @@ setInterval(() => {}, 1000);
             command,
             source: HooksConfigSource.Project,
             shell: 'bash',
-            timeout: 300,
+            // The root exits as soon as the descendant has written its pid;
+            // the supervisor then keeps the surviving descendant on the
+            // clock until this deadline and kills the group. That kill is
+            // what ends the test, so the deadline must outlast a node
+            // process starting on a loaded host — at 300ms the descendant
+            // could be killed before it ever wrote the pid, and no amount
+            // of waiting for the file afterwards could recover it.
+            timeout: HOOK_GROUP_TIMEOUT_MS,
           },
           HookEventName.SessionDelete,
           input,
         );
 
-        // The root's 300ms hook timeout can fire before the descendant node
-        // process has started far enough to write its pid file, so poll for
-        // the file instead of reading it once the hook returns.
         await waitFor(async () => {
           descendantPid = await readPid(descendantPidPath);
           return descendantPid !== undefined;
@@ -928,7 +933,7 @@ setInterval(() => {}, 1000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: 'Hook timed out after 300ms' },
+          error: { message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS}ms` },
         });
         await waitFor(
           () => !isRunning(descendantPid as number),
