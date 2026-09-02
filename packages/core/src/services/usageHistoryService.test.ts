@@ -12,8 +12,19 @@ import path from 'node:path';
 
 const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
 
+// The factory intercepts every `createDebugLogger` caller in this module
+// graph, not just usageHistoryService: jsonl-utils builds its own logger and
+// calls warn/error on the tolerant-parse and read paths. A partial mock turns
+// those into `TypeError: ... is not a function`, so the whole DebugLogger
+// interface has to be here.
 vi.mock('../utils/debugLogger.js', () => ({
-  createDebugLogger: () => ({ debug: debugMock }),
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: debugMock,
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
 }));
 
 import {
@@ -811,6 +822,12 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     const merged = await loadUsageHistoryWithLive();
     expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+    // The garbage lines must be recovered by the tolerant JSONL parse, not by
+    // loadUsageHistoryWithLive's catch-all: a throwing `jsonl.read` would reach
+    // that catch and log here, hiding the regression behind a green test.
+    expect(debugMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to read usage file'),
+    );
   });
 
   it.skipIf(process.platform === 'win32')(
