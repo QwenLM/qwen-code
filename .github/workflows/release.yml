@@ -43,9 +43,10 @@ on:
         default: false
 
 concurrency:
-  # Only one release validation may use the reserved host at a time, including
-  # delayed schedules and manually dispatched dry runs or releases.
-  group: 'release-validation'
+  # A delayed preview must not overlap the nightly validation on the same
+  # reserved host. Manual runs keep unique groups so GitHub's non-FIFO
+  # concurrency queue can never supersede a pending real release with a dry run.
+  group: "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}"
   cancel-in-progress: false
 
 jobs:
