@@ -71,6 +71,9 @@ const REGISTERED_LANES = new Set([
   // Not part of the per-host convention above: a single benchmark host
   // registered on its own for the DSW SWE-verified release lane.
   'qwen-benchmark-dsw-hk-eas',
+  // Not part of it either: hk4 is pinned host-wide for release validation
+  // and deliberately does not carry ecs-qwen (release.yml:53-58).
+  'ecs-qwen-hk4-host',
 ]);
 
 // Platform labels every self-hosted runner reports; they never name a lane.
@@ -108,30 +111,52 @@ function runnerSetAssignments(text) {
   ].map((m) => ({ name: m[1], raw: m[3] }));
 }
 
-// Quoted labels inside a bracketed literal. `*` (not `+`): an empty ""
-// label must surface as an empty token and fail the set rules the way the
-// direct-array spelling does, not vanish from the set. residueOk is false
-// when anything but commas and whitespace sits beside the quoted spans:
-// vouching only the quoted subset would certify a label set the guard
-// never fully read (R11-1 — an unquoted scalar rides fromJSON to GitHub as
-// an extra array element no runner carries).
+// The labels a bracketed literal delivers, judged by the authority being
+// modelled rather than by a lexer (R13-2). `fromJSON` IS JSON.parse: a
+// payload it rejects (single-quoted or mismatched delimiters, a stray extra
+// bracket) never reaches the runner at all, and one it parses to a nested
+// array reaches it as something other than the flat label set a lexer reads
+// out of the same text. Only a flat array of JSON strings vouches; an empty
+// "" element stays visible so it fails the set rules the way the
+// direct-array spelling does, rather than vanishing from the set.
+//
+// On failure `tokens` is a double-quoted span scan used for the message
+// alone, never for a vouch, so callers can still tell "no quoted labels at
+// all" from "quoted labels beside content the guard cannot read" (R11-1 —
+// vouching only the quoted subset would certify a label set the guard never
+// fully read).
 function bracketTokens(raw) {
-  const tokens = [...raw.matchAll(/["']([^"']*)["']/g)].map((m) => m[1]);
-  const residue = raw.replace(/["'][^"']*["']/g, ' ').replace(/[[\]]/g, ' ');
-  return { tokens, residueOk: /^[,\s]*$/.test(residue) };
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Not JSON; the fail-closed return below reports it.
+  }
+  if (Array.isArray(parsed) && parsed.every((l) => typeof l === 'string')) {
+    return { tokens: parsed, parseOk: true };
+  }
+  return {
+    tokens: [...raw.matchAll(/"([^"]*)"/g)].map((m) => m[1]),
+    parseOk: false,
+  };
 }
 
-// Splits a GitHub expression body on top-level `||`, then takes the LAST
-// top-level `&&` operand of each part — GitHub's `cond && value || fallback`
-// yields exactly those operands as possible runs-on VALUES, while the
-// preceding `&&` operands are conditions (whose quoted scalars, e.g. the
-// `!= 'true'` comparisons in ci.yml's classify_pr, are operands of the
-// condition, not labels, and must not be judged). Quote state honors the
-// GitHub-expression `''` escape; parens/brackets nest. For each || part
-// every operand that can BE the value is judged; stripping a parenthesized
-// value's parens re-exposes top-level operators, so recurse until each arm
-// is operator-free.
-function valueArms(body) {
+// Splits a GitHub expression body on top-level `||` and returns every
+// operand that can BE the runs-on value. Quote state honors the
+// GitHub-expression `''` escape; parens/brackets nest. Stripping a
+// parenthesized value's parens re-exposes top-level operators, so recurse
+// until each arm is operator-free.
+//
+// Which operands can be the value follows from GitHub's own semantics.
+// `a || b` yields `b` when `a` is falsy, so a non-terminal `||` part
+// contributes only its LAST `&&` operand and its falsy prefixes are
+// swallowed by the `||` that follows — those prefixes are conditions (the
+// `!= 'true'` comparisons in ci.yml's classify_pr), not labels, and judging
+// them would red the accepted routing. The TERMINAL part has no `||` after
+// it to swallow anything, and `a && b` yields `a` itself when `a` is falsy,
+// so every one of its `&&` operands can reach the runner (R12-1). A
+// parenthesized group inherits the terminality of the part it sits in.
+function valueArms(body, terminal = true) {
   const parts = [[]];
   let depth = 0;
   let quote = null;
@@ -180,15 +205,18 @@ function valueArms(body) {
   }
   arms.push(current);
   const out = [];
-  for (const ops of arms) {
-    let v = ops[ops.length - 1].trim();
-    while (v.startsWith('(') && v.endsWith(')')) {
-      v = v.slice(1, -1).trim();
-    }
-    if (/\|\||&&/.test(stripQuotesAndParens(v))) {
-      out.push(...valueArms(v));
-    } else {
-      out.push(v);
+  for (const [index, ops] of arms.entries()) {
+    const valuePosition = terminal && index === arms.length - 1;
+    for (const operand of valuePosition ? ops : ops.slice(-1)) {
+      let v = operand.trim();
+      while (v.startsWith('(') && v.endsWith(')')) {
+        v = v.slice(1, -1).trim();
+      }
+      if (/\|\||&&/.test(stripQuotesAndParens(v))) {
+        out.push(...valueArms(v, valuePosition));
+      } else {
+        out.push(v);
+      }
     }
   }
   return out;
@@ -247,12 +275,18 @@ const CASE_HEAD_SHAPE = new RegExp(
   `^\\s*case\\s+(?:${SAFE_SQ}|${SAFE_DQ}|${SAFE_BARE}|` +
     `\\$\\{[A-Za-z_][A-Za-z0-9_]*\\})\\s+in\\s*$`,
 );
+// An assignment whose TARGET is the runner's own output file rebinds where
+// the accepted publish lands: `GITHUB_OUTPUT=/tmp/x` leaves the real output
+// file empty, so every consumer silently takes its hosted fallback while
+// this guard stays green. $GITHUB_ENV/$GITHUB_PATH need no lookahead — the
+// job-wide scan below refuses any body that mentions them at all.
+const CONTROL_TARGET = `(?!GITHUB_OUTPUT=)`;
 const CASE_ARM_SHAPE = new RegExp(
-  `^\\s*[A-Za-z0-9_*?|]+\\)\\s*[A-Za-z_][A-Za-z0-9_]*=` +
+  `^\\s*[A-Za-z0-9_*?|]+\\)\\s*${CONTROL_TARGET}[A-Za-z_][A-Za-z0-9_]*=` +
     `(?:${SAFE_SQ}|${SAFE_BARE})\\s*;;\\s*$`,
 );
 const ASSIGN_SHAPE = new RegExp(
-  `^\\s*[A-Za-z_][A-Za-z0-9_]*=(?:${SAFE_SQ}|${SAFE_BARE})\\s*(?:#.*)?$`,
+  `^\\s*${CONTROL_TARGET}[A-Za-z_][A-Za-z0-9_]*=(?:${SAFE_SQ}|${SAFE_BARE})\\s*(?:#.*)?$`,
 );
 const SKELETON_SHAPE = /^\s*(?:else|fi|esac)\s*$/;
 // `[[ … ]]` conditions cannot run commands; the lookahead bars the four
@@ -514,15 +548,15 @@ function laneTestPlan(file, text) {
                   );
                   continue;
                 }
-                const { tokens, residueOk } = bracketTokens(inner);
+                const { tokens, parseOk } = bracketTokens(inner);
                 if (tokens.length === 0 && inner.slice(1, -1).trim() !== '') {
                   problem(
                     `${file}: ${origin} embeds an unquoted array`,
-                    `${inner} has no quoted labels the guard can read.`,
+                    `${inner} has no JSON-quoted labels the guard can read.`,
                   );
                   continue;
                 }
-                if (!residueOk) {
+                if (!parseOk) {
                   problem(
                     `${file}: ${origin} embeds unquoted content the guard ` +
                       `cannot judge`,
@@ -572,8 +606,8 @@ function laneTestPlan(file, text) {
                   if (Array.isArray(v)) {
                     checkSet(v, `${origin} (${operand})`);
                   } else if (String(v).trim().startsWith('[')) {
-                    const { tokens, residueOk } = bracketTokens(String(v));
-                    if (residueOk) {
+                    const { tokens, parseOk } = bracketTokens(String(v));
+                    if (parseOk) {
                       checkSet(tokens, `${origin} (${operand} = ${v})`);
                     } else {
                       problem(
@@ -671,8 +705,8 @@ function laneTestPlan(file, text) {
       return;
     }
     judgedAssemblies.add(a);
-    const { tokens, residueOk } = bracketTokens(a.raw);
-    if (residueOk) {
+    const { tokens, parseOk } = bracketTokens(a.raw);
+    if (parseOk) {
       checkSet(tokens, `runner-set assignment ${a.raw}${why}`);
     } else {
       problem(
@@ -732,12 +766,13 @@ function laneTestPlan(file, text) {
   //    runs each step in a fresh shell, so a literal in another step
   //    cannot feed the publish;
   //  - the step resolves to bash (the shapes this guard vouches are bash
-  //    shapes), and no env scope visible to it — step, job, workflow, or
-  //    the container's — binds the name or a BASH_ENV/ENV/BASH_FUNC_*
-  //    startup key;
-  //  - no step of the job writes $GITHUB_ENV/$GITHUB_PATH — a sibling
-  //    plant feeds a later step's environment or command lookup without
-  //    appearing in the producer step at all;
+  //    shapes), the job runs in no container, and no env scope visible to
+  //    it — step, job or workflow — binds the name or a
+  //    BASH_ENV/ENV/BASH_FUNC_* startup key;
+  //  - every step of the job is a `run:` step this guard can read, and none
+  //    writes $GITHUB_ENV/$GITHUB_PATH or dereferences a constructed name —
+  //    a sibling plant feeds a later step's environment or command lookup
+  //    without appearing in the producer step at all;
   //  - every other line of the body matches the closed residual allowlist
   //    (vouchedResidualLine) — shapes that cannot write the name or run
   //    code the guard did not read;
@@ -802,12 +837,23 @@ function laneTestPlan(file, text) {
           `consumed output cannot come from a scannable assembly.`,
       );
     }
-    // Env scopes visible to the step — step, job, workflow, and the
-    // container's. A binding of the consumed name lets the publish expand
-    // a value no scannable literal assigns, and a BASH_ENV/ENV/BASH_FUNC_*
-    // binding is executed by bash at startup, before the body the guard
-    // read (R6-1 h/l).
-    const envScopes = [step.env, job.env, doc?.env, job?.container?.env];
+    // A container binds environment this file cannot read: `docker create`
+    // options and the image's own ENV both reach the step, so enumerating
+    // `container.env` beside step/job/workflow would vouch a chain whose
+    // environment it only partly saw (R6-1). Refuse the container outright —
+    // classify_pr has none, so the live vouch costs nothing.
+    if (job.container !== undefined) {
+      return unreadable(
+        `job '${producerJob}' runs in a container — its options and image ` +
+          `can bind '${outName}' or a bash startup key outside every scope ` +
+          `this guard reads.`,
+      );
+    }
+    // Env scopes visible to the step. A binding of the consumed name lets
+    // the publish expand a value no scannable literal assigns, and a
+    // BASH_ENV/ENV/BASH_FUNC_* binding is executed by bash at startup,
+    // before the body the guard read (R6-1 h/l).
+    const envScopes = [step.env, job.env, doc?.env];
     for (const scope of envScopes) {
       if (scope && typeof scope === 'object' && outName in scope) {
         return unreadable(
@@ -847,19 +893,32 @@ function laneTestPlan(file, text) {
       );
     }
     // A $GITHUB_ENV write by ANY step of the job plants a binding the
-    // publish expands when no scannable assignment ran (a dead branch),
-    // and a $GITHUB_PATH append shims command lookup — neither write
-    // appears in the producer step itself (R6-1 e/g).
+    // publish expands when no scannable assignment ran (a dead branch), and
+    // a $GITHUB_PATH append shims command lookup — neither write appears in
+    // the producer step itself (R6-1 e/g). A dereference or eval primitive
+    // lets a body build the sink's name (`v='GITHUB'; v+=_ENV; … >> "${!v}"`)
+    // so that literal spelling never appears.
+    //
+    // This substring posture is inherently incomplete against deliberate
+    // obfuscation. The closures that do not depend on recognizing a spelling
+    // are refusing a `uses:` step below — opaque action code — and refusing
+    // a container above.
+    const SIBLING_WRITE =
+      /GITHUB_ENV|GITHUB_PATH|\$\{!|(^|\s|;)(?:eval|declare)\s/;
     for (const sibling of Array.isArray(job.steps) ? job.steps : []) {
-      if (
-        typeof sibling?.run === 'string' &&
-        /GITHUB_ENV|GITHUB_PATH/.test(sibling.run)
-      ) {
+      if (typeof sibling?.uses === 'string') {
         return unreadable(
-          `a step of job '${producerJob}' writes $GITHUB_ENV/$GITHUB_PATH, ` +
-            `feeding a later step's environment or command lookup — the ` +
-            `value the publish in '${stepId}' expands is one this guard ` +
-            `never read.`,
+          `a step of job '${producerJob}' runs the action ` +
+            `'${sibling.uses}' — opaque code this guard cannot read can ` +
+            `plant the value the publish in '${stepId}' expands.`,
+        );
+      }
+      if (typeof sibling?.run === 'string' && SIBLING_WRITE.test(sibling.run)) {
+        return unreadable(
+          `a step of job '${producerJob}' writes $GITHUB_ENV/$GITHUB_PATH ` +
+            `or dereferences a constructed name, feeding a later step's ` +
+            `environment or command lookup — the value the publish in ` +
+            `'${stepId}' expands is one this guard never read.`,
         );
       }
     }
@@ -948,8 +1007,8 @@ function laneTestPlan(file, text) {
 
   for (const perJob of jobAssemblies.values()) {
     for (const a of perJob) {
-      const { tokens, residueOk } = bracketTokens(a.raw);
-      if (!residueOk || tokens.some((l) => l.toLowerCase() === 'self-hosted')) {
+      const { tokens, parseOk } = bracketTokens(a.raw);
+      if (!parseOk || tokens.some((l) => l.toLowerCase() === 'self-hosted')) {
         judgeAssembly(a, '');
       }
     }
@@ -1142,6 +1201,45 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.deepEqual(plan.problems, []);
     assert.deepEqual(plan.lanes, ['ecs-qwen']);
+  });
+
+  // R12-1: the TERMINAL || part has no following || to swallow a falsy
+  // prefix, and GitHub's `a && b` yields `a` itself when `a` is falsy — so
+  // every && operand there can BE the runs-on value and is judged like any
+  // other arm. Earlier parts keep discarding their condition operands.
+  it('catches an empty-string prefix in a terminal && chain', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(`'\${{ "" && fromJSON(''["ubuntu-latest"]'') }}'`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /single non-hosted label/);
+  });
+
+  it('catches an unjudgeable prefix in a terminal && chain', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ needs.preflight.outputs.go && fromJSON(''["self-hosted", "linux", "x64", "ecs-light"]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unresolvable expression/);
+  });
+
+  // A parenthesized group inherits the terminality of the part it sits in:
+  // in a NON-terminal part only its last operand can be the value, so the
+  // condition operands inside it stay unjudged. Passing terminality down is
+  // what keeps this green — always recursing as terminal reds it.
+  it("keeps a non-terminal paren group's condition operands unjudged", () => {
+    const plan = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ x && (''ubuntu-latest'' || "" && ''ubuntu-latest'') || ''ubuntu-latest'' }}'`,
+      ),
+    );
+    assert.deepEqual(plan.problems, []);
+    assert.deepEqual(plan.lanes, []);
   });
 
   // R5-1: the arm ladder is a closed allowlist. Each demonstrated escape is
@@ -1518,6 +1616,13 @@ describe('laneTestPlan fail-closed behavior', () => {
     ['a trap rebind of the publish', `trap 'ubuntu_runner=evil' EXIT`],
     ['an alias rebind of echo', `alias echo='echo evil'`],
     ['a shopt enabling alias expansion', `shopt -s expand_aliases`],
+    // Rebinding the runner's own output file leaves it empty, so every
+    // consumer silently takes its hosted fallback (R6-1).
+    ['a $GITHUB_OUTPUT rebind', `GITHUB_OUTPUT=/tmp/redirect`],
+    [
+      'a $GITHUB_OUTPUT rebind as a case arm',
+      `x) GITHUB_OUTPUT=/tmp/redirect ;;`,
+    ],
   ];
   for (const [name, extraLine] of residualEntrances) {
     it(`fails closed on ${name}`, () => {
@@ -1629,6 +1734,37 @@ describe('laneTestPlan fail-closed behavior', () => {
     assert.match(blob(problems[0]), /unreadable/);
   });
 
+  it('fails closed when a sibling step is an action this guard cannot read', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    outputs:\n      ubuntu_runner: '\${{ steps.pick_runner.outputs.ubuntu_runner }}'\n` +
+          `    steps:\n      - uses: actions/github-script@v7\n` +
+          `      - id: 'pick_runner'\n        run: |-\n` +
+          `          ${literal}\n          ${publish}\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+  });
+
+  // The sibling scan looks for a literal spelling; a body that builds the
+  // sink's name out of pieces never shows one.
+  it('fails closed when a sibling builds the sink name by dereference', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        siblingPlant(
+          `v='GITHUB'; v+=_ENV; echo 'ubuntu_runner=[evil]' >> "\${!v}"`,
+        ),
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+  });
+
   it('fails closed when the container env binds the consumed name', () => {
     const { problems } = laneTestPlan(
       'probe.yml',
@@ -1636,6 +1772,24 @@ describe('laneTestPlan fail-closed behavior', () => {
         consumer,
         `    container:\n      image: 'node:22'\n      env:\n` +
           `        ubuntu_runner: '["self-hosted", "linux", "x64", "ecs-invented"]'\n` +
+          producerStep([literal, publish]),
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+  });
+
+  // `container.env` is only the part of a container's environment the file
+  // happens to record: `docker create` options and the image's own ENV bind
+  // the name too and neither is readable here, so any container fails the
+  // vouch (R6-1).
+  it('fails closed when the producer job runs in a container', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    container:\n      image: 'node:22'\n` +
+          `      options: '--env ubuntu_runner=["self-hosted", "linux", "x64", "ecs-invented"]'\n` +
           producerStep([literal, publish]),
       ),
     );
@@ -1691,6 +1845,72 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.equal(problems.length, 1);
     assert.match(blob(problems[0]), /unquoted content/);
+  });
+
+  // R13-2: the payload is judged by the authority being modelled, because
+  // `fromJSON` IS JSON.parse. A lexer that erased brackets and paired any
+  // quote with any quote vouched each shape below as the flat set it read
+  // out of the text — while JSON.parse either throws, so GitHub's evaluator
+  // kills the job at start, or yields a nested value that is not that set.
+  // Each entrance reads the payload: the fromJSON literal arm, a resolved
+  // env. operand, and the standalone assembly scan.
+  it('fails closed on a nested fromJSON literal', () => {
+    const { problems, lanes } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON(''["self-hosted", ["linux", "x64", "ecs-qwen"]]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unquoted content/);
+    assert.deepEqual(lanes, []);
+  });
+
+  it('fails closed on an unbalanced fromJSON literal', () => {
+    const { problems, lanes } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        `'\${{ fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]]'') }}'`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unquoted content/);
+    assert.deepEqual(lanes, []);
+  });
+
+  it('fails closed when an env operand resolves to a nested array', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      `env:\n  RUNNER_SET: '["self-hosted", ["linux", "x64", "ecs-qwen"]]'\n` +
+        wrap(`'\${{ fromJSON(env.RUNNER_SET) }}'`),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unquoted content/);
+  });
+
+  it('fails closed when a standalone assembly is a nested array', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n` +
+        `      - run: |-\n` +
+        `          ubuntu_runner='["self-hosted", ["linux", "x64", "ecs-qwen"]]'\n`,
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unquoted content/);
+  });
+
+  it('fails closed on a payload whose delimiters are not JSON', () => {
+    // Expression-level '' quoting leaves JSON single-quote delimiters, and a
+    // mismatched pair leaves a lone single quote. JSON.parse rejects both, so
+    // GitHub's evaluator raises and the runs-on this vouched can never run.
+    for (const runsOn of [
+      `'\${{ fromJSON(''[''''self-hosted'''', ''''linux'''', ''''x64'''', ''''ecs-light'''']'') }}'`,
+      `'\${{ fromJSON(''["self-hosted", "linux", "x64", ''''ecs-qwen"]'') }}'`,
+    ]) {
+      const { problems, lanes } = laneTestPlan('probe.yml', wrap(runsOn));
+      assert.equal(problems.length, 1);
+      assert.deepEqual(lanes, []);
+    }
   });
 
   // R7-1: prefix exemptions are end-anchored; a comma'd string is one
