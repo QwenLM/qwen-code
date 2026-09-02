@@ -22,8 +22,9 @@
  *    forwarded as a structured argument rather than folded into the text;
  *  - a failed dispatcher initialization rejects later submissions with the
  *    recorded reason instead of misrouting to the model;
- *  - the confirmation bridge auto-denies (Cancel / false) so a command can never
- *    hang waiting for a renderer this shell does not own;
+ *  - the confirmation bridge renders a real modal (shell / action) and the
+ *    returned promise settles with the dialog's resolution, so a command can
+ *    never hang waiting for a renderer;
  *  - the session re-key reaches the entry seam, or reports that no owner is
  *    wired to re-key the UI-side session state;
  *  - user history rows drive the composer's history, and an error thrown in the
@@ -47,6 +48,9 @@ const mocks = vi.hoisted(() => {
     host: null as unknown,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
+    toolConfirmProps: null as Record<string, unknown> | null,
+    shellConfirmProps: null as Record<string, unknown> | null,
+    actionConfirmProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
   };
   async function buildJsxRuntime() {
@@ -137,6 +141,20 @@ vi.mock('./input-prompt.js', () => ({
     return 'input-prompt';
   },
 }));
+vi.mock('./dialogs-confirm.js', () => ({
+  OpenTuiToolConfirmation: (props: Record<string, unknown>) => {
+    mocks.state.toolConfirmProps = props;
+    return 'tool-confirm';
+  },
+  OpenTuiShellConfirmation: (props: Record<string, unknown>) => {
+    mocks.state.shellConfirmProps = props;
+    return 'shell-confirm';
+  },
+  OpenTuiActionConfirmation: (props: Record<string, unknown>) => {
+    mocks.state.actionConfirmProps = props;
+    return 'action-confirm';
+  },
+}));
 
 const CONFIG = {} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
@@ -180,6 +198,9 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.host = null;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
+    mocks.state.toolConfirmProps = null;
+    mocks.state.shellConfirmProps = null;
+    mocks.state.actionConfirmProps = null;
     mocks.state.keyboardHandlers.length = 0;
   });
 
@@ -239,7 +260,36 @@ describe('OpenTuiApp shell wiring', () => {
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/rewind apply');
-    expect(onSubmitPrompt).toHaveBeenCalledWith('rewind to checkpoint');
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'rewind to checkpoint',
+      undefined,
+      {
+        modelOverride: undefined,
+        onComplete: undefined,
+        refreshContextFilesOnWrite: undefined,
+      },
+    );
+  });
+
+  it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
+    const onSubmitPrompt = vi.fn();
+    const onComplete = async () => {};
+    renderApp({ onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'submit_prompt',
+      content: 'summarize',
+      modelOverride: 'qwen3-max',
+      refreshContextFilesOnWrite: true,
+      onComplete,
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/model summarize');
+    expect(onSubmitPrompt).toHaveBeenCalledWith('summarize', undefined, {
+      modelOverride: 'qwen3-max',
+      refreshContextFilesOnWrite: true,
+      onComplete,
+    });
   });
 
   it('reaches the entry seam on a quit outcome', async () => {
@@ -349,7 +399,7 @@ describe('OpenTuiApp shell wiring', () => {
     ).toBeTruthy();
   });
 
-  it('auto-denies the confirmation bridge so no command can hang', async () => {
+  it('renders the shell confirmation modal and settles with its resolution', async () => {
     renderApp();
     await settle();
     const host = mocks.state.host as {
@@ -358,17 +408,69 @@ describe('OpenTuiApp shell wiring', () => {
       ) => Promise<{ outcome: ToolConfirmationOutcome }>;
       presentActionConfirmation: (prompt: unknown) => Promise<boolean>;
     };
-    // The dispatcher awaits this with the real, non-empty allowlist; a list
-    // left pending would park `run()` and the gateway busy flag forever.
-    await expect(host.presentShellConfirmation([])).resolves.toEqual({
-      outcome: ToolConfirmationOutcome.Cancel,
+
+    const pending = host.presentShellConfirmation([
+      'rm -rf build',
+      'npm publish',
+    ]);
+    await act(async () => {
+      await Promise.resolve();
     });
-    await expect(
-      host.presentShellConfirmation(['rm -rf build', 'npm publish']),
-    ).resolves.toEqual({ outcome: ToolConfirmationOutcome.Cancel });
-    await expect(host.presentActionConfirmation('delete?')).resolves.toBe(
-      false,
-    );
+    expect(screen.getByText('shell-confirm')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    const resolution = {
+      outcome: ToolConfirmationOutcome.ProceedOnce,
+      approvedCommands: ['rm -rf build', 'npm publish'],
+    };
+    await act(async () => {
+      (mocks.state.shellConfirmProps?.['onResolve'] as (r: unknown) => void)(
+        resolution,
+      );
+    });
+    await expect(pending).resolves.toEqual(resolution);
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+
+    const actionPending = host.presentActionConfirmation('delete?');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText('action-confirm')).toBeTruthy();
+    await act(async () => {
+      (mocks.state.actionConfirmProps?.['onResolve'] as (c: boolean) => void)(
+        true,
+      );
+    });
+    await expect(actionPending).resolves.toBe(true);
+  });
+
+  it('gives a waiting tool call priority over the composer and settles it', async () => {
+    const onToolCallSettled = vi.fn();
+    const call = {
+      callId: 'call-1',
+      name: 'run_shell_command',
+      confirmationDetails: { type: 'info', title: 'ok?' },
+    } as never;
+    renderApp({
+      waitingToolCalls: [call],
+      onToolCallSettled,
+    });
+    await settle();
+    expect(screen.getByText('tool-confirm')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+
+    await act(async () => {
+      (mocks.state.toolConfirmProps?.['onSettled'] as () => void)();
+    });
+    expect(onToolCallSettled).toHaveBeenCalledWith('call-1');
+  });
+
+  it('passes streaming state and interrupt through to the composer', async () => {
+    const onInterrupt = vi.fn();
+    renderApp({ streaming: true, onInterrupt });
+    await settle();
+    expect(mocks.state.inputProps?.['streaming']).toBe(true);
+    (mocks.state.inputProps?.['onInterrupt'] as () => void)();
+    expect(onInterrupt).toHaveBeenCalled();
   });
 
   it('catches a subtree render error inside the error boundary', async () => {
