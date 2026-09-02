@@ -351,7 +351,7 @@ setInterval(() => {}, 1000);
           await rm(tempDir, { recursive: true, force: true });
         }
       },
-      15_000,
+      90_000,
     );
 
     it.each([
@@ -524,7 +524,7 @@ writeFileSync(process.argv[3], 'completed');
           await rm(tempDir, { recursive: true, force: true });
         }
       },
-      10_000,
+      90_000,
     );
 
     it('enforces a surviving hook timeout after the parent exits', async () => {

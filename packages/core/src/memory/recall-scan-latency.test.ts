@@ -164,10 +164,12 @@ describe('auto-memory recall scan latency', () => {
     }
 
     const [smallest] = rows;
-    // The ordinary case must leave the rest of the budget to spare. Loose
-    // because CI is shared; the table is what carries the detail.
+    // The ordinary case must leave the rest of the budget to spare. On
+    // shared runners only the best sample survives contention, so the loose
+    // bound checks it; off them the median faces the strict ceiling. The
+    // table is what carries the detail.
     expect(smallest[0]).toBe(TOPIC_COUNTS[0]);
-    expect(smallest[1]).toBeLessThan(FAST_RESULT_CEILING_MS);
+    expect(smallest[SHARED_CI ? 1 : 2]).toBeLessThan(FAST_RESULT_CEILING_MS);
 
     console.log(
       [

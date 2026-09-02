@@ -517,9 +517,12 @@ const nextFrame = () =>
 // tick, but the effect they were meant to flush is queued behind everything
 // else on the box. Poll frames against a wall-clock deadline instead, so the
 // wait stretches with the machine rather than with a frame count. The bound
-// stays well inside the 60s per-test budget this config gives shared ECS
-// runners, so a wait that never resolves still fails as an assertion.
-const FLUSH_DEADLINE_MS = 10_000;
+// stays well inside the lane's per-test budget (60s on shared ECS runners,
+// vitest's 5s default elsewhere), so a wait that never resolves still fails
+// as an assertion.
+const FLUSH_DEADLINE_MS = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 10_000
+  : 4_000;
 const waitForFrames = async (predicate: () => boolean) => {
   const deadline = Date.now() + FLUSH_DEADLINE_MS;
   while (!predicate() && Date.now() < deadline) {
