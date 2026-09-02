@@ -300,8 +300,11 @@ export function BranchPickerPopover({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  // Daemon explanation shown in the panel instead of the fixed blocked line,
-  // when the refusal carried one worth reading (a discard the daemon refused).
+  // Daemon explanation shown in the panel instead of the fixed blocked line
+  // when the refusal carried one worth reading — a discard the daemon
+  // refused (force_unsupported). While set, the Discard action is hidden:
+  // the daemon has declared it impossible for this workspace, so offering
+  // it again could only loop the same refusal.
   const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
     null,
   );
@@ -1007,14 +1010,16 @@ export function BranchPickerPopover({
                   )}
                   {t('branchPicker.pullStash')}
                 </button>
-                <button
-                  type="button"
-                  className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
-                  disabled={!!busyAction}
-                  onClick={() => setConfirmDiscard(true)}
-                >
-                  {t('branchPicker.pullDiscard')}
-                </button>
+                {pullBlockedDetail === null && (
+                  <button
+                    type="button"
+                    className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
+                    disabled={!!busyAction}
+                    onClick={() => setConfirmDiscard(true)}
+                  >
+                    {t('branchPicker.pullDiscard')}
+                  </button>
+                )}
                 <button
                   type="button"
                   className={styles.pullBlockedButton}

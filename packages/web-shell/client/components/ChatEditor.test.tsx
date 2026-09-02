@@ -400,10 +400,10 @@ interface ChatEditorRenderProps {
   workspaceFeaturesEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
+  language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
-  language?: WebShellLanguage;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -418,9 +418,9 @@ function renderChatEditorInto(
     pastedImages,
     pastedFiles,
     customization,
+    language = 'en',
     renderComposerTagTooltip,
     onComposerTagClick,
-    language = 'en',
     ...chatEditorProps
   } = props;
   if (composerTags) {
@@ -1839,6 +1839,28 @@ describe('ChatEditor toolbar popovers', () => {
         '[data-web-shell-toolbar-popover] input[type="search"]',
       ),
     ).toBeNull();
+  });
+
+  it('localizes the approval-mode button accessible name', () => {
+    const english = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'en',
+    });
+    const chinese = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'zh-CN',
+    });
+
+    expect(
+      english
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Approval mode');
+    expect(
+      chinese
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('审批模式');
   });
 });
 
