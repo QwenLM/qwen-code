@@ -575,8 +575,9 @@ function registerIpc(): void {
     });
     publishState();
   });
-  ipcMain.on('live:audio:playback-started', (_event, epoch: unknown) => {
+  ipcMain.on('live:audio:playback-started', (event, epoch: unknown) => {
     if (
+      !isTrustedSender(event) ||
       typeof epoch !== 'number' ||
       !Number.isSafeInteger(epoch) ||
       epoch !== daemon.getEpoch()
@@ -586,8 +587,9 @@ function registerIpc(): void {
     daemon.sendPlaybackStarted(epoch);
   });
 
-  ipcMain.on('live:audio:playback-completed', (_event, epoch: unknown) => {
+  ipcMain.on('live:audio:playback-completed', (event, epoch: unknown) => {
     if (
+      !isTrustedSender(event) ||
       typeof epoch !== 'number' ||
       !Number.isSafeInteger(epoch) ||
       epoch !== daemon.getEpoch()
