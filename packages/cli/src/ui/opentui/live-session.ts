@@ -60,6 +60,8 @@ interface LooseCompletedCall {
 export interface LivePromptOptions {
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
+  /** Raw composer text before @-file expansion, for UserPromptSubmit hooks. */
+  submittedPrompt?: string;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
    * before their results go back to the model). Returned texts are appended
@@ -264,10 +266,15 @@ export async function* livePromptEvents(
   const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
-      ? options?.modelOverride
+      ? options?.modelOverride || options?.submittedPrompt
         ? {
             type: SendMessageType.UserQuery,
-            modelOverride: options.modelOverride,
+            ...(options.modelOverride
+              ? { modelOverride: options.modelOverride }
+              : {}),
+            ...(options.submittedPrompt
+              ? { submittedPrompt: options.submittedPrompt }
+              : {}),
           }
         : undefined
       : {

@@ -138,6 +138,7 @@ import type { InitializationResult } from '../../core/initializer.js';
 
 function buildConfig(): Config {
   return {
+    initialize: vi.fn(async () => {}),
     getSessionId: () => 'test-session-id',
     getTargetDir: () => '/tmp/project',
     getApprovalMode: () => 'default',
@@ -210,6 +211,10 @@ describe('startOpenTuiUI fallback contract', () => {
       {} as InitializationResult,
     );
     expect(started).toBe(true);
+    expect(config.initialize).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(config.initialize).mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.state.root.render.mock.invocationCallOrder[0]!);
     expect(mocks.state.stderrLines).toHaveLength(0);
     expect(mocks.state.cleanups.length).toBeGreaterThanOrEqual(3);
     expect(config.trackSessionRegistration).toHaveBeenCalled();

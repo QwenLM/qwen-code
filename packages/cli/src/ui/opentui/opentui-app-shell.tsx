@@ -46,6 +46,8 @@ import type { ExtensionRefreshState } from '../../config/extension-refresh-state
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { HistoryItem } from '../types.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
+import { isAtCommand } from '../utils/commandUtils.js';
 import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -329,7 +331,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   ]);
 
   const applyOutcome = useCallback(
-    (outcome: OpenTuiDispatchOutcome) => {
+    (outcome: OpenTuiDispatchOutcome, submittedPrompt: string) => {
       switch (outcome.kind) {
         case 'handled':
           return;
@@ -340,6 +342,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           if (onSubmitPrompt)
             onSubmitPrompt(outcome.content, undefined, {
               modelOverride: outcome.modelOverride,
+              submittedPrompt,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
             });
@@ -369,13 +372,30 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return;
       }
       if (settlement.outcome === false) {
-        if (onSubmitPrompt) onSubmitPrompt(text, imagePaths);
-        else notify('The live prompt turn is not wired in this shell.');
+        if (!onSubmitPrompt) {
+          notify('The live prompt turn is not wired in this shell.');
+          return;
+        }
+        let content: PartListUnion = text;
+        if (isAtCommand(text)) {
+          const resolved = await handleAtCommand({
+            query: text,
+            config,
+            onDebugMessage: () => {},
+            messageId: Date.now(),
+            signal: new AbortController().signal,
+            addItem: host.addItem,
+          });
+          if (!resolved.shouldProceed || resolved.processedQuery === null)
+            return;
+          content = resolved.processedQuery;
+        }
+        onSubmitPrompt(content, imagePaths, { submittedPrompt: text });
         return;
       }
-      applyOutcome(settlement.outcome);
+      applyOutcome(settlement.outcome, text);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify],
+    [gateway, onSubmitPrompt, applyOutcome, notify, config, host],
   );
 
   const userMessages = useMemo(

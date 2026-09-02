@@ -267,6 +267,7 @@ describe('OpenTuiApp shell wiring', () => {
         modelOverride: undefined,
         onComplete: undefined,
         refreshContextFilesOnWrite: undefined,
+        submittedPrompt: '/rewind apply',
       },
     );
   });
@@ -289,6 +290,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      submittedPrompt: '/model summarize',
     });
   });
 
@@ -316,6 +318,7 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'summarize the diff',
       undefined,
+      { submittedPrompt: 'summarize the diff' },
     );
   });
 
@@ -328,10 +331,11 @@ describe('OpenTuiApp shell wiring', () => {
     await submit('what is in these', ['a.png', 'b.png']);
     // The shell has no business choosing an image encoding: the entry layer
     // builds the real parts (ink: attachments), so the paths stay separate.
-    expect(onSubmitPrompt).toHaveBeenCalledWith('what is in these', [
-      'a.png',
-      'b.png',
-    ]);
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'what is in these',
+      ['a.png', 'b.png'],
+      { submittedPrompt: 'what is in these' },
+    );
   });
 
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {

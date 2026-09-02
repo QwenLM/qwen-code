@@ -263,6 +263,40 @@ describe('livePromptEvents', () => {
     });
   });
 
+  it('passes submittedPrompt only on the initial user query', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, [{ text: 'expanded prompt' }], undefined, {
+        submittedPrompt: '@context.txt review this',
+      }),
+    );
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: '@context.txt review this',
+    });
+    expect((sendMessageStream.mock.calls[1] as unknown[])[3]).toEqual({
+      type: SendMessageType.ToolResult,
+    });
+  });
+
   it('appends drained steering texts after tool responses at the boundary', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{

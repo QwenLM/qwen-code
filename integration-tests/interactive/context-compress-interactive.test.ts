@@ -5,24 +5,82 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig, type } from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
+import {
+  TestRig,
+  type,
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 describe('Interactive Mode', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer | undefined;
+  let restoreNoProxy: () => void;
 
   beforeEach(() => {
     rig = new TestRig();
+    restoreNoProxy = applyContainerSandboxNoProxy();
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
+    fakeServer = undefined;
+    restoreNoProxy();
     await rig.cleanup();
   });
+
+  async function runInteractiveWithFakeModel() {
+    fakeServer = await startFakeOpenAIServer(
+      ({ requestIndex }) => ({
+        content:
+          requestIndex === 0
+            ? `SEED_TURN_DONE ${'deterministic history '.repeat(50)}einstein`
+            : 'COMPRESSED_SUMMARY_DONE',
+      }),
+      fakeServerHostOptions(),
+    );
+    return rig.runInteractive(
+      '--auth-type',
+      'openai',
+      '--openai-api-key',
+      'fake-key',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--model',
+      'fake-model',
+    );
+  }
+
+  async function waitForInteractiveOutputToSettle() {
+    let previousLength = rig._interactiveOutput.length;
+    let stableSince = Date.now();
+    return rig.poll(
+      () => {
+        const currentLength = rig._interactiveOutput.length;
+        if (currentLength !== previousLength) {
+          previousLength = currentLength;
+          stableSince = Date.now();
+        }
+        return Date.now() - stableSince >= 1000;
+      },
+      25_000,
+      100,
+    );
+  }
 
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
     async () => {
       await rig.setup('interactive-compress-test', {
         settings: {
+          memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+          },
           security: {
             auth: {
               selectedType: 'openai',
@@ -31,38 +89,47 @@ describe('Interactive Mode', () => {
         },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess, promise } = await runInteractiveWithFakeModel();
 
-      let fullOutput = '';
-      ptyProcess.onData((data: string) => (fullOutput += data));
+      try {
+        const isReady = await rig.waitForText('Type your message', 15000);
+        expect(
+          isReady,
+          'CLI did not start up in interactive mode correctly',
+        ).toBe(true);
 
-      // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 15000);
-      expect(
-        isReady,
-        'CLI did not start up in interactive mode correctly',
-      ).toBe(true);
+        await type(ptyProcess, 'Seed deterministic history for compression.');
+        await type(ptyProcess, '\r');
 
-      const longPrompt =
-        'Dont do anything except returning a 1000 token long paragragh with the <name of the scientist who discovered theory of relativity> at the end to indicate end of response. This is a moderately long sentence.';
+        expect(
+          await rig.waitForText('SEED_TURN_DONE', 25_000),
+          'Fake model seed turn did not complete',
+        ).toBe(true);
+        expect(
+          await rig.waitForTelemetryEvent('api_response', 25_000),
+          'Seed turn API response telemetry was not recorded',
+        ).toBe(true);
+        expect(
+          await waitForInteractiveOutputToSettle(),
+          'Interactive output did not settle after the seed turn',
+        ).toBe(true);
 
-      await type(ptyProcess, longPrompt);
-      await type(ptyProcess, '\r');
+        await type(ptyProcess, '/compress');
+        await type(ptyProcess, '\r');
+        await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
-
-      await type(ptyProcess, '/compress');
-      // A small delay to allow React to re-render the command list.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await type(ptyProcess, '\r');
-
-      const foundEvent = await rig.waitForTelemetryEvent(
-        'chat_compression',
-        90000,
-      );
-      expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
-        true,
-      );
+        const foundEvent = await rig.waitForTelemetryEvent(
+          'chat_compression',
+          90000,
+        );
+        expect(
+          foundEvent,
+          'chat_compression telemetry event was not found',
+        ).toBe(true);
+      } finally {
+        ptyProcess.kill();
+        await promise;
+      }
     },
   );
 
@@ -111,6 +178,10 @@ describe('Interactive Mode', () => {
     async () => {
       await rig.setup('interactive-compress-instructions-test', {
         settings: {
+          memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+          },
           security: {
             auth: {
               selectedType: 'openai',
@@ -119,42 +190,47 @@ describe('Interactive Mode', () => {
         },
       });
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess, promise } = await runInteractiveWithFakeModel();
 
-      let fullOutput = '';
-      ptyProcess.onData((data: string) => (fullOutput += data));
+      try {
+        const isReady = await rig.waitForText('Type your message', 15000);
+        expect(
+          isReady,
+          'CLI did not start up in interactive mode correctly',
+        ).toBe(true);
 
-      const isReady = await rig.waitForText('Type your message', 15000);
-      expect(
-        isReady,
-        'CLI did not start up in interactive mode correctly',
-      ).toBe(true);
+        await type(ptyProcess, 'Seed deterministic history for compression.');
+        await type(ptyProcess, '\r');
 
-      // Seed history so /compress has material to summarize.
-      const seedPrompt =
-        'Dont do anything except returning a 1000 token long paragragh with the <name of the scientist who discovered theory of relativity> at the end to indicate end of response. This is a moderately long sentence.';
+        expect(
+          await rig.waitForText('SEED_TURN_DONE', 25_000),
+          'Fake model seed turn did not complete',
+        ).toBe(true);
+        expect(
+          await rig.waitForTelemetryEvent('api_response', 25_000),
+          'Seed turn API response telemetry was not recorded',
+        ).toBe(true);
+        expect(
+          await waitForInteractiveOutputToSettle(),
+          'Interactive output did not settle after the seed turn',
+        ).toBe(true);
 
-      await type(ptyProcess, seedPrompt);
-      await type(ptyProcess, '\r');
+        await type(ptyProcess, '/compress focus on the scientist mentioned');
+        await type(ptyProcess, '\r');
+        await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
-
-      // Fire /compress with a trailing instruction. We are not asserting on
-      // summary CONTENT (model behaviour) — only that the wiring runs
-      // end-to-end and the compression telemetry event lands. Earlier unit
-      // tests cover the prompt-composition path; this is the smoke test that
-      // the args plumbing reaches the side-query.
-      await type(ptyProcess, '/compress focus on the scientist mentioned');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await type(ptyProcess, '\r');
-
-      const foundEvent = await rig.waitForTelemetryEvent(
-        'chat_compression',
-        90000,
-      );
-      expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
-        true,
-      );
+        const foundEvent = await rig.waitForTelemetryEvent(
+          'chat_compression',
+          90000,
+        );
+        expect(
+          foundEvent,
+          'chat_compression telemetry event was not found',
+        ).toBe(true);
+      } finally {
+        ptyProcess.kill();
+        await promise;
+      }
     },
   );
 });

@@ -330,6 +330,10 @@ export async function startOpenTuiUI(
     await runtime.writeRuntimeSidecar();
     runtime.startPressureMonitor();
 
+    profileCheckpoint('config_initialize_start');
+    await config.initialize();
+    profileCheckpoint('config_initialize_end');
+
     // Drain the early-captured input exactly once, before the renderer takes
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
@@ -353,6 +357,7 @@ export async function startOpenTuiUI(
       }),
     );
     profileCheckpoint('first_paint');
+    profileCheckpoint('input_enabled');
 
     startPostRenderPrefetches(config, settings, {
       connectIde: options.postRenderConnectIde ?? false,

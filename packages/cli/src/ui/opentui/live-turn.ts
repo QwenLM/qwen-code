@@ -88,6 +88,7 @@ export interface UseOpenTuiLiveTurnOptions {
  */
 export interface OpenTuiSubmitOptions {
   modelOverride?: string;
+  submittedPrompt?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
 }
@@ -187,6 +188,7 @@ export function useOpenTuiLiveTurn(
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
           modelOverride: turnOptions?.modelOverride,
+          submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           onWaitingCall: (call) => {
@@ -228,7 +230,9 @@ export function useOpenTuiLiveTurn(
             const text = drainQueue().join('\n');
             if (text.trim()) {
               apply({ type: 'user', text });
-              void runTurn(text, nextLivePromptId(config));
+              void runTurn(text, nextLivePromptId(config), {
+                submittedPrompt: text,
+              });
             }
           }
         }
