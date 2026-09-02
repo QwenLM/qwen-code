@@ -1753,11 +1753,16 @@ export function createDaemonSessionActions({
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
       if (sessionRef.current === session) {
+        const refreshStandaloneOptions =
+          getConnection().sessionContext?.kind === 'standalone';
         clearActiveSessionState();
         sessionRef.current = undefined;
         setConnection((current) =>
           getConnectionAfterSessionClear(current, session?.sessionId),
         );
+        if (refreshStandaloneOptions) {
+          setRestoreSessionNonce((nonce) => nonce + 1);
+        }
       }
       if (session) {
         try {
