@@ -171,8 +171,28 @@ describe('DaemonClient standalone sessions', () => {
       { ...standaloneOptions(), workspaceCwd: '/conversations' },
       'workspace internals',
     ],
+    [{ ...standaloneOptions(), acpChannelLive: true }, 'workspace internals'],
     [{ ...standaloneOptions(), v: 2 }, 'expected v=1'],
     [{ ...standaloneOptions(), providers: null }, 'expected providers[]'],
+    [{ ...standaloneOptions(), errors: {} }, 'expected errors[]'],
+    [
+      {
+        ...standaloneOptions(),
+        errors: [{ kind: 'a', status: 'degraded' }],
+      },
+      'invalid status',
+    ],
+    [
+      { ...standaloneOptions(), approvalMode: 'yolo-plus' },
+      'invalid approvalMode',
+    ],
+    [
+      {
+        ...standaloneOptions(),
+        current: { modelId: 'q', visionModelId: 7 },
+      },
+      'expected visionModelId string',
+    ],
     [
       {
         ...standaloneOptions(),

@@ -1981,6 +1981,7 @@ export interface DaemonWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface DaemonWorkspaceProviderModel {
