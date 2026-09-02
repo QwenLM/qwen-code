@@ -27,7 +27,11 @@ import {
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
-import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
+import {
+  startPeerInbox,
+  type PeerConnectionAuth,
+  type PeerInbox,
+} from './uds-inbox.js';
 
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
@@ -519,5 +523,90 @@ describe.skipIf(isWindows)('client errors', () => {
       for (const conn of conns) conn.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe.skipIf(isWindows)('child token', () => {
+  const PEER = 'a'.repeat(64);
+  const CHILD = 'c'.repeat(64);
+  let admitted: Array<PeerConnectionAuth | undefined>;
+
+  beforeEach(() => {
+    admitted = [];
+  });
+
+  async function listenWithBoth(
+    tokens: { requiredToken?: string; childToken?: string } = {
+      requiredToken: PEER,
+      childToken: CHILD,
+    },
+  ): Promise<PeerInbox> {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'child.sock'),
+      ...tokens,
+      onFrame: (frame, auth) => {
+        received.push(frame);
+        admitted.push(auth);
+      },
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    return started;
+  }
+
+  it('admits either token and reports which one it was', async () => {
+    const started = await listenWithBoth();
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'p' }), {
+      authToken: PEER,
+    });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'c' }), {
+      authToken: CHILD,
+    });
+    await settle();
+    expect(
+      received.map(
+        (f) => (f as { message: { content: string } }).message.content,
+      ),
+    ).toEqual(['p', 'c']);
+    expect(admitted).toEqual(['peer', 'child']);
+  });
+
+  it('holds the verdict for every frame on the connection', async () => {
+    // The kind is decided once per connection, at the auth line, and
+    // cannot be re-negotiated by a later line.
+    const started = await listenWithBoth();
+    await writeRaw(started.socketPath, [
+      buildAuthLine(CHILD) +
+        encodePeerFrame(buildUserFrame({ content: 'one' })) +
+        buildAuthLine(PEER) +
+        encodePeerFrame(buildUserFrame({ content: 'two' })),
+    ]);
+    await settle();
+    // The second auth line is an unparseable frame, skipped like any other.
+    expect(received).toHaveLength(2);
+    expect(admitted).toEqual(['child', 'child']);
+  });
+
+  it('still refuses a token that is neither', async () => {
+    const started = await listenWithBoth();
+    await writeRaw(started.socketPath, [
+      buildAuthLine('b'.repeat(64)) +
+        encodePeerFrame(buildUserFrame({ content: 'neither' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(0);
+  });
+
+  it('means nothing without a required token', async () => {
+    // A child token on an open inbox would be a third state — "admitted,
+    // but not by a token we asked for" — with no consumer. It is inert.
+    const started = await listenWithBoth({ childToken: CHILD });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'x' }), {
+      authToken: CHILD,
+    });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'y' }));
+    await settle();
+    expect(received).toHaveLength(2);
+    expect(admitted).toEqual([undefined, undefined]);
   });
 });
