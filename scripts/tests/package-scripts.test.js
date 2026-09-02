@@ -448,6 +448,10 @@ describe('package scripts', () => {
       workspaceTestJob,
       'Run Workspace Tests',
     );
+    const scriptsTestStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'quality_scripts'),
+      'Run Script Tests',
+    );
 
     expect(buildJob).toContain("name: 'Check Serve Fast Path Bundle'");
     expect(buildJob).toContain('npm run check:serve-fast-path-bundle');
@@ -456,15 +460,21 @@ describe('package scripts', () => {
     );
     expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
-    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
-      expect(workspaceTestStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
-      );
-    }
-    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
-      expect(workspaceTestStep).toContain(
-        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
-      );
+    expect(scriptsTestStep).toContain('npm run test:scripts');
+    // Both test lanes share the bound: the scripts suite's ESLint instances
+    // and bash replays spawn heavy subprocesses, and the unbounded default
+    // worker count timed them out on the shared ECS pool (release #10755).
+    for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
+      for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+        );
+      }
+      for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+        );
+      }
     }
   });
 

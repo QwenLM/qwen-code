@@ -196,6 +196,10 @@ describe('uploadAssets (integration)', () => {
       // Without the bound this test would sit in the shim's 60s hang; the
       // kill turns the stall into an ordinary failed attempt, so all three
       // attempts happen and the uploader fails loudly instead of hanging.
+      // The bound stays well above worst-case child-spawn latency on the
+      // shared runners: a SIGKILL before the shim's first appendFileSync
+      // loses that attempt's log line and the count below reads short even
+      // though all three attempts ran.
       expect(() =>
         uploadAssets(
           {
@@ -204,7 +208,7 @@ describe('uploadAssets (integration)', () => {
             config: configPath,
             prefix: 'releases/qwen-code/v0.0.0',
           },
-          { ossutilCommand, ossutilCommandArgs, attemptTimeoutMs: 400 },
+          { ossutilCommand, ossutilCommandArgs, attemptTimeoutMs: 2000 },
         ),
       ).toThrow(/ossutil failed after 3 attempts/);
       const uploadAttempts = fs
