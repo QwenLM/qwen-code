@@ -451,8 +451,8 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
-          updateSessionRegistryIpcPath: (ipcPath) =>
-            config.updateSessionRegistryIpcPath(ipcPath),
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),
           reassertSessionRecord: () => config.reassertSessionRegistryRecord(),
         });

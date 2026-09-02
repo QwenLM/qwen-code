@@ -48,6 +48,9 @@ import {
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
+  parseCron,
+  readCronTasks,
+  taskHasLegacyCondition,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -137,6 +140,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useEffortCommand } from './hooks/use-effort-command.js';
+import { useOutputStyleCommand } from './hooks/use-output-style-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -681,6 +685,33 @@ export function mergeStartupWarnings(
   return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
+export function getScheduledTasksStartupWarning(
+  activeTaskCount: number,
+): string | null {
+  if (activeTaskCount < 1) return null;
+  const taskLabel = activeTaskCount === 1 ? 'task' : 'tasks';
+  // `/loop list` comes from the bundled loop skill (registered as a slash
+  // command by BundledSkillLoader), not from the built-in command set, so
+  // it can be absent (bare mode, skills.disabled). Flag the skill in the
+  // wording so the recommendation stays interpretable when /loop is not
+  // registered in this session.
+  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list (loop skill) to inspect.`;
+}
+
+export function countActiveScheduledTasks(
+  tasks: Awaited<ReturnType<typeof readCronTasks>>,
+): number {
+  return tasks.filter((task) => {
+    if (task.enabled === false || taskHasLegacyCondition(task)) return false;
+    try {
+      parseCron(task.cron);
+      return true;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
 /**
  * Whether the skill-review dialog should auto-open. Exported for tests.
  *
@@ -1043,6 +1074,23 @@ export const AppContainer = (props: AppContainerProps) => {
             '(session writer lease contention?); continuing with goal features degraded.',
         );
       }
+      let activeScheduledTaskCount = 0;
+      if (config.isCronEnabled()) {
+        // Count durable tasks read from disk only. The in-memory scheduler
+        // is structurally empty at this point: enableDurable() — the only
+        // TUI path that loads durable jobs into the scheduler — is gated
+        // on isConfigInitialized, which this same effect sets only below,
+        // and session-only jobs cannot exist before input is enabled.
+        try {
+          const durableTasks = await readCronTasks(config.getProjectRoot());
+          activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
+        } catch (error) {
+          debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
+        }
+      }
+      const scheduledTasksWarning = getScheduledTasksStartupWarning(
+        activeScheduledTaskCount,
+      );
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(
           currentWarnings,
@@ -1168,6 +1216,19 @@ export const AppContainer = (props: AppContainerProps) => {
             console.debug('worktree session restore failed:', error);
           }
         }
+      }
+
+      // Add this after resume restoration because loadHistory replaces the
+      // current transcript. The notice should be visible in both fresh and
+      // resumed sessions whenever durable scheduling is enabled.
+      if (scheduledTasksWarning) {
+        historyManager.addItem(
+          {
+            type: MessageType.WARNING,
+            text: scheduledTasksWarning,
+          },
+          Date.now(),
+        );
       }
     })();
 
@@ -1590,6 +1651,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
 
+  const {
+    isOutputStyleDialogOpen,
+    openOutputStyleDialog,
+    handleOutputStyleSelect,
+  } = useOutputStyleCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1939,6 +2006,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
         try {
           cancelOngoingRequestRef.current();
@@ -1989,6 +2057,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -2586,7 +2655,11 @@ export const AppContainer = (props: AppContainerProps) => {
         {
           type: MessageType.INFO,
           text:
-            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `Held a message from ${
+              newest.selfSent
+                ? 'a process this session started'
+                : 'another session'
+            } (${describeHoldCause(newest.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),
@@ -3674,6 +3747,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isEffortDialogOpen ||
+    isOutputStyleDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -4238,6 +4312,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
     isEffortDialogOpen,
     handleEffortSelect,
+    isOutputStyleDialogOpen,
+    handleOutputStyleSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -4719,6 +4795,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4865,6 +4942,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4999,6 +5077,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -5091,6 +5170,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,
