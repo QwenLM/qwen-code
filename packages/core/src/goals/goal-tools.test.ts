@@ -1596,6 +1596,13 @@ describe('ProposeGoalTool', () => {
     expect(invocation.requiresUserInteraction?.()).toBe(true);
     expect(await invocation.getDefaultPermission()).toBe('ask');
     expect(invocation.getDescription()).toContain(objective);
+    // The decline clause is what keeps the model from re-proposing after a
+    // refusal: the constant it would otherwise read never reaches it. Same
+    // fragment as the bundled skill's copy in goal-draft/SKILL.test.ts, so the
+    // two cannot drift apart unnoticed.
+    expect(tool.description).toContain(
+      'do not propose the same or a reworded objective again',
+    );
   });
 
   it('validates the objective', () => {
@@ -1722,34 +1729,26 @@ describe('ProposeGoalTool', () => {
     expect(host.started).toHaveLength(0);
   });
 
-  it('parks nothing when the dialog is cancelled', async () => {
-    const { runtime, host } = idleRuntime();
-    const config = proposeConfig(runtime);
-    const tool = new ProposeGoalTool(config);
-
-    // The real path: the scheduler settles a cancelled confirmation without
-    // calling `execute()` at all, so a decline must already have parked
-    // nothing by the time the dialog resolves.
-    await confirm(tool, ToolConfirmationOutcome.Cancel);
-
-    expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
-    expect(config.pending()).toBeUndefined();
-    expect(runtime.getSnapshot().goal).toBeNull();
-    expect(host.started).toHaveLength(0);
-  });
-
   it('refuses if a host runs it anyway after a cancelled dialog', async () => {
     const { runtime, host } = idleRuntime();
     const config = proposeConfig(runtime);
     const tool = new ProposeGoalTool(config);
 
+    // On the real path the scheduler settles a cancelled confirmation without
+    // entering `execute()` at all -- that path is pinned by 'forwards the host
+    // denial reason when a bounced edit confirmation is cancelled' in
+    // coreToolScheduler.test.ts. What is checked here is the guard that stays
+    // for a host which runs `execute()` anyway: the decline must refuse rather
+    // than fall through to parking an approval.
     const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
     const result = await execute(invocation);
 
     expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
     expect(config.pending()).toBeUndefined();
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
-    expect(String(result.llmContent)).toContain('The Goal was not set');
+    // Not the bare 'The Goal was not set' prefix: PROPOSE_GOAL_NO_TURN_MESSAGE
+    // shares it, so only this fragment tells the two refusal branches apart.
+    expect(String(result.llmContent)).toContain('the user did not approve it');
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
   });
