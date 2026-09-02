@@ -2018,22 +2018,28 @@ describe('localFilterCommands', () => {
     expect(carriesReplacementChar('\uFFFD')).toBe(true);
   });
 
-  it('refuses rather than hanging when an include names a FIFO', () => {
-    // git follows includes at startup, so the very first `rev-parse` blocks on
-    // a FIFO nobody writes to — and `spawnSync` blocks the event loop, so no
-    // JS timer can interrupt it. The bound has to be on the spawn, and a
-    // killed discovery must not read as "not a usable repository".
-    const fifo = join(dir, '.git', 'evil.fifo');
-    execFileSync('mkfifo', [fifo]);
-    appendFileSync(
+  // POSIX-only: `mkfifo` does not exist on Windows. The bound it pins is
+  // platform-independent; only this way of provoking a block is not.
+  it.skipIf(process.platform === 'win32')(
+    'refuses rather than hanging when an include names a FIFO',
+    () => {
+      // git follows includes at startup, so the very first `rev-parse` blocks on
+      // a FIFO nobody writes to — and `spawnSync` blocks the event loop, so no
+      // JS timer can interrupt it. The bound has to be on the spawn, and a
+      // killed discovery must not read as "not a usable repository".
+      const fifo = join(dir, '.git', 'evil.fifo');
+      execFileSync('mkfifo', [fifo]);
+      appendFileSync(
       join(dir, '.git', 'config'),
       `[include]\n\tpath = ${fifo}\n`,
-    );
+      );
 
-    const screen = localFilterCommands(dir);
+      const screen = localFilterCommands(dir);
 
-    expect(screen.stopped).toBe('unreadable');
-  }, 60_000);
+      expect(screen.stopped).toBe('unreadable');
+    },
+    60_000,
+  );
 
   it('caps the reported keys and keeps the pre-cap total', () => {
     // The keys come from an attacker-writable file that cleanup never wipes;
@@ -2052,6 +2058,54 @@ describe('localFilterCommands', () => {
     // refusal nobody can act on.
     expect(screen.keys[0]).toMatch(/^filter\.evil\d+\.smudge$/);
   });
+
+  // POSIX-only: the shim is a `#!/bin/sh` script found through `which`, and
+  // neither works on Windows. The ORDER it pins is platform-independent, so
+  // skipping there loses the witness, not the behaviour.
+  it.skipIf(process.platform === 'win32')(
+    'reads `<common>/config` LAST, after the amplifiable admin set',
+    () => {
+      // Order is load-bearing, not cosmetic. The checkout this screen authorises
+      // reads merged config at its start, so the gap between the screen's read
+      // of a file and that checkout is a window a plant can land in. The
+      // admin-dir set is attacker-amplifiable — filler entries cost spawns and
+      // stretch the walk — so reading the common config first would put the
+      // likeliest plant target at the START of a window the plant itself can
+      // widen. Pinned through a `git` shim on PATH, which is deterministic;
+      // racing it would not be.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-shim-'));
+      const log = join(shimDir, 'calls.log');
+      const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+      writeFileSync(
+      join(shimDir, 'git'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      for (const e of ['w1', 'w2']) {
+      mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
+      writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
+      }
+      writeFileSync(join(dir, '.git', 'config.worktree'), '');
+      const savedPath = process.env['PATH'];
+      try {
+      process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+      localFilterCommands(dir);
+
+      const reads = readFileSync(log, 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('--file'))
+        .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
+      const commonAt = reads.indexOf(join(dir, '.git', 'config'));
+      expect(commonAt).toBeGreaterThanOrEqual(0);
+      // Every other candidate was read before it.
+      expect(commonAt).toBe(reads.length - 1);
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("refuses past the candidate cap instead of walking a plant's filler", () => {
     // Each entry costs one synchronous `git config` spawn, on every screen

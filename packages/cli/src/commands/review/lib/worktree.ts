@@ -659,9 +659,9 @@ export interface LocalFilterScreen {
    * stopped it — otherwise null.
    *
    * Exit 1 is git's ordinary "no key matched" and is not a failure. Anything
-   * else is: a spawn error, a config git could not parse to the end (a
-   * malformed section, or an include it could not follow), or an ENOBUFS from
-   * more filter keys than the buffer holds. Skipping such a file reports the
+   * else is: a spawn error, a spawn killed at the timeout, a config git could
+   * not parse to the end (a malformed section header exits 128), or an ENOBUFS
+   * from more filter keys than the buffer holds. Skipping such a file reports the
    * repository clean on the one file that might define the filter, so the caller
    * refuses instead. One file, not a list: the refusal only has to name where
    * the screen stopped, and an unbounded join is its own denial-of-service.
