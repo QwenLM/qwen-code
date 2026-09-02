@@ -89,15 +89,17 @@ it('keeps the no-AK gate on its pre-contention ceiling when hosted', () => {
   expect(timeoutMinutesOn('integration_no_ak', '')).toBe(30);
 });
 
-it('keeps lint_and_static sized for a cold-cache first run', () => {
-  // 45 is a measured number, not a prediction: the lane's first run on a
-  // cold-cache pool runner was beheaded at exactly 30 minutes (install 892s
-  // where the sibling Test job paid 347s). Lowering this toward the
-  // 13–15-minute warm-cache figure re-beheads every first run on a fresh
-  // runner. Deliberately routing-independent — the job carries a bare
-  // constant.
-  expect(timeoutMinutesOn('lint_and_static', ECS_RUNNER)).toBe(45);
+it('keeps lint_and_static sized for cold-cache pool runs', () => {
+  // Both numbers are measured, not predicted: a flat 45 was tried first and
+  // the lane was beheaded twice running honestly on cold-cache hk3 pool
+  // runners — at 30 flat (install 892s vs the sibling Test job's 347s) and
+  // again at 45 (install 940s, bundle closure 681s vs a warm 171s, every
+  // step 2–4x). Routed like test's 120/60 and no_ak's 60/30 for the same
+  // pool-contention reason; hosted keeps the tighter ceiling so a genuine
+  // hang there does not burn the ECS allowance.
+  expect(timeoutMinutesOn('lint_and_static', ECS_RUNNER)).toBe(90);
   expect(timeoutMinutesOn('lint_and_static', HOSTED_RUNNER)).toBe(45);
+  expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
