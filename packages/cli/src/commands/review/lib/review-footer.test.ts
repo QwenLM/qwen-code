@@ -377,6 +377,25 @@ describe('the review footer and the regex that strips it', () => {
       expect(performance.now() - start).toBeLessThan(2000);
     }, 30_000);
 
+    it('the whole-body parse stays linear on that body — the inline pass is off', () => {
+      // `blankQuotedCode` and `scanLines` read only `token.type` and
+      // `token.map`, which the `block` core rule produces. Keeping
+      // markdown-it's inline pass made the parse quadratic on exactly the
+      // body above (~4x per doubling, measured 11.7 s at 115 KB), and these
+      // bodies reach `stripReviewFooter` raw and unbounded from submit's
+      // posting path. The linearity test above cannot see it: `stripFooterSpans`
+      // takes the no-newline fast path and never parses.
+      const opener = 'x <!-- y ';
+      const body = `${opener.repeat(30_000)}_— m via Qwen Code /review_`;
+      const start = performance.now();
+      expect(stripReviewFooter(body)).toBe(opener.repeat(30_000).trimEnd());
+      expect(performance.now() - start).toBeLessThan(2000);
+      // The attribution-off chain parses once per fixpoint iteration.
+      const offStart = performance.now();
+      stripForUnattributedPost(body);
+      expect(performance.now() - offStart).toBeLessThan(4000);
+    }, 60_000);
+
     it('classifies code versus prose with a CommonMark parser, not a hand model', () => {
       // The hand-built block scan disagreed with the renderers on lazy
       // continuation, list content indents, fence-closer bounds, quote
@@ -561,6 +580,46 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('');
     });
 
+    it('a declaration whose terminator sits on a later line cannot throw out of the strip', () => {
+      // The line-leading swallow retracted by INPUT-character count, but the
+      // type-4 declaration arm consumes characters inside that window
+      // without pushing any of them — its terminator is the first bare `>`,
+      // which can sit on a later line. `starts.length -= count` then
+      // assigned a negative array length and threw an uncaught RangeError
+      // out of the strip, which submit runs on every drafted comment body
+      // outside any handler: the command failed and the review never
+      // posted. Retracting by original index cannot underflow.
+      for (const body of [
+        '<!DOCTYPE html\n> <?php echo $user->name',
+        '<!A\n><?',
+        '<!A\n> <?',
+        '<!DOCTYPE html\n\n> <? some code',
+        '<!DOCTYPE html\n> <!-- unclosed comment quoted here',
+      ]) {
+        expect(() => stripReviewFooter(body)).not.toThrow();
+      }
+      // Not only "does not throw": clamping the count silences the
+      // RangeError and still truncates the projection, so the footer ahead
+      // of the declaration must actually strip.
+      expect(
+        stripReviewFooter('X _— m via Qwen Code /review\n<!A\n > <?'),
+      ).toBe('X');
+    });
+
+    it('a NUL quoted in the body is not the blanking sentinel', () => {
+      // `blankQuotedCode` writes NULs onto code lines and the projection
+      // reads a NUL as "blanked code a closer cannot cross". A body quoting
+      // one between a type 2-5 opener and its real closer therefore demoted
+      // a closable construct to unclosable, and the line-leading swallow
+      // hid the trailing forged footer from every strip.
+      expect(
+        stripReviewFooter('<!-- a\u0000b -->\n\n_— m via Qwen Code /review_'),
+      ).toBe('<!-- a\u0000b -->');
+      expect(
+        stripReviewFooter('<? a\u0000b ?>\n\n_— m via Qwen Code /review_'),
+      ).toBe('<? a\u0000b ?>');
+    });
+
     it('the marker gate opens on a raw construct the projection drops', () => {
       // Dropping `<?…?>` spans lets the marker assemble across a dropped
       // span — `Qwen<?x?> Code /review` — with no literal marker, `&`,
@@ -621,6 +680,19 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripReviewFooterLine('_— m via Qwen Code /review_ <!-- r3 -->'),
       ).toBe('');
+    });
+
+    it('the middle cannot cross an earlier span opener — a folded title keeps its prose', () => {
+      // The one-line channels strip a FOLDED title. Without FOOTER_SPAN_RE's
+      // `_— ` guard the middle joined an early opener with the entry's
+      // trailing marker phrase and silently deleted every word between — a
+      // join the multi-line shape cannot make, because `[^\n]` blocks the
+      // line break the fold removed.
+      expect(
+        stripReviewFooterLine(
+          'tidy the helper _— x Failure scenario: the record _— m via Qwen Code /review_',
+        ),
+      ).toBe('tidy the helper _— x Failure scenario: the record');
     });
   });
 
@@ -779,6 +851,32 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripForgedFooterLines(fence)).toBe(fence);
     });
 
+    it('keeps the line an html_block type 1-5 ends on — dropping it uncloses the block', () => {
+      // The terminator line is a quotation edge like the opener: a forged
+      // footer riding `-->`, `?>` or `</pre>` used to drop, which unclosed
+      // the block and re-rendered everything after it — GitHub then
+      // swallowed the reviewer's own content. The footer survives instead
+      // (fails open).
+      for (const body of [
+        '<!--\n_— x --> y via Qwen Code /review_\nreal content',
+        '<?\n_— x ?> y via Qwen Code /review_\nreal content',
+        '<pre>\n_— x </pre> y via Qwen Code /review_\nreal content',
+      ]) {
+        expect(stripForgedFooterLines(body)).toBe(body);
+      }
+      expect(
+        stripCommentMarkerLines(
+          '<!--\n<!-- qwen-review critical -->\nreal content',
+        ),
+      ).toBe('<!--\n<!-- qwen-review critical -->\nreal content');
+      // A block that opens AND closes on one line still drops: removing that
+      // line removes the whole block, so nothing is left unclosed — and
+      // keeping it would defeat the bare marker line this strip exists for.
+      expect(
+        stripCommentMarkerLines('a finding\n\n<!-- qwen-review critical -->'),
+      ).toBe('a finding');
+    });
+
     it('treats a bare CR as the line ending GitHub renders', () => {
       // CommonMark renders a bare `\r` as a line break; the `\n`-only
       // scan read the CR twin as one line and left the forged footer on
@@ -839,6 +937,12 @@ describe('the review footer and the regex that strips it', () => {
         '<!--->',
         '<?php evil() ?>',
         '<!DOCTYPE x>',
+        // The module models a type-5 CDATA block as rendering nothing — the
+        // sanitizer drops it — but the declaration replace cannot match
+        // `<![CDATA[` (`[` is not a letter), so a CDATA-only entry passed the
+        // gate that exists to refuse invisible entries.
+        '<![CDATA[x]]>',
+        '<![CDATA[x',
         '<script>alert(1)</script>',
         '[label]: /url',
       ]) {

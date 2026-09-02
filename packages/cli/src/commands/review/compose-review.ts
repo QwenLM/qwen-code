@@ -784,7 +784,9 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
     // collapsed, so the folded line is the shape to strip.
     const title =
       typeof o['title'] === 'string'
-        ? stripReviewFooterLine(collapseToLine(o['title'])).trim()
+        ? stripReviewFooterLine(
+            collapseToLine(stripReviewFooter(o['title'])),
+          ).trim()
         : '';
     const source = o['source'];
     const severity = o['severity'];
@@ -1165,7 +1167,9 @@ export function floorEnforcedReroute(
     // Strip AFTER the fold — the collapsed line is the shape that posts,
     // for the reason toDeferredEntries states.
     const title = stripReviewFooterLine(
-      collapseToLine(record + (nl === -1 ? '' : stripped.slice(nl))),
+      collapseToLine(
+        stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+      ),
     );
     indices.push(i);
     entries.push({
@@ -2049,14 +2053,21 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map((entry) =>
-      quotedProse(
-        stripReviewFooterLine(
-          collapseEntry(attribution ? entry : stripCommentMarkerLines(entry)),
-        ),
+    .map((entry) => {
+      // The attribution-off whole-line strips must see WHOLE lines: folded
+      // first, `stripForgedFooterLines`' `^…$` anchor can never match a
+      // doubled marker phrase, and the forgery posts as the only attribution
+      // an attribution-off body carries.
+      const raw = attribution ? entry : stripForUnattributedPost(entry);
+      // The raw multi-line shape strips ahead of the fold too: folding can
+      // pair a prose backtick with one inside the footer's middle into a code
+      // span that masks the `_— ` anchor, leaving the post-fold line strip
+      // nothing to match.
+      return quotedProse(
+        stripReviewFooterLine(collapseEntry(stripReviewFooter(raw))),
         attribution,
-      ),
-    )
+      );
+    })
     .filter((entry) => entry.trim() !== '');
 }
 

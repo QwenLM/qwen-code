@@ -217,12 +217,18 @@ function projectInvisibles(input: string): Projection {
     }
     text += chars;
   };
-  // Drop the LAST `count` projected chars — the render-nothing prefix a
-  // line-leading raw block opener pushes before it swallows the tail.
-  const retract = (count: number): void => {
-    text = text.slice(0, text.length - count);
-    starts.length -= count;
-    ends.length -= count;
+  // Drop the projected chars at and after ORIGINAL index `from` — the
+  // render-nothing prefix a line-leading raw block opener pushes before it
+  // swallows the tail. By index, not by input-character count: the type-4
+  // declaration arm consumes input inside that window without pushing any of
+  // it (its terminator can sit on a later line), so a count retraction
+  // assigns a negative array length and throws out of the strip.
+  const retractFrom = (from: number): void => {
+    let k = text.length;
+    while (k > 0 && starts[k - 1]! >= from) k -= 1;
+    text = text.slice(0, k);
+    starts.length = k;
+    ends.length = k;
   };
   const n = input.length;
   // Monotone next-position seekers: `i` only moves left-to-right, so each
@@ -315,7 +321,7 @@ function projectInvisibles(input: string): Projection {
           }
           const lineStart = rawOpenerLineStart(input, i);
           if (lineStart !== -1) {
-            retract(i - lineStart);
+            retractFrom(lineStart);
             i = n;
             continue;
           }
@@ -361,7 +367,7 @@ function projectInvisibles(input: string): Projection {
         }
         const lineStart = rawOpenerLineStart(input, i);
         if (lineStart !== -1) {
-          retract(i - lineStart);
+          retractFrom(lineStart);
           i = n;
           continue;
         }
@@ -561,9 +567,18 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  * run no longer parsed exactly one way. The capped trailing `…`
  * `reviewFooter` writes for an interpolation past MODEL_ID_MAX_CHARS is
  * admitted — the canonical capped footer must strip like any forged one.
+ *
+ * The middle also carries FOOTER_SPAN_RE's `_— ` guard, which the one-line
+ * channels make load-bearing: they strip a FOLDED title, where a middle free
+ * to run across `_— ` joins an early opener with the entry's trailing marker
+ * phrase and silently deletes every word of prose between — a join the
+ * multi-line shape cannot make, because `[^\n]` blocks crossing the line break
+ * the fold removed. It stays UNCAPPED: this is the trailing strip the capped
+ * anywhere-strips hand their over-long forged footers to, so a middle bound
+ * here would let a 400-character forged footer post as ballast.
  */
 export const REVIEW_FOOTER_RE =
-  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?\s*)+$/;
+  /\s*(?:_— (?:(?!_— | via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?\s*)+$/;
 
 /** The widest slice `stripReviewFooter` runs the strip regex over. */
 const STRIP_TAIL_LIMIT = 8192;
@@ -602,7 +617,20 @@ export function stripReviewFooter(body: string): string {
   // Call arguments evaluate eagerly — checked BEFORE the blanking, or the
   // dominant marker-less shape would pay the structural parse anyway.
   if (!canProjectFooterMarker(body)) return body;
-  return stripTrailingFooter(body, blankQuotedCode(body));
+  return stripTrailingFooter(body, blankQuotedCode(normalizeSourceNuls(body)));
+}
+
+/**
+ * Source NULs replaced 1:1 with U+FFFD — markdown-it's own `normalize` rule
+ * and the render's, so nothing visible changes. `blankQuotedCode`'s sentinel
+ * is a NUL, and a body quoting one (a binary-adjacent paste) would otherwise
+ * read it as blanked code: a closable raw construct demotes to unclosable,
+ * its line-leading swallow drops the tail, and a trailing forged footer
+ * hides from every strip. Length-preserving, or the cut arithmetic mapping
+ * projection indexes back into the body lands on the wrong bytes.
+ */
+function normalizeSourceNuls(text: string): string {
+  return text.includes('\u0000') ? text.replaceAll('\u0000', '\uFFFD') : text;
 }
 
 /**
@@ -638,7 +666,10 @@ function canProjectFooterMarker(s: string): boolean {
  * would map into the wrong bytes.
  */
 export function stripReviewFooterLine(line: string): string {
-  return stripTrailingFooter(line, neutralizeUnclosedOpeners(line));
+  return stripTrailingFooter(
+    line,
+    neutralizeUnclosedOpeners(normalizeSourceNuls(line)),
+  );
 }
 
 /**
@@ -686,6 +717,12 @@ function stripTrailingFooter(body: string, scanned: string): string {
 // delimiter inside `<div>…</div>` would open code state GitHub does not
 // render. Same construction as `audit-layers.ts`.
 const BLOCK_PARSER = new MarkdownIt({ html: true });
+// Only `token.type` and `token.map` are read, and the `block` core rule
+// produces both: the inline pass is pure cost, and it is quadratic on the
+// unclosed-opener-dense one-line bodies `collapseEntry` produces (~4x per
+// doubling, measured 11.7 s at 115 KB). Those bodies are model-written with
+// no length cap and reach the parse ahead of any bound.
+BLOCK_PARSER.core.ruler.disable(['inline']);
 
 /**
  * The body's code-block lines blanked to same-length NULs — fenced- and
@@ -762,6 +799,14 @@ const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
  */
 const RAW_HTML_BLOCK_OPEN_RE = /^ {0,3}(?:<!--|<\?|<!\[CDATA\[|<![A-Z])/;
 
+/**
+ * The type-1 raw-HTML block openers. Tag-based like the types 6/7 whose
+ * content renders visibly, but type 1 ends ON its closing-tag line instead of
+ * at a blank line, so that line is a quotation edge too.
+ */
+const TERMINATING_TAG_OPEN_RE =
+  /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i;
+
 /** Structural classes a line falls into. */
 type LineKind =
   | 'text' // ordinary line — a strip's map applies
@@ -778,6 +823,13 @@ interface ScannedLine {
   depth: number;
   /** The line's content after its blockquote prefix. */
   content: string;
+  /**
+   * The line an `html_block` type 1-5 ENDS ON, carrying its terminator.
+   * Dropping it uncloses the block and re-renders everything after it, so the
+   * maps keep it verbatim: a forged footer riding one survives — fails open —
+   * instead of swallowing the reviewer's own content.
+   */
+  endEdge: boolean;
 }
 
 /**
@@ -813,6 +865,7 @@ interface ScannedLine {
 function scanLines(body: string): ScannedLine[] {
   const lines = body.split(LINE_ENDING_RE);
   const kinds: LineKind[] = new Array<LineKind>(lines.length).fill('text');
+  const endEdges = new Set<number>();
   for (const token of BLOCK_PARSER.parse(body, {})) {
     if (token.map === null) continue;
     let kind: LineKind;
@@ -822,7 +875,19 @@ function scanLines(body: string): ScannedLine[] {
       const first = lines[token.map[0]] ?? '';
       const quote = QUOTE_PREFIX_RE.exec(first);
       const opener = quote === null ? first : first.slice(quote[0].length);
-      kind = RAW_HTML_BLOCK_OPEN_RE.test(opener) ? 'rawHtml' : 'html';
+      const raw = RAW_HTML_BLOCK_OPEN_RE.test(opener);
+      kind = raw ? 'rawHtml' : 'html';
+      // Types 1-5 end ON the terminator line; types 6/7 end at a blank line
+      // and have no terminator line to protect. A block that opens and closes
+      // on ONE line is not protected: dropping that line removes the whole
+      // block, so nothing is left unclosed — and protecting it would keep the
+      // bare marker line `stripCommentMarkerLines` exists to remove.
+      if (
+        token.map[1] - 1 > token.map[0] &&
+        (raw || TERMINATING_TAG_OPEN_RE.test(opener))
+      ) {
+        endEdges.add(token.map[1] - 1);
+      }
     } else continue;
     for (let l = token.map[0]; l < token.map[1]; l += 1) kinds[l] = kind;
   }
@@ -830,7 +895,13 @@ function scanLines(body: string): ScannedLine[] {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);
-    return { line, kind: kinds[i]!, depth, content };
+    return {
+      line,
+      kind: kinds[i]!,
+      depth,
+      content,
+      endEdge: endEdges.has(i),
+    };
   });
 }
 
@@ -856,8 +927,8 @@ function mapLinesAware(
   // at its edge), so the collapse must never touch the blank runs around
   // them — those blanks belong to the quotation and render.
   const quotedDrops = new Set<number>();
-  for (const { line, kind } of scanLines(body)) {
-    if (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml') {
+  for (const { line, kind, endEdge } of scanLines(body)) {
+    if (endEdge || (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml')) {
       out.push(line);
       continue;
     }
@@ -951,7 +1022,8 @@ function linkRefDefLines(lines: string[], i: number): number {
  * format characters (Cf, e.g. zero-width spaces — `.trim()` does not see
  * them), HTML comments — terminated or not: an unclosed `<!--` runs to the
  * end of the input and swallows the marker this post would append — the
- * sanitizer-dropped raw-HTML blocks (script/style, `<?…?>`, `<!DOCTYPE …>`),
+ * sanitizer-dropped raw-HTML blocks (script/style, `<?…?>`, `<!DOCTYPE …>`,
+ * `<![CDATA[…]]>`),
  * the entities decoding to nothing visible (the no-break, space, and
  * named-invisible families), empty elements, void tags, empty links (an
  * empty-alt IMAGE still renders its `<img>`), blockquote-punctuation-only
@@ -969,6 +1041,7 @@ export function rendersAsNothing(text: string): boolean {
     .replace(/<script\b[\s\S]*?(?:<\/script\s*>|$)/gi, '')
     .replace(/<style\b[\s\S]*?(?:<\/style\s*>|$)/gi, '')
     .replace(/<\?[\s\S]*?(?:\?>|$)/g, '')
+    .replace(/<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, '')
     .replace(/<![A-Za-z][\s\S]*?(?:>|$)/g, '')
     .replace(/\p{Cf}/gu, '')
     // No-break, space, and invisible named/numeric entity families.

@@ -876,6 +876,19 @@ describe('composeReview — the C/S table', () => {
     }
   });
 
+  it('refuses an entry that is only CDATA scaffolding', () => {
+    // The twin of the `<?php … ?>` and `<!DOCTYPE …>` refusals: the
+    // sanitizer drops a type-5 CDATA block too, so a CDATA-only entry posts
+    // content GitHub renders as nothing and still counts toward
+    // REQUEST_CHANGES.
+    for (const field of [
+      { bodyCriticals: ['<![CDATA[x]]>'] },
+      { cannotTellCriticals: ['<![CDATA[x]]>'] },
+    ]) {
+      expect(() => composeReview(base(field))).toThrow(/renders as nothing/);
+    }
+  });
+
   it('refuses a body Critical that renders as nothing', () => {
     // Marker-only strips to nothing yet would still count toward
     // REQUEST_CHANGES — the inline path refuses this shape at submit's
@@ -1900,6 +1913,46 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     // canonical one: exactly one occurrence means the entry's copy was
     // stripped and only the canonical footer remains.
     expect(r.body.split(FOOTER)).toHaveLength(2);
+  });
+
+  it('attribution off: a doubled marker phrase in a duplicates entry posts no attribution', () => {
+    // The pre-fold added for the code-quoted footer collapsed each entry to
+    // one line BEFORE `quotedProse`, which demoted `stripForgedFooterLines`
+    // — the only strip in the attribution-off chain whose middle may cross
+    // an earlier marker phrase — from a whole-line strip that fires to a
+    // `^…$`-anchored strip that can never match. The doubled phrase then
+    // posted as the only attribution on a body carrying no canonical footer.
+    for (const entry of [
+      'dup of #123\n_— m via Qwen Code /review via Qwen Code /review',
+      'dup of #123\n_— m via Qwen Code /review and via Qwen Code /review',
+      'dup of #123\n_— m via Qwen Code /review (v0.21.2)_ via Qwen Code /review',
+    ]) {
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).toContain('dup of #123');
+      expect(off.body).not.toContain('via Qwen Code /review');
+    }
+  });
+
+  it('attribution on: a duplicates entry whose prose backtick the fold pairs with the footer', () => {
+    // The render leg's strip must see the raw multi-line entry as well:
+    // folded first, the prose backtick pairs with the one inside the
+    // footer's middle and the code span that forms masks the `_— ` anchor,
+    // so the forged footer posts as a second attribution.
+    const on = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'see `x\n\n_— m `y via Qwen Code /review_',
+        ],
+      }),
+      '0.21.2',
+      true,
+    );
+    expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    expect(on.body).toContain('see');
   });
 
   it('strips a forged footer the blanking kept inside a code shape — the strip runs AFTER the fold', () => {
@@ -8931,6 +8984,24 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
       expect(l.includes('�')).toBe(false);
     }
     expect(lines.some((l) => l.includes('…'))).toBe(true);
+  });
+
+  it('strips a forged footer from a title whose prose backtick the fold would pair with it', () => {
+    // Folding first lets `collapseToLine` pair a prose backtick with the one
+    // inside the footer's middle; the code span that forms masks the `_— `
+    // anchor, so the post-fold line strip alone left the forged footer and
+    // the deferral line carried a second attribution. The raw multi-line
+    // title strips before the collapse as well as after it.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: 'see `x\n\n_— m `y via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
   });
 
   it('strips a forged footer a model-written title quotes in code — the strip runs on the folded line', () => {
@@ -17613,6 +17684,40 @@ describe('floor enforcement — the Critical arm (#10291)', () => {
     for (const e of entries) {
       expect(e.title).not.toContain('via Qwen Code /review');
     }
+  });
+
+  it('floorEnforcedReroute strips the raw shape too — the fold can mask the anchor', () => {
+    // The twin of the deferred-title case: folding joins the prose backtick
+    // to the one inside the footer's middle, the code span masks the `_— `
+    // anchor, and the post-fold line strip has nothing to match. The merge
+    // base stripped the raw multi-line form and returned just the prose.
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 12,
+        body: '**[Suggestion]** see `x\n\n_— m `y via Qwen Code /review_',
+      },
+    ]);
+    expect(entries[0].title).toBe('see `x');
+    expect(entries[0].title).not.toContain('via Qwen Code /review');
+  });
+
+  it('floorEnforcedReroute keeps the whole claim — the strip cannot cross an earlier span opener', () => {
+    // The deferral line is the moved blocker's only published surface and
+    // the title carries the WHOLE marker-stripped body. The footer is split
+    // across a soft break, so only the POST-fold strip can reach it — and
+    // there an unbounded middle joined the claim's own early `_— ` with the
+    // rejoined marker phrase, deleting the failure scenario between them.
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 12,
+        body: '**[Suggestion]** tidy the helper _— x\n\nFailure scenario: the record\n\n_— m via\nQwen Code /review_',
+      },
+    ]);
+    expect(entries[0].title).toBe(
+      'tidy the helper _— x Failure scenario: the record',
+    );
   });
 
   it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
