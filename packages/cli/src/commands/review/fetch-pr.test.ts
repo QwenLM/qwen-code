@@ -277,6 +277,10 @@ const producerMocks = vi.hoisted(() => ({
   buildDiffPlan: vi.fn(),
   actualBuildDiffPlan: undefined as unknown as (...a: unknown[]) => unknown,
   writeStderrLine: vi.fn(),
+  // Admits by default, which is what the real one answers for every checkout
+  // outside a review temp dir — the shape all but one of these tests are in.
+  // The ordering test steers it to a refusal; nothing else touches it.
+  untrustedRepositoryFrom: vi.fn((..._args: unknown[]): string | null => null),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -354,6 +358,14 @@ vi.mock('./lib/git.js', () => ({
   releaseWorktree: producerMocks.releaseWorktree,
 }));
 
+// PARTIAL: only the launch-directory gate is steered. The rest of this module
+// — `sanitizedGitEnv`, `untrustedGitfile` — has to stay real, because the
+// worktree gate is one of the things the report-assembly path exercises.
+vi.mock('./lib/worktree.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/worktree.js')>()),
+  untrustedRepositoryFrom: producerMocks.untrustedRepositoryFrom,
+}));
+
 vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: producerMocks.resolveMergeBase,
 }));
@@ -423,6 +435,7 @@ describe('fetch-pr report assembly', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
+    producerMocks.untrustedRepositoryFrom.mockReturnValue(null);
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
@@ -955,6 +968,36 @@ describe('fetch-pr report assembly', () => {
       expect(leaseOrder).toBeLessThan(
         producerMocks.execFileSync.mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('refuses a poisoned launch directory before the sweep and the fetch', async () => {
+      // The launch directory is where every git command here without an
+      // explicit `-C` finds its repository, and in the nested geometry that
+      // directory sits inside the OUTER review's read-write mount. Gating only
+      // the `worktree add` at step 4 left `cleanStale`'s force-remove and the
+      // PR fetch resolving through the very pointer the gate distrusts — a
+      // fetch through a planted repository loads its transport config and runs
+      // it on the host.
+      //
+      // So the assertion is ordering, not just refusal: NOTHING may have run.
+      // Not the lease read, not the sweep, not one git call.
+      producerMocks.untrustedRepositoryFrom.mockReturnValue(
+        'the launch dir resolves to an admin entry inside the review temp dir',
+      );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /refusing to review PR #42 from this directory/,
+      );
+
+      expect(producerMocks.untrustedRepositoryFrom).toHaveBeenCalledWith(
+        process.cwd(),
+        expect.any(Function),
+      );
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
+      expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
     });
   });
 

@@ -829,6 +829,38 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
 
+  // BEFORE the first git command of the run, not at step 4. Every git
+  // invocation this command makes without an explicit `-C` — `cleanStale`'s
+  // `worktree remove --force`, step 2's `git fetch`, the branch rollbacks —
+  // discovers its repository from `process.cwd()`, and in the nested geometry
+  // `mountRootFor` documents (a review running inside another review's
+  // worktree) that launch directory sits inside the outer review's read-write
+  // mount: the outer PR's containerized build can rewrite the pointer git
+  // resolves here. `git fetch` through a rewritten pointer loads the planted
+  // repository's transport config — `core.sshCommand`, `remote.*.uploadpack`,
+  // a `url.*.insteadOf` rewrite — and runs it on the host. Gating only the
+  // `worktree add` at step 4 left every command before it resolving through
+  // exactly the pointer the gate exists to distrust.
+  //
+  // A throw, not a refusal-to-fresh like the `--resume` gate's: that one can
+  // fall back because the fresh path is the safe one, and here the fresh path
+  // is what has been poisoned. There is no command left to run in a
+  // repository this process cannot locate honestly — `cleanStale` would sweep
+  // through the same pointer.
+  //
+  // Says nothing outside a mount (`mountRootFor` answers null), so an ordinary
+  // `qwen review` from a normal checkout never reaches the question.
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd(), mountRootFor);
+  if (launchUntrusted !== null) {
+    throw new Error(
+      `refusing to review PR #${prNumber} from this directory: ` +
+        `${launchUntrusted}. Every git command below — the stale-worktree ` +
+        `sweep, the PR fetch, the worktree creation — would resolve through ` +
+        `that pointer and run whatever the repository it names configures. ` +
+        `Run the review from a checkout outside the review temp dir.`,
+    );
+  }
+
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
   // reviewing — that is precisely how #9205 destroyed a round-4 review mid-run.
@@ -1002,14 +1034,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // 4. Create the ephemeral worktree.
     try {
       mkdirSync(dirname(wt), { recursive: true });
-      // The fresh path checks files out too, and resolves through the same
-      // pointer the resume path was gated on — but the pointer it resolves
-      // through is the LAUNCH directory's, not the new tree's: `git()` sets no
-      // cwd, so `worktree add` finds the repository from `process.cwd()`.
-      // Gating `wt` was a no-op — `cleanStale` above has just removed whatever
-      // stood there, and a tree that does not exist has no pointer to
-      // distrust. In the nested geometry `mountRootFor` itself documents, the
-      // outer review's containerized phase can rewrite exactly this one.
+      // Asked a SECOND time, immediately before the write. The hoisted gate at
+      // the top of this function is what keeps the fetch and the sweep from
+      // running through a poisoned pointer; this one narrows the window
+      // between that answer and the checkout `worktree add` performs, which
+      // is the step that executes a planted filter. Neither closes the TOCTOU
+      // window a same-user writer has — `scratch-tree` documents the same
+      // residual — and one spawn is a cheap price for making the window one
+      // function long instead of one command long.
+      //
+      // The pointer it judges is the LAUNCH directory's, not the new tree's:
+      // `git()` sets no cwd, so `worktree add` finds the repository from
+      // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
+      // removed whatever stood there, and a tree that does not exist has no
+      // pointer to distrust.
       const freshUntrusted = untrustedRepositoryFrom(
         process.cwd(),
         mountRootFor,

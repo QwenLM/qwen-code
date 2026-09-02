@@ -35,6 +35,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isSubpath } from '@qwen-code/qwen-code-core';
+import { REVIEW_TMP_DIR } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -111,6 +112,125 @@ const GIT_ENV_EXEC = [
 ];
 
 /**
+ * The directory to mount for a command running in `cwd`, or null when `cwd` is
+ * not one of the pipeline's trees.
+ *
+ * Not the tree: the dependency farm links out of every tree into the review
+ * worktree's `node_modules`, so a per-tree mount leaves every link dangling.
+ * Every tree the pipeline builds is a sibling under the review temp dir, so
+ * that directory covers both ends of every link while `<repo>/.git` stays
+ * outside it.
+ *
+ * `lastIndexOf`, because a review run from inside another review's worktree —
+ * this pipeline's own dogfood geometry — nests one `.qwen/tmp` inside another,
+ * and the FIRST occurrence would widen the mount to the outer temp dir,
+ * pulling `<repo>/.git` and every sibling checkout in with it. Tree names
+ * cannot contain a separator (scratch labels flatten to `[A-Za-z0-9._-]`), so
+ * the deepest occurrence is always the tree's own parent.
+ *
+ * The MOUNT is the deepest one; the DISTRUST judgement is not. Which directory
+ * may be handed to a container read-write and which directories reviewed code
+ * may already have written are two different questions, and in the nested
+ * geometry above they have two different answers — see
+ * `adminEntryInsideReviewTmp`, which widens only the second.
+ *
+ * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
+ * the tree under test IS the user's working copy and there is no sibling
+ * layout to mount.
+ */
+export function mountRootFor(cwd: string): string | null {
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.lastIndexOf(marker);
+  if (at < 0) return null;
+  const root = resolved.slice(0, at + marker.length - 1);
+  // A LEXICAL root is not a safe mount target. `resolve` never touches the
+  // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
+  // 120000 and materialised by a fresh clone — silently widens a read-write
+  // bind mount to wherever it points. Every other creating or destroying path
+  // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
+  // `resetScratchTree`); the mount is the one place a redirect would hand the
+  // reviewed code a directory nobody chose.
+  try {
+    if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
+      return null;
+    }
+    const real = realpathSync(root);
+    // `-v src:dst` separates its fields with `:`, so a root that contains one
+    // cannot be spelled in that grammar at all: docker answers `invalid spec
+    // ... too many colons` and every command in the phase hard-fails with a
+    // raw mount error. Under `auto` those land as build/test failures the
+    // report attributes to the PR; under `required` the gate passes and the
+    // refusal that should have explained it never happens. Both designed
+    // degradations are bypassed because this said "mountable" about a root
+    // that is not.
+    //
+    // Refusing it here puts such a checkout back on the path every other
+    // unmountable root already takes. That is the whole fix: the `-v` grammar
+    // has exactly one separator, and `:` in a repository path — legal, if
+    // rare — is the only way to write it.
+    //
+    // On Windows this refuses EVERY absolute path, and that is the right
+    // answer rather than a casualty of it: a drive letter is a colon, and the
+    // mount this builds uses one path as both source and target, which a
+    // Windows path cannot be — the container side has no `C:`. So containment
+    // is not available there, and saying so gives `auto` its direct fallback
+    // and `required` its refusal instead of the runtime's parse error on every
+    // single command.
+    if (real.includes(':')) return null;
+    return real;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * git's own answer to "which repository does this path resolve to", or null
+ * when git cannot answer at all.
+ *
+ * ASK GIT, rather than parsing the pointer here. The first cut read the
+ * gitfile and resolved it in Node, and the two resolvers disagree in ways
+ * that are individually small and collectively unbounded: JS `trim()` strips
+ * U+00A0 (and U+FEFF, the U+2000 block, …) while git's `read_gitfile` trims
+ * only C-locale space, so `gitdir: <NBSP><real entry>` resolves to the real
+ * entry here — outside the mount, admitted — and to a planted one inside it
+ * there; and `resolve()` is lexical while a spawned git resolves a relative
+ * target against the tree's PHYSICAL path after chdir. Every such divergence
+ * admits a pointer whose real referent only git sees, and the list of them
+ * has no last entry.
+ *
+ * So the resolver that decides is the resolver that acts. This asks git for
+ * the same answer the gated command will use, and the callers then make the
+ * only judgment that is theirs to make: WHERE that answer lives. Reading is safe —
+ * no checkout, no index refresh — and hooks and fsmonitor are inert arguments
+ * anyway, so a planted config cannot turn the question into an execution.
+ *
+ * The terminator `rev-parse` adds is stripped, and NOTHING else. `.trim()`
+ * here re-opened the very divergence the paragraph above closes: it also
+ * removes U+00A0, U+FEFF and the U+2000 block, so an admin entry whose
+ * directory name ENDS in one of those is resolved by git with the character
+ * kept and judged by the caller with it gone — and a twin of that name without
+ * it, symlinked outside the mount, is what the judgment then lands on. The
+ * resolver that decides has to receive git's answer unedited.
+ */
+function resolvedGitDir(cwd: string): string | null {
+  const resolved = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+      'rev-parse',
+      '--absolute-git-dir',
+    ],
+    { cwd, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
+  );
+  if (resolved.error || resolved.status !== 0 || !resolved.stdout) return null;
+  return resolved.stdout.replace(/\r?\n$/, '');
+}
+
+/**
  * The same location question, asked from a directory that need not be a
  * worktree ROOT.
  *
@@ -127,28 +247,16 @@ const GIT_ENV_EXEC = [
  */
 export function untrustedRepositoryFrom(
   cwd: string,
-  mountRoot: (dir: string) => string | null,
+  mountRoot: (dir: string) => string | null = mountRootFor,
 ): string | null {
   if (mountRoot(cwd) === null) return null;
   if (!existsSync(cwd)) return null;
-  const resolved = spawnSync(
-    'git',
-    [
-      '-c',
-      'core.hooksPath=/dev/null/no-hooks',
-      '-c',
-      'core.fsmonitor=',
-      'rev-parse',
-      '--absolute-git-dir',
-    ],
-    { cwd, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
-  );
-  if (resolved.error || resolved.status !== 0 || !resolved.stdout) {
+  const target = resolvedGitDir(cwd);
+  if (target === null) {
     // Not a repository from here at all — the caller's own error path owns
     // that, and refusing would answer a question nobody asked.
     return null;
   }
-  const target = resolved.stdout.replace(/\r?\n$/, '');
   if (adminEntryInsideReviewTmp(target, mountRoot, cwd)) {
     return `${cwd} resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it`;
   }
@@ -156,14 +264,14 @@ export function untrustedRepositoryFrom(
 }
 
 /**
- * Why a tree's own gitfile cannot be trusted to resolve a host-side git write.
+ * Why a tree's own gitfile cannot be trusted to resolve a host-side git command.
  *
  * Returns a refusal, or null when there is nothing to police. Every host-side
- * git command that WRITES resolves the repository through the `.git` of the
- * tree it runs in, and for every tree this pipeline builds that `.git` sits
- * inside the directory the sandbox mounts read-write. Two shapes reach a
- * planted repository from there, and both end in a `filter.<x>.smudge`
- * running on the host:
+ * git command resolves the repository through the `.git` of the tree it runs
+ * in, and for every tree this pipeline builds that `.git` sits inside the
+ * directory the sandbox mounts read-write. Two shapes reach a planted
+ * repository from there, and both end in a `filter.<x>` command running on the
+ * host:
  *
  * - the gitfile rewritten to an admin entry planted under the same mount, and
  * - the gitfile REPLACED by a `.git` directory, which is a repository of the
@@ -174,14 +282,35 @@ export function untrustedRepositoryFrom(
  * `<repo>/.git/worktrees/` — so refusing both costs nothing. Outside a mount
  * this says nothing at all: a plain checkout's `.git` IS a directory, and
  * refusing that would refuse every ordinary repository.
+ *
+ * WHERE IT IS ASKED — kept as a list because this gate was first added one
+ * call site at a time, and a class closed call site by call site re-opens at
+ * the next call site somebody adds:
+ *
+ * - writes: `scratch-tree`'s reuse and rebuild, `base-tree`, `test-efficacy`'s
+ *   probe-tree restore and worktree creation;
+ * - reads that the pipeline later TREATS as fact: `worktreeResidue` (below,
+ *   inline, because `status` refreshes the index and a refresh runs the clean
+ *   filter), `comment-status`'s code probes, `repo-context`'s merge-base
+ *   identity reads, and `--resume`'s pre-flight;
+ * - launch directories rather than trees, via `untrustedRepositoryFrom`:
+ *   `fetch-pr` before its stale sweep, `captureLocalDiff` before its first
+ *   `rev-parse`.
+ *
+ * What it does NOT close: the TOCTOU window between this answer and the
+ * command that uses it (`scratch-tree` documents the same residual), and
+ * nothing at all where containment cannot exist — Windows, where
+ * `mountRootFor` refuses every absolute path because a drive letter is a
+ * colon. `host-execution.canary.test.ts` holds the property for the routes
+ * above as one test, with a live plant as its oracle.
  */
 export function untrustedGitfile(
   tree: string,
-  // Required, not defaulted to `mountRootFor`: importing it here would close
-  // an ESM cycle — `sandboxed-exec` already imports `redirectedAncestor` from
-  // this module — and a cycle whose only symptom appears at module-init time
-  // is not worth a saved argument.
-  mountRoot: (cwd: string) => string | null,
+  // Defaulted, but still injectable: the tests drive the judgement with a
+  // fixture's own root, and `sandboxed-exec` — which used to own
+  // `mountRootFor` — reaches it from here now, so no import cycle stands in
+  // the way of a default any more.
+  mountRoot: (cwd: string) => string | null = mountRootFor,
 ): string | null {
   const root = mountRoot(tree);
   if (root === null) return null;
@@ -200,45 +329,12 @@ export function untrustedGitfile(
   if (!stat.isFile()) {
     return `${tree}'s .git is not the gitfile the pipeline created, and the tree is inside the review temp dir`;
   }
-  // ASK GIT, rather than parsing the pointer here. The first cut read the
-  // gitfile and resolved it in Node, and the two resolvers disagree in ways
-  // that are individually small and collectively unbounded: JS `trim()` strips
-  // U+00A0 (and U+FEFF, the U+2000 block, …) while git's `read_gitfile` trims
-  // only C-locale space, so `gitdir: <NBSP><real entry>` resolves to the real
-  // entry here — outside the mount, admitted — and to a planted one inside it
-  // there; and `resolve()` is lexical while a spawned git resolves a relative
-  // target against the tree's PHYSICAL path after chdir. Every such divergence
-  // admits a pointer whose real referent only git sees, and the list of them
-  // has no last entry.
-  //
-  // So the resolver that decides is the resolver that acts. This asks git for
-  // the same answer the write below will use, and then makes the only judgment
-  // that is ours to make: WHERE that answer lives. Reading is safe — no
-  // checkout, no index refresh — and hooks and fsmonitor are inert arguments
-  // anyway, so a planted config cannot turn the question into an execution.
-  const resolved = spawnSync(
-    'git',
-    [
-      '-c',
-      'core.hooksPath=/dev/null/no-hooks',
-      '-c',
-      'core.fsmonitor=',
-      'rev-parse',
-      '--absolute-git-dir',
-    ],
-    { cwd: tree, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
-  );
-  if (resolved.error || resolved.status !== 0 || !resolved.stdout) {
+  // The repository git itself would use — see `resolvedGitDir` for why the
+  // pointer is not parsed here.
+  const target = resolvedGitDir(tree);
+  if (target === null) {
     return `${tree}: git could not resolve its own git dir`;
   }
-  // Strip the terminator `rev-parse` adds, and NOTHING else. `.trim()` here
-  // re-opened the very divergence the paragraph above closes: it also removes
-  // U+00A0, U+FEFF and the U+2000 block, so an admin entry whose directory name
-  // ENDS in one of those is resolved by git with the character kept and judged
-  // here with it gone — and a twin of that name without it, symlinked outside
-  // the mount, is what the judgment then lands on. The resolver that decides
-  // has to receive git's answer unedited.
-  const target = resolved.stdout.replace(/\r?\n$/, '');
   if (adminEntryInsideReviewTmp(target, mountRoot, tree)) {
     return `${tree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
   }
@@ -310,7 +406,52 @@ export function adminEntryInsideReviewTmp(
   // relative path starting with `..`, which the prefix test read as an escape.
   // Both are places a planted entry can sit, and both are why path containment
   // belongs in one tested helper rather than in each caller's arithmetic.
-  return isSubpath(realRoot, real);
+  //
+  // And judged against the OUTERMOST review temp root on that path, not the
+  // one the mount was cut at. `mountRootFor` takes the deepest `.qwen/tmp`
+  // deliberately — the first occurrence would widen the MOUNT to the outer
+  // temp dir and pull `<repo>/.git` and every sibling checkout into the
+  // container — but "which directory may a container have been given
+  // read-write" and "where may reviewed code already have written" are not the
+  // same question. In the nested geometry `mountRootFor` documents, the OUTER
+  // review's containerized phase held the outer `.qwen/tmp` read-write, so an
+  // admin entry planted one layer up sits outside the inner root and inside a
+  // writable surface all the same — and judging only against the inner root
+  // admitted it, after which the very `worktree add` this gate protects ran
+  // the planted filter.
+  //
+  // Widening costs the honest layouts nothing, because git does not put a
+  // linked worktree's admin entry beside its tree: `worktree add` run from
+  // INSIDE a linked worktree still writes its entry under the MAIN
+  // repository's `.git/worktrees/`, which is outside every layer's
+  // `.qwen/tmp` rather than merely outside the deepest. What it does refuse is
+  // a repository whose own `.git` lives under a review temp dir — a checkout
+  // cloned into one. Nothing this pipeline builds has that shape (every tree
+  // it makes is a linked worktree), and a repository sitting inside the
+  // directory reviewed code is handed read-write is not one a host-side write
+  // should resolve through anyway.
+  return isSubpath(outermostReviewTmpRoot(realRoot), real);
+}
+
+/**
+ * The shallowest review temp root on a canonical review temp root's own path.
+ *
+ * `mountRootFor` already cut at the DEEPEST `.qwen/tmp`, so the string handed
+ * in ends at one; any earlier occurrence in it is an enclosing review's temp
+ * dir, and the shallowest is the widest writable surface this tree sits in.
+ * Because the layers nest, the outermost alone answers for all of them — an
+ * entry inside any inner layer is inside this one too.
+ *
+ * Lexical on purpose: the input is already canonical (`adminEntryInsideReviewTmp`
+ * realpaths it before asking), so there is no link left to resolve, and a
+ * separator-delimited marker cannot match half a path component. A root with
+ * no `.qwen/tmp` inside it — an injected mount in a fixture — comes back
+ * unchanged, so the judgement is never widened past what was handed in.
+ */
+function outermostReviewTmpRoot(root: string): string {
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = root.indexOf(marker);
+  return at < 0 ? root : root.slice(0, at + marker.length - 1);
 }
 
 /**
@@ -899,6 +1040,45 @@ export function worktreeResidue(
   } catch {
     // No `.git` at all: the walk-up check below fails closed with its own
     // reason.
+  }
+  // WHERE the repository lives, asked BEFORE the first spawn that can execute.
+  // `status` refreshes the index, and an index refresh runs the repository's
+  // configured content filters — so a gitfile rewritten to an admin entry
+  // planted under the same read-write mount, whose common dir carries
+  // `filter.<x>.process`, turns this tripwire into host-side code execution.
+  // The measurement is the attack.
+  //
+  // Every identity check below is honest about WHICH repository answers and
+  // blind to where that repository lives, and it cannot be otherwise: a
+  // coherent plant writes both halves of the round trip, so the entry points
+  // back; `--show-toplevel` prints the tree the gitfile sits in; no symlink is
+  // involved; and the sha pin can only compare against a record the same
+  // writer can rewrite. Location is the question that has an honest answer —
+  // `worktree add` puts a real admin entry under the MAIN repository's
+  // `.git/worktrees/`, outside the mount, and a planted one has to be inside
+  // it. See `untrustedGitfile`, which asks the same question for the writes.
+  //
+  // Unmeasured-with-reason, not a throw: this is a tripwire, and a tree whose
+  // pointer cannot be trusted is precisely what the `unmeasured` channel
+  // exists to report — every caller already treats it as "not clean". Outside
+  // a mount the question does not arise (`mountRootFor` answers null), so an
+  // ordinary checkout never pays for the extra spawn.
+  if (mountRootFor(cwd) !== null) {
+    const target = resolvedGitDir(cwd);
+    if (
+      target !== null &&
+      adminEntryInsideReviewTmp(target, mountRootFor, cwd)
+    ) {
+      return {
+        paths: [],
+        total: 0,
+        unmeasured:
+          'the .git gitfile resolves to an admin entry inside the review ' +
+          'temp dir, where the reviewed code can rewrite it — the status ' +
+          'below would measure whichever repository it names, and refresh ' +
+          'that index through whatever filters it configures',
+      };
+    }
   }
   // git's discovery WALKS UP: with the `.git` file gone — a crash mid-`worktree
   // add`, a cleanup whose `rmSync` failed — `status` exits 0 against the

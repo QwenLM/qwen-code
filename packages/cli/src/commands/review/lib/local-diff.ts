@@ -27,6 +27,7 @@
 import { lstatSync, statSync, type Stats } from 'node:fs';
 import { join, sep } from 'node:path';
 import { repoRelativeOf } from './paths.js';
+import { mountRootFor, untrustedRepositoryFrom } from './worktree.js';
 import { parseDiff, sliceDiffByLines } from './diff-plan.js';
 import {
   LITERAL_PATHSPECS,
@@ -368,6 +369,29 @@ export function captureLocalDiff(opts: {
   includeUntracked?: boolean;
 }): LocalDiffCapture {
   const { file, includeUntracked = true } = opts;
+  // BEFORE the first git call, because the first git call is already resolving
+  // through the answer. `--show-toplevel` finds the repository from
+  // `process.cwd()`, and in the nested geometry `mountRootFor` documents — a
+  // review running inside another review's worktree — that directory sits
+  // inside the OUTER review's read-write mount, where the reviewed code could
+  // rewrite the `.git` pointer. `git diff` is not a safe read through a
+  // planted repository: it refreshes the index (running any configured clean
+  // filter) and honours `diff.<driver>.command`, both of which are host
+  // execution as this user.
+  //
+  // The PR lane's `fetch-pr` asks this same question of its own launch
+  // directory; this is the local lane's copy of it. Says nothing for an
+  // ordinary checkout (`mountRootFor` answers null), which is every local
+  // review that is not nested inside a review temp dir.
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd(), mountRootFor);
+  if (launchUntrusted !== null) {
+    throw new Error(
+      `refusing to capture a local diff from this directory: ` +
+        `${launchUntrusted}. Every git command below would resolve through ` +
+        `that pointer and run whatever the repository it names configures. ` +
+        `Run the review from a checkout outside the review temp dir.`,
+    );
+  }
   // Everything below runs against the repo *root*, not the process's cwd. A
   // capture started from a subdirectory must still see the whole working tree —
   // and, more subtly, must label its files the same way `git diff --no-relative`

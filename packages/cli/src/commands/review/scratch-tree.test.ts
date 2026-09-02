@@ -134,7 +134,7 @@ describe('runScratchTree', () => {
       writeFileSync(join(fakeCommon, 'info', 'attributes'), '* filter=evil\n');
       cpSync(real, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
       writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
       // BOTH trees, pointing at ONE planted common dir. The reset's own gate
       // compares the two trees' common dirs, so poisoning the scratch tree
@@ -146,10 +146,7 @@ describe('runScratchTree', () => {
         .replace('gitdir: ', '');
       cpSync(realWt, plantedWt, { recursive: true });
       writeFileSync(join(plantedWt, 'commondir'), `${fakeCommon}\n`);
-      writeFileSync(
-        join(plantedWt, 'gitdir'),
-        `gitdir: ${join(worktree, '.git')}\n`,
-      );
+      writeFileSync(join(plantedWt, 'gitdir'), `${join(worktree, '.git')}\n`);
       writeFileSync(join(worktree, '.git'), `gitdir: ${plantedWt}\n`);
 
       const second = run();
@@ -175,10 +172,7 @@ describe('runScratchTree', () => {
         .replace('gitdir: ', '');
       cpSync(real, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(
-        join(planted, 'gitdir'),
-        `gitdir: ${join(worktree, '.git')}\n`,
-      );
+      writeFileSync(join(planted, 'gitdir'), `${join(worktree, '.git')}\n`);
       writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
 
       const r = run();

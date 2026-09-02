@@ -1966,7 +1966,7 @@ describe('untrustedGitfile', () => {
         .replace('gitdir: ', '');
       cpSync(real, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
       writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
       expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
     },
@@ -2003,7 +2003,7 @@ describe('untrustedGitfile', () => {
       mkdirSync(dirname(planted), { recursive: true });
       cpSync(real, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
       writeFileSync(join(tree, '.git'), `gitdir: \u00a0${real}\n`);
 
       // Node would resolve the real entry here; git resolves the planted one.
@@ -2027,7 +2027,7 @@ describe('untrustedGitfile', () => {
       const twin = join(repo, '.qwen', 'tmp', 'entry');
       cpSync(real, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
       // The twin points OUTSIDE the mount; trimming the NBSP lands here.
       symlinkSync(repo, twin);
       writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);

@@ -338,7 +338,7 @@ describe('the review worktree is the first pointer a probe run trusts', () => {
       const planted = join(repo, '.qwen', 'tmp', '.evil-git');
       cpSync(realEntry, planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(wt, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(wt, '.git')}\n`);
       writeFileSync(join(wt, '.git'), `gitdir: ${planted}\n`);
       // Coherence check, so a fixture that breaks silently fails HERE and not as
       // a green assertion below.
@@ -407,7 +407,7 @@ describe('the revert phase is reached after the gates refuse', () => {
         { recursive: true },
       );
       writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
-      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(wt, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `${join(wt, '.git')}\n`);
       writeFileSync(
         vitestScript(),
         `#!/usr/bin/env node
