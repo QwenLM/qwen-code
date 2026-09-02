@@ -6818,9 +6818,13 @@ export function App({
               pendingManualTitle &&
               pendingManualTitleRef.current === pendingManualTitle
             ) {
-              await sessionActions.renameSession(
-                pendingManualTitle.displayName,
-              );
+              try {
+                await sessionActions.renameSession(
+                  pendingManualTitle.displayName,
+                );
+              } catch {
+                pendingManualTitleRef.current = undefined;
+              }
             }
             await onSessionCreatedRef.current?.(sessionId);
           },

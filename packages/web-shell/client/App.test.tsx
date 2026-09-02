@@ -14631,6 +14631,37 @@ describe('App session callbacks', () => {
     ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
   });
 
+  it('attaches a /clear successor when carrying its title fails', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'Bug hunt';
+    mockSessionActions.renameSession.mockRejectedValueOnce(
+      new Error('rename failed'),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      mockConnection.titleSource = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+
+    await vi.waitFor(() => {
+      expect(mockSessionActions.attachSession).toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+  });
+
   it('does not carry an automatic title across /clear', async () => {
     mockConnection.titleSource = 'auto';
     const { container, rerender } = renderApp();
