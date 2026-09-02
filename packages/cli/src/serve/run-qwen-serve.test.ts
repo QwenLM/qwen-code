@@ -11632,7 +11632,10 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         maxSessions: 1,
         ...extra,
       },
-      { bridge: makeFakeBridge() },
+      {
+        bridge: makeFakeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
     );
   }
 
@@ -12143,6 +12146,22 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     const handle = await bootHandle({ serveWebShell: false });
     try {
       await handle.runtimeReady;
+      const saturationInfo = {
+        requiredBytes: 200,
+        availableBytes: 20,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        graceMs: 10_000,
+      };
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        const hooks = options['pipeHooks'] as
+          | {
+              onQueueSaturated?: (info: typeof saturationInfo) => void;
+            }
+          | undefined;
+        expect(hooks?.onQueueSaturated).toEqual(expect.any(Function));
+        hooks?.onQueueSaturated?.(saturationInfo);
+      }
       const pipeHooks = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
         'pipeHooks'
       ] as
@@ -12189,6 +12208,17 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+    const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+    let logContent = '';
+    await vi.waitFor(() => {
+      logContent = fs.readFileSync(logPath, 'utf8');
+      expect(logContent).toContain('ACP NDJSON decoded queue saturated');
+    });
+    expect(logContent).toContain('requiredBytes=200');
+    expect(logContent).toContain('availableBytes=20');
+    expect(logContent).toContain('maxQueuedMessages=2');
+    expect(logContent).toContain('maxQueuedBytes=220');
+    expect(logContent).toContain('queueSaturationGraceMs=10000');
   });
 });
 
