@@ -18,6 +18,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -527,6 +528,57 @@ describe('qwen serve — transcript paging route', () => {
       second.events.every((event) => event.type === 'session_update'),
     ).toBe(true);
     expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('indexes and opens frozen turns through the real daemon owner path', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111112';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'first prompt'),
+      chatRecord(sessionId, 'a1', 'u1', 'first answer'),
+      chatRecord(sessionId, 'u2', 'a1', 'second prompt'),
+      chatRecord(sessionId, 'a2', 'u2', 'second answer'),
+    ]);
+
+    const initial = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(initial.totalTurns).toBe(2);
+    expect(initial.turns.map((turn) => turn.turnId)).toEqual(['u1', 'u2']);
+
+    const anchored = await client.getSessionTranscriptPage(sessionId, {
+      atRecordId: 'u2',
+      snapshot: initial.snapshot,
+      limit: 2,
+    });
+    expect(anchored.targetRecordId).toBe('u2');
+    expect(anchored.hasOlder).toBe(true);
+
+    appendFileSync(
+      filePath,
+      `${JSON.stringify(chatRecord(sessionId, 'u3', 'a2', 'third prompt'))}\n`,
+      'utf8',
+    );
+    const frozen = await client.getSessionTurnIndexPage(sessionId, {
+      snapshot: initial.snapshot,
+      start: 0,
+      limit: 10,
+    });
+    const fresh = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(frozen.totalTurns).toBe(2);
+    expect(fresh.totalTurns).toBe(3);
+
+    const tampered = `${initial.snapshot[0] === 'A' ? 'B' : 'A'}${initial.snapshot.slice(1)}`;
+    await expect(
+      client.getSessionTurnIndexPage(sessionId, {
+        snapshot: tampered,
+        start: 0,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_transcript_cursor' },
+    } satisfies Partial<DaemonHttpError>);
   });
 
   it('maps transcript request validation errors through the real daemon', async () => {

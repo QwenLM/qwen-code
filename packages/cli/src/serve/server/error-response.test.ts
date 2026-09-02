@@ -8,6 +8,7 @@ import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  InvalidSessionTranscriptTurnAnchorError,
   SessionIdCaseConflictError,
   SessionTranscriptChangedError,
   SessionWriterConflictError,
@@ -261,6 +262,36 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it('maps an invalid transcript turn anchor to the public 400 contract', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new InvalidSessionTranscriptTurnAnchorError(), {
+      sessionId: 'session-1',
+    });
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid transcript turn anchor',
+      code: 'invalid_turn_anchor',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('maps a serialized invalid turn anchor to the public 400 contract', () => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('Invalid transcript turn anchor'), {
+      data: { errorKind: 'invalid_turn_anchor' },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid transcript turn anchor',
+      code: 'invalid_turn_anchor',
     });
   });
 

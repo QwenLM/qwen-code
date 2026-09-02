@@ -3744,6 +3744,27 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('maps a missing turn-index session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+          throw RequestError.resourceNotFound('session:missing-turn-index');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTurnIndexPage({ sessionId: 'missing-turn-index' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-turn-index',
+    });
+
+    await bridge.shutdown();
+  });
+
   it('rejects malformed workspace memory dream responses', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

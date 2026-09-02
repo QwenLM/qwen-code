@@ -25705,6 +25705,13 @@ describe('createServeApp', () => {
         boundWorkspace: wsDir,
       });
 
+      const missingSnapshot = await request(app)
+        .get(`/session/${sid}/turn-index?start=0`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingSnapshot.status).toBe(400);
+      expect(missingSnapshot.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+
       const res = await request(app)
         .get(`/session/${sid}/turn-index?limit=2`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -25743,6 +25750,21 @@ describe('createServeApp', () => {
         bridge,
         boundWorkspace: wsDir,
       });
+
+      const conflictingCursor = await request(app)
+        .get(
+          `/session/${sid}/transcript?cursor=cursor-1&atRecordId=record-1&snapshot=snapshot-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(conflictingCursor.status).toBe(400);
+      expect(conflictingCursor.body.code).toBe('invalid_transcript_cursor');
+
+      const snapshotWithoutAnchor = await request(app)
+        .get(`/session/${sid}/transcript?snapshot=snapshot-1`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(snapshotWithoutAnchor.status).toBe(400);
+      expect(snapshotWithoutAnchor.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
 
       const res = await request(app)
         .get(

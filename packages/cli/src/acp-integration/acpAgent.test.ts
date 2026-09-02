@@ -1002,6 +1002,7 @@ import {
   Storage,
   SessionTranscriptReader,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
@@ -15506,6 +15507,102 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    {
+      name: 'invalid cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      snapshot: undefined,
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'unavailable snapshots',
+      error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
+      snapshot: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'oversized snapshots',
+      error: new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
+      snapshot: undefined,
+      expected: {
+        code: -32011,
+        data: {
+          errorKind: 'transcript_too_large',
+          sessionId: VALID_SESSION_ID,
+          snapshotSize: 300,
+          maxBytes: 200,
+        },
+      },
+    },
+    {
+      name: 'missing frozen snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing first-page transcripts',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: undefined,
+      expected: {
+        code: -32002,
+        data: { uri: `session:${VALID_SESSION_ID}` },
+      },
+    },
+  ])(
+    'qwen/status/session/turn_index maps $name',
+    async ({ error, snapshot, expected }) => {
+      const settings = makeCoreSettings();
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readTurnIndexPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+          sessionId: VALID_SESSION_ID,
+          ...(snapshot ? { snapshot } : {}),
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('rejects a turn-index start without its snapshot', async () => {
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(makeCoreSettings());
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+        sessionId: VALID_SESSION_ID,
+        start: 0,
+      }),
+    ).rejects.toThrow('Invalid transcript turn index start');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('passes snapshot-bound transcript anchors and response metadata through', async () => {
     const settings = makeCoreSettings();
     const readPage = vi.fn().mockResolvedValue({
@@ -16146,6 +16243,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expected: {
         code: -32602,
         data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'invalid turn anchors',
+      error: new InvalidSessionTranscriptTurnAnchorError(),
+      cursor: undefined,
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_turn_anchor' },
       },
     },
     {

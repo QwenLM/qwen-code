@@ -4302,6 +4302,66 @@ describe('SessionTranscriptReader', () => {
       ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
     });
 
+    it('continues forward from an anchored page inside the frozen snapshot', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+        record('a2', 'u2', 'answer two'),
+        record('u3', 'a2', 'third'),
+        record('a3', 'u3', 'answer three'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'u2',
+        snapshot: index.snapshot,
+        limit: 2,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+      expect(anchored.hasMore).toBe(true);
+      expect(anchored.nextCursorState).toBeDefined();
+
+      const continued = await reader.readPage(sessionId, {
+        cursor: encodeCursor(anchored.nextCursorState!),
+        limit: 2,
+      });
+      expect(continued.records.map((item) => item.uuid)).toEqual(['u3', 'a3']);
+      expect(continued.hasMore).toBe(false);
+    });
+
+    it('rejects conflicting snapshot-bound transcript anchors', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const cursor = encodeCursor(first.nextCursorState!);
+
+      await expect(
+        reader.readPage(sessionId, {
+          cursor,
+          atRecordId: 'u2',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, {
+          atRecordId: 'u2',
+          beforeRecordId: 'u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, { snapshot: index.snapshot }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
     it('expands an anchored scheduled turn to a safe replay boundary', async () => {
       const scheduled = {
         ...record('uc1', 'a1', 'model schedule payload'),
@@ -4328,6 +4388,34 @@ describe('SessionTranscriptReader', () => {
         'uc1',
         'r1',
       ]);
+      expect(anchored.targetRecordId).toBe('uc1');
+      expect(anchored.hasOlder).toBe(true);
+    });
+
+    it('keeps an anchored page bounded when safe expansion exceeds its budget', async () => {
+      const scheduled = {
+        ...record('uc1', 'a1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        toolCallRecord('a1', 'u1', 'call-1'),
+        scheduled,
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      setSessionTranscriptExpandedPageBytesForTest(1);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 2,
+        maxBytes: 1024,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['uc1', 'r1']);
       expect(anchored.targetRecordId).toBe('uc1');
       expect(anchored.hasOlder).toBe(true);
     });
@@ -4375,6 +4463,46 @@ describe('SessionTranscriptReader', () => {
           start: 1,
         }),
       ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('rejects a frozen turn-index snapshot after its leaf is replaced', async () => {
+      const filePath = await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readTurnIndexPage(sessionId);
+      const original = await fs.readFile(filePath, 'utf8');
+      await fs.writeFile(
+        filePath,
+        original.replace('"uuid":"a1"', '"uuid":"a2"'),
+        'utf8',
+      );
+      resetSessionTranscriptIndexCacheForTest();
+
+      await expect(
+        reader.readTurnIndexPage(sessionId, {
+          snapshot: page.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+    });
+
+    it('caps navigation labels and details by Unicode code points', async () => {
+      await writeRecords([
+        record('u1', null, '🧭'.repeat(200)),
+        record('a1', 'u1', '🧩'.repeat(300)),
+      ]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+      const turn = page.turns[0]!;
+
+      expect(Array.from(turn.label)).toHaveLength(160);
+      expect(turn.label.endsWith('…')).toBe(true);
+      expect(Array.from(turn.detail ?? '')).toHaveLength(240);
+      expect(turn.detail?.endsWith('…')).toBe(true);
     });
 
     it('does not turn a fragmented control-only user record into navigation', async () => {
