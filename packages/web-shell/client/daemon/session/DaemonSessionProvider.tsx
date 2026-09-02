@@ -1550,8 +1550,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (disposed || abort.signal.aborted) return;
                 const providerModelStatus =
                   mapProviderStatus(standaloneOptions);
+                // The options request can outlive a first-prompt create: the
+                // composer does not block while this branch is still
+                // connecting, so the session may already be attached by the
+                // time the response lands. Never publish over it.
                 setConnection((current) =>
-                  current.status === 'error'
+                  current.status === 'error' || current.sessionId
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),

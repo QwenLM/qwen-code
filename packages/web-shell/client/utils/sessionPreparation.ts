@@ -148,6 +148,10 @@ export async function createAndAttachSessionForPrompt({
     // The model is normally best-effort because the composer may already match
     // the daemon. An explicit model-bound reasoning choice is different: it
     // must never be applied after a failed switch to an unknown model.
+    // Standalone sessions skip this switch entirely: create already carries
+    // modelServiceId, which the daemon applies best-effort at spawn — a
+    // failed apply leaves the session on the agent default model (surfaced
+    // via model_switch_failed) instead of failing creation.
     if (modelId && sessionContext?.kind !== 'standalone') {
       preparationStep = 'set model for new session';
       try {

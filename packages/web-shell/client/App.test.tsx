@@ -47,7 +47,7 @@ type MockConnection = {
   clientId: string;
   displayName: string | undefined;
   workspaceCwd: string;
-  currentModel: string;
+  currentModel: string | undefined;
   currentMode: string;
   models: Array<{
     id: string;
@@ -455,6 +455,7 @@ const {
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
+      latestStatusBarOnSelectModel: null as (() => void) | null,
       latestMessageListProps: null as {
         messages?: Array<{
           role?: string;
@@ -1469,10 +1470,12 @@ vi.doMock('./components/StatusBar', async () => {
       tasks?: DaemonSessionMonitorTaskStatus[];
       onOpenTasks?: () => void;
       hideSettings?: boolean;
+      onSelectModel?: () => void;
     }) => {
       testState.latestStatusBarTasks = props.tasks ?? [];
       testState.latestStatusBarOnOpenTasks = props.onOpenTasks ?? null;
       testState.latestStatusBarHideSettings = props.hideSettings ?? false;
+      testState.latestStatusBarOnSelectModel = props.onSelectModel ?? null;
       return React.createElement('div');
     },
   };
@@ -5643,6 +5646,7 @@ beforeEach(() => {
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
   testState.latestStatusBarHideSettings = false;
+  testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
@@ -11016,6 +11020,43 @@ describe('App session callbacks', () => {
 
     expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
       'model',
+    );
+  });
+
+  it('toasts instead of opening the model dialog via /model when standalone models are unavailable', async () => {
+    const onToast = vi.fn();
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = undefined;
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/model');
+      await Promise.resolve();
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Models are unavailable; the daemon default will be used.',
+    );
+  });
+
+  it('toasts instead of opening the model dialog from the status bar when standalone models are unavailable', async () => {
+    const onToast = vi.fn();
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = [];
+    renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.latestStatusBarOnSelectModel?.();
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Models are unavailable; the daemon default will be used.',
     );
   });
 
@@ -25409,6 +25450,92 @@ describe('App session callbacks', () => {
         'first standalone prompt',
         expect.any(Object),
       );
+    });
+  });
+
+  it('keeps a pending standalone model selection when options hydrate late', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.currentModel = undefined;
+    mockConnection.models = [];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/model qwen3-max');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      mockConnection.currentModel = 'qwen-default';
+      mockConnection.currentMode = 'yolo';
+      rerender();
+      await flush();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen3-max',
+      approvalMode: 'yolo',
+    });
+  });
+
+  it('hydrates the standalone model from late options when nothing is pending', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.currentModel = undefined;
+    mockConnection.models = [];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      mockConnection.currentModel = 'qwen-default';
+      rerender();
+      await flush();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen-default',
+      approvalMode: 'default',
     });
   });
 

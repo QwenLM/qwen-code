@@ -255,7 +255,10 @@ import {
   SLASH_COMMAND_PATTERN,
 } from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { isVisibleComposerModel } from './utils/composerModels';
+import {
+  isStandaloneModelPickerUnavailable,
+  isVisibleComposerModel,
+} from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -8954,12 +8957,26 @@ export function App({
     onError(new Error(connection.error));
   }, [connection.error, onError]);
 
+  const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
-    setCurrentModel(connection.currentModel ?? '');
+    const next = connection.currentModel;
+    // A late standalone options publish lands as an undefined→value change;
+    // never let it overwrite a model the user already picked while waiting.
+    const wasLateHydration =
+      prevConnectionModelRef.current === undefined && next !== undefined;
+    prevConnectionModelRef.current = next;
+    setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
+  const prevConnectionModeRef = useRef(connection.currentMode);
   useLayoutEffect(() => {
-    setCurrentMode(connection.currentMode ?? 'default');
+    const next = connection.currentMode;
+    const wasLateHydration =
+      prevConnectionModeRef.current === undefined && next !== undefined;
+    prevConnectionModeRef.current = next;
+    setCurrentMode((prev) =>
+      wasLateHydration && prev !== 'default' ? prev : (next ?? 'default'),
+    );
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
@@ -11556,9 +11573,11 @@ export function App({
                 });
             } else {
               if (
-                !connectionRef.current.sessionId &&
-                effectiveSessionContext?.kind === 'standalone' &&
-                (connectionRef.current.models?.length ?? 0) === 0
+                isStandaloneModelPickerUnavailable({
+                  sessionId: connectionRef.current.sessionId,
+                  sessionContextKind: effectiveSessionContext?.kind,
+                  models: connectionRef.current.models,
+                })
               ) {
                 pushToast('info', t('model.unavailable'));
                 return true;
@@ -13329,15 +13348,17 @@ export function App({
       (composerToolbarAdditionalActions?.length
         ? [...defaults, ...composerToolbarAdditionalActions]
         : defaults);
-    return !connection.sessionId &&
-      effectiveSessionContext?.kind === 'standalone' &&
-      availableModels.length === 0
+    return isStandaloneModelPickerUnavailable({
+      sessionId: connection.sessionId,
+      sessionContextKind: effectiveSessionContext?.kind,
+      models: connection.models,
+    })
       ? configured.filter((action) => action !== 'model')
       : configured;
   }, [
-    availableModels.length,
     composerToolbarActions,
     composerToolbarAdditionalActions,
+    connection.models,
     connection.sessionId,
     environmentGitReplacementEnabled,
     effectiveSessionContext?.kind,
@@ -15870,9 +15891,11 @@ export function App({
                             setShowApprovalModeDialog((v) => !v)
                           }
                           onSelectModel={() =>
-                            !connection.sessionId &&
-                            effectiveSessionContext?.kind === 'standalone' &&
-                            availableModels.length === 0
+                            isStandaloneModelPickerUnavailable({
+                              sessionId: connection.sessionId,
+                              sessionContextKind: effectiveSessionContext?.kind,
+                              models: connection.models,
+                            })
                               ? pushToast('info', t('model.unavailable'))
                               : setModelDialogMode((v) =>
                                   v ? null : 'main',
