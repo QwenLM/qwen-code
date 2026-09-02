@@ -215,6 +215,7 @@ export function SkillsManagerPage({
         (skill) =>
           skill.name.toLowerCase() === selectedSkill.name.toLowerCase(),
       ));
+  const activeWorkspaceCwd = connection.workspaceCwd ?? workspace.workspaceCwd;
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],
@@ -253,7 +254,7 @@ export function SkillsManagerPage({
     try {
       const result = await setEnabled(skill.name, enabled, {
         clientId:
-          workspaceCwd === undefined || workspaceCwd === workspace.workspaceCwd
+          workspaceCwd === undefined || workspaceCwd === activeWorkspaceCwd
             ? connection.clientId
             : undefined,
       });
@@ -421,7 +422,7 @@ export function SkillsManagerPage({
               disabled={
                 selectedSkill.status === 'disabled' ||
                 (workspaceCwd !== undefined &&
-                  workspaceCwd !== workspace.workspaceCwd)
+                  workspaceCwd !== activeWorkspaceCwd)
               }
               onClick={() => onUseSkill(selectedSkill.name)}
             >

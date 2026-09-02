@@ -1136,13 +1136,17 @@ describe('createDaemonWorkspaceService', () => {
     });
 
     it('fails closed when config Skill enumeration is unavailable', async () => {
-      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
-        v: 1,
-        workspaceCwd: '/ws',
-        initialized: false,
-        skills: [],
-        errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
-      });
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+          errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
+        }),
+        { invalidate },
+      );
       const svc = createDaemonWorkspaceService(
         makeDeps({
           workspaceSkillsStatusProvider,
@@ -1158,6 +1162,7 @@ describe('createDaemonWorkspaceService', () => {
         code: 'skills_config_unavailable',
         statusCode: 503,
       });
+      expect(invalidate).toHaveBeenCalledWith('/ws');
     });
 
     it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {

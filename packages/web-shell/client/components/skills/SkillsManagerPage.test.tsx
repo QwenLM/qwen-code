@@ -13,7 +13,10 @@ import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-rea
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { skillsState, workspaceState } = vi.hoisted(() => ({
+const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
+  connectionState: {
+    current: { clientId: 'client-1', workspaceCwd: '/workspace/demo' },
+  },
   skillsState: {
     current: {
       status: undefined,
@@ -40,7 +43,7 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => ({ clientId: 'client-1' }),
+  useConnection: () => connectionState.current,
   useSkills: () => ({
     ...skillsState.current,
     configStatus: {
@@ -151,6 +154,7 @@ beforeEach(() => {
   workspaceState.current.capabilities.features = [
     'workspace_skill_settings_toggle',
   ];
+  connectionState.current.workspaceCwd = '/workspace/demo';
 });
 
 afterEach(() => {
@@ -253,6 +257,7 @@ describe('SkillsManagerPage', () => {
   });
 
   it('keeps the client id for an explicitly selected active workspace', async () => {
+    connectionState.current.workspaceCwd = '/workspace/secondary';
     skillsState.current.skills = [
       {
         kind: 'skill',
@@ -265,7 +270,7 @@ describe('SkillsManagerPage', () => {
       },
     ];
 
-    await renderPage('/workspace/demo');
+    await renderPage('/workspace/secondary');
     await openDisabledSkill('review');
     await enableSelectedSkill();
 
@@ -321,6 +326,9 @@ describe('SkillsManagerPage', () => {
     expect(runButton()?.disabled).toBe(true);
     runButton()?.click();
     expect(onUseSkill).not.toHaveBeenCalled();
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    await renderPage('/workspace/secondary', onUseSkill);
+    expect(runButton()?.disabled).toBe(false);
   });
 
   it('shows the authoritative enabled state after a normal toggle', async () => {

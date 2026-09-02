@@ -1067,6 +1067,7 @@ export function createDaemonWorkspaceService(
       assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
       const exactName = requestedSkillName.trim();
+      if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
       const status =
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
@@ -1101,13 +1102,21 @@ export function createDaemonWorkspaceService(
           409,
         );
       }
-      const result = await deleteWorkspaceSkill(
-        boundWorkspace,
-        scope,
-        skill.name,
-        skill.installedPath,
-        assertGenerationOpen,
-      );
+      let result: WorkspaceSkillMutationResult;
+      try {
+        result = await deleteWorkspaceSkill(
+          boundWorkspace,
+          scope,
+          skill.name,
+          skill.installedPath,
+          assertGenerationOpen,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new WorkspaceSkillNotFoundError(requestedSkillName);
+        }
+        throw error;
+      }
       assertActiveGeneration();
       if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsSnapshot();
       else await refreshWorkspaceSkillsAfterMutation();

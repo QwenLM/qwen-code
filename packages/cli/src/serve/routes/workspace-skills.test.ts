@@ -190,7 +190,7 @@ describe('workspace Skill management routes', () => {
     expect(harness.getWorkspaceSkillsRuntimeStatus).toHaveBeenCalledOnce();
   });
 
-  it('keeps global config reads and writes independent of primary trust', async () => {
+  it('keeps global config reads available but rejects untrusted writes', async () => {
     const harness = createHarness(false);
     const body = {
       name: 'demo-skill',
@@ -207,22 +207,14 @@ describe('workspace Skill management routes', () => {
     );
 
     expect(config.status).toBe(200);
-    expect(install.status).toBe(200);
-    expect(remove.status).toBe(200);
+    expect(install.status).toBe(403);
+    expect(remove.status).toBe(403);
     expect(harness.getSkillsConfigStatus).toHaveBeenCalledWith(
       '/workspace',
       false,
     );
-    expect(harness.installWorkspaceSkill).toHaveBeenCalledWith(
-      '/workspace',
-      body,
-    );
-    expect(harness.deleteWorkspaceSkill).toHaveBeenCalledWith(
-      '/workspace',
-      'global',
-      'configured',
-      '/global/skills/configured/SKILL.md',
-    );
+    expect(harness.installWorkspaceSkill).not.toHaveBeenCalled();
+    expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
   });
 
   it('does not report a missing Skill when config enumeration fails', async () => {
@@ -314,14 +306,15 @@ describe('workspace Skill management routes', () => {
     const first = await request(untrusted.app).get(
       '/workspaces/workspace-1/config/skills',
     );
-    untrusted.workspaceRegistry.beginReplacement(
-      untrusted.workspaceRegistry.primaryEntry,
+    const replacing = createHarness(true);
+    replacing.workspaceRegistry.beginReplacement(
+      replacing.workspaceRegistry.primaryEntry,
       'next-policy',
     );
-    const transitioning = await request(untrusted.app).get(
+    const transitioning = await request(replacing.app).get(
       '/workspaces/workspace-1/config/skills',
     );
-    const globalInstall = await request(untrusted.app)
+    const globalInstall = await request(replacing.app)
       .post('/workspace/config/skills/install')
       .send({
         name: 'global-during-replacement',
@@ -331,8 +324,13 @@ describe('workspace Skill management routes', () => {
 
     expect(first.status).toBe(200);
     expect(transitioning.status).toBe(200);
-    expect(globalInstall.status).toBe(200);
-    expect(untrusted.getSkillsConfigStatus).toHaveBeenCalledWith(
+    expect(globalInstall.status).toBe(403);
+    expect(untrusted.getSkillsConfigStatus).toHaveBeenNthCalledWith(
+      1,
+      '/workspace',
+      false,
+    );
+    expect(replacing.getSkillsConfigStatus).toHaveBeenCalledWith(
       '/workspace',
       false,
     );
@@ -404,6 +402,20 @@ describe('workspace Skill management routes', () => {
 
     const response = await request(harness.app).delete(
       '/workspaces/workspace-1/config/skills/missing?scope=workspace',
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('skill_not_found');
+  });
+
+  it('maps a vanished configured Skill to not found', async () => {
+    const harness = createHarness();
+    harness.deleteWorkspaceSkill.mockRejectedValueOnce(
+      Object.assign(new Error('gone'), { code: 'ENOENT' }),
+    );
+
+    const response = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
     );
 
     expect(response.status).toBe(404);

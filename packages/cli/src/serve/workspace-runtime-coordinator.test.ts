@@ -216,7 +216,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
     });
   });
 
-  it('wraps a hard retry failure during Skills preparation', async () => {
+  it('reports a hard retry failure without failing runtime ensure', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });
     harness.invokeWorkspaceCommand.mockResolvedValueOnce({
@@ -234,9 +234,31 @@ describe('WorkspaceRuntimeCoordinator', () => {
       new Error('refresh failed'),
     );
 
-    await expect(coordinator.ensure()).rejects.toBeInstanceOf(
-      WorkspaceRuntimeInitializationError,
-    );
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      runtimeLive: true,
+      capabilities: {
+        skills: {
+          state: 'error',
+          error: { message: 'refresh failed' },
+        },
+      },
+    });
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'error' } },
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies a Skills mutation deferred while the runtime is starting', async () => {
+    const harness = makeRuntime();
+    harness.setSnapshot({ state: 'starting', runtimeLive: false });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    expect(coordinator.reconcileSkillsConfiguration()).toBe('deferred');
+    await expect(coordinator.ensure()).resolves.toMatchObject({
+      capabilities: { skills: { state: 'ready', revision: 1 } },
+    });
+    expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce();
   });
 
   it('retries a failed Skills refresh before certifying its revision', async () => {

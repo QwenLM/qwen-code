@@ -52,6 +52,19 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(status.workspaceCwd).toBe('/some/workspace');
   });
 
+  it('does not load workspace environment while enumerating Skills', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-env-'),
+    );
+    const key = 'QWEN_SKILLS_STATUS_ENV_TEST';
+    await fsp.writeFile(path.join(workspace, '.env'), `${key}=leaked\n`);
+    delete process.env[key];
+
+    await createWorkspaceSkillsStatusProvider()(workspace);
+
+    expect(process.env[key]).toBeUndefined();
+  });
+
   it('returns a non-initialized error status (and logs) when enumeration fails', async () => {
     vi.spyOn(SkillManager.prototype, 'listSkills').mockRejectedValueOnce(
       new Error('boom'),

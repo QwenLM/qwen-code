@@ -104,7 +104,7 @@ async function buildWorkspaceSkillsStatus(
   try {
     const settings = loadSettings(workspaceCwd, {
       consumeCorruptionEnvVars: false,
-      skipLoadEnvironment: !workspaceTrusted,
+      skipLoadEnvironment: true,
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
     });

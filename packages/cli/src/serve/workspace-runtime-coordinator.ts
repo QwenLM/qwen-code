@@ -79,6 +79,8 @@ export class WorkspaceRuntimeCoordinator {
 
   private skillsRefreshRetryRevision: number | undefined;
 
+  private skillsRefreshFailedRevision: number | undefined;
+
   private skillsTail: Promise<void> = Promise.resolve();
 
   private skillsQueuedWork = 0;
@@ -197,6 +199,7 @@ export class WorkspaceRuntimeCoordinator {
   reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
     this.skillsRevision += 1;
     this.skillsRefreshRetryRevision = undefined;
+    this.skillsRefreshFailedRevision = undefined;
     return this.scheduleSkillsReconciliation();
   }
 
@@ -204,6 +207,9 @@ export class WorkspaceRuntimeCoordinator {
     const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
     if (!snapshot.runtimeLive || this.draining || this.disposed) {
       this.skillsReconcileDeferred ||= snapshot.runtimeLive && this.draining;
+      if (snapshot.state === 'starting') {
+        this.skillsRefreshRetryRevision = this.skillsRevision;
+      }
       this.skillsStatus = {
         state:
           this.skillsStatus.runtimeEpoch === undefined
@@ -250,8 +256,26 @@ export class WorkspaceRuntimeCoordinator {
       ) {
         return;
       }
+      if (
+        status.capabilities?.skills?.state === 'error' &&
+        status.capabilities.skills.revision === revision &&
+        status.capabilities.skills.runtimeEpoch === status.runtimeEpoch &&
+        this.skillsRefreshFailedRevision === revision
+      ) {
+        return;
+      }
       if (this.skillsRefreshRetryRevision === revision) {
-        await this.refreshSkillsRevision(revision);
+        try {
+          await this.refreshSkillsRevision(revision);
+        } catch (error) {
+          if (this.skillsRefreshRetryRevision === revision) {
+            this.skillsRefreshRetryRevision = undefined;
+          }
+          this.skillsRefreshFailedRevision = revision;
+          const snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
+          this.recordSkillsError(revision, snapshot.runtimeEpoch, error);
+          return;
+        }
       }
       await this.prepareSkillsRevision(revision);
     });
