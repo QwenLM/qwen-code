@@ -37652,6 +37652,128 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('logs a boot failure once per episode with the full cause chain', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let captured = '';
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      captured += String(chunk);
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const driveBoot = async (settle: () => void) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      settle();
+      return promise;
+    };
+    try {
+      const first = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-ONE', {
+            cause: new Error('ROOT-CAUSE-ONE EACCES'),
+          }),
+        ),
+      );
+      expect(first.status).toBe(503);
+
+      const second = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-TWO', {
+            cause: new Error('ROOT-CAUSE-TWO'),
+          }),
+        ),
+      );
+      expect(second.status).toBe(503);
+      const firstEpisode = captured;
+      expect(firstEpisode).toContain(
+        'qwen serve: Conversations runtime boot failed:',
+      );
+      expect(firstEpisode).toContain('WRAPPED-BOOT-FAILURE-ONE');
+      expect(firstEpisode).toContain('ROOT-CAUSE-ONE');
+      expect(firstEpisode).not.toContain('WRAPPED-BOOT-FAILURE-TWO');
+      expect(firstEpisode).not.toContain('ROOT-CAUSE-TWO');
+
+      const recovered = await driveBoot(() => setup.resolveCreation());
+      expect(recovered.status).toBe(200);
+
+      vi.mocked(setup.conversationWorkspace.revalidate).mockRejectedValueOnce(
+        new Error('ROOT-CAUSE-THREE ENOENT'),
+      );
+      const third = await request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(third.status).toBe(503);
+      expect(captured).toContain('ROOT-CAUSE-THREE');
+      const episodeLines = captured
+        .split('\n')
+        .filter((line) =>
+          line.includes('qwen serve: Conversations runtime boot failed:'),
+        );
+      expect(episodeLines).toHaveLength(2);
+    } finally {
+      stderrSpy.mockRestore();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('keeps the classified boot rejection when the stderr write itself fails', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let writeAttempts = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      if (String(chunk).includes('qwen serve: Conversations runtime boot')) {
+        writeAttempts += 1;
+        throw new Error('EPIPE dead stderr');
+      }
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const failBootOnce = async (message: string) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      setup.rejectCreation(new Error(message));
+      return promise;
+    };
+    try {
+      const first = await failBootOnce('SENTINEL-BOOT-FAILURE-ONE');
+      expect(first.status).toBe(503);
+      expect(first.body.code).toBe('conversation_runtime_unavailable');
+
+      const second = await failBootOnce('SENTINEL-BOOT-FAILURE-TWO');
+      expect(second.status).toBe(503);
+      expect(second.body.code).toBe('conversation_runtime_unavailable');
+      expect(writeAttempts).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
+      await restoreLiveSettings();
+    }
+  });
+
   it('boots an exact Conversations restore target before source proof', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
