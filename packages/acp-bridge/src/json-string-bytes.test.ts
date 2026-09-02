@@ -8,17 +8,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
 
 describe('estimateJsonStringBytes', () => {
-  // The exhaustive 65,536-iteration sweep spends most of its time in
-  // per-iteration assertion overhead, which exceeds vitest's default 5s
-  // timeout on slow or contended CI runners.
   it('matches JSON.stringify UTF-8 bytes for every UTF-16 code unit', () => {
+    const mismatches: Array<{ code: number; got: number; want: number }> = [];
     for (let code = 0; code <= 0xffff; code++) {
       const value = String.fromCharCode(code);
-      expect(estimateJsonStringBytes(value, Number.MAX_SAFE_INTEGER)).toBe(
-        Buffer.byteLength(JSON.stringify(value)),
-      );
+      const got = estimateJsonStringBytes(value, Number.MAX_SAFE_INTEGER);
+      const want = Buffer.byteLength(JSON.stringify(value));
+      if (got !== want) mismatches.push({ code, got, want });
     }
-  }, 60_000);
+    expect(mismatches).toEqual([]);
+  });
 
   it('matches JSON.stringify for paired surrogates and mixed escaping', () => {
     const samples = [
