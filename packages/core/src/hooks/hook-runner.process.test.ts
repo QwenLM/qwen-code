@@ -902,7 +902,13 @@ setInterval(() => {}, 1000);
           input,
         );
 
-        descendantPid = await readPid(descendantPidPath);
+        // The root's 300ms hook timeout can fire before the descendant node
+        // process has started far enough to write its pid file, so poll for
+        // the file instead of reading it once the hook returns.
+        await waitFor(async () => {
+          descendantPid = await readPid(descendantPidPath);
+          return descendantPid !== undefined;
+        }, 10_000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
@@ -919,7 +925,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 30_000);
 
     it('delivers complete large input after the parent exits', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-input-'));
