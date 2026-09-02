@@ -2,10 +2,10 @@ name: 'Release'
 
 on:
   schedule:
-    # Both crons run in the shared ECS pool's quiet hours (UTC+8 early
-    # morning) and hours apart from each other and from the CI/E2E
-    # nightlies, so one release validation never shares a host with
-    # another. The strings are compared verbatim in prepare below.
+    # Both crons run in the ECS pool's quiet hours (UTC+8 early morning),
+    # hours apart from each other and from the CI/E2E nightlies. Scheduled
+    # release validation is also serialized below. The strings are compared
+    # verbatim in prepare.
     # Runs every day at 21:00 UTC for the nightly release.
     - cron: '0 21 * * *'
     # Runs every Tuesday at 17:00 UTC for the preview release.
@@ -42,18 +42,25 @@ on:
         type: 'boolean'
         default: false
 
+concurrency:
+  # A delayed preview must not overlap the nightly validation on the same
+  # reserved host. Manual runs keep independent groups.
+  group: "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}"
+  cancel-in-progress: false
+
 jobs:
-  # Validation runs on the ecs-qwen pool but is pinned to the hk4 host:
+  # Validation is pinned to the hk4 host through its dedicated label:
   # every runner on a host shares its CPUs, and the sharded workspace tests
   # failed on timing whenever they landed on a host that was also running
-  # a dozen PR CI / E2E jobs. Dropping the ecs-qwen label from the hk4
-  # runners makes the host release-only without touching this file.
+  # a dozen PR CI / E2E jobs. The workflow deliberately does not require the
+  # shared ecs-qwen label, so infra can remove that label from hk4 and keep
+  # the host release-only without making these jobs unroutable.
   prepare:
     name: 'Prepare Release Metadata'
     # Process cleanup belongs to the runner service/cgroup boundary. This
     # workflow only resets job-owned filesystem state on the shared pool.
     # MAINTAINER_ECS_RUNNER_DISABLED restores the hosted fallback.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
@@ -328,7 +335,7 @@ jobs:
 
   quality_static:
     name: 'Quality Checks (Static)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     needs: 'prepare'
     if: |-
@@ -392,7 +399,7 @@ jobs:
 
   quality_build:
     name: 'Quality Checks (Build)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     needs: 'prepare'
     if: |-
@@ -449,7 +456,7 @@ jobs:
 
   quality_typecheck:
     name: 'Quality Checks (Typecheck)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     needs:
       - 'prepare'
@@ -484,7 +491,7 @@ jobs:
 
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     needs:
       - 'prepare'
@@ -515,13 +522,14 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-        # --retry absorbs the timing-only failures a shared host still
-        # produces; a test that fails three times in a row is a real failure.
-        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry=2'
+          # Nightly and preview releases may absorb a transient timing failure;
+          # stable/manual releases remain strict and never retry a failed test.
+          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}"
+        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     needs:
       - 'prepare'
@@ -542,6 +550,12 @@ jobs:
       - *unpack_release_build
 
       - name: 'Run Script Tests'
+        env:
+          # Match the tunable per-process bound used by the main CI gate.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: 'npm run test:scripts'
 
   quality:
@@ -589,7 +603,7 @@ jobs:
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
@@ -624,7 +638,7 @@ jobs:
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
