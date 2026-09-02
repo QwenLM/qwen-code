@@ -124,6 +124,7 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
   'model',
+  'output-style',
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
@@ -187,6 +188,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openEffortDialog: () => void;
+  openOutputStyleDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -1282,6 +1284,9 @@ export const useSlashCommandProcessor = (
                     case 'effort':
                       actions.openEffortDialog();
                       return { type: 'handled' };
+                    case 'output-style':
+                      actions.openOutputStyleDialog();
+                      return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
                         await actions.handleResume(result.sessionId);
@@ -1321,7 +1326,7 @@ export const useSlashCommandProcessor = (
                     }
                   }
                 case 'load_history': {
-                  config?.getGeminiClient()?.setHistory(result.clientHistory);
+                  config?.getLlmClient()?.setHistory(result.clientHistory);
                   fullCommandContext.ui.clear();
                   result.history.forEach((item, index) => {
                     fullCommandContext.ui.addItem(item, index);

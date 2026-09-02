@@ -84,6 +84,8 @@ export interface UseCommandCompletionReturn {
   activeCategory: SuggestionCategory | 'all';
   /** Tabs available for the current suggestion set (always includes 'all'). */
   availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
   /** Cycle the active category tab; resets active/scroll index. */
   switchCategory: (direction: 1 | -1) => void;
 }
@@ -246,6 +248,7 @@ export function useCommandCompletion(
     navigateDown,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   } = useCompletion({ query });
 
@@ -447,6 +450,7 @@ export function useCommandCompletion(
     midInputGhostText,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   };
 }

@@ -3114,13 +3114,18 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Seven sites now: the four feedback/deferral exclusions, the
+    // Ten sites now: the four feedback/deferral exclusions, the
     // over-budget census (command comments are not feedback batches), the
-    // conflict handoff wake filter, and its scan-side mirror for the
+    // conflict handoff wake filter, its scan-side mirror for the
     // stale-base park gate (a /command comment is not a trusted-human
-    // response and must not unpark a conflict verdict in either).
+    // response and must not unpark a conflict verdict in either), and the
+    // convergence breaker's human-activity boundary in all three of its
+    // lockstepped sites — the scan gate, the prepare mirror, and the
+    // report step's stale-base guard (#10122) — since a /command comment
+    // is not a maintainer weighing in and must not hand the loop a fresh
+    // runway.
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      7,
+      10,
     );
   });
 
@@ -3145,12 +3150,14 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflowWithScripts.split('--paginate').length - 1).toBe(22);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(25);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
-    // needs the same human-feedback legs prepare reads) = twelve normalized
-    // fetch sites. The
+    // needs the same human-feedback legs prepare reads) + the report step's
+    // convergence-guard rv/rc/ic re-fetches (#10122: the guard re-derives
+    // the breaker's reading over FRESH fetches, so it owns three new
+    // normalized sites) = fifteen normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
@@ -3170,7 +3177,7 @@ describe('qwen-autofix workflow', () => {
     // by `jq -rs` into a shell variable to resolve ONE job id, never a
     // WORKDIR file, so it bumps the total pin without joining the count
     // below.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(12);
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(15);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -8937,6 +8944,57 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       'strip_runner_channels npm run test',
     );
+    // The load clamps must actually reach every vitest the gate launches.
+    // Dropping the expansion from any of the three legs is silent —
+    // `set -eo pipefail` without `-u` swallows an empty array — and the
+    // gate reverts to 15s timeouts, unbounded workers and coverage on,
+    // which is the incident this script's clamps exist to prevent.
+    // Pinned on reviewVerificationRunner only: the inline issue-fix gate
+    // keeps unclamped copies by design — RUNNER_NAME is present there, so
+    // its package legs keep the config-level clamps, and its contracts leg
+    // accepts the web-shell 5s default.
+    expect(reviewVerificationRunner).toContain(
+      '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
+    expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and the array definition sits above its consumers: `set -eo
+    // pipefail` without `-u` expands a not-yet-set array to zero words, so
+    // a definition moved below them silently empties every clamp while the
+    // position-blind toContains above stay green.
+    expect(
+      reviewVerificationRunner.indexOf('VITEST_LOAD_CLAMPS=('),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+      ),
+    );
+    // ...and above the contracts call: run_check_no_ab spawns a child bash
+    // that inherits exported variables only, so an export missing or moved
+    // below the call leaves the drift leg at vitest's 5s default.
+    expect(
+      reviewVerificationRunner.indexOf('export AUTOFIX_VITEST_FLAGS'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    );
+    // ...and the unset stays below the contracts call: the child inherits
+    // the export at spawn time, so an unset moved above the call (or
+    // deleted) strips the clamps from the drift leg while every
+    // establish-side pin above stays green.
+    expect(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('unset AUTOFIX_VITEST_FLAGS'),
+    );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
     const verdictGateAt = reviewVerificationRunner.indexOf(
@@ -9898,25 +9956,21 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
@@ -9960,6 +10014,8 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -9985,10 +10041,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -9996,6 +10051,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
@@ -11946,7 +12004,10 @@ exit 1
         join(dir, 'npm'),
         [
           '#!/usr/bin/env bash',
-          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          // One bracketed line per argv word: $*-joined logging renders a
+          // joined-blob flag identically to separate words, so a [*]-for-
+          // [@] regression in the contracts script would survive it.
+          'printf \'[%s]\\n\' "$@" >> "${NPM_LOG}"',
           'if [[ "$*" == "run check-i18n" ]]; then',
           '  exit "${I18N_EXIT:-0}"',
           'fi',
@@ -11970,14 +12031,45 @@ exit 1
 
       expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
+        '[run]',
+        '[check-i18n]',
       ]);
 
       writeFileSync(npmLog, '');
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
+      ]);
+
+      // web-shell's config sets no timeouts and has no RUNNER_NAME branch,
+      // so without caller flags the drift test runs at vitest's 5s default;
+      // the review gate launches it on a saturating shared host and hands
+      // its clamps down through this variable. The issue-fix gate leaves
+      // it unset (the case above) and accepts the 5s default there.
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          AUTOFIX_VITEST_FLAGS: '--maxWorkers=25% --testTimeout=60000',
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[--maxWorkers=25%]',
+        '[--testTimeout=60000]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
       writeFileSync(npmLog, '');
@@ -11988,7 +12080,7 @@ exit 1
           I18N_EXIT: '1',
         }).status,
       ).toBe(1);
-      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('[run]\n[check-i18n]');
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
 
       writeFileSync(npmLog, '');
@@ -14661,7 +14753,7 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  });
+  }, 30000);
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -17222,7 +17314,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  });
+  }, 30000);
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -18946,8 +19038,9 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    // 111 was implemented; 333's thread is already resolved; 999 matches
-    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    // 111 was implemented (112 is a reply in the SAME thread); 333's thread
+    // is already resolved; 999 matches nothing. 222 was DECLINED, so it is
+    // deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
@@ -18961,7 +19054,10 @@ exit 1
         id: 'T_open_1',
         isResolved: false,
         comments: {
-          nodes: [{ databaseId: 111 }],
+          // 112 is a reply in this same thread: the feedback renderer lists
+          // a Critical root and its reply as two findings with their own
+          // rc: handles, so one thread can carry two selected ids (R2-1).
+          nodes: [{ databaseId: 111 }, { databaseId: 112 }],
           pageInfo: { hasNextPage: false },
         },
       },
@@ -19011,6 +19107,8 @@ exit 1
           VERIFIED_HEAD: localHead,
           LIVE_HEAD: localHead,
           PUSH_RACE_MERGED: 'false',
+          ROUND_PUSHED: 'true',
+          LIVE_HEAD_RETRY_DELAY: '0',
           ...env,
         },
         encoding: 'utf8',
@@ -19067,6 +19165,76 @@ exit 1
     expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
     expect(matching.out).toContain(
       'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    // #10106 root cause on #9729: the PR read model is eventually
+    // consistent, so a headRefOid read seconds after this round's OWN push
+    // routinely still returns the previous head — every pushed round
+    // declared drift on that one stale read and silently skipped. The
+    // initial equality check waits out propagation instead…
+    const lagThenConverge = runResolve({
+      LIVE_HEAD_SEQUENCE: `stale-pre-push-head,${localHead}`,
+    });
+    expect(lagThenConverge.status).toBe(0);
+    expect(lagThenConverge.resolved).toEqual(['resolve:T_open_1']);
+    expect(lagThenConverge.out).not.toContain(
+      'skipping review-thread resolution',
+    );
+    // …and a PUSHED round whose head never converges still skips, after
+    // exhausting the whole window rather than a single read…
+    const neverConverges = runResolve({ LIVE_HEAD: 'stale-pre-push-head' });
+    expect(neverConverges.status).toBe(0);
+    expect(neverConverges.resolved).toEqual([]);
+    expect(neverConverges.out).toContain('skipping review-thread resolution');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('5');
+    // …but the window waits out THIS round's OWN push, so a round that
+    // pushed nothing decides on ONE read — a head moved by a contributor
+    // only ever moves further from VERIFIED_HEAD, never back to it.
+    const noopNeverConverges = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopNeverConverges.status).toBe(0);
+    expect(noopNeverConverges.resolved).toEqual([]);
+    expect(noopNeverConverges.out).toContain(
+      'skipping review-thread resolution',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // And an empty selection needs no head proof at all: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    const zeroIdsDrift = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(zeroIdsDrift.status).toBe(0);
+    expect(zeroIdsDrift.resolved).toEqual([]);
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // The retry delay is a test knob on a PAT-bearing step: anything but
+    // a single digit (a GITHUB_ENV plant stalling the step to the job
+    // timeout) must fall back to the default.
+    expect(block).toContain(
+      '[[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5',
+    );
+    // The wait itself is the #10106 fix: with the sleep gone all five
+    // reads fire inside the propagation window, every one returns the
+    // stale head, and resolution silently skips every pushed round.
+    expect(block).toContain(
+      '[[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
+    );
+    // The window's premise is THIS round's OWN push propagating: five
+    // attempts only after a push, one read otherwise, and no head proof
+    // at all on an empty selection.
+    expect(block).toContain(
+      '[[ "${ROUND_PUSHED:-}" == \'true\' ]] || LIVE_HEAD_ATTEMPTS=1',
+    );
+    expect(block).toContain('if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then');
+    // R3-1: CRs go through tr, not a sed \r escape — BSD sed on the
+    // macOS test lane does not interpret \r, so a sed-spelled strip
+    // drops every CRLF-terminated id there and the fixture above goes
+    // red (ci.yml records #9220, this defect class, shipped to main).
+    expect(block).toContain(
+      "RESOLVED_IDS=\"$(tr -d '\\r' < \"${WORKDIR}/resolved-comments.txt\" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)\"",
     );
 
     const movedBeforeMutation = runResolve({
@@ -19169,6 +19337,21 @@ exit 1
     expect(resolvedByOtherActor.status).toBe(0);
     expect(resolvedByOtherActor.resolved).toEqual([]);
     expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    // R2-1: a Critical root and its reply carry two rc: handles for ONE
+    // thread. The loop resolves the thread on the first id; the second
+    // maps to the same thread and must read as same-thread dedupe — not
+    // as "another actor" resolving it between the fetch and the guard,
+    // which counted one thread as two in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const oneThreadTwoIds = runResolve();
+    expect(oneThreadTwoIds.status).toBe(0);
+    expect(oneThreadTwoIds.resolved).toEqual(['resolve:T_open_1']);
+    expect(oneThreadTwoIds.out).not.toContain('resolved by another actor');
+    expect(oneThreadTwoIds.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
     const unknownThreadState = runResolve({
@@ -19368,6 +19551,213 @@ exit 1
         'confirmed 1 selected review thread(s) resolved',
       );
     }
+
+    // #10106: the ::warning:: lines above reach only the run log — on the
+    // PR, a guard refusing round after round reads exactly like resolution
+    // working (0/90 threads on #9729, silent for days). The block composes
+    // one host-authored RESOLUTION_NOTE naming the refusing guard and
+    // counting the threads left behind, and BOTH report arms (pushed and
+    // no-op) embed it in the round report.
+    expect(
+      pushAndReportScript.match(/echo "\$\{RESOLUTION_NOTE\}"/g) ?? [],
+    ).toHaveLength(2);
+    // R2-3 wiring: each arm tells the shared function whether THIS round
+    // pushed — the pushed arm retries out its own push's propagation lag,
+    // the no-op arm decides on one read.
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='true'/g) ?? [],
+    ).toHaveLength(1);
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='false'/g) ?? [],
+    ).toHaveLength(1);
+    const noteEnd = lines.findIndex((l) =>
+      l.includes('The mirror of the resolve above'),
+    );
+    expect(noteEnd).toBeGreaterThan(j);
+    const noteBlock = [
+      ...lines.slice(i, noteEnd),
+      'printf "NOTE<%s>" "${RESOLUTION_NOTE}"',
+    ].join('\n');
+    const runNote = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync(
+        'bash',
+        ['-c', `set -euo pipefail\n${noteBlock}`],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            REPO: 'QwenLM/qwen-code',
+            PR: '7308',
+            RESOLVED_LOG: resolvedLog,
+            HEAD_READ_COUNT: headReadCount,
+            THREAD_STATE_FILE: threadStateFile,
+            THREADS_RAW_STUB: threadsRaw,
+            VERIFIED_HEAD: localHead,
+            LIVE_HEAD: localHead,
+            PUSH_RACE_MERGED: 'false',
+            ROUND_PUSHED: 'true',
+            LIVE_HEAD_RETRY_DELAY: '0',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status).toBe(0);
+      return /NOTE<([\s\S]*)>$/.exec(result.stdout)?.[1] ?? '';
+    };
+    // Every up-front guard names itself. The skip path classifies like
+    // the resolve loop: three selected THREADS here, and the one already
+    // resolved before the fetch is subtracted from the residual.
+    for (const [env, guard] of [
+      [{ PUSH_RACE_MERGED: 'true' }, 'salvage merge'],
+      [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
+      [{ VERIFIED_HEAD: 'different-verified-head' }, 'verified_head mismatch'],
+      [{ LIVE_HEAD: 'new-contributor-head' }, 'live-head drift'],
+      [{ LIVE_HEAD_EXIT: '1' }, 'live-head unreadable'],
+    ]) {
+      const note = runNote(env);
+      expect(note).toContain('Review-thread resolution skipped');
+      expect(note).toContain(`guard: \`${guard}\``);
+      expect(note).toContain(
+        'resolved 0 of 3 selected thread(s), 2 left for a later round',
+      );
+    }
+    // R2-3: a round that pushed nothing decides on ONE read — the note
+    // stays byte-identical while the head reads drop from five to one…
+    const noopDriftNote = runNote({
+      LIVE_HEAD: 'new-contributor-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopDriftNote).toContain('Review-thread resolution skipped');
+    expect(noopDriftNote).toContain('guard: `live-head drift`');
+    expect(noopDriftNote).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // …and an empty selection skips the head proof entirely: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(
+      runNote({ LIVE_HEAD: 'new-contributor-head', ROUND_PUSHED: 'false' }),
+    ).toBe('');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R3-2: the skip and break paths must count THREADS like the resolve
+    // loop does — classification cannot live only inside the guarded loop,
+    // or exactly the refusing rounds this observability was built for
+    // report id counts: two ids of ONE thread as two threads, and a
+    // pre-fetch-resolved thread as work left behind forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const skipOneThreadTwoIds = runNote({ PUSH_RACE_MERGED: 'true' });
+    expect(skipOneThreadTwoIds).toContain('Review-thread resolution skipped');
+    expect(skipOneThreadTwoIds).toContain('guard: `salvage merge`');
+    expect(skipOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    // A skip round that re-lists ONLY already-resolved ids converges to
+    // zero left instead of re-reporting a phantom residual every round.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote({ PUSH_RACE_MERGED: 'true' })).toContain(
+      'resolved 0 of 1 selected thread(s), 0 left for a later round',
+    );
+    // A mid-list break reports the same-thread dedupe it broke past, too.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const brokeOneThreadTwoIds = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(brokeOneThreadTwoIds).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(brokeOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // A mid-list abort names its guard too, and carries the partial count.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const stoppedNote = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(stoppedNote).toContain('Review-thread resolution stopped early');
+    expect(stoppedNote).toContain('guard: `live-head drift`');
+    expect(stoppedNote).toContain(
+      'resolved 1 of 2 selected thread(s), 1 left for a later round',
+    );
+    const unprovenNote = runNote({ UNKNOWN_THREAD_STATE: 'T_open_1' });
+    expect(unprovenNote).toContain('guard: `thread state unproven`');
+    expect(unprovenNote).toContain('resolved 0 of 2');
+    const ambiguousNote = runNote({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(ambiguousNote).toContain('guard: `mutation post-check ambiguous`');
+    expect(ambiguousNote).toContain('resolved 0 of 2');
+    // Healthy rounds report a positive count and never name a guard.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const healthyNote = runNote();
+    expect(healthyNote).toContain('Resolved all 1 selected review thread(s)');
+    expect(healthyNote).not.toContain('guard:');
+    // Per-thread misses without a stopping guard still show up as a count,
+    // and an incomplete thread fetch is called out as the likely cause.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R2-2: 333's thread was already resolved BEFORE the fetch — it is
+    // not work left behind, so the residual counts 999 alone; without
+    // the already-resolved probe a re-listed still-valid fix kept the
+    // residual above zero forever.
+    const partialNote = runNote();
+    expect(partialNote).toContain(
+      'Resolved 1 of 3 selected review thread(s); 1 not resolved by this round',
+    );
+    expect(partialNote).toContain('details in the run log');
+    expect(partialNote).not.toContain('guard:');
+    const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
+    expect(fetchNote).toContain('thread fetch incomplete');
+    // A round that re-lists ONLY already-resolved ids converges to "all
+    // resolved" instead of reporting a phantom residual forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // R2-1: two ids of ONE thread count one thread in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // A thread another actor resolved between the fetch and the per-thread
+    // guard is not work left for a later round: before it had its own
+    // counter the note said "3 left" while only 2 threads were open.
+    writeFileSync(
+      join(dir, 'resolved-comments.txt'),
+      'rc:222\nrc:111\nrc:444\n',
+    );
+    // The shared normalization iterates ids in sorted order (111, 222,
+    // 444), so the first thread hits the another-actor continue and the
+    // second trips the drift break.
+    const anotherActorThenDrift = runNote({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(anotherActorThenDrift).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(anotherActorThenDrift).toContain('guard: `live-head drift`');
+    expect(anotherActorThenDrift).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    // A duplicate id selects one thread, so it counts once: before the
+    // shared normalization deduplicated, the note reported "1 of 2".
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n111\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // No ids selected → no note: the line appears only when the agent
+    // asked for resolution.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '');
+    expect(runNote()).toBe('');
+    // Non-empty but zero valid ids — agent-authored files do carry
+    // malformed lines. grep -c exits 1 on zero matches, so the || true is
+    // load-bearing under the step's bash -eo pipefail: without it the
+    // assignment aborts the whole push-and-report step.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(runNote()).toBe('');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
@@ -19916,7 +20306,15 @@ exit 1
     const runMark = (env) =>
       execFileSync(
         'bash',
-        ['-c', `${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`],
+        // The mark chain nests the report stale-base retry, whose
+        // convergence guard now fetches and speaks on failure: stub gh to
+        // silent success (the fetches read '[]', the guard stays quiet and
+        // falls through exactly as before) and give the fetch files a real
+        // directory, so the exact-output mark assertions stay exact.
+        [
+          '-c',
+          `WORKDIR='${tmpdir()}'\ngh() { :; }\n${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`,
+        ],
         {
           env: {
             ...process.env,
@@ -21218,7 +21616,9 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // CONSEC_FAIL toward a terminal lockout on the exact PR a human is
     // settling (probe-verified entrance). The scan block mirrors prepare's
     // conflict-handoff idempotence wake set; execute the real block.
-    expect(reviewScanJob).toContain('&& "${CONFLICT_PARKED}" != \'true\' ]]');
+    expect(reviewScanJob).toContain(
+      '&& "${CONFLICT_PARKED}" != \'true\' && "${CONV_PARKED}" != \'true\' ]]',
+    );
     const scanParkGateBlock = reviewScanJob.match(
       /CONFLICT_PARKED='false'[\s\S]*?rm -f "\$\{WORKDIR\}\/rv\.scan\.json" "\$\{WORKDIR\}\/rc\.scan\.json" "\$\{WORKDIR\}\/checks\.scan\.json"\n {12}fi\n/,
     )?.[0];
@@ -21342,6 +21742,1262 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         ],
       }),
     ).toBe('false');
+  });
+
+  it('behaviorally trips the convergence breaker on N signal rounds and resumes on a human response (#10107)', () => {
+    // The review side publishes its convergence diagnosis as `rec` codes in
+    // the posted ledger marker; the scan gate is the consumer. The streak
+    // is trailing-consecutive over marker ROUNDS (a dismissed review and
+    // its same-round re-run count once), a healthy or pre-field marker
+    // resets it, and the boundary is max(window key, newest trusted-human
+    // activity) — a human response IS the resume signal. Execute the real
+    // boundary+streak block against fixture state.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-'));
+    try {
+      const led = (round, rec) =>
+        `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec === undefined ? {} : { rec }),
+        })} -->`;
+      const botReview = (at, round, rec) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `findings… ${led(round, rec)}`,
+      });
+      const readState = ({ rv = [], rc = [], ic = [], rearmKey = 'none' }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='${rearmKey}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}\n` +
+              `printf '\\n%s %s' "$CONV_STREAK" "$CONVERGENCE_BREAK_ROUNDS"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const [streak, cap] = out.split('\n').at(-1).split(' ');
+        return { streak: Number(streak), cap: Number(cap) };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3, ['root-cause-triage']),
+        botReview(T(2), 4, ['batch-fixes', 'stem-surface']),
+        botReview(T(3), 5, ['root-cause-triage', 'batch-fixes']),
+      ];
+      // Three signal rounds, nobody in between → the breaker's bar, and the
+      // malformed knob fell back to its default at the read site.
+      expect(readState({ rv: threeSignals })).toEqual({ streak: 3, cap: 3 });
+      // A healthy round (marker, no codes) resets; so does a pre-field
+      // marker from a CLI predating `rec` — not evidence of divergence.
+      for (const rec of [undefined, []]) {
+        expect(
+          readState({
+            rv: [
+              botReview(T(1), 3, ['batch-fixes']),
+              botReview(T(2), 4, rec),
+              botReview(T(3), 5, ['batch-fixes']),
+            ],
+          }).streak,
+        ).toBe(1);
+      }
+      // 'land-and-defer' is an exit signal, not a divergence one.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['land-and-defer'])] }).streak,
+      ).toBe(0);
+      // 'successor-chain' is a divergence signal like the other wired
+      // codes — the gate's list is the CLI vocabulary minus the ONE
+      // documented exit code ('land-and-defer'); the lockstep test pins
+      // that contract on both ends.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['successor-chain'])] }).streak,
+      ).toBe(1);
+      // A dismissed review and its same-round re-run count once — the
+      // NEWEST marker speaks for the round (here: the healthy re-run).
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            { ...botReview(T(2), 4, ['batch-fixes']), state: 'DISMISSED' },
+            botReview(T(3), 4, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // A review with no parseable marker is not a round — a fallback stub
+      // between signal rounds neither counts nor resets.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'fallback — no marker',
+            },
+            botReview(T(3), 4, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human response moves the boundary: only rounds AFTER it
+      // count, so every human touch grants a fresh N-round runway.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'split the cluster out',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // …but the review bot, an untrusted login, and @qwen-code command
+      // comments move nothing (commands act through their own routes).
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'suggestion digest',
+            },
+            {
+              user: { login: 'drive-by' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'bump',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: '@qwen-code /takeover',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // The window key is the other boundary: /retry or re-engaging resets
+      // the breaker exactly like every other census.
+      expect(readState({ rv: threeSignals, rearmKey: T(2) }).streak).toBe(1);
+      // A marker whose payload parses to a NON-object (number, string,
+      // array, boolean) is skipped like an unparseable one. Under jq >=
+      // 1.7 (the CI/production platform) the old `!= null` select let
+      // `.led.round` raise "Cannot index number" outside any try — the
+      // `|| echo 0` fallback turned one bad marker into CONV_STREAK=0 for
+      // the WHOLE window. jq 1.6 masks the crash (its assignment's
+      // try scope swallows the downstream error), so this witness bites
+      // only on 1.7+.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'CHANGES_REQUESTED',
+              body: '<!-- qwen-review-ledger 42 -->',
+            },
+            botReview(T(3), 5, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human REVIEW moves the boundary too — the notice
+      // promises "a review or comment counts", so the reviews arm's
+      // state filter and submitted_at field must decide here.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'review feedback, not an issue comment',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // An APPROVE-state review is a maintainer response too — the notice
+      // promises "a review or comment counts", and a maintainer who resolves
+      // the flagged issues themselves approves without a separate comment.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'APPROVED',
+              body: 'resolved the flagged issues myself',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // A DISMISSED review keeps the boundary where the human put it: a
+      // resume review later dismissed (manually, or by dismiss-stale on a
+      // force-push) must not snap the boundary back to the window key and
+      // silently re-park under the stale pre-resume notice.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'DISMISSED',
+              body: 'resume review, dismissed later',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The streak is trailing-consecutive in TIME, not in round number:
+      // jq's group_by re-sorts the deduped rounds by the grouping key, so
+      // the reduce re-sorts by submitted_at first. Rounds land out of order
+      // exactly where the per-round dedup exists for them — a dismissed
+      // round's re-run. Rounds 3-6 signal at T1-T4, then round 3's HEALTHY
+      // re-run lands at T5: the newest event is healthy, so the trailing
+      // streak is 0 even though round-number order reads a signal tail of
+      // three — a false park in the unsafe direction.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // Control: a late SIGNAL re-run extends in time order too.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, []),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(4);
+      // An edited body can hold more than one marker; the NEWEST describes
+      // the round — a `last` → `first` mutation stays green on every
+      // single-marker body, so pin a two-marker one: a healthy marker
+      // edited in AFTER the original signal marker speaks for the round.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'CHANGES_REQUESTED',
+              body: `findings… ${led(5, ['batch-fixes'])} amended after re-check ${led(5, [])}`,
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The boundary reads the NEWEST trusted-human activity, not the
+      // first: a `min` would anchor the boundary at the first response
+      // forever, and every later response — the act the notice says
+      // resumes the loop — would fail to advance it.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'looking into it',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(4),
+              body: 'keep going',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The loop's own convergence-break notice must not count as
+      // trusted-human activity even though its author carries a trusted
+      // association on this repo — the marker is not in the
+      // machine-marker exclusion regex, so the bot-login filter is the
+      // only thing keeping the park from self-disarming on its own
+      // notice.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              author_association: 'MEMBER',
+              created_at: T(2),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // Wiring: the trip parks the candidate before target emission, posts
+      // the once-per-boundary notice under its own marker, and is a PARK —
+      // never the fleet shepherd's terminal-stop headline.
+      expect(reviewScanJob).toContain(
+        'fleet_row "${PR}" \'convergence-parked\'',
+      );
+      // The release lever only exists under the takeover label, so the
+      // notice branches on it like the cap notices — two CONV_BODY texts,
+      // both under the park marker, neither a terminal-stop headline.
+      const noticeBodies =
+        reviewScanJob.match(
+          /CONV_BODY="\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/g,
+        ) ?? [];
+      expect(noticeBodies).toHaveLength(2);
+      for (const body of noticeBodies) {
+        expect(body).toContain('<!-- autofix-convergence-break -->');
+        expect(body).not.toContain('🤖 AutoFix stopped');
+        // The codes clause claims exactly what CONV_CODES derives: the
+        // union since the last maintainer response, not the window key.
+        expect(body).toContain(
+          'codes observed since the last maintainer response',
+        );
+        expect(body).toContain('自上次维护者响应以来观察到的信号码');
+      }
+      expect(noticeBodies[0]).toContain('stop` to release takeover');
+      expect(noticeBodies[1]).toContain('to take it over');
+      expect(reviewScanJob).toContain('--body "${CONV_BODY}"');
+      expect(reviewScanJob).toContain(
+        'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
+      );
+      // Trip branch, EXECUTED: the -ge threshold, the park's `continue`,
+      // the once-per-boundary notice dedup, and the CONV_CODES union are
+      // the breaker's core effect — a substring pin cannot see a threshold
+      // off by one, a missing `continue` (the parked PR still dispatched),
+      // or a dedup that reposts every scan. Run the real block through a
+      // loop (a `continue` needs one); a sentinel after the block says
+      // whether the candidate fell through to dispatch or parked.
+      // The verdict derives ABOVE the stale-base update (a base merge into
+      // a parked PR would self-lift the park); the trip branch is the park
+      // ACTION on that verdict. The harness runs the production order:
+      // boundary+streak read, verdict derivation, then the action.
+      const parkedDerivation = reviewScanJob.match(
+        /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+      )?.[0];
+      expect(parkedDerivation).toBeTruthy();
+      const tripBlock = reviewScanJob.match(
+        /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+      )?.[0];
+      expect(tripBlock).toBeTruthy();
+      const runTrip = ({
+        rv = [],
+        ic = [],
+        dryRun = 'true',
+        noticedAt,
+        takeover = 'false',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            noticedAt === undefined
+              ? ic
+              : [
+                  ...ic,
+                  {
+                    user: { login: 'qwen-code-dev-bot' },
+                    created_at: noticedAt,
+                    body: '<!-- autofix-convergence-break --> earlier notice',
+                  },
+                ],
+          ),
+        );
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='${takeover}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) if [[ "\${2:-}" == 'view' ]]; then\n` +
+              `          printf '{"labels":[{"name":"triage"}]}'\n` +
+              `        else\n` +
+              `          printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `        fi ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `    *) printf '%s\\n' "$*" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          parked: !out.includes('sentinel=reached'),
+          commentCalls: existsSync(ghCalls)
+            ? readFileSync(ghCalls, 'utf8')
+            : '',
+        };
+      };
+      // At the bar the candidate parks before dispatch; under it, it is
+      // selected normally.
+      const atBar = runTrip({ rv: threeSignals });
+      expect(atBar.parked).toBe(true);
+      expect(atBar.out).toContain('convergence-parked');
+      expect(atBar.out).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      expect(runTrip({ rv: threeSignals.slice(0, 2) }).parked).toBe(false);
+      // The notice carries the UNION of signal codes observed since the
+      // boundary — wider than the trailing streak: a round that reset the
+      // streak still contributes its code, and the reworded notice claims
+      // exactly that.
+      const union = runTrip({
+        rv: [
+          botReview(T(1), 3, ['stem-surface']),
+          botReview(T(2), 4, []),
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['root-cause-triage']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+      });
+      expect(union.parked).toBe(true);
+      expect(union.out).toContain('(codes: root-cause-triage, stem-surface)');
+      // The notice posts once per boundary; a notice already present
+      // after the boundary suppresses the repost but not the park. The
+      // live-label gate runs outside DRY_RUN, against a stubbed gh whose
+      // calls are journaled.
+      const fresh = runTrip({ rv: threeSignals, dryRun: 'false' });
+      expect(fresh.parked).toBe(true);
+      expect(fresh.commentCalls).toContain('comment');
+      // A non-takeover PR's notice offers takeover itself: `/takeover stop`
+      // is the remove branch's logged no-op without the label, and command
+      // comments do not even move the breaker's boundary.
+      expect(fresh.commentCalls).toContain('to take it over');
+      expect(fresh.commentCalls).not.toContain('stop` to release takeover');
+      // Under the label the release lever exists and is advertised.
+      const taken = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        takeover: 'true',
+      });
+      expect(taken.parked).toBe(true);
+      expect(taken.commentCalls).toContain('stop` to release takeover');
+      expect(taken.commentCalls).not.toContain('to take it over');
+      const dedup = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        noticedAt: T(9),
+      });
+      expect(dedup.parked).toBe(true);
+      expect(dedup.commentCalls).not.toContain('comment');
+      // The dedup's time filter is not vacuous: a notice OLDER than the
+      // boundary (a maintainer response resumed the loop after the first
+      // park) must not suppress the fresh notice a re-trip earns — the
+      // af-152 promise. Every case above ran the dedup against an EMPTY
+      // boundary, where `> $since` cannot be told from "any notice ever".
+      const resumed = runTrip({
+        rv: [
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['batch-fixes']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(2),
+            body: 'resuming — batch the remaining fixes',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(resumed.parked).toBe(true);
+      expect(resumed.commentCalls).toContain('comment');
+      // The park HOLD: a clean round (a push-triggered review resets the
+      // streak exactly like this) does not release a posted park — the
+      // notice holds it until the boundary itself moves, so a re-trip can
+      // never park under a stale notice, and the dedup never reposts while
+      // the hold stands.
+      const held = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(3), 5, []),
+        ],
+        dryRun: 'false',
+        noticedAt: T(4),
+      });
+      expect(held.parked).toBe(true);
+      expect(held.commentCalls).not.toContain('comment');
+      // …and a trusted-human response after the notice moves the boundary
+      // past it, releasing the hold: under the bar the candidate runs.
+      const released = runTrip({
+        rv: [
+          botReview(T(2), 3, ['root-cause-triage']),
+          botReview(T(3), 4, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(5),
+            body: 'looking at it myself',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(released.parked).toBe(false);
+      // The codes clause matches its derivation: the union is keyed to
+      // CONV_SINCE, so codes observed BEFORE a mid-window maintainer
+      // response do not ride the notice posted after the response moved
+      // the boundary.
+      const spanned = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(4), 5, ['batch-fixes']),
+          botReview(T(5), 6, ['batch-fixes']),
+          botReview(T(6), 7, ['batch-fixes']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(3),
+            body: 'addressed the first cluster',
+          },
+        ],
+      });
+      expect(spanned.parked).toBe(true);
+      expect(spanned.out).toContain('(codes: batch-fixes)');
+      expect(spanned.out).not.toContain('root-cause-triage');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the scan stale-base update (#10107)', () => {
+    // The verdict derives ABOVE the stale-base section and the update's
+    // gate refuses a parked PR beside the conflict park: a base merge into
+    // a parked PR re-fires every synchronize-triggered workflow on the new
+    // head, and the base-merge round reviews an unchanged diff — its clean
+    // marker resets the streak, silently self-lifting the park with zero
+    // human activity (af-108's exact hazard). Execute the real read, the
+    // real verdict derivation, and the real gate: a tripped streak must
+    // suppress the update-branch call, and an untripped one must still
+    // update.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(parkedDerivation).toBeTruthy();
+    // The verdict precedes the gate that consumes it.
+    expect(reviewScanJob.indexOf("CONV_PARKED='false'")).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    const staleBaseBlock = reviewScanJob.match(
+      /( {12}# Auto-update a PR that is red ONLY because of a stale base[\s\S]*?\n {12}fi\n)\n {12}# Convergence-signal circuit breaker \(#10107\): the park action on/,
+    )?.[1];
+    expect(staleBaseBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-base-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runStaleBase = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `CONFLICT_PARKED='false'\nMAIN_HEAD='mainsha'\nPR_HEAD_OID='prheadsha'\n` +
+              `CHECKS_JSON='[{"name":"Qwen Code CI","workflowName":"Qwen Code CI","conclusion":"FAILURE"}]'\n` +
+              `MAIN_GREEN_CHECKS='["Qwen Code CI"]'\n` +
+              `BASE_UPDATE_CUTOFF='2025-12-31T00:00:00Z'\n` +
+              `fleet_row() { :; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `           printf 'behind'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${staleBaseBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nCONV_PARKED=%s sentinel=%s' "$CONV_PARKED" "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const last = out.split('\n').at(-1);
+        return {
+          parked: /CONV_PARKED=true/.test(last),
+          fellThrough: /sentinel=reached/.test(last),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // Tripped: the verdict parks and the stale-base gate refuses the head
+      // move — no update-branch call, no base-updated marker.
+      const parked = runStaleBase({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.parked).toBe(true);
+      expect(parked.fellThrough).toBe(true);
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.calls).not.toContain('autofix-base-updated');
+      // Untripped: the SAME red-on-PR/green-on-main/behind state updates
+      // the base as before — the guard suppresses only the parked case.
+      const unparked = runStaleBase({ rv: [] });
+      expect(unparked.parked).toBe(false);
+      expect(unparked.fellThrough).toBe(false);
+      expect(unparked.calls).toContain('update-branch');
+      // The park HOLD reaches the gate too: a clean round after a posted
+      // notice resets the streak but does not release the park.
+      const held = runStaleBase({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'qwen-code-ci-bot' },
+            submitted_at: T(3),
+            state: 'COMMENTED',
+            body: `<!-- qwen-review-ledger ${JSON.stringify({
+              v: 1,
+              round: 5,
+              findings: [],
+            })} -->`,
+          },
+        ],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.parked).toBe(true);
+      expect(held.fellThrough).toBe(true);
+      expect(held.calls).not.toContain('update-branch');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the report stale-base retry (#10122)', () => {
+    // The report step's stale-base retry is a sibling wake leg the scan's
+    // CONV_PARKED cannot cover: that reading is scan-local, and the
+    // report's inputs froze at prepare time — a PR parked AFTER prepare
+    // would merge main in here on a failed round, and the base-merge
+    // round's clean marker would reset the streak, self-lifting the park
+    // with zero human activity. The guard re-derives the scan gate's
+    // reading over fresh fetches (the lockstep pin covers the programs);
+    // execute the real block.
+    const retryBlock = reviewAddressReportStep.match(
+      /STALE_BASE_RETRY=false\n[\s\S]*?\n {16}fi\n/,
+    )?.[0];
+    expect(retryBlock).toBeTruthy();
+    // Wiring: the guard runs inside the conflict skip and BEFORE the
+    // merge attempt it guards.
+    expect(retryBlock.indexOf('CONV_PARKED_R')).toBeLessThan(
+      retryBlock.indexOf('update-branch'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-report-'));
+    try {
+      const botReview = (at, round, rec = ['root-cause-triage']) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec ? { rec } : {}),
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runRetry = ({
+        rv,
+        ic = [],
+        verdict = 'sound',
+        shellOpts = 'set -e',
+        fetchFail = false,
+      }) => {
+        writeFileSync(join(dir, 'rv.fixture.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.fixture.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.fixture.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${shellOpts}\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
+              `FETCH_FAIL='${fetchFail}'\n` +
+              `DEFAULT_BRANCH='main'\nAUDIT_VERDICT='${verdict}'\nREPORT_HEAD='reportheadsha'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    api)\n` +
+              `      if [[ "$*" == *'update-branch'* ]]; then\n` +
+              `        printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `      elif [[ "\${FETCH_FAIL}" == 'true' ]] && [[ "$*" == *'/pulls/1/reviews'* || "$*" == *'/pulls/1/comments'* || "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        return 1\n` +
+              `      elif [[ "$*" == *'/pulls/1/reviews'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rv.fixture.json"\n` +
+              `      elif [[ "$*" == *'/pulls/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rc.fixture.json"\n` +
+              `      elif [[ "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/ic.fixture.json"\n` +
+              `      elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `        printf 'behind'\n` +
+              `      elif [[ "$*" == *'/commits/'* ]]; then\n` +
+              `        printf 'mainsha'\n` +
+              `      fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${retryBlock.replace(/^ {16}/gm, '')}\n` +
+              `printf '\\nSTALE_BASE_RETRY=%s' "$STALE_BASE_RETRY"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          stale: /STALE_BASE_RETRY=true/.test(out.split('\n').at(-1)),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // The finding's scenario arm: the round fails its gate, the streak
+      // is tripped, the PR compares behind — NO merge. The comparator arm
+      // (a conflict verdict) skips the whole leg, guard included.
+      const parked = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.stale).toBe(false);
+      expect(parked.out).toContain('convergence-parked');
+      const conflict = runRetry({ rv: [], verdict: 'conflict' });
+      expect(conflict.calls).toBe('');
+      expect(conflict.stale).toBe(false);
+      // The park HOLD reaches the report leg too: a clean round after a
+      // posted notice does not release it.
+      const held = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5, null)],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.calls).not.toContain('update-branch');
+      expect(held.stale).toBe(false);
+      // A trusted-human response after the signals moves the boundary —
+      // the retry merges main exactly as before the guard.
+      const resumed = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(6),
+            body: 'on it',
+          },
+        ],
+      });
+      expect(resumed.calls).toContain('update-branch');
+      expect(resumed.stale).toBe(true);
+      // Untripped: the merge attempt happens as before.
+      const clean = runRetry({ rv: [] });
+      expect(clean.calls).toContain('update-branch');
+      expect(clean.stale).toBe(true);
+      // R3-8's witness, executed under the step shell's production
+      // semantics: a transient gh failure of the guard's three fresh
+      // fetches must NOT abort the report step under -eo pipefail — the
+      // errexit-exempt fetches let the block run to completion (the report
+      // comment and eval marker still post), and the merge gate fails
+      // CLOSED on the unreadable park state: no update-branch.
+      const fetchFailed = runRetry({
+        rv: [],
+        fetchFail: true,
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(fetchFailed.out).toContain('STALE_BASE_RETRY=false');
+      expect(fetchFailed.calls).not.toContain('update-branch');
+      expect(fetchFailed.out).toContain('fail closed');
+      // Comparator under the same shell: healthy fetches still merge.
+      const healthyPipefail = runRetry({
+        rv: [],
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(healthyPipefail.calls).toContain('update-branch');
+      expect(healthyPipefail.stale).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('parks a feedback-idle PR visibly — the park action outranks the idle fast-path (#10122)', () => {
+    // The verdict derives above the idle fast-path, and the park ACTION
+    // must too: a parked PR whose signal rounds all sit at or below the
+    // eval watermark IS the idle case, and the notice and fleet row this
+    // action writes are the park's only visible escalation — below the
+    // fast-path the idle `continue` would fire first and the park would
+    // go invisible (the fleet says 'idle', the notice never posts). Run
+    // the production order: verdict, park action, idle fast-path.
+    expect(reviewScanJob.indexOf('convergence park active')).toBeLessThan(
+      reviewScanJob.indexOf('fleet_row "${PR}" \'idle\''),
+    );
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    const tripBlock = reviewScanJob.match(
+      /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+    )?.[0];
+    const idleBlock = reviewScanJob.match(
+      /N_FAILED_CHECKS="\$\(jq --arg wm[\s\S]*?\n {14}continue\n {12}fi\n/,
+    )?.[0];
+    expect(
+      streakBlock && parkedDerivation && tripBlock && idleBlock,
+    ).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-idle-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runIdleRace = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='true'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='false'\nROUND='1'\nEFF_MAX_ROUNDS='6'\n` +
+              `EFF_WM='2026-01-01T08:00:00Z'\nCHECKS_JSON='[]'\n` +
+              `PR_META='{"headRefOid":"h1"}'\nRED_HEAD='h1'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  if [[ "\${1:-}" == 'pr' && "$*" == *'mergeable'* ]]; then\n` +
+              `    printf 'MERGEABLE'\n` +
+              `  else\n` +
+              `    printf '{"labels":[]}'\n` +
+              `  fi\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `${idleBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return out;
+      };
+      // Three signal rounds fully consumed by the eval watermark and no
+      // new feedback: the idle case. The park still acts — notice and
+      // fleet row post, and the candidate spends no dispatch.
+      const parked = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked).not.toContain('sentinel=reached');
+      expect(parked).toContain('convergence-parked');
+      expect(parked).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      // Under the bar the same idle PR idles as before.
+      const idle = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4)],
+      });
+      expect(idle).toContain('fleet_row: 1 idle');
+      expect(idle).not.toContain('convergence-break notice');
+      // …and a non-idle unparked candidate still falls through to dispatch.
+      const selected = runIdleRace({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            submitted_at: T(9),
+            state: 'COMMENTED',
+            body: 'fresh feedback above the watermark',
+          },
+        ],
+      });
+      expect(selected).toContain('sentinel=reached');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mirrors the convergence breaker live in prepare, discarding without comment (#10107)', () => {
+    // A target can be emitted moments before the tripping review lands (the
+    // review's own submitted trigger routes a round for exactly that
+    // review), so the leg re-derives the scan gate's reading and idles via
+    // STALE — no agent run, no marker, no comment; the notice stays the
+    // scan's job. Execute the real mirror block.
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(mirrorBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-mirror-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['batch-fixes'],
+        })} -->`,
+      });
+      const staleOf = ({
+        rv = [],
+        rc = [],
+        ic = [],
+        stale = 'false',
+        rearmKey = 'none',
+        rounds = '3',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='${rearmKey}'\nSTALE='${stale}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          stale: out.trim().split('\n').pop(),
+          parked:
+            out.includes('convergence break pending') ||
+            out.includes('convergence park holds'),
+        };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3),
+        botReview(T(2), 4),
+        botReview(T(3), 5),
+      ];
+      // The breaker holds → the leg discards, and says why.
+      expect(staleOf({ rv: threeSignals })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // Under the bar → the leg runs.
+      expect(staleOf({ rv: threeSignals.slice(0, 2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // A trusted-human response since the streak → resumed.
+      expect(
+        staleOf({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              created_at: T(4),
+              body: 'batching these myself',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+      // An already-stale leg is not re-derived (the block never unsets it).
+      expect(staleOf({ rv: threeSignals, stale: 'true' }).stale).toBe('true');
+      // The mirror's window-key wiring is the scan harness's rearmKey case:
+      // a re-armed window counts only signals after the new key — a fresh
+      // runway, not a silent discard of the leg the scan still allows.
+      expect(staleOf({ rv: threeSignals, rearmKey: T(2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // The mirror's malformed-knob fallback matches the scan's (the scan
+      // side's is pinned by the 'not-a-number' case above): with a garbage
+      // repo var the mirror must park at the SAME threshold, or it burns an
+      // agent round the scan already refused.
+      expect(staleOf({ rv: threeSignals, rounds: 'garbage' })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // The park HOLD rides along: a posted notice newer than the boundary
+      // keeps the leg STALE after a clean round reset the streak — a target
+      // dispatched before the clean round must not land on a PR the scan
+      // still holds parked.
+      expect(
+        staleOf({
+          rv: [
+            botReview(T(1), 3),
+            botReview(T(2), 4),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'COMMENTED',
+              body: `<!-- qwen-review-ledger ${JSON.stringify({
+                v: 1,
+                round: 5,
+                findings: [],
+              })} -->`,
+            },
+          ],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(9),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'true', parked: true });
+      // …until a trusted-human response moves the boundary past the notice:
+      // the hold releases with the park.
+      expect(
+        staleOf({
+          rv: [botReview(T(1), 3)],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(1),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(5),
+              body: 'resuming',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the convergence signal codes inside the review CLI vocabulary, and the two gates in lockstep (#10107)', () => {
+    // The vocabulary is a CONTRACT owned by the review CLI: the workflow
+    // wires actions to codes the marker publishes, so a workflow code the
+    // CLI can never emit is a breaker that can never trip, and a renamed
+    // CLI code silently disarms it. Pin membership on both ends, and the
+    // deliberate absence of the exit code.
+    const codesEnv = workflow.match(
+      /CONVERGENCE_SIGNAL_CODES: '(\[[^\n]*\])'/,
+    )?.[1];
+    expect(codesEnv).toBeTruthy();
+    const signalCodes = JSON.parse(codesEnv);
+    expect(signalCodes.length).toBeGreaterThan(0);
+    const convergenceTs = readFileSync(
+      'packages/cli/src/commands/review/lib/convergence.ts',
+      'utf8',
+    );
+    const vocab = convergenceTs
+      .match(/RECOMMENDATION_CODES = \[([\s\S]*?)\] as const/)?.[1]
+      .match(/'([a-z-]+)'/g)
+      .map((c) => c.replaceAll("'", ''));
+    expect(vocab).toBeTruthy();
+    for (const code of signalCodes) {
+      expect(vocab).toContain(code);
+    }
+    // …and the converse: every divergence code the CLI can emit is wired —
+    // the vocabulary minus the ONE documented exit code. A code the CLI
+    // emits that the gate never counts takes the streak reduce's else-0
+    // branch and RESETS an accumulated streak instead of extending it.
+    for (const code of vocab) {
+      if (code === 'land-and-defer') continue;
+      expect(signalCodes).toContain(code);
+    }
+    // 'land-and-defer' means "this loop can end by merging" — pausing on it
+    // would park exactly the PR a human should merge.
+    expect(vocab).toContain('land-and-defer');
+    expect(signalCodes).not.toContain('land-and-defer');
+    // The marker really publishes the field the gates read.
+    const ledgerTs = readFileSync(
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'utf8',
+    );
+    expect(ledgerTs).toContain('payload.rec = rec');
+    // Lockstep: the scan gate and the prepare mirror must read the SAME
+    // streak and the SAME boundary, or one side burns rounds the other
+    // refused. The jq programs reference only their own --arg names, so
+    // the two sides' programs must be verbatim-identical modulo
+    // indentation; only the shell variable names around them differ.
+    // A program opens as `--arg… "${VAR}" '` + newline and contains no
+    // single quote of its own, so the next `'` closes it.
+    // Per-line, not whole-string, normalization: it absorbs the scan/mirror
+    // indentation difference but preserves whitespace INSIDE jq string
+    // literals — the machine-marker exclusion regex ends in a load-bearing
+    // trailing space, and a one-sided literal edit there must fail the pin
+    // instead of normalizing into it.
+    const jqProgramsOf = (block) =>
+      [...block.matchAll(/" '\n([\s\S]+?)'/g)].map((m) =>
+        m[1]
+          .split('\n')
+          .map((line) => line.trimStart())
+          .join(' ')
+          .trim(),
+      );
+    const scanBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    const reportBlock = reviewAddressReportStep.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK_R=0\n/,
+    )?.[0];
+    expect(reportBlock).toBeTruthy();
+    const scanPrograms = jqProgramsOf(scanBlock);
+    // Two programs each: the human-activity boundary and the streak.
+    expect(scanPrograms).toHaveLength(2);
+    // Three sites run the SAME programs: the scan gate, the prepare mirror
+    // (which also carries the park hold's census as a third program), and
+    // the report step's stale-base guard.
+    const mirrorPrograms = jqProgramsOf(mirrorBlock);
+    expect(mirrorPrograms.slice(0, 2)).toEqual(scanPrograms);
+    expect(jqProgramsOf(reportBlock)).toEqual(scanPrograms);
+    // The hold census is one program in the three lockstepped sites.
+    const scanParkBlock = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(scanParkBlock).toBeTruthy();
+    const reportParkBlock = reviewAddressReportStep.match(
+      /if \[\[ "\$\{CONV_STREAK_R\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n[\s\S]*?\n {18}fi\n/,
+    )?.[0];
+    expect(reportParkBlock).toBeTruthy();
+    const censusPrograms = jqProgramsOf(scanParkBlock);
+    expect(censusPrograms).toHaveLength(1);
+    expect(mirrorPrograms[2]).toEqual(censusPrograms[0]);
+    expect(jqProgramsOf(reportParkBlock)).toEqual(censusPrograms);
+    // Witness that the pin now sees a one-sided literal edit: a single extra
+    // space inside ONE side's exclusion regex (its trailing space is
+    // load-bearing) normalized away under the old whole-string collapse.
+    const mutatedScanBlock = scanBlock.replace(
+      'qwen-review-ack) ',
+      'qwen-review-ack)  ',
+    );
+    expect(mutatedScanBlock).not.toEqual(scanBlock);
+    expect(jqProgramsOf(mutatedScanBlock)).not.toEqual(scanPrograms);
+    // The design pointers resolve.
+    expect(designDoc).toContain('<a id="af-151"></a>');
+    expect(designDoc).toContain('<a id="af-152"></a>');
+    expect(designDoc).toContain('<a id="af-153"></a>');
+    expect(designDoc).toContain('<a id="af-154"></a>');
   });
 
   it('a conflict round parks quietly — no stale-base merge in its report', () => {

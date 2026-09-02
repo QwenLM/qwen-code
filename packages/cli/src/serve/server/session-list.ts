@@ -6,11 +6,14 @@
 
 import {
   addDaemonRequestAttribute,
+  SESSION_PR_LIST_LIMIT,
   SessionService,
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
   type SessionPr,
@@ -470,6 +473,7 @@ function toSummary(item: {
   mtime: number;
   prompt: string;
   customTitle?: string;
+  titleSource?: 'manual' | 'auto';
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -481,6 +485,9 @@ function toSummary(item: {
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     displayName: item.customTitle || item.prompt,
+    ...(item.customTitle && item.titleSource
+      ? { titleSource: item.titleSource }
+      : {}),
     ...(item.parentSessionId ? { parentSessionId: item.parentSessionId } : {}),
     ...(item.sourceType ? { sourceType: item.sourceType } : {}),
     ...(item.sourceId !== undefined ? { sourceId: item.sourceId } : {}),
@@ -520,9 +527,14 @@ function mergeLiveSessionSummary(
     isArchived: false,
   };
   // The live entry only knows PR bindings from this daemon lifetime while the
-  // sidecar-enriched persisted summary holds the full history — merge by PR
-  // number (live url wins, live-only bindings sort latest) instead of letting
-  // the spread overwrite the history.
+  // sidecar-enriched persisted summary holds the full history. The sidecar is
+  // the append-only binding-time record (last = latest — the order the badge
+  // renders by), so it supplies the merged order; the live entry overlays
+  // fresher volatile data onto it. Positional concatenation (persisted-only
+  // before live) breaks that order whenever a persisted-only binding is
+  // NEWER than a live one — exactly what a shell-hook write lands after a
+  // GitDialog bind. For `state` the sidecar wins: the refresh timer rewrites
+  // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
     merged.prs = mergeSummaryPrs(existing.prs, live.prs);
   }
@@ -530,38 +542,83 @@ function mergeLiveSessionSummary(
 }
 
 function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
-  return sidecar.map(({ number, url, state }) => ({
-    number,
-    url,
-    ...(state ? { state } : {}),
-  }));
+  return sidecar.map(toSessionPrInfo);
 }
 
 /**
  * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
- * summary rendering: dedupe by number (live url wins, live-only bindings
- * sort latest). For `state` the persisted sidecar wins: the refresh timer
- * rewrites it there while the live entry is frozen at bind-time.
+ * summary rendering. The sidecar is the append-only binding-time record
+ * (last = latest — the order the badge renders by), so it supplies the
+ * merged order; the live entry overlays fresher volatile data onto it.
+ * Positional concatenation (persisted-only before live) breaks that order
+ * whenever a persisted-only binding is NEWER than a live one — exactly what
+ * a shell-hook write lands after a GitDialog bind. For `state` and `issues`
+ * the persisted sidecar wins: the refresh timer rewrites them there, while
+ * the live entry is frozen at bind-time — and only for the same PR (same
+ * canonical url), whose live spelling (a query, a trailing slash) is kept.
+ * A same-numbered entry at a DIFFERENT canonical url is another PR: the
+ * sidecar-only writers (the shell hook, backfill) re-bind without touching
+ * the live entry, so the persisted binding wins wholesale and no stale live
+ * field survives; when a hand-edited sidecar holds two same-numbered
+ * entries, the live binding attaches to the url-matched one. A binding
+ * present only in the live entry was either bound this daemon lifetime and
+ * has not landed in the sidecar yet (the newest binding), or was EVICTED
+ * from the sidecar once it overflowed; eviction only happens at the cap, so
+ * below it a live-only entry is genuinely the newest and at the cap it must
+ * not be re-appended as the session's latest.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
   livePrs: readonly SessionPrInfo[] | undefined,
 ): SessionPrInfo[] {
   const live = livePrs ?? [];
-  const persistedByNumber = new Map(
-    (persistedPrs ?? []).map((p) => [p.number, p]),
-  );
-  return [
-    ...(persistedPrs ?? []).filter(
-      (p) => !live.some((l) => l.number === p.number),
-    ),
-    ...live.map((l) => {
-      const persisted = persistedByNumber.get(l.number);
-      return persisted?.state !== undefined && persisted.state !== l.state
-        ? { ...l, state: persisted.state }
-        : l;
-    }),
-  ];
+  const persisted = persistedPrs ?? [];
+  const liveByNumber = new Map(live.map((l) => [l.number, l]));
+  const persistedNumbers = new Set(persisted.map((p) => p.number));
+  const consumedLive = new Set<number>();
+  const ordered: SessionPrInfo[] = [];
+  for (const p of persisted) {
+    const liveEntry = liveByNumber.get(p.number);
+    if (!liveEntry) {
+      ordered.push(p);
+      continue;
+    }
+    const samePr =
+      canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(liveEntry.url);
+    // Matched by url, not a number-keyed map: a hand-edited sidecar can
+    // hold two same-numbered entries, and the live binding must attach to
+    // its own entry, not whichever one comes last.
+    const matchedTwinExists = persisted.some(
+      (q) =>
+        q.number === p.number &&
+        canonicalSessionPrUrl(q.url) === canonicalSessionPrUrl(liveEntry.url),
+    );
+    if (!samePr && matchedTwinExists) continue;
+    if (consumedLive.has(p.number)) continue;
+    consumedLive.add(p.number);
+    ordered.push(
+      samePr
+        ? {
+            ...liveEntry,
+            ...(p.state ? { state: p.state } : {}),
+            ...(p.issues ? { issues: p.issues } : {}),
+          }
+        : p,
+    );
+  }
+  for (const liveEntry of live) {
+    // Gate on the PERSISTED size: eviction only happens at the cap, so
+    // below it a live-only entry is genuinely the newest binding and must
+    // not be dropped once the running total fills up — the final slice
+    // keeps the newest and evicts the oldest persisted instead.
+    if (
+      !persistedNumbers.has(liveEntry.number) &&
+      persisted.length < SESSION_PR_LIST_LIMIT
+    ) {
+      ordered.push(liveEntry);
+    }
+  }
+  return ordered.slice(-SESSION_PR_LIST_LIMIT);
 }
 
 /**
@@ -1478,6 +1535,77 @@ export async function listLiveWorkspaceSessionsForResponse(
       sessions: enriched,
       ...(nextCursor !== undefined ? { nextCursor } : {}),
     };
+  });
+}
+
+export interface SearchWorkspaceSessionsResult {
+  results: Array<{ session: BridgeSessionSummary; snippet: string }>;
+}
+
+/**
+ * Searches user/assistant message text across the workspace's persisted
+ * active sessions and returns one summary + snippet per matching session,
+ * most recently modified first. Persisted-only: live sessions without a
+ * flushed transcript have no searchable content yet, and read-only secondary
+ * runtimes may only inspect the persisted store.
+ */
+export async function searchWorkspaceSessionsForResponse(
+  workspaceCwd: string,
+  query: string,
+  options: { maxResults?: number } = {},
+  readOptions: ListWorkspaceSessionsReadOptions = {},
+): Promise<SearchWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+    const sessionService = new SessionService(workspaceCwd);
+    const hits = await sessionService.searchSessionContent(query, {
+      ...(options.maxResults !== undefined
+        ? { maxResults: options.maxResults }
+        : {}),
+      ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+    });
+    const bySessionId = new Map<string, BridgeSessionSummary>();
+    // Ghost hits (sessions the client's loaded catalog page doesn't carry)
+    // must render with the same organization state as catalog entries —
+    // pin/group/color — or they break the pin/group invariants downstream.
+    const organizationSnapshot =
+      await createSessionOrganizationService(workspaceCwd).readSnapshot();
+    readOptions.signal?.throwIfAborted();
+    for (const hit of hits) {
+      readOptions.signal?.throwIfAborted();
+      const item = await sessionService.getSessionListItem(hit.sessionId);
+      if (item)
+        bySessionId.set(
+          hit.sessionId,
+          applyOrganization(
+            toSummary(item),
+            organizationSnapshot.sessions.get(hit.sessionId),
+          ),
+        );
+    }
+    await enrichWorktreeSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    readOptions.signal?.throwIfAborted();
+    const results: SearchWorkspaceSessionsResult['results'] = [];
+    for (const hit of hits) {
+      const session = bySessionId.get(hit.sessionId);
+      if (session) results.push({ session, snippet: hit.snippet });
+    }
+    return { results };
   });
 }
 

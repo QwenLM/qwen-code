@@ -47,6 +47,7 @@ import {
 } from './goal-protocol.js';
 import {
   elapsedActiveTime,
+  GoalInvalidTransitionError,
   reduceGoalControl,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
@@ -176,7 +177,10 @@ export interface GoalRuntime {
   ): Promise<void>;
   getPreparedRestore(): Promise<void>;
   activateRestoredWork(): Promise<void>;
-  dispatch(request: GoalControlRequest): Promise<GoalStateResponse>;
+  dispatch(
+    request: GoalControlRequest,
+    options?: { refuseIfActive?: boolean },
+  ): Promise<GoalStateResponse>;
   bindHost(host: GoalTurnHost): () => void;
   beginTurn(turnKey: string): GoalTurnPermit | undefined;
   releaseTurn(turnKey: string): Promise<boolean>;
@@ -300,7 +304,8 @@ export function createGoalRuntime(
   /**
    * The permit turn of the wind-down continuation now in flight, if any.
    * In memory only: a wind-down the host dropped undelivered must be minted
-   * again, and only the turn that actually finishes stamps the record.
+   * again, and only a wind-down turn that finishes delivered stamps the
+   * record; one finished under someone else's text leaves the hand-off owed.
    */
   let windDownTurnId: string | undefined;
   let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
@@ -606,8 +611,9 @@ export function createGoalRuntime(
     }
     if (isGoalTokenBudgetSpent(snapshot.goal)) {
       // A spent window buys one hand-off before it stops. The record marks
-      // the hand-off that finished; until then -- never granted, or granted
-      // and dropped by the host before the model saw it -- grant it.
+      // the hand-off that was delivered and finished; until then -- never
+      // granted, dropped before the model saw it, or finished under someone
+      // else's text -- grant it.
       if (snapshot.goal.windDownTurnId !== undefined) {
         stopForSpentBudget();
         return;
@@ -1521,15 +1527,22 @@ export function createGoalRuntime(
           // query can claim a queued continuation's permit and send its own
           // text instead. Only the host's delivery mark says the model saw
           // the objective; without it the notice stays owed.
-          settleCurrentTurnAnnouncement(currentTurnDelivered);
+          const delivered = currentTurnDelivered;
+          settleCurrentTurnAnnouncement(delivered);
           const recordUuid = randomUUID();
-          const finishedWindDown = windDownTurnId === permit.turnId;
+          // The same rule decides the hand-off. The record's marker means
+          // "the user got the hand-off", and the budget gate stops the Goal
+          // on it -- so a wind-down permit that finished under someone
+          // else's text leaves no marker, and the next continuation grants
+          // the hand-off again instead of stopping cold.
+          const heldWindDown = windDownTurnId === permit.turnId;
+          const finishedWindDown = heldWindDown && delivered;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),
             ...(finishedWindDown ? { windDownTurnId: permit.turnId } : {}),
           });
-          if (finishedWindDown) windDownTurnId = undefined;
+          if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
             goal: nextGoal,
@@ -1721,9 +1734,22 @@ export function createGoalRuntime(
       pendingProposal = undefined;
       return proposal ? structuredClone(proposal) : undefined;
     },
-    dispatch(request: GoalControlRequest): Promise<GoalStateResponse> {
+    dispatch(
+      request: GoalControlRequest,
+      dispatchOptions?: { refuseIfActive?: boolean },
+    ): Promise<GoalStateResponse> {
       const execute = async (): Promise<GoalStateResponse> => {
         assertOperational();
+        if (
+          dispatchOptions?.refuseIfActive &&
+          request.action === 'replace' &&
+          snapshot.goal?.status === 'active'
+        ) {
+          throw new GoalInvalidTransitionError(
+            'An active Goal cannot be replaced by an approved proposal',
+            getSnapshot(),
+          );
+        }
         const recordUuid = randomUUID();
         const nextGoal = reduceGoalControl(snapshot.goal, {
           request,

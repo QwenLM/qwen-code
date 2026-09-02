@@ -109,6 +109,7 @@ import {
   ApprovalMode,
   deriveApprovalModeConfig,
   deriveWorktreeConfig,
+  installSessionWorkflowRevisionWriteThrough,
   normalizeMaxSubagentDepth,
   validateMaxSessionTurns,
   type Config,
@@ -118,6 +119,7 @@ import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-pl
 import {
   buildAgentTranscriptAttach,
   getAgentMetaPath,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
   writeAgentMeta,
@@ -134,11 +136,26 @@ import type { AuthOverrides } from '../../models/content-generator-config.js';
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
+  sessionWorkflow: boolean,
+  stats?: {
+    totalTokens: number;
+    outputTokens: number;
+    toolUses: number;
+    durationMs: number;
+  },
+  recentActivities?: ReadonlyArray<{
+    name: string;
+    description: string;
+    at: number;
+  }>,
 ): void {
   patchAgentMeta(metaPath, {
     status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
+    ...(sessionWorkflow
+      ? getAgentMetaTerminalSummary(stats, recentActivities)
+      : {}),
   });
 }
 
@@ -616,6 +633,11 @@ export async function createApprovalModeOverride(
 ): Promise<ApprovalModeOverrideHandle> {
   const { config: override, cleanup } = deriveApprovalModeConfig(base, mode);
   try {
+    // Session Workflow plan-revision state is session-global on the base
+    // Config; without the shim the prototype set/clear would assign it
+    // as an OWN property of this wrapper (see
+    // installSessionWorkflowRevisionWriteThrough).
+    installSessionWorkflowRevisionWriteThrough(override, base);
     applyPersistedCliFlagOverrides(override, options.persistedCliFlags);
     await rebuildToolRegistryOnOverride(override, base);
     return { config: override, cleanup };
@@ -791,9 +813,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
-      const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
-        await geminiClient.setTools();
+      const llmClient = this.config.getLlmClient();
+      if (llmClient) {
+        await llmClient.setTools();
       }
     }
   }
@@ -975,6 +997,19 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.todo_id.length > 500)
     ) {
       return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
+    }
+
+    const workflowRevision = this.config.getSessionWorkflowPlanRevision?.();
+    if (workflowRevision && getCurrentAgentId() === null) {
+      if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+        return 'Top-level Agents cannot start until the Session Workflow plan is approved.';
+      }
+      if (!params.todo_id) {
+        return 'Parameter "todo_id" is required for a top-level Agent in the approved Session Workflow.';
+      }
+      if (!workflowRevision.todoIds.includes(params.todo_id)) {
+        return `Parameter "todo_id" must match the approved Session Workflow (${workflowRevision.todoIds.join(', ')}).`;
+      }
     }
 
     if (params.subagent_type !== undefined) {
@@ -1405,16 +1440,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    */
   private setupEventListeners(
     updateOutput?: (output: ToolResultDisplay) => void,
+    captureWorkflowDetails = false,
+    eventEmitter = this.eventEmitter,
   ): void {
     let pendingConfirmationCallId: string | undefined;
     const preserveProtocolPayloads = !this.config.isInteractive();
 
-    this.eventEmitter.on(AgentEventType.START, () => {
+    eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
     });
 
-    this.eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
       const event = args[0] as AgentToolCallEvent;
+      const skill =
+        event.name.toLowerCase() === 'skill' ? event.args['skill'] : undefined;
       const newToolCall = {
         callId: event.callId,
         name: event.name,
@@ -1427,12 +1466,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.updateDisplay(
         {
           toolCalls: [...this.currentToolCalls!],
+          ...(captureWorkflowDetails &&
+          typeof skill === 'string' &&
+          skill.trim()
+            ? {
+                skills: [
+                  ...new Set([
+                    ...(this.currentDisplay?.skills ?? []),
+                    skill.trim(),
+                  ]),
+                ],
+              }
+            : {}),
         },
         updateOutput,
       );
     });
 
-    this.eventEmitter.on(AgentEventType.TOOL_RESULT, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.TOOL_RESULT, (...args: unknown[]) => {
       const event = args[0] as AgentToolResultEvent;
       const toolCallIndex = this.currentToolCalls!.findIndex(
         (call) => call.callId === event.callId,
@@ -1475,7 +1526,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     });
 
-    this.eventEmitter.on(AgentEventType.FINISH, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.FINISH, (...args: unknown[]) => {
       const event = args[0] as AgentFinishEvent;
       this.updateDisplay(
         {
@@ -1486,7 +1537,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       );
     });
 
-    this.eventEmitter.on(AgentEventType.ERROR, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.ERROR, (...args: unknown[]) => {
       const event = args[0] as AgentErrorEvent;
       this.updateDisplay(
         {
@@ -1502,23 +1553,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // output tokens across rounds.  We use candidatesTokenCount (output-only)
     // to stay consistent with the main stream's chars/4 output-token estimate.
     let accumulatedOutputTokens = 0;
-    this.eventEmitter.on(
-      AgentEventType.USAGE_METADATA,
-      (...args: unknown[]) => {
-        const event = args[0] as AgentUsageEvent;
-        const outputTokens = event.usage?.candidatesTokenCount ?? 0;
-        if (outputTokens > 0) {
-          accumulatedOutputTokens += outputTokens;
-          this.updateDisplay(
-            { tokenCount: accumulatedOutputTokens },
-            updateOutput,
-          );
-        }
-      },
-    );
+    eventEmitter.on(AgentEventType.USAGE_METADATA, (...args: unknown[]) => {
+      const event = args[0] as AgentUsageEvent;
+      const outputTokens = event.usage?.candidatesTokenCount ?? 0;
+      if (outputTokens > 0) {
+        accumulatedOutputTokens += outputTokens;
+        this.updateDisplay(
+          { tokenCount: accumulatedOutputTokens },
+          updateOutput,
+        );
+      }
+    });
 
     // Indicate when a tool call is waiting for approval
-    this.eventEmitter.on(
+    eventEmitter.on(
       AgentEventType.TOOL_WAITING_APPROVAL,
       (...args: unknown[]) => {
         const event = args[0] as AgentApprovalRequestEvent;
@@ -1631,8 +1679,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     taskPrompt: string;
     toolConfig: ToolConfig;
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const llmClient = this.config.getLlmClient();
+    const generationConfig = llmClient?.getChat().getGenerationConfig();
     const parentToolNames = generationConfig?.systemInstruction
       ? extractParentToolNames(generationConfig)
       : [];
@@ -1648,7 +1696,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
-    if (geminiClient) {
+    if (llmClient) {
       // The `all` and numeric paths curate history differently on purpose.
       // `all` takes curated history directly. The numeric path reads
       // *uncurated* history so the startup context can be sliced off on its own
@@ -1659,13 +1707,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // reminder into the first turn and break bounded selection.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
-          geminiClient.getHistoryShallow?.(true) ??
-            geminiClient.getHistory(true),
+          llmClient.getHistoryShallow?.(true) ?? llmClient.getHistory(true),
           forkTurns,
         );
       } else {
         const comprehensiveHistory =
-          geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
+          llmClient.getHistoryShallow?.() ?? llmClient.getHistory();
         const startupContext = comprehensiveHistory.slice(
           0,
           getStartupContextLength(comprehensiveHistory),
@@ -1681,8 +1728,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // startupContext above prepends it again, duplicating startup.
             // Uncurated history keeps the startup reminder as its own pure
             // entry, which selectForkHistory strips cleanly.
-            geminiClient.getHistoryForForkWindow?.() ??
-              geminiClient.getHistory(),
+            llmClient.getHistoryForForkWindow?.() ?? llmClient.getHistory(),
             forkTurns,
           ),
         ];
@@ -2208,6 +2254,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const sessionWorkflowAgent =
+      this.config.getSessionWorkflowPlanRevision?.() !== undefined;
     if (this.params.plan_mode_required === true) {
       if (
         !this.params.name ||
@@ -2583,32 +2631,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (model !== undefined && model !== subagentConfig.model) {
         subagentConfig = { ...subagentConfig, model };
       }
-      // Initialize the current display state
-      this.currentDisplay = {
-        type: 'task_execution' as const,
-        subagentName: subagentConfig.name,
-        taskDescription: this.params.description,
-        taskPrompt: this.params.prompt,
-        status: 'running' as const,
-        subagentColor: subagentConfig.color,
-      };
-      this.setupEventListeners(updateOutput);
-      if (updateOutput) {
-        updateOutput(this.currentDisplay);
-      }
-
       // Headless forks always use the background registry, even when
       // run_in_background is false. Forks are detached by definition, and a
       // short-lived non-interactive process must hold open until the inherited
       // work completes. Otherwise, an explicit tool parameter wins. An
       // agent-level background flag retains its existing meaning, and safe
       // ordinary one-shot launches default to background.
-      //
-      // This is the source of truth for the background-classification rule. The
-      // web-shell classifier replicates it from tool-call args (it cannot see
-      // subagentConfig.background) and must be kept in sync when it changes:
-      //   - packages/web-shell/client/adapters/toolClassification.ts
-      //     (isBackgroundSubAgentToolCall)
       //
       // Background delegation is top-level-only in v1. A nested launcher would
       // be handed a completion contract it cannot honor — the success guidance
@@ -2620,6 +2648,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Implicit background requests downgrade to an awaited foreground run
       // instead of orphaning the child's results. The runtime spawn guard
       // above rejects an explicit run_in_background: true request.
+      //
+      // This decision is the source of truth for client classification. Its
+      // resolved value is projected onto the task display so clients do not
+      // have to replicate rules that depend on loaded subagent configuration.
+      // The desktop client (forked out of this repo with OpenWork and no
+      // longer vendored here) does not receive this projection and replicates
+      // the rule in its own copy — keep the fork informed if this rule
+      // changes. The web-shell fallback in toolClassification.ts covers every
+      // frame lacking executionMode (including blocked-spawn result frames and
+      // pre-feature recordings) and must stay frozen at the legacy rule.
       const backgroundRequested =
         isFork && !this.config.isInteractive()
           ? true
@@ -2628,11 +2666,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               (!isForkRequested &&
                 this.params.working_dir === undefined &&
                 // A `name` passed without an active team falls through to a regular
-                // one-shot agent above; keep it foreground so both UI classifiers
+                // one-shot agent above; keep it foreground so legacy UI fallbacks
                 // (which exclude `name`) stay consistent with core dispatch.
                 this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
-      const backgroundOwnerId = getCurrentAgentId();
+
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
         // agent — the caller could reap the worktree while the detached agent
@@ -2641,11 +2679,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // background: a subagent config with `background: true`. Guarding on
         // the resolved shouldRunInBackground catches both and avoids
         // over-rejecting a nested call that downgrades to the foreground.
+        // Like the other spawn guards, this returns before any display
+        // update: a never-running launch must not emit a running frame whose
+        // authoritative executionMode ('background') contradicts the blocked
+        // result frame, which carries no executionMode and therefore falls
+        // back to the frozen legacy heuristic (background when the args carry
+        // explicit run_in_background: true — a named launch that falls through
+        // without an active team — otherwise foreground for a working_dir-bearing
+        // call).
         return this.buildSpawnBlockedResult(
           'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
           'working_dir is incompatible with a background agent',
         );
       }
+
+      this.currentDisplay = {
+        type: 'task_execution' as const,
+        subagentName: subagentConfig.name,
+        taskDescription: this.params.description,
+        taskPrompt: this.params.prompt,
+        executionMode: shouldRunInBackground ? 'background' : 'foreground',
+        status: 'running' as const,
+        subagentColor: subagentConfig.color,
+      };
+      if (shouldRunInBackground) this.setupEventListeners(updateOutput);
+      updateOutput?.(this.currentDisplay);
+
+      const backgroundOwnerId = getCurrentAgentId();
       if (backgroundRequested && !shouldRunInBackground) {
         debugLogger.debug(
           `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,
@@ -2908,6 +2968,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               this.config.getFileFilteringOptions().customIgnoreFiles,
           })
         : this.config;
+      if (worktreeIsolation) {
+        // The approval wrapper built below forwards revision mutations
+        // to its base; this wrapper must keep them flowing to the root
+        // Config (see installSessionWorkflowRevisionWriteThrough).
+        installSessionWorkflowRevisionWriteThrough(worktreeConfig, this.config);
+      }
       const { config: agentConfig, cleanup } = await createApprovalModeOverride(
         worktreeConfig,
         resolvedApprovalMode,
@@ -2990,6 +3056,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = result.subagent;
         subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
+      }
+      const runtimeEventEmitter =
+        subagent.getCore().getEventEmitter?.() ?? this.eventEmitter;
+      if (!shouldRunInBackground) {
+        this.setupEventListeners(
+          updateOutput,
+          sessionWorkflowAgent,
+          runtimeEventEmitter,
+        );
       }
 
       // ── Optional worktree isolation (Phase 3: notice to prompt) ───
@@ -3201,6 +3276,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: backgroundOwnerId,
           createdAt: new Date().toISOString(),
           status: 'running',
+          ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: true,
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
@@ -3521,6 +3597,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   status: 'completed',
                   lastUpdatedAt: new Date().toISOString(),
                   lastError: undefined,
+                  ...(sessionWorkflowAgent
+                    ? getAgentMetaTerminalSummary(
+                        completionStats,
+                        registry.get(hookOpts.agentId)?.recentActivities,
+                      )
+                    : {}),
                 });
                 registry.complete(hookOpts.agentId, finalText, completionStats);
               } else if (
@@ -3541,6 +3623,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   metaPath,
                   registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
                     'cancelled',
+                  sessionWorkflowAgent,
+                  completionStats,
+                  registry.get(hookOpts.agentId)?.recentActivities,
                 );
               } else {
                 registry.fail(
@@ -3553,6 +3638,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   lastUpdatedAt: new Date().toISOString(),
                   lastError:
                     finalText || `Agent terminated with mode: ${terminateMode}`,
+                  ...(sessionWorkflowAgent
+                    ? getAgentMetaTerminalSummary(
+                        completionStats,
+                        registry.get(hookOpts.agentId)?.recentActivities,
+                      )
+                    : {}),
                 });
               }
               break;
@@ -3597,22 +3688,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
             if (turnAbortController.signal.aborted) {
+              const completionStats = getCompletionStats();
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 errorMsg,
-                getCompletionStats(),
+                completionStats,
               );
               persistBackgroundCancellation(
                 metaPath,
                 registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
                   'cancelled',
+                sessionWorkflowAgent,
+                completionStats,
+                registry.get(hookOpts.agentId)?.recentActivities,
               );
             } else {
-              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              const completionStats = getCompletionStats();
+              registry.fail(hookOpts.agentId, errorMsg, completionStats);
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: errorMsg,
+                ...(sessionWorkflowAgent
+                  ? getAgentMetaTerminalSummary(
+                      completionStats,
+                      registry.get(hookOpts.agentId)?.recentActivities,
+                    )
+                  : {}),
               });
             }
           } finally {
@@ -3703,6 +3805,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               lastUpdatedAt: new Date().toISOString(),
               lastError: undefined,
               resumeCount: hotContinuationCount,
+              // Mirror the resume-service twins (background-agent-resume.ts):
+              // the completed run's terminal summary must not survive into the
+              // continuation — a crash mid-continuation would otherwise let
+              // discovery restore run N-1's stats/activities as the live run's
+              // state.
+              stats: undefined,
+              recentActivities: undefined,
             });
 
             const nextContextState = new ContextState();
@@ -3921,9 +4030,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       //
       // This is a separate listener from setupEventListeners' TOOL_CALL
       // handler (which feeds `currentDisplay.toolCalls` for the committed
-      // inline frame). They consume different state — committed inline UI
-      // vs. live registry stats — and setupEventListeners runs before we
-      // know the flavor or the registry id, so folding them is awkward.
+      // inline frame). They consume different state: committed inline UI
+      // versus live registry stats.
       let fgLiveToolCallCount = 0;
       const refreshFgLiveStats = () => {
         const entry = registry.get(hookOpts.agentId);
@@ -3949,8 +4057,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const onFgUsageMetadata = () => {
         refreshFgLiveStats();
       };
-      this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
-      this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+      runtimeEventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
+      runtimeEventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
       // Nested foreground launches under a backgrounded ancestor (a fork or
       // any background agent that spawns sub-agents) have no inline UI:
@@ -3974,14 +4082,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         approvalAncestorId && !this.config.getShouldAvoidPermissionPrompts?.()
           ? registry.bridgeApprovalEvents(
               approvalAncestorId,
-              this.eventEmitter,
+              runtimeEventEmitter,
               { nestedSource: true },
             )
           : undefined;
 
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
-          this.eventEmitter,
+          runtimeEventEmitter,
           fgJsonlPath,
           fgTranscriptAttachOptions,
         ));
@@ -4017,6 +4125,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: false,
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
@@ -4094,8 +4203,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Helper logs its own failures; never mask the original
           // error path with cleanup noise.
         }
-        this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
-        this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        runtimeEventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
+        runtimeEventEmitter.off(
+          AgentEventType.USAGE_METADATA,
+          onFgUsageMetadata,
+        );
         cleanupNestedApprovalBridge?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();

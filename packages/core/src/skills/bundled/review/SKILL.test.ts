@@ -51,6 +51,17 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -168,6 +179,61 @@ describe('bundled review skill', () => {
     // without the manifest's required agents.
     expect(body).toContain(
       '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
     );
   });
 
@@ -450,16 +516,50 @@ describe('bundled review skill', () => {
     // The posture is the reviewer-side brake on the review→fix→re-review
     // bloat loop. Each clause below carries a distinct obligation a later
     // "simplify the prose" edit is most likely to drop: the floor's
-    // round-adaptive default, the never-defer-Criticals rule, the
+    // round-adaptive default, the axes-only Critical deferral rule, the
     // record-not-request contract, and the age-reference/anchor distinction
     // (conflating `commitId` with the ledger `sha` would scope an
     // incremental review past scope a fail-closed round never certified).
     const body = skillBody();
     expect(body).toContain('Through round 5 the floor is `suggestion`');
     expect(body).toContain('**from round 6 it is `critical`**');
+    // A Critical leaves the posting set by its AXES, never by severity, and
+    // only at floor `critical` (#10291): the one deferrable shape is named,
+    // the wrong-result and regression arms are pinned as always posting,
+    // the unclassified arm too, and the rounds-2–5 age rule is kept off
+    // Criticals.
     expect(body).toContain(
-      'A Critical is never deferred — any round, any floor',
+      'A Critical is deferred by its axes, never by its severity — and only at floor `critical`.',
     );
+    expect(body).toContain(
+      '`direction: fails-closed` AND `baseline: new-surface`',
+    );
+    expect(body).toContain('Every other Critical posts');
+    expect(body).toContain('`certifies-falsely` at either baseline');
+    expect(body).toContain('`regression` in either direction');
+    expect(body).toContain('a blocker in doubt posts');
+    // The deferrable-set definition names the Critical shape where it is
+    // introduced, and the deterministic carve-out is scoped to Suggestions.
+    expect(body).toContain(
+      'plus, at floor `critical` only, the fails-closed/new-surface Criticals described below',
+    );
+    expect(body).toContain(
+      'a deterministic Critical the axes classify defers like any other axes-Critical',
+    );
+    // The orchestrator-side no-guess rule — the only instruction keeping the
+    // orchestrator from completing a deferrable pair — pinned like its
+    // verifier-side twin in agent-prompt.test.ts.
+    expect(body).toContain('an axis the verifier omitted stays absent');
+    expect(body).toContain("never fill one in from the finding's prose");
+    expect(body).toContain('a guess on EITHER axis of the pair');
+    // The in-band report copies the axes too — one copy list, not two.
+    expect(body).toContain(
+      '`summary`, `shortSummary`, `failureScenario`, `category`, `direction`, `baseline` — never re-typed',
+    );
+    expect(body).toContain(
+      'the rounds-2–5 code-age rule never touches a Critical',
+    );
+    expect(body).toContain('no issue is filed by the review');
     expect(body).toContain('an **age reference, never an incremental anchor**');
     expect(body).toContain('skip the age rule, not the review');
     // The explicit knob's two directions: `critical` from round 1, and
@@ -771,12 +871,19 @@ describe('bundled review skill', () => {
 
   it('names the deferral channel in the bodyCriticals sources', () => {
     // Revert guard: compose-review relocates a `Critical` entry written
-    // into `deferredSuggestions` into the body Criticals (a Critical is
-    // never deferred); the bodyCriticals bullet must name that mechanical
-    // relocation beside the two model-written sources.
+    // into `deferredSuggestions` into the body Criticals — unless it is the
+    // one shape the floor defers (#10291); the bodyCriticals bullet must
+    // name that mechanical relocation, and its one exception, beside the
+    // two model-written sources.
     const body = skillBody();
     expect(body).toContain(
-      'a `Critical` entry placed in `deferredSuggestions` is relocated here, never deferred',
+      'a `Critical` entry placed in `deferredSuggestions` is relocated here unless the floor is `critical` and the entry is `fails-closed` on `new-surface`',
+    );
+    // The fix-witness invariant on body Criticals carves the deferral
+    // channel out explicitly: its line carries neither witness nor
+    // constraint, and the artifact keeps the full entry.
+    expect(body).toContain(
+      "the deferral channel's disclosed line is the one exception",
     );
   });
 
@@ -901,6 +1008,145 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain(
       'this sentence never changes what the comment reports or at what severity',
+    );
+  });
+
+  it('pins the fix-constraint field in all three of its halves', () => {
+    // The premise half of #10153, beside the fix-witness claim half above.
+    // The same three clauses have to survive together:
+    //   1. the finding format has to ASK for the fact (Step 6, and the Step 4
+    //      aggregate slot Step 6 points at),
+    //   2. the comment has to CARRY it — a constraint recorded and never
+    //      posted reaches no fixer, and the human fixer reading the comment
+    //      is the loop this field exists for, and
+    //   3. the two properties that make it different from its sibling must
+    //      hold at both sites: omitted rather than `N/A` (comment volume,
+    //      #9177), and witness-grade evidence — a quoted constant or a
+    //      file:line — rather than a caution the fixer would follow.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Fix constraint** — an existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'Omit it when none was observed — never `N/A` — and never without a source',
+    );
+    expect(body).toContain(
+      '- **Fix constraint:** <the existing fact the general fix must not violate',
+    );
+    expect(body).toContain(
+      'Suggested fix, Fix witness, Fix constraint, Severity',
+    );
+    // The artifact field list: a fourth optional field the command carries
+    // but the skill does not name is one the orchestrator strips when it
+    // re-emits the artifact by hand.
+    expect(body).toContain(
+      '`fixConstraint` is the existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'And a comment whose fix rests on an existing fact carries that fact',
+    );
+    expect(body).toContain(
+      'a constraint that names no constant and no `file:line` is not posted',
+    );
+    expect(body).toContain(
+      'A finding with no `fixConstraint` adds nothing — no `N/A`, no "no constraints observed"',
+    );
+    // R4-2: half 2's operative sentence — the heading is pinned above, but
+    // the mandate itself was not, so weakening "carries it" shipped green.
+    expect(body).toContain(
+      'When the finding has a `fixConstraint`, the posted body carries it in one sentence of ordinary prose',
+    );
+    // R4-1: the witness closes the body, so the constraint's only consistent
+    // place is immediately before it — and a finding whose `fixWitness` is
+    // `N/A` has no witness sentence to stand beside, so the constraint takes
+    // that place itself, after the suggestion block.
+    expect(body).toContain(
+      'immediately before the fix-witness sentence, which still closes the body',
+    );
+    expect(body).toContain(
+      'the constraint sentence takes its place after the suggestion block',
+    );
+  });
+
+  it('keeps the fix side — fixWitness and sourced fixConstraint — through the dedup merge', () => {
+    // R1-2 (#10168): the merge rules kept the most detailed description, the
+    // highest severity, and the source tags — never a fix-side field. Two
+    // agents reporting one root cause then lost the constraint only the less
+    // detailed copy recorded, before canonicalization ever saw the finding:
+    // the presence-keyed posting rule read "absent" on the deduplicated
+    // record and posted the unconstrained fix the field exists to prevent.
+    // R3-1: the sibling field dies the same death — the fix-witness sentence
+    // is presence-keyed too, so a witness only the discarded copy recorded
+    // is silently omitted and the fix ships unwitnessed (#9578). The
+    // preservation therefore names BOTH fields at all three merging sites —
+    // Step 4's paragraph and the two pair-loop bullets that merge on their
+    // own wording — or a pair-merge ships green under the Step 4 pin while
+    // dropping the field the same way. The adjudication sentence stays
+    // constraint-specific: two sourced constraints can conflict as claims
+    // about the code, and the rule that settles them re-reads the sources;
+    // this pin only guards that nothing fix-side is silently discarded.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Deduplication merges the fix side too: keep every `fixWitness` and every sourced `fixConstraint` the merged findings carry.**',
+    );
+    expect(body).toContain('when two conflict, adjudicate explicitly');
+    expect(body).toContain(
+      '`fixWitness`/sourced `fixConstraint` on either copy survives the merge',
+    );
+    expect(body).toContain(
+      '`fixWitness`/sourced `fixConstraint` on any copy survives the merge',
+    );
+  });
+
+  it('carries the fix side onto a Critical relocated into the body', () => {
+    // R1-1 (#10168): the carry rule was scoped to inline comment bodies, but
+    // a confirmed Critical whose locations all fail anchor resolution moves
+    // to `bodyCriticals` — the review body becomes its sole published copy,
+    // and a constraint the entry does not carry reaches no fixer. R3-1: the
+    // fix-witness sentence is presence-keyed the same way and dies the same
+    // death, so the carry covers both fix-side sentences. R3-2: the cover is
+    // scoped to the two moves the orchestrator performs — on an Aone target
+    // `submit` itself relocates an unanchorable Critical through a one-line
+    // entry rebuilt from the claim line alone, a channel neither sentence
+    // rides — and that residue must stay a named acceptance, never the
+    // universal promise ("every PR-facing copy") the channel contradicts.
+    // The requirement must stand at both sites the routing is spoken: the
+    // posting rule that performs the move, and the compose-state field that
+    // receives it.
+    const body = skillBody();
+    expect(body).toContain(
+      'the rule follows the finding through the two moves the orchestrator performs',
+    );
+    expect(body).toContain(
+      'a Critical carrying either fix-side sentence — the fix-witness or the constraint sentence — that moves to `bodyCriticals`',
+    );
+    expect(body).toContain(
+      'appends the same sentence to that entry, copied from the artifact',
+    );
+    // R4-1: an entry that carries both sentences appends them in the inline
+    // order — the constraint before the witness.
+    expect(body).toContain(
+      'the constraint before the witness when the finding carries both',
+    );
+    expect(body).toContain(
+      'an entry whose finding carries a `fixWitness` or a `fixConstraint` appends the corresponding sentence',
+    );
+    // The disclosed residue: Aone performs no server-side anchor validation,
+    // so submit relocates at submit time through the claim line alone, and
+    // the rule names the loss instead of promising past it.
+    expect(body).toContain(
+      'relocates an unanchorable Critical into the body as a one-line entry rebuilt from the claim line alone',
+    );
+    expect(body).toContain('the loss is a named acceptance, not a silent one');
+    // R4: the named residue covers the two further exits that carry neither
+    // sentence — the typed deferral line (a `DeferredEntry` holds no
+    // fix-side field) and the duplicate-drop account (a name-and-location
+    // pointer, never the finding's own text).
+    expect(body).toContain(
+      'a finding carried into `deferredSuggestions` renders as the typed one-line entry',
+    );
+    expect(body).toContain(
+      'a Suggestion dropped as a duplicate posts a name-and-location account only',
     );
   });
 
@@ -1449,6 +1695,92 @@ describe('bundled review skill', () => {
     // The anti-drift clause that makes the examples non-authoritative.
     expect(section).toContain(
       'The examples are the set as written, not the gate',
+    );
+  });
+});
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
+});
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
     );
   });
 });

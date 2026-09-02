@@ -154,7 +154,7 @@ export function useBranchCommand(
         //    `swapOpened = true` keeps the catch from settling the slot,
         //    which belongs to the in-flight swap.
         const telemetrySwapOpened =
-          config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
+          config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
         if (!telemetrySwapOpened) {
           throw new Error(
             'A session switch is already in progress. Try again in a moment.',
@@ -252,7 +252,7 @@ export function useBranchCommand(
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
-        await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
+        await config.getLlmClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
@@ -275,7 +275,7 @@ export function useBranchCommand(
         );
         startNewSession(newSessionId);
         uiSwapped = true;
-        config.getGeminiClient()?.commitTelemetrySwap?.();
+        config.getLlmClient()?.commitTelemetrySwap?.();
         clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
@@ -329,7 +329,7 @@ export function useBranchCommand(
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.
-            await config.getGeminiClient()?.initialize?.();
+            await config.getLlmClient()?.initialize?.();
           } catch (rollbackErr) {
             config
               .getDebugLogger()
@@ -343,7 +343,7 @@ export function useBranchCommand(
           // replays the parent's history on top of the fork's already-
           // committed replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
-          config.getGeminiClient()?.abortTelemetrySwap?.();
+          config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
           // transaction is unarmed) or the UI already committed (the replay
@@ -353,7 +353,7 @@ export function useBranchCommand(
           // `swapOpened = true`, so it owns no transaction here, and the
           // shared slot may hold a different in-flight swap (#9844). See
           // beginTelemetrySwap's JSDoc in core client.ts.
-          config.getGeminiClient()?.commitTelemetrySwap?.();
+          config.getLlmClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {
           try {

@@ -11,6 +11,7 @@ import {
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -45,6 +46,10 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  btw?(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ChannelBtwResult>;
   uploadAttachment?(
     data: Blob,
     name: string,
@@ -76,7 +81,7 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
-  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
 }
 
@@ -416,6 +421,7 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -700,6 +706,18 @@ export class DaemonChannelBridge
         });
       }
     }
+  }
+
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    const session = this.ensureSession(sessionId);
+    if (!session.btw) {
+      throw new Error('BTW is not supported by this daemon session');
+    }
+    return session.btw(question, signal ? { signal } : undefined);
   }
 
   async shellCommand(

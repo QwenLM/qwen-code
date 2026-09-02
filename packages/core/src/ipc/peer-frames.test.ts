@@ -6,11 +6,13 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  buildAuthLine,
   buildDeliveryStatusFrame,
   buildUserFrame,
   canonicalizeMsgId,
   describeDeliveryStatus,
   encodePeerFrame,
+  parsePeerAuthLine,
   parsePeerFrame,
   PEER_FRAME_VERSION,
 } from './peer-frames.js';
@@ -52,6 +54,18 @@ describe('parsePeerFrame — user frames', () => {
       fromName: 'app-ab',
       fromMode: 'bypass',
     });
+  });
+
+  it('carries the recipient session id through', () => {
+    expect(
+      parsePeerFrame(line({ ...validUser, toSessionId: 'sess-9' })),
+    ).toMatchObject({ toSessionId: 'sess-9' });
+  });
+
+  it('treats a non-string toSessionId as unaddressed', () => {
+    const frame = parsePeerFrame(line({ ...validUser, toSessionId: 7 }));
+    expect(frame).not.toBeNull();
+    expect(frame && 'toSessionId' in frame).toBe(false);
   });
 
   it('drops an unrecognized fromMode rather than trusting it', () => {
@@ -174,6 +188,20 @@ describe('parsePeerFrame — control frames', () => {
     origMsgId: 'abc',
   };
 
+  it('parses every delivery status, including misaddressed', () => {
+    for (const status of [
+      'held',
+      'denied',
+      'expired',
+      'delivered',
+      'misaddressed',
+    ]) {
+      expect(parsePeerFrame(line({ ...validControl, status }))).toMatchObject({
+        status,
+      });
+    }
+  });
+
   it('parses a delivery status', () => {
     expect(parsePeerFrame(line(validControl))).toMatchObject({
       type: 'control',
@@ -209,6 +237,22 @@ describe('round trip', () => {
     expect(parsePeerFrame(encoded.trimEnd())).toEqual(frame);
   });
 
+  it('round-trips the recipient session id', () => {
+    const frame = buildUserFrame({ content: 'hi', toSessionId: 'sess-9' });
+    expect(frame.toSessionId).toBe('sess-9');
+    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+  });
+
+  it('omits the recipient key rather than writing undefined', () => {
+    expect('toSessionId' in buildUserFrame({ content: 'hi' })).toBe(false);
+  });
+
+  it('round-trips the reply token, and omits its key when absent', () => {
+    const frame = buildUserFrame({ content: 'hi', replyToken: 'tok' });
+    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+    expect('replyToken' in buildUserFrame({ content: 'hi' })).toBe(false);
+  });
+
   it('survives content containing newlines', () => {
     const frame = buildUserFrame({ content: 'line one\nline two' });
     const encoded = encodePeerFrame(frame);
@@ -230,6 +274,10 @@ describe('delivery status frames', () => {
     expect(describeDeliveryStatus('denied')).toContain('declined');
     expect(describeDeliveryStatus('expired')).toContain('expired');
     expect(describeDeliveryStatus('delivered')).toContain('released');
+    expect(describeDeliveryStatus('misaddressed')).toContain(
+      'different session',
+    );
+    expect(describeDeliveryStatus('misaddressed')).not.toContain('declined');
   });
 
   it('carries the reason on the frame so the sender need not map it', () => {
@@ -240,5 +288,35 @@ describe('delivery status frames', () => {
     });
     expect(frame.reason).toBe(describeDeliveryStatus('held'));
     expect(frame.origMsgId).toBe('abc');
+  });
+});
+
+describe('auth lines', () => {
+  it('round-trips a token on one newline-terminated line', () => {
+    const line = buildAuthLine('tok-123');
+    expect(line.endsWith('\n')).toBe(true);
+    expect(line.indexOf('\n')).toBe(line.length - 1);
+    expect(parsePeerAuthLine(line.trimEnd())).toBe('tok-123');
+  });
+
+  it('is not a peer frame — a tokenless inbox skips it as unparseable', () => {
+    expect(parsePeerFrame(buildAuthLine('tok').trimEnd())).toBeNull();
+  });
+
+  it('rejects everything that is not exactly an auth line', () => {
+    expect(parsePeerAuthLine('not json')).toBeNull();
+    expect(parsePeerAuthLine(line({ ...validUser }))).toBeNull();
+    expect(parsePeerAuthLine(line({ msgV: 1, type: 'auth' }))).toBeNull();
+    expect(
+      parsePeerAuthLine(line({ msgV: 1, type: 'auth', token: '' })),
+    ).toBeNull();
+    expect(
+      parsePeerAuthLine(line({ msgV: 1, type: 'auth', token: 42 })),
+    ).toBeNull();
+    expect(
+      parsePeerAuthLine(
+        line({ msgV: PEER_FRAME_VERSION + 1, type: 'auth', token: 'tok' }),
+      ),
+    ).toBeNull();
   });
 });

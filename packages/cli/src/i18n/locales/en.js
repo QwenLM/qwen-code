@@ -188,6 +188,7 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.Goal': 'toolDisplayName.Goal',
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
+  'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
@@ -1621,6 +1622,12 @@ export default {
     'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
   'Could not compress chat history due to a token counting error.':
     'Could not compress chat history due to a token counting error.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Could not compress chat history because the compression summary was empty.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Could not compress chat history because the compression summary was truncated.',
+  'Could not compress chat history due to an API error.':
+    'Could not compress chat history due to an API error.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -2494,6 +2501,8 @@ export default {
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
+  'Choose the output style that shapes how responses are written ({{styles}}).':
+    'Choose the output style that shapes how responses are written ({{styles}}).',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',

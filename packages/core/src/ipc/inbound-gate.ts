@@ -16,12 +16,20 @@
  * encodes one idea: a message may auto-deliver only when acting on it
  * cannot do more than the sender could already have done itself.
  *
+ *   sender is a process this session started → accept
  *   receiver not fully reviewed + sender bypass     → accept
  *   receiver not fully reviewed + sender prompting  → hold
  *   receiver not fully reviewed + sender unasserted → hold
  *   receiver fully reviewed     + anything          → accept
  *   receiver mode unknown/unrecognized      → hold  (fail closed)
  *   policy setting unreadable               → hold  (fail closed)
+ *
+ * The first row is the one case where the sender is known: a connection
+ * that authenticated with the child token was opened by a script or hook
+ * this session itself ran, and whatever it can ask for, the session
+ * already chose to run the thing that is asking. Parity has nothing to
+ * weigh there. The explicit setting still wins over it — a user who said
+ * `hold` reviews everything, own processes included.
  *
  * A fully reviewed receiver can accept freely because every consequential
  * action still faces its own gate; the message is a suggestion, not an
@@ -114,10 +122,25 @@ export type PolicyDecision =
   | { policy: 'hold'; cause: HoldCause }
   | { policy: 'accept' | 'refuse' };
 
+/**
+ * What the transport could establish about a frame's sender. Kept apart
+ * from the frame because it is not on the wire: a peer writes the frame,
+ * the inbox determines this.
+ */
+export interface PeerOrigin {
+  /**
+   * The connection authenticated with the child token, so the frame came
+   * from a process this session started.
+   */
+  selfSent: boolean;
+}
+
 export interface HeldMessage {
   frame: PeerUserFrame;
   cause: HoldCause;
   heldAt: number;
+  /** Set when the message came from one of this session's own processes. */
+  selfSent?: true;
 }
 
 export interface InboundGateOptions {
@@ -129,12 +152,20 @@ export interface InboundGateOptions {
   /** Explicit user setting, if any. */
   getPolicySetting: () => InboundPolicy | undefined;
   /** Deliver an accepted message into the session's input queue. */
-  deliver: (frame: PeerUserFrame) => void;
+  deliver: (frame: PeerUserFrame, origin: PeerOrigin) => void;
   /** Report a terminal outcome back to the sender. Best-effort. */
   reportStatus?: (
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
   ) => void;
+  /**
+   * The session id this process holds now, when pinning is wired. A
+   * parked frame pinned to another id was addressed to whoever held the
+   * socket before an in-process session swap (/clear, /resume), and a
+   * release path must drop it as misaddressed rather than deliver it
+   * into the session that replaced its addressee.
+   */
+  getSessionId?: () => string | undefined;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -154,7 +185,7 @@ export class InboundGate {
    */
   private readonly settled = new Map<
     string,
-    'delivered' | 'denied' | 'expired'
+    'delivered' | 'denied' | 'expired' | 'misaddressed'
   >();
   private shuttingDown = false;
 
@@ -171,7 +202,10 @@ export class InboundGate {
    * Exposed for tests and for the UI, which shows the cause next to a
    * held message.
    */
-  resolvePolicy(frame?: Pick<PeerUserFrame, 'fromMode'>): PolicyDecision {
+  resolvePolicy(
+    frame?: Pick<PeerUserFrame, 'fromMode'>,
+    origin?: PeerOrigin,
+  ): PolicyDecision {
     // The setting is read from user configuration, so it can be missing,
     // misspelled, or backed by a getter that throws mid-teardown. None of
     // those are "the user asked for accept".
@@ -197,6 +231,12 @@ export class InboundGate {
     }
     if (explicit !== undefined) {
       return { policy: explicit, cause: 'explicit-setting' };
+    }
+
+    // Known sender: parity compares what two sessions may do, and a
+    // process this session ran is not another session.
+    if (origin?.selfSent) {
+      return { policy: 'accept' };
     }
 
     let mode: ApprovalMode | null;
@@ -231,8 +271,14 @@ export class InboundGate {
       : { policy: 'hold', cause: 'mode-mismatch' };
   }
 
-  /** Run a freshly-arrived message through the gate. */
-  admit(frame: PeerUserFrame): GateDecision {
+  /**
+   * Run a freshly-arrived message through the gate. `origin` defaults to
+   * an ordinary peer — the transport asserts self-sent, never the frame.
+   */
+  admit(
+    frame: PeerUserFrame,
+    origin: PeerOrigin = { selfSent: false },
+  ): GateDecision {
     // An id that is already settled has a final answer: repeat its
     // receipt and stop. This is what keeps a re-send from re-parking a
     // swapped body under a handle the user already reviewed.
@@ -265,7 +311,7 @@ export class InboundGate {
       return 'held';
     }
 
-    const decision = this.resolvePolicy(frame);
+    const decision = this.resolvePolicy(frame, origin);
     const { policy } = decision;
 
     if (policy === 'refuse') {
@@ -287,7 +333,7 @@ export class InboundGate {
     }
 
     if (policy === 'accept') {
-      const ok = this.tryDeliver(frame);
+      const ok = this.tryDeliver(frame, origin);
       if (ok) {
         this.recordSettled(frame.msgId, 'delivered');
       }
@@ -307,7 +353,12 @@ export class InboundGate {
     }
 
     const cause = decision.policy === 'hold' ? decision.cause : 'mode-unknown';
-    this.held.push({ frame, cause, heldAt: Date.now() });
+    this.held.push({
+      frame,
+      cause,
+      heldAt: Date.now(),
+      ...(origin.selfSent ? { selfSent: true } : {}),
+    });
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
     );
@@ -338,7 +389,16 @@ export class InboundGate {
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
-      if (!this.tryDeliver(entry.frame)) {
+      if (!this.pinStillValid(entry.frame)) {
+        // Dropped, not released: the id is tombstoned like every other
+        // terminal outcome, and the caller is told the message is gone
+        // rather than that it will appear on the next turn.
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        this.notifyHeldChange();
+        return 'gone';
+      }
+      if (!this.tryDeliver(entry.frame, originOf(entry))) {
         this.held.splice(index, 0, entry);
         void this.report(entry.frame, 'held');
         this.notifyHeldChange();
@@ -372,7 +432,7 @@ export class InboundGate {
     let dropped = 0;
 
     for (const entry of this.held) {
-      const decision = this.resolvePolicy(entry.frame);
+      const decision = this.resolvePolicy(entry.frame, originOf(entry));
       const { policy } = decision;
       if (policy === 'accept') {
         release.push(entry);
@@ -387,8 +447,15 @@ export class InboundGate {
     }
 
     let released = 0;
+    let misaddressed = 0;
     for (const entry of release) {
-      if (this.tryDeliver(entry.frame)) {
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
+      if (this.tryDeliver(entry.frame, originOf(entry))) {
         released += 1;
         this.recordSettled(entry.frame.msgId, 'delivered');
         void this.report(entry.frame, 'delivered');
@@ -405,7 +472,7 @@ export class InboundGate {
 
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
-        `reevaluate (${reason}): released ${released}, dropped ${dropped}, ${this.held.length} still held`,
+        `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
@@ -438,7 +505,7 @@ export class InboundGate {
   /** Remember a settled id, pruning the oldest beyond the cap. */
   private recordSettled(
     msgId: string,
-    verdict: 'delivered' | 'denied' | 'expired',
+    verdict: 'delivered' | 'denied' | 'expired' | 'misaddressed',
   ): void {
     const key = canonicalizeMsgId(msgId);
     // Delete-then-set refreshes recency: Map iterates in insertion
@@ -453,6 +520,17 @@ export class InboundGate {
   }
 
   /**
+   * A frame's pin is judged at arrival, but a session swap can happen
+   * while it sits parked; the release paths re-judge against the id the
+   * session holds now, not the one the frame saw on arrival.
+   */
+  private pinStillValid(frame: PeerUserFrame): boolean {
+    if (frame.toSessionId === undefined) return true;
+    const ownSessionId = this.options.getSessionId?.();
+    return ownSessionId === undefined || frame.toSessionId === ownSessionId;
+  }
+
+  /**
    * Receipt a terminal outcome without letting the transport take the
    * gate down with it.
    *
@@ -463,7 +541,7 @@ export class InboundGate {
    */
   private report(
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered',
+    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
   ): Promise<void> {
     try {
       return Promise.resolve(this.options.reportStatus?.(frame, status));
@@ -478,9 +556,9 @@ export class InboundGate {
   }
 
   /** Hand a message to the session, reporting whether it landed. */
-  private tryDeliver(frame: PeerUserFrame): boolean {
+  private tryDeliver(frame: PeerUserFrame, origin: PeerOrigin): boolean {
     try {
-      this.options.deliver(frame);
+      this.options.deliver(frame, origin);
       return true;
     } catch (error) {
       debugLogger.error(
@@ -503,6 +581,10 @@ export class InboundGate {
       );
     }
   }
+}
+
+function originOf(entry: HeldMessage): PeerOrigin {
+  return { selfSent: entry.selfSent === true };
 }
 
 /** One-line explanation of why a message is parked, for the UI. */

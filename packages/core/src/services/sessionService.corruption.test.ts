@@ -338,6 +338,14 @@ describe('SessionService lifecycle maintenance', () => {
       id: string,
       state: 'active' | 'archived',
     ) => string;
+    getPromptLedgerPathForState: (
+      id: string,
+      state: 'active' | 'archived',
+    ) => string;
+    getWorktreeSessionPathForState: (
+      id: string,
+      state: 'active' | 'archived',
+    ) => string;
     sessionBelongsToCurrentProject: (
       sessionId: string,
       cwd: string,
@@ -997,7 +1005,7 @@ describe('SessionService lifecycle maintenance', () => {
   });
 
   it.each(['archive', 'unarchive'] as const)(
-    'does not swallow a generation rejection at the %s ledger fence',
+    'finishes the %s ledger move after the generation closes',
     async (action) => {
       const state = action === 'archive' ? 'active' : 'archived';
       const { service, sessionId, paths } = createHarness('transcript', state);
@@ -1017,14 +1025,126 @@ describe('SessionService lifecycle maintenance', () => {
         .mockImplementation(() => {
           throw generationChanged;
         });
+      const assertCleanupOwned = vi.fn();
 
       const result = await service[`${action}Sessions`]([sessionId], {
         assertCanMutate,
+        assertCleanupOwned,
       });
 
-      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(result.errors).toEqual([]);
+      expect(assertCanMutate).toHaveBeenCalledOnce();
+      expect(assertCleanupOwned).toHaveBeenCalled();
+      expect(fs.existsSync(sourceLedger)).toBe(false);
+      expect(fs.existsSync(destinationLedger)).toBe(true);
+    },
+  );
+
+  it.each(['archive', 'unarchive'] as const)(
+    'stops the %s ledger move after cleanup ownership is lost',
+    async (action) => {
+      const state = action === 'archive' ? 'active' : 'archived';
+      const { service, sessionId, paths } = createHarness('transcript', state);
+      const sourcePath = paths[state];
+      const destinationPath =
+        action === 'archive' ? paths.archived : paths.active;
+      const sourceLedger = sourcePath.replace(/\.jsonl$/, '.ledger.jsonl');
+      const destinationLedger = destinationPath.replace(
+        /\.jsonl$/,
+        '.ledger.jsonl',
+      );
+      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const ownershipLost = new Error('writer ownership lost');
+
+      const result = await service[`${action}Sessions`]([sessionId], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      expect(fs.existsSync(destinationPath)).toBe(true);
       expect(fs.existsSync(sourceLedger)).toBe(true);
       expect(fs.existsSync(destinationLedger)).toBe(false);
+    },
+  );
+
+  it.each(['archive', 'unarchive'] as const)(
+    'reconciles stranded %s sidecars on an exact retry',
+    async (action) => {
+      const sourceState = action === 'archive' ? 'active' : 'archived';
+      const destinationState = action === 'archive' ? 'archived' : 'active';
+      const { service, sessionId } = createHarness(
+        action === 'archive' ? '' : '{"uuid":"torn-head"',
+        sourceState,
+      );
+      const internals = service as unknown as Privates;
+      const sourceWorktree = internals.getWorktreeSessionPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationWorktree = internals.getWorktreeSessionPathForState(
+        sessionId,
+        destinationState,
+      );
+      const sourcePr = internals.getPrSessionPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationPr = internals.getPrSessionPathForState(
+        sessionId,
+        destinationState,
+      );
+      const sourceLedger = internals.getPromptLedgerPathForState(
+        sessionId,
+        sourceState,
+      );
+      const destinationLedger = internals.getPromptLedgerPathForState(
+        sessionId,
+        destinationState,
+      );
+      fs.writeFileSync(sourceWorktree, '{}');
+      const pr = {
+        number: 123,
+        url: 'https://github.com/QwenLM/qwen-code/pull/123',
+        createdAt: '2026-08-28T00:00:00.000Z',
+      };
+      await writeSessionPrs(sourcePr, [pr]);
+      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const ownershipLost = new Error('writer ownership lost');
+
+      const first = await service[`${action}Sessions`]([sessionId], {
+        assertCleanupOwned: () => {
+          throw ownershipLost;
+        },
+      });
+      expect(first.errors[0]?.error).toBe(ownershipLost);
+
+      const assertCanMutate = vi.fn();
+      const assertCleanupOwned = vi.fn();
+      const retry = await service[`${action}Sessions`]([sessionId], {
+        assertCanMutate,
+        assertCleanupOwned,
+      });
+
+      expect(retry).toMatchObject({
+        [action === 'archive' ? 'alreadyArchived' : 'alreadyActive']: [
+          sessionId,
+        ],
+        errors: [],
+      });
+      expect(fs.existsSync(sourceWorktree)).toBe(false);
+      expect(fs.existsSync(destinationWorktree)).toBe(true);
+      expect(fs.existsSync(sourcePr)).toBe(false);
+      await expect(readSessionPrs(destinationPr)).resolves.toEqual([pr]);
+      expect(fs.existsSync(sourceLedger)).toBe(false);
+      expect(fs.readFileSync(destinationLedger, 'utf8')).toContain(
+        '"promptId":"p1"',
+      );
+      expect(assertCanMutate).toHaveBeenCalled();
+      expect(assertCleanupOwned).toHaveBeenCalled();
     },
   );
 

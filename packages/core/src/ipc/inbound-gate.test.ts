@@ -18,6 +18,8 @@ import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
 interface Harness {
   gate: InboundGate;
   delivered: PeerUserFrame[];
+  /** `selfSent` as the gate reported it to `deliver`, per delivery. */
+  deliveredAsSelfSent: boolean[];
   statuses: Array<{ msgId: string; status: string }>;
   heldChanges: number;
   setMode: (mode: ApprovalMode | null) => void;
@@ -41,6 +43,7 @@ function harness(
   let modeThrows = false;
   let policyThrows = false;
   const delivered: PeerUserFrame[] = [];
+  const deliveredAsSelfSent: boolean[] = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
   const state = { heldChanges: 0 };
   let deliveryFails = false;
@@ -54,9 +57,10 @@ function harness(
       if (policyThrows) throw new Error('settings getter exploded');
       return policy as InboundPolicy | undefined;
     },
-    deliver: (frame) => {
+    deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
       delivered.push(frame);
+      deliveredAsSelfSent.push(origin.selfSent);
     },
     reportStatus: (frame, status) =>
       statuses.push({ msgId: frame.msgId, status }),
@@ -68,6 +72,7 @@ function harness(
   return {
     gate,
     delivered,
+    deliveredAsSelfSent,
     statuses,
     get heldChanges() {
       return state.heldChanges;
@@ -468,6 +473,71 @@ describe('receipts', () => {
     expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
   });
 
+  it('drops an approved hold when a session swap invalidates its pin', () => {
+    let currentSessionId = 'session-a';
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      getSessionId: () => currentSessionId,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const held = frame({
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    expect(gate.admit(held)).toBe('held');
+
+    currentSessionId = 'session-b';
+    // 'gone', not 'done': the caller must not tell the user it was
+    // released when it was dropped.
+    expect(gate.decide(held.msgId, 'approve')).toBe('gone');
+    expect(delivered).toEqual([]);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('tombstones a misaddressed drop so a re-send repeats the verdict', () => {
+    for (const path of ['decide', 'reevaluate'] as const) {
+      let currentSessionId = 'session-a';
+      let mode = ApprovalMode.YOLO;
+      const delivered: PeerUserFrame[] = [];
+      const statuses: string[] = [];
+      const gate = new InboundGate({
+        getApprovalMode: () => mode,
+        getPolicySetting: () => undefined,
+        getSessionId: () => currentSessionId,
+        deliver: (candidate) => delivered.push(candidate),
+        reportStatus: (_candidate, status) => statuses.push(status),
+      });
+      const held = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+      expect(gate.admit(held)).toBe('held');
+      currentSessionId = 'session-b';
+      if (path === 'decide') {
+        gate.decide(held.msgId, 'approve');
+      } else {
+        // A mode change that would release the hold reaches the pin check.
+        mode = ApprovalMode.DEFAULT;
+        gate.reevaluate('test');
+      }
+      expect(statuses).toEqual(['held', 'misaddressed']);
+
+      // The user /resume-s session-a; a re-send of the same id with a
+      // swapped body passes the arrival pin check. It must not be
+      // re-decided — the drop was terminal.
+      currentSessionId = 'session-a';
+      const resent = {
+        ...held,
+        message: { role: 'user' as const, content: 'body-2' },
+      };
+      expect(gate.admit(resent)).toBe('refused');
+      expect(delivered).toEqual([]);
+      expect(gate.getHeld()).toHaveLength(0);
+      expect(statuses).toEqual(['held', 'misaddressed', 'misaddressed']);
+    }
+  });
+
   it('reports denied when a held message is rejected', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
     const f = frame();
@@ -532,6 +602,32 @@ describe('reevaluate', () => {
     expect(h.gate.reevaluate('mode-changed')).toBe(1);
     expect(h.delivered).toEqual([f]);
     expect(h.gate.getHeld()).toHaveLength(0);
+  });
+
+  it('drops a releasable hold when a session swap invalidates its pin', () => {
+    let mode = ApprovalMode.YOLO;
+    let currentSessionId = 'session-a';
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      getSessionId: () => currentSessionId,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const held = frame({
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    expect(gate.admit(held)).toBe('held');
+
+    currentSessionId = 'session-b';
+    mode = ApprovalMode.DEFAULT;
+    expect(gate.reevaluate('mode-changed')).toBe(0);
+    expect(delivered).toEqual([]);
+    expect(gate.getHeld()).toEqual([]);
+    expect(statuses).toEqual(['held', 'misaddressed']);
   });
 
   it('drops the backlog when the policy becomes refuse', () => {
@@ -622,7 +718,7 @@ describe('onHeldChange', () => {
     const f = frame();
     expect(() => gate.admit(f)).not.toThrow();
     expect(gate.decide(f.msgId, 'approve')).toBe('done');
-    expect(deliver).toHaveBeenCalledWith(f);
+    expect(deliver).toHaveBeenCalledWith(f, { selfSent: false });
   });
 });
 
@@ -698,5 +794,70 @@ describe('describeHoldCause', () => {
     expect(describeHoldCause('policy-unreadable')).toContain(
       'crossSessionInbound',
     );
+  });
+});
+
+describe('self-sent messages (child token)', () => {
+  const own = { selfSent: true };
+
+  it('accepts a message a peer would be held for', () => {
+    // Bypassing receiver, sender asserting no mode: the parity rule holds
+    // an unknown peer here, and does not apply to the session's own process.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame();
+    expect(h.gate.admit(f, own)).toBe('accept');
+    expect(h.delivered).toEqual([f]);
+    expect(h.deliveredAsSelfSent).toEqual([true]);
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
+  });
+
+  it('holds the same frame when the transport does not vouch for it', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    expect(h.gate.admit(frame())).toBe('held');
+    expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
+    expect(h.gate.getHeld()[0].selfSent).toBeUndefined();
+  });
+
+  it('does not depend on the receiver mode being known', () => {
+    const h = harness({ mode: null });
+    expect(h.gate.admit(frame(), own)).toBe('accept');
+  });
+
+  it('yields to an explicit hold, and is released as itself later', () => {
+    const h = harness({ mode: ApprovalMode.YOLO, policy: 'hold' });
+    const f = frame();
+    expect(h.gate.admit(f, own)).toBe('held');
+    expect(h.gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      selfSent: true,
+    });
+
+    h.setPolicy(undefined);
+    expect(h.gate.reevaluate('setting cleared')).toBe(1);
+    expect(h.delivered).toEqual([f]);
+    expect(h.deliveredAsSelfSent).toEqual([true]);
+  });
+
+  it('yields to an explicit refuse', () => {
+    const h = harness({ policy: 'refuse' });
+    const f = frame();
+    expect(h.gate.admit(f, own)).toBe('refused');
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'denied' }]);
+  });
+
+  it('keeps its origin through a manual approval', () => {
+    const h = harness({ policy: 'hold' });
+    const f = frame();
+    h.gate.admit(f, own);
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.deliveredAsSelfSent).toEqual([true]);
+  });
+
+  it('is decided by the transport, never by the frame', () => {
+    // A frame cannot spell "self-sent" in any field; the flag is a
+    // separate argument the inbox supplies. Omitting it means peer.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ from: '/tmp/own-session.sock' });
+    expect(h.gate.admit(f)).toBe('held');
   });
 });

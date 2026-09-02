@@ -17,7 +17,8 @@ import type {
 } from '@google/genai';
 import type {
   Config,
-  GeminiChat,
+  ContentGeneratorConfig,
+  LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
   ToolResult,
@@ -48,16 +49,20 @@ import type {
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
+  CronRunSessionOutcome,
   InvocationContextV1,
   ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
+  WorkflowSnapshot,
+  WorkflowTask,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  isCompressionFailureStatus,
   RUNTIME_SNAPSHOT_PREFIX,
   detectLoopSentinel,
   detectAutonomousSentinel,
@@ -106,6 +111,9 @@ import {
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
+  getOutputStyleTurnReminder,
+  resolveMainSessionOutputStyle,
+  wrapSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
@@ -200,6 +208,13 @@ import {
   toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
+  getWorkflowTaskMutationKey,
+  isTerminalWorkflowStatus,
+  tryWithWorkflowTaskMutation,
+  MAX_RETAINED_SNAPSHOTS,
+  toSnapshot,
+  deleteWorkflowSnapshot,
+  listWorkflowSnapshots,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
   collectSessionTurnState,
@@ -210,6 +225,12 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
+import {
+  buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
+  scheduledTaskRunSourceId,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from '../../runtime/scheduled-task-run.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -306,8 +327,24 @@ import {
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  applyReasoningSelection,
+  clearReasoningRequestOverrides,
+  getModelConfiguration,
+  isReasoningSelectionSupported,
+  parseReasoningSelection,
+  REASONING_EFFORT_DEFAULT,
+  type ReasoningSelection,
+} from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -374,6 +411,7 @@ const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
 >();
+const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
@@ -451,15 +489,6 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
   );
 }
 
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
-  );
-}
-
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
   tracker: ToolCallPreparationTracker,
@@ -484,7 +513,11 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 }
 
 type AutoCompressionSendResult =
-  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
+  | {
+      responseStream: AsyncGenerator<StreamEvent>;
+      requestRouteKey: string;
+      stopReason?: never;
+    }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 function getAbortAwareEndTurnStopReason(
@@ -524,6 +557,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
+  workflows: Set<WorkflowTask>;
   wakeups: Set<string>;
 };
 
@@ -1385,7 +1419,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
   toolUseId?: string;
   todoWorkChainId?: string;
   /** Structured fields for i18n rendering on the frontend. */
@@ -1413,6 +1447,8 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  sessionMode?: 'persistent' | 'per_run';
+  name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -1695,7 +1731,7 @@ export async function registerCreateSubSessionTool(
       ToolNames.CREATE_SUB_SESSION,
       async () => new CreateSubSessionTool(config),
     );
-    await config.getGeminiClient().setTools();
+    await config.getLlmClient().setTools();
     return;
   }
   toolRegistry.registerTool(new CreateSubSessionTool(config));
@@ -1711,7 +1747,7 @@ export async function registerCreateSubSessionTool(
   // those configurations.
   toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
   toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
-  await config.getGeminiClient().setTools();
+  await config.getLlmClient().setTools();
 }
 
 export interface AvailableCommandsSnapshot {
@@ -1767,12 +1803,10 @@ export async function buildAvailableCommandsSnapshot(
     settings,
     executionPolicy,
   );
-  const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
@@ -1787,7 +1821,9 @@ export async function buildAvailableCommandsSnapshot(
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      config.isSkillEnabled(cmd.skillDetail) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -1831,7 +1867,7 @@ export async function buildAvailableCommandsSnapshot(
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
-          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          config.isSkillEnabled(skill) &&
           !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
@@ -1937,7 +1973,15 @@ export class Session implements SessionContext {
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
-  private lastPromptTokenCountChat: GeminiChat | null = null;
+  private lastPromptTokenCountChat: LlmChat | null = null;
+  // Private ACP fallback cache, bounded like LlmChat without exposing a
+  // cross-package route resolver just for this closeout.
+  private readonly lastPromptTokenCountsByRouteKey = new Map<string, number>();
+  // The model route that produced `lastPromptTokenCount` (Config
+  // .getModelRouteIdentity). ACP model switches keep the same LlmChat, so
+  // the chat-instance check alone never invalidates the count on a route
+  // change (#9529, follow-up to #9454/#9506).
+  private lastPromptTokenCountRouteKey: string | undefined = undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -1967,13 +2011,14 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
-  private readonly activeAgentNotificationAcceptances = new Set<string>();
+  private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
   private goalProcessing = false;
@@ -2001,12 +2046,44 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
+  private workflowHistory: WorkflowSnapshot[];
+  /**
+   * R7-5: runIds whose snapshot write this session has observed. Latches
+   * `#rememberWorkflowHistory` off so a post-persistence status emission
+   * cannot resurrect a sibling-deleted run. See that method.
+   */
+  private readonly persistedWorkflowRunIds = new Set<string>();
+  /**
+   * R7-4: every runId the last `refreshWorkflowHistory` merged, BEFORE the
+   * MAX_RETAINED_SNAPSHOTS cap. `workflowHistory` is the display window;
+   * this is what deletion tests membership against.
+   */
+  private mergedWorkflowRunIds = new Set<string>();
+  private readonly unpersistedWorkflowHistory = new Map<
+    string,
+    WorkflowSnapshot
+  >();
+  /**
+   * Deletion order, so a refresh can tell which runs were deleted AFTER
+   * its disk read began. `refreshWorkflowHistory` reads the directory
+   * and then merges without holding a claim, while deletion holds one —
+   * a delete that lands between the read and the merge would otherwise
+   * be overwritten by the stale listing and the run would reappear
+   * until the next refresh. Keyed by runId so a later re-run of the same
+   * id (a retry reuses it) is not suppressed: its sequence predates that
+   * refresh's mark.
+   */
+  private workflowDeletionSeq = 0;
+  private readonly workflowDeletionSeqByRunId = new Map<string, number>();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
     sourceCallId: string;
   };
+  private activeTodoPlanStructure?: string;
+  private todoPlanRevisionGeneration = 0;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -2058,6 +2135,7 @@ export class Session implements SessionContext {
 
   // Implement SessionContext interface
   readonly sessionId: string;
+  private sessionReasoningSelection?: ReasoningSelection;
 
   constructor(
     id: string,
@@ -2073,8 +2151,19 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    workflowHistory: readonly WorkflowSnapshot[] = [],
+    /**
+     * Reports whether another session in this process owns a live or
+     * still-settling registry entry for the run. Every session here shares
+     * one on-disk workflow store but keeps a private registry, so history
+     * deletion must consult all of them, not just this session's.
+     */
+    private readonly isWorkflowRunLiveInSiblingSession: (
+      runId: string,
+    ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
         this.config.getSessionSourceType?.(),
@@ -2090,6 +2179,20 @@ export class Session implements SessionContext {
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    // Capture the settings-derived gate value ONCE instead of tracking the
+    // live settings view: this session's LoadedSettings is reloaded from
+    // disk behind the session's back (e.g. `reloadSkillSettings` during a
+    // workspaceSkillsRefresh), and such a reload must not silently flip the
+    // Session Workflow gate with no change event and no plan-revision
+    // cleanup. Gate changes flow only through the daemon's explicit writers
+    // (the workspaceSessionWorkflow UI write and the workspaceReload
+    // re-derivation, both via applySessionWorkflowOverrideToLiveSessions),
+    // which re-pin the provider and run the per-session side effects.
+    const sessionWorkflowEnabledFromSettings =
+      this.settings.merged.experimental?.sessionWorkflow === true;
+    this.config.setSessionWorkflowEnabledProvider?.(
+      () => sessionWorkflowEnabledFromSettings,
+    );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
       process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
@@ -2809,7 +2912,10 @@ export class Session implements SessionContext {
   }
 
   clearActiveTodoPlanRevision(): void {
+    this.todoPlanRevisionGeneration++;
     this.activeTodoPlanRevision = undefined;
+    this.activeTodoPlanStructure = undefined;
+    this.config.clearSessionWorkflowPlanRevision?.();
   }
 
   hardSuspendTodoStopGuard(): void {
@@ -2928,6 +3034,7 @@ export class Session implements SessionContext {
     const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
     const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
     const wakeups = this.config.isCronEnabled?.()
       ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
           (job) => job.cronExpr === '@wakeup',
@@ -2953,6 +3060,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
+      workflows: new Set(workflows),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -3050,6 +3158,17 @@ export class Session implements SessionContext {
             task.id,
             task.ownerAgentId,
           ) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
+    if (
+      workflows.some(
+        (task) =>
+          !baseline.workflows.has(task) &&
+          !isTerminalWorkflowStatus(task.status),
       )
     ) {
       return true;
@@ -3270,11 +3389,11 @@ export class Session implements SessionContext {
   }
 
   async #syncLiveToolDeclarations(): Promise<void> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient) {
       throw new Error('The Live backend model client is unavailable.');
     }
-    await geminiClient.setTools();
+    await llmClient.setTools();
   }
 
   async setLiveConversationActive(active: boolean): Promise<void> {
@@ -3292,7 +3411,7 @@ export class Session implements SessionContext {
       this.liveEndInstructionPending = true;
       this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
     }
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   async appendLiveConversationTranscript(
@@ -3341,7 +3460,7 @@ export class Session implements SessionContext {
     if (this.liveConversationActive || !this.liveEndInstructionPending) return;
     this.liveEndInstructionPending = false;
     this.config.setLiveAppendSystemPrompt(undefined);
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   getId(): string {
@@ -3368,6 +3487,192 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  getWorkflowHistory(): readonly WorkflowSnapshot[] {
+    return this.workflowHistory;
+  }
+
+  async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
+    const deletionMark = this.workflowDeletionSeq;
+    const persisted = await listWorkflowSnapshots(this.config);
+    const byRunId = new Map(
+      persisted.map((snapshot) => [snapshot.runId, snapshot]),
+    );
+    for (const [runId, seq] of this.workflowDeletionSeqByRunId) {
+      if (seq > deletionMark) byRunId.delete(runId);
+    }
+    for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
+      const stored = byRunId.get(runId);
+      if (stored === undefined) {
+        // Never persisted (write pending or failed): keep the cached
+        // projection visible. Once persistence is observed the entry is
+        // retired via the snapshot-persisted callback, so absence here
+        // afterwards means the run was deleted and must stay gone.
+        byRunId.set(runId, snapshot);
+      } else {
+        // A persisted copy is the newer authoritative projection: the
+        // runId settled (possibly re-run in another session), so a stale
+        // cache must not shadow it.
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+    // R7-4: the returned/stored history is the capped display window, but
+    // deletion must reason about the whole merged set — keep it before the
+    // slice rather than making callers re-derive it.
+    this.mergedWorkflowRunIds = new Set(byRunId.keys());
+    this.workflowHistory = [...byRunId.values()]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+    return this.workflowHistory;
+  }
+
+  async deleteWorkflowHistory(runId: string): Promise<boolean> {
+    const attempt = await tryWithWorkflowTaskMutation(
+      getWorkflowTaskMutationKey(this.config, runId),
+      () => this.#deleteWorkflowHistoryClaimed(runId),
+    );
+    return attempt.acquired ? attempt.value : false;
+  }
+
+  async #deleteWorkflowHistoryClaimed(runId: string): Promise<boolean> {
+    const registry = this.config.getWorkflowRunRegistry();
+    const isDeletable = (): boolean => {
+      if (this.isWorkflowRunLiveInSiblingSession(runId)) return false;
+      if (registry.isStarting?.(runId)) return false;
+      const current = registry.get(runId);
+      return !current || isTerminalWorkflowStatus(current.status);
+    };
+    if (!isDeletable()) return false;
+    const handle = registry.getHandle(runId);
+    if (handle) {
+      await handle.completion;
+      if (!isDeletable()) return false;
+    }
+    await this.refreshWorkflowHistory();
+    if (!isDeletable()) return false;
+    // R7-4: membership must be tested against everything the client can
+    // SEE, not against the capped window. `buildSessionTasksStatus`
+    // serializes every registry entry unconditionally, while
+    // `refreshWorkflowHistory` truncates to MAX_RETAINED_SNAPSHOTS by
+    // startTime — so a long run that settles after ~30 newer ones started
+    // stays listed via the registry but falls out of the window, and the
+    // capped check answered `{changed: false}` forever. It was terminal,
+    // handle-free and live in no sibling: nothing but the window kept it
+    // undeletable. `deleteWorkflowSnapshot` already tolerates an absent
+    // target, so widening the gate cannot delete something that is not
+    // there.
+    if (
+      !this.mergedWorkflowRunIds.has(runId) &&
+      registry.get(runId) === undefined &&
+      !this.unpersistedWorkflowHistory.has(runId)
+    ) {
+      return false;
+    }
+    // Retire the registry entry before touching the store. `removeTerminal`
+    // refuses a live or handle-held entry — the registry's own last word
+    // on whether the run is still active here — so `false` for an entry
+    // that exists means the run re-registered and must not be reported
+    // deleted; a persisted-only run has no entry to retire.
+    if (registry.get(runId) !== undefined && !registry.removeTerminal(runId)) {
+      return false;
+    }
+    if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    this.persistedWorkflowRunIds.delete(runId);
+    this.workflowHistory = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    this.#activeWorkChanged();
+    return true;
+  }
+
+  /**
+   * A sibling session deleted `runId` from the shared store. The
+   * deletion-sequence marker is per-Session — it records deletions THIS
+   * session issued — while the store and the delete entrance are
+   * process-wide, so without this a refresh of ours that began reading
+   * the directory before the sibling's delete landed would merge the
+   * stale listing and republish the run the sibling's client was just
+   * told was gone. Called under the sibling's task-mutation claim,
+   * symmetric to the registry `removeTerminal` sweep.
+   *
+   * The R7-5 persisted latch is deliberately kept: a late terminal
+   * emission for the deleted run must still not re-insert it.
+   */
+  noteExternalWorkflowDeletion(runId: string): void {
+    this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
+    this.unpersistedWorkflowHistory.delete(runId);
+    this.mergedWorkflowRunIds.delete(runId);
+    const retained = this.workflowHistory.filter(
+      (item) => item.runId !== runId,
+    );
+    if (retained.length === this.workflowHistory.length) return;
+    this.workflowHistory = retained;
+    this.#activeWorkChanged();
+  }
+
+  #rememberWorkflowHistory(entry: WorkflowTask): void {
+    if (!isTerminalWorkflowStatus(entry.status)) {
+      // Back in an active state means this runId was registered afresh
+      // (a retry/resume reuses it), so its next settlement must be
+      // remembered again — release the R7-5 latch here rather than
+      // wiring a second registry callback for it.
+      this.persistedWorkflowRunIds.delete(entry.runId);
+      return;
+    }
+    // R7-5: retirement is a latch, not a one-shot. The registry's
+    // dispatch-drain callbacks (onAgentCompleted / onBudgetUpdated /
+    // onDispatchSettled) emit status changes on TERMINAL entries with no
+    // status gate, and in-flight dispatches keep draining across the
+    // snapshot write — so a terminal emission routinely lands AFTER
+    // `notifySnapshotPersisted` retired the cache entry. Without this
+    // guard each late emission re-inserted the run as "never persisted",
+    // and a sibling session's deletion was then undone by the next
+    // refresh: absent on disk but present in the stale cache reads as a
+    // pending write, so the deleted run was republished and stayed for
+    // the life of the session. Released at the top of this method when
+    // the runId comes back non-terminal (a retry/resume re-registers it)
+    // so a genuine re-run of the same runId is remembered again.
+    if (this.persistedWorkflowRunIds.has(entry.runId)) return;
+    const snapshot = toSnapshot(entry);
+    this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
+    this.workflowHistory = [
+      snapshot,
+      ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
+    ]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+  }
+
+  #pruneUnpersistedWorkflowHistory(): void {
+    const retainedRunIds = new Set(
+      this.workflowHistory.map((item) => item.runId),
+    );
+    for (const runId of this.unpersistedWorkflowHistory.keys()) {
+      if (!retainedRunIds.has(runId)) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
+  }
+
+  reloadModelProvidersFromDisk(): void {
+    if (
+      !this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.User,
+        SettingScope.Workspace,
+      ])
+    ) {
+      throw new Error('Unable to reload model-provider settings from disk.');
+    }
+    this.config.reloadModelProvidersConfig(
+      this.settings.merged.modelProviders,
+      this.settings.merged.providerProtocol ?? {},
+    );
   }
 
   installPendingManagedConversationBinding(
@@ -3611,13 +3916,18 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent') notificationIds.add(item.taskId);
+      if (item.kind === 'agent' || item.kind === 'workflow') {
+        notificationIds.add(item.taskId);
+      }
     }
-    for (const taskId of this.activeAgentNotificationAcceptances) {
+    for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
     }
     if (this.currentAgentNotificationTaskId !== null) {
       notificationIds.add(this.currentAgentNotificationTaskId);
+    }
+    if (this.currentWorkflowNotificationTaskId !== null) {
+      notificationIds.add(this.currentWorkflowNotificationTaskId);
     }
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
@@ -3628,6 +3938,26 @@ export class Session implements SessionContext {
       this.currentShellNotificationActive;
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
+    }
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    // A reserved-but-unregistered run (script loading, journal replay)
+    // has no `list()` entry yet, but the registry's hasRunningEntries()
+    // and the delete/cancel liveness gates already count it as live. A
+    // daemon-initiated conditional close that read no hold here would
+    // dispose the session and abort the start under the client that just
+    // asked for it. The hold releases itself: registration takes over
+    // with the entry's running hold, and a failed or cancelled start
+    // drops the reservation via `releaseStart`.
+    for (const runId of workflowRegistry.listStartingRunIds?.() ?? []) {
+      holds.push({ category: 'workflow', id: runId });
+    }
+    for (const task of workflowRegistry.list()) {
+      // Mirror the registry's hasRunningEntries(): a paused run executes
+      // nothing and no backstop would ever release the hold, so it must
+      // not pin the session the way executing work does.
+      if (task.status === 'running' || task.status === 'pausing') {
+        holds.push({ category: 'workflow', id: task.runId });
+      }
     }
     return holds;
   }
@@ -3771,6 +4101,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -3822,7 +4153,26 @@ export class Session implements SessionContext {
       shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
       this.#shellStatusChangeCallback = undefined;
     }
+    // R7-10: mirror the agent registry's treatment above. Without this a
+    // workflow outlives its session's removal — close/kill/shutdown use
+    // force semantics and a background run owns a detached controller —
+    // and an orphan that nothing can see keeps writing its snapshot,
+    // recreating history a sibling session just deleted. Abort BEFORE the
+    // callbacks are cleared so the cancellation still reaches this
+    // session's own bookkeeping.
+    this.config.getWorkflowRunRegistry().abortAll();
+    this.config.getWorkflowRunRegistry().setCompletionCallback(undefined);
+    this.config
+      .getWorkflowRunRegistry()
+      .setSnapshotPersistedCallback(undefined);
+    if (this.#workflowStatusChangeCallback) {
+      this.config
+        .getWorkflowRunRegistry()
+        .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
+      this.#workflowStatusChangeCallback = undefined;
+    }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -3899,7 +4249,7 @@ export class Session implements SessionContext {
       // belong to finished cycles; only live updates may bind the next
       // exit_plan_mode approval, so a replayed session starts text-only —
       // even when the replay fails part-way.
-      this.activeTodoPlanRevision = undefined;
+      this.clearActiveTodoPlanRevision();
     }
   }
 
@@ -3924,7 +4274,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const chat = this.config.getLlmClient()!.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -3940,7 +4290,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3975,7 +4325,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
+    return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
   getRewindableUserTurnCount(): number {
@@ -4002,11 +4352,8 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
-    this.activeTodoPlanRevision = undefined;
+    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
+    this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -4595,8 +4942,8 @@ export class Session implements SessionContext {
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       return { accepted: false, interruption: 'none' };
     }
 
@@ -4679,7 +5026,7 @@ export class Session implements SessionContext {
     if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
-    const chat = this.config.getGeminiClient()?.getChat();
+    const chat = this.config.getLlmClient()?.getChat();
     if (!chat) return;
 
     const ac = new AbortController();
@@ -4826,7 +5173,7 @@ export class Session implements SessionContext {
         // it, `qwen review fetch-pr` cannot record its worktree lease and an
         // interrupted /review leaves the review worktree behind. TUI and
         // headless enter this context at their prompt entry points
-        // (useGeminiStream.ts / nonInteractiveCli.ts); ACP had no equivalent.
+        // (use-llm-stream.ts / nonInteractiveCli.ts); ACP had no equivalent.
         // enterWith (not run) so the 500-line turn body below stays unnested;
         // the binding dies with this async scope.
         promptIdContext.enterWith(promptId);
@@ -5217,7 +5564,7 @@ export class Session implements SessionContext {
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
               this.config
-                .getGeminiClient()
+                .getLlmClient()
                 .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
             }
 
@@ -5233,7 +5580,7 @@ export class Session implements SessionContext {
             this.activeTodoWorkChainPromptId = promptId;
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
-            // block in GeminiClient.sendMessageStream). Placed after
+            // block in LlmClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
@@ -5261,13 +5608,13 @@ export class Session implements SessionContext {
 
             // Prepend session-level system reminders (plan mode / subagent /
             // arena) so the model sees them, matching the behaviour of
-            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // `LlmClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (isFreshUserTurn) {
               const memory = await this.config
-                .getGeminiClient()
+                .getLlmClient()
                 .consumeManagedAutoMemoryRecall('initial');
               if (memory?.prompt) {
                 systemReminders.unshift({ text: memory.prompt });
@@ -5359,7 +5706,7 @@ export class Session implements SessionContext {
             // not just the stop-hook loop. Daemon turns run autonomously in
             // all approval modes (approvals are mediated by the ACP client
             // rather than by gating this loop), so unlike the CLI reference
-            // (useGeminiStream.ts, which only emits in YOLO) this is
+            // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
             try {
               if (isRestoreAskUserQuestion) {
@@ -5508,6 +5855,10 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
+                // The send result assigns this before any read; null-stream
+                // paths return before the record site, so a pre-send route
+                // computation here would only be discarded.
+                let requestRouteKey = '';
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -5558,6 +5909,7 @@ export class Session implements SessionContext {
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
+                  requestRouteKey = sendResult.requestRouteKey;
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
@@ -5641,6 +5993,15 @@ export class Session implements SessionContext {
                         );
                         functionCalls.length = 0;
                       }
+                      if (resp.type === StreamEventType.COMPRESSED) {
+                        // In-send compression rewrote the shared history;
+                        // invalidate every retained route count (the
+                        // pre-send hook never sees this path).
+                        this.#recordCompressionTokenCount(
+                          resp.info,
+                          requestRouteKey,
+                        );
+                      }
                     }
                   } catch (error) {
                     streamFailed = true;
@@ -5686,7 +6047,7 @@ export class Session implements SessionContext {
                   this.todoStopGuard.pauseForTrustedRetry();
 
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  // Aligned with use-llm-stream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);
                   const errorMessage =
                     error instanceof Error ? error.message : String(error);
@@ -5733,7 +6094,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(pendingSend.signal);
@@ -5898,7 +6259,7 @@ export class Session implements SessionContext {
       },
     ).finally(() => {
       if (managedMemoryRecallStarted) {
-        this.config.getGeminiClient().finishManagedAutoMemoryRecall();
+        this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
     });
   }
@@ -6315,8 +6676,12 @@ export class Session implements SessionContext {
         | ChannelDeliveryResponseBlock
         | undefined;
       let channelDeliveryCheckpoint = 0;
-      let providerSendChat: GeminiChat | undefined;
+      let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      // The send result assigns this before any read; null-stream paths
+      // return before the record site, so a pre-send route computation here
+      // would only be discarded.
+      let requestRouteKey = '';
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -6610,6 +6975,7 @@ export class Session implements SessionContext {
           };
         }
 
+        requestRouteKey = sendResult.requestRouteKey;
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
@@ -6706,6 +7072,12 @@ export class Session implements SessionContext {
             );
             functionCalls.length = 0;
           }
+          if (response.type === StreamEventType.COMPRESSED) {
+            // In-send compression rewrote the shared history; invalidate
+            // every retained route count (the pre-send hook never sees
+            // this path).
+            this.#recordCompressionTokenCount(response.info, requestRouteKey);
+          }
         }
       } catch (error) {
         streamFailed = true;
@@ -6780,7 +7152,7 @@ export class Session implements SessionContext {
       );
 
       if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata);
+        this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,
@@ -6962,22 +7334,76 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       update: projectedUpdate,
     };
+    const canUpdateTodoPlanRevision =
+      update.sessionUpdate === 'plan' &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN;
+    const todoPlanRevision = canUpdateTodoPlanRevision
+      ? this.#readTodoPlanRevision(update)
+      : undefined;
+    const preservesPendingRevision =
+      todoPlanRevision !== undefined &&
+      todoPlanRevision.structure === this.activeTodoPlanStructure;
+    const previousActiveTodoPlanRevision = this.activeTodoPlanRevision;
+    const previousActiveTodoPlanStructure = this.activeTodoPlanStructure;
+    const previousWorkflowRevision =
+      this.config.getSessionWorkflowPlanRevision?.();
 
-    if (update.sessionUpdate === 'plan') {
-      // Clear before delivery: a plan update the client never receives
-      // must not stay bound to the next exit_plan_mode approval. The
-      // capture below re-stamps only after delivery succeeds.
-      this.activeTodoPlanRevision = undefined;
+    if (canUpdateTodoPlanRevision && !preservesPendingRevision) {
+      // Clear during delivery so a replacement cannot be approved before the
+      // client sees it. Success captures the new revision below; failure
+      // restores the previous one while the session remains in PLAN mode.
+      this.clearActiveTodoPlanRevision();
     }
-    await this.client.sessionUpdate(params);
-    if (update.sessionUpdate === 'plan') {
-      this.#captureTodoPlanRevision(update);
+    try {
+      await this.client.sessionUpdate(params);
+    } catch (error) {
+      if (
+        canUpdateTodoPlanRevision &&
+        !preservesPendingRevision &&
+        this.config.getApprovalMode() === ApprovalMode.PLAN
+      ) {
+        this.activeTodoPlanRevision = previousActiveTodoPlanRevision;
+        this.activeTodoPlanStructure = previousActiveTodoPlanStructure;
+        this.config.setSessionWorkflowPlanRevision?.(previousWorkflowRevision);
+      }
+      throw error;
+    }
+    if (
+      canUpdateTodoPlanRevision &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN &&
+      todoPlanRevision?.allPending
+    ) {
+      if (
+        this.activeTodoPlanRevision?.planId !== todoPlanRevision.planId ||
+        this.activeTodoPlanRevision?.sourceCallId !==
+          todoPlanRevision.sourceCallId
+      ) {
+        this.todoPlanRevisionGeneration++;
+      }
+      this.activeTodoPlanRevision = {
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+      };
+      this.activeTodoPlanStructure = todoPlanRevision.structure;
+      this.config.setSessionWorkflowPlanRevision?.({
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+        todoIds: todoPlanRevision.todoIds,
+      });
     }
   }
 
-  #captureTodoPlanRevision(
+  #readTodoPlanRevision(
     update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
-  ): void {
+  ):
+    | {
+        planId: string;
+        sourceCallId: string;
+        todoIds: string[];
+        structure: string;
+        allPending: boolean;
+      }
+    | undefined {
     const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
     const plan = isRecord(meta?.['qwenTodoPlan'])
       ? meta['qwenTodoPlan']
@@ -6987,12 +7413,58 @@ export class Session implements SessionContext {
       : undefined;
     const planId = plan?.['id'];
     const sourceCallId = transcript?.['planToolCallId'];
-    this.activeTodoPlanRevision =
+    const workflowPlan = meta?.['qwenSessionWorkflow'] === true;
+    const hasValidIdentity =
       typeof planId === 'string' &&
+      planId.trim() !== '' &&
       typeof sourceCallId === 'string' &&
-      update.entries.length > 0
-        ? { planId, sourceCallId }
+      sourceCallId.trim() !== '' &&
+      update.entries.length > 0;
+    const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
+    if (!workflowEnabled || !workflowPlan || !hasValidIdentity)
+      return undefined;
+
+    const todos = update.entries.flatMap((entry) => {
+      const entryRecord = entry as unknown as Record<string, unknown>;
+      const entryMeta = isRecord(entryRecord['_meta'])
+        ? entryRecord['_meta']
         : undefined;
+      const todo = isRecord(entryMeta?.['qwenTodo'])
+        ? entryMeta['qwenTodo']
+        : undefined;
+      const todoId = todo?.['id'];
+      const blockedBy = todo?.['blockedBy'];
+      if (
+        typeof todoId !== 'string' ||
+        todoId.trim() === '' ||
+        (blockedBy !== undefined &&
+          (!Array.isArray(blockedBy) ||
+            !blockedBy.every((dependency) => typeof dependency === 'string')))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: todoId,
+          content: entry.content,
+          priority: entry.priority,
+          blockedBy: blockedBy ?? [],
+        },
+      ];
+    });
+    const todoIds = todos.map((todo) => todo.id);
+    if (
+      todos.length !== update.entries.length ||
+      new Set(todoIds).size !== todoIds.length
+    )
+      return undefined;
+    return {
+      planId,
+      sourceCallId,
+      todoIds,
+      structure: JSON.stringify([planId, todos]),
+      allPending: update.entries.every((entry) => entry.status === 'pending'),
+    };
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -7089,8 +7561,8 @@ export class Session implements SessionContext {
     }
   }
 
-  #getCurrentChat(): GeminiChat {
-    return this.config.getGeminiClient()!.getChat();
+  #getCurrentChat(): LlmChat {
+    return this.config.getLlmClient()!.getChat();
   }
 
   async #runWithFullTurnModel<T>(
@@ -7109,9 +7581,9 @@ export class Session implements SessionContext {
   /**
    * Create the MessageDisplay hook dispatcher for one model call's streamed
    * reply, or null when the hook isn't registered (the common case — keeps
-   * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
+   * the streaming loops zero-cost). The ACP surface consumes LlmChat's
    * raw stream directly rather than going through
-   * GeminiClient.sendMessageStream, so it has to fire this hook itself —
+   * LlmClient.sendMessageStream, so it has to fire this hook itself —
    * with the same contract as the terminal UI path in client.ts: debounced
    * cumulative text, one message_id per model call, and an is_final firing
    * on every non-aborted exit (delivered by awaiting `finish()` in a
@@ -7157,7 +7629,7 @@ export class Session implements SessionContext {
       ) => Promise<BeforeModelSendDecision>;
     } = {},
   ): Promise<AutoCompressionSendResult> {
-    const geminiClient = this.config.getGeminiClient()!;
+    const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
       if (decision.kind === 'stop') {
@@ -7181,13 +7653,12 @@ export class Session implements SessionContext {
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {
-        const compressed = await geminiClient.tryCompressChat(
+        const compressed = await llmClient.tryCompressChat(
           promptId,
           false,
           abortSignal,
         );
         compressionInfo = compressed;
-        this.#recordCompressionTokenCount(compressed);
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,
         );
@@ -7240,18 +7711,38 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (!compressionInfo) {
-      this.#syncPromptTokenCountWithCurrentChat();
+    const model =
+      options.getModelOverride?.() ??
+      options.modelOverride ??
+      this.config.getModel();
+    const requestRouteKey = await this.#requestRouteKeyForModel(model);
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after request route key resolution for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+    // Recorded with the resolved request route key: a COMPRESSED result
+    // must invalidate every retained route count, not just the active
+    // route's (see #invalidateRouteTokenCountsForCompression).
+    if (compressionInfo) {
+      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+    } else {
+      this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
 
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
-      const lastPromptTokenCount =
-        this.#getPostCompressionTokenCount(compressionInfo);
+      const lastPromptTokenCount = this.#getPostCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+      );
       if (lastPromptTokenCount > sessionTokenLimit) {
         debugLogger.warn(
           `Session token limit exceeded for prompt ${promptId}: ` +
-            `${lastPromptTokenCount} > ${sessionTokenLimit}. Send dropped.`,
+            `${lastPromptTokenCount} > ${sessionTokenLimit}. ` +
+            `requestRoute=${requestRouteKey}, activeModel=${this.config.getModel()}. ` +
+            'Send dropped.',
         );
         await this.#emitAgentDiagnosticMessageSafely(
           `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
@@ -7293,7 +7784,7 @@ export class Session implements SessionContext {
 
     if (message[0]?.functionResponse) {
       const memory =
-        await geminiClient.consumeManagedAutoMemoryRecall('tool_result');
+        await llmClient.consumeManagedAutoMemoryRecall('tool_result');
       if (memory?.prompt) {
         message = insertAfterFunctionResponses(message, [
           { text: memory.prompt },
@@ -7302,10 +7793,6 @@ export class Session implements SessionContext {
     }
 
     const chat = this.#getCurrentChat();
-    const model =
-      options.getModelOverride?.() ??
-      options.modelOverride ??
-      this.config.getModel();
     const request = {
       message,
       config: {
@@ -7316,7 +7803,7 @@ export class Session implements SessionContext {
     const responseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    return { responseStream };
+    return { responseStream, requestRouteKey };
   }
 
   #clearPendingRestoreNotices(): void {
@@ -7516,31 +8003,75 @@ export class Session implements SessionContext {
     };
   }
 
-  #recordCompressionTokenCount(info: ChatCompressionInfo): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+  #recordCompressionTokenCount(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      return;
+    }
+    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
     }
+  }
+
+  /**
+   * Compression rewrote the shared history, so EVERY retained route-keyed
+   * count is stale — not just the request route's. Drop them all and
+   * re-record the fresh post-compression count under the request route,
+   * retaining it under the active route too when the two differ (the
+   * compressed history is shared, so the count anchors both routes' next
+   * gate reads). Mirrors LlmChat clearing its keyed counts in the
+   * COMPRESSED branch of tryCompress; without this, in-send compressions
+   * (LlmChat.sendMessageStream's hard-tier rescue and reactive-overflow
+   * paths, surfaced as StreamEventType.COMPRESSED) would leave this cache
+   * holding pre-compression sizes and the gate would drop a returning
+   * route's send that fits the compressed history (#9529).
+   */
+  #invalidateRouteTokenCountsForCompression(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    this.lastPromptTokenCountsByRouteKey.clear();
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null && tokenCount > 0) {
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
+      const activeRouteKey = this.#currentRouteKey();
+      if (activeRouteKey !== requestRouteKey) {
+        this.lastPromptTokenCountsByRouteKey.set(activeRouteKey, tokenCount);
+      }
+    } else {
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountRouteKey = requestRouteKey;
+    }
+    this.lastPromptTokenCountChat = this.#getCurrentChat();
   }
 
   #recordPromptTokenCount(
     usageMetadata: GenerateContentResponseUsageMetadata,
+    routeKey = this.#currentRouteKey(),
   ): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     const tokenCount =
       usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
     if (tokenCount !== undefined && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(routeKey, tokenCount);
     }
   }
 
-  #getPostCompressionTokenCount(info: ChatCompressionInfo | null): number {
+  #getPostCompressionTokenCount(
+    info: ChatCompressionInfo | null,
+    routeKey = this.#currentRouteKey(),
+  ): number {
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null) {
       return tokenCount;
     }
 
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     return this.lastPromptTokenCount;
   }
 
@@ -7560,15 +8091,71 @@ export class Session implements SessionContext {
     return tokenCount;
   }
 
-  #syncPromptTokenCountWithCurrentChat(): void {
-    const chat = this.#getCurrentChat();
+  #currentRouteKey(): string {
+    // Optional chaining keeps partial Config test mocks from throwing; a
+    // missing identity degrades to one stable key, i.e. no route-change
+    // invalidation (mirrors LlmChat.currentRouteKey, #9454).
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  async #requestRouteKeyForModel(model: string): Promise<string> {
+    if (!this.config.getModelRouteIdentity) {
+      return '';
+    }
+    if (!model.endsWith('\0')) {
+      return this.config.getModelRouteIdentity(model);
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(model.slice(0, -1), { failClosed: true });
+    return this.config.getModelRouteIdentity(
+      runtimeView.model,
+      runtimeView.contentGeneratorConfig,
+    );
+  }
+
+  #setLastPromptTokenCount(routeKey: string, tokenCount: number): void {
+    this.lastPromptTokenCount = tokenCount;
+    this.lastPromptTokenCountRouteKey = routeKey;
     if (
-      this.lastPromptTokenCountChat &&
-      this.lastPromptTokenCountChat !== chat
+      !this.lastPromptTokenCountsByRouteKey.has(routeKey) &&
+      this.lastPromptTokenCountsByRouteKey.size >=
+        MAX_RETAINED_SESSION_ROUTE_COUNTS
     ) {
+      const oldestKey = this.lastPromptTokenCountsByRouteKey
+        .keys()
+        .next().value;
+      if (oldestKey !== undefined) {
+        this.lastPromptTokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
+    this.lastPromptTokenCountsByRouteKey.set(routeKey, tokenCount);
+  }
+
+  #syncPromptTokenCountWithCurrentChat(
+    routeKey = this.#currentRouteKey(),
+  ): void {
+    const chat = this.#getCurrentChat();
+    const chatChanged =
+      this.lastPromptTokenCountChat && this.lastPromptTokenCountChat !== chat;
+    if (chatChanged) {
+      this.lastPromptTokenCountsByRouteKey.clear();
       this.lastPromptTokenCount = 0;
+    } else if (this.lastPromptTokenCountRouteKey !== routeKey) {
+      if (
+        this.lastPromptTokenCountRouteKey !== undefined &&
+        this.lastPromptTokenCount > 0
+      ) {
+        this.lastPromptTokenCountsByRouteKey.set(
+          this.lastPromptTokenCountRouteKey,
+          this.lastPromptTokenCount,
+        );
+      }
+      this.lastPromptTokenCount =
+        this.lastPromptTokenCountsByRouteKey.get(routeKey) ?? 0;
     }
     this.lastPromptTokenCountChat = chat;
+    this.lastPromptTokenCountRouteKey = routeKey;
   }
 
   #isAbortError(error: unknown): boolean {
@@ -7923,6 +8510,22 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      // A missed one-shot arrives as a synthetic carrier whose prompt is the
+      // confirm-first notification ("ask the user before running it"). It
+      // inherits sessionMode from the task it stands for, so without this
+      // guard it would be wrapped in the execute-now header and run headless,
+      // with nobody attached to answer the confirmation. Carriers belong in
+      // the controller session; only real fires get a fresh child.
+      if (
+        !job.missed &&
+        job.sessionMode === 'per_run' &&
+        job.cronExpr !== '@wakeup' &&
+        !job.delivery &&
+        !detectAutonomousSentinel(job.prompt)
+      ) {
+        void this.#dispatchCronToFreshSession(job);
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
@@ -7935,6 +8538,88 @@ export class Session implements SessionContext {
       });
       void this.#drainCronQueue();
     });
+  }
+
+  /**
+   * Runs a per-run scheduled fire in a fresh child session created through the
+   * daemon. The scheduler has already booked the run; this attributes it to the
+   * child that accepted it. If the daemon cannot create the child, the fire
+   * falls back to this (persistent) session so it is not lost — a consumed
+   * one-shot has no scheduled retry — and the run record keeps the failure
+   * marker alongside the session it actually ran in.
+   */
+  async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
+    const scheduler = this.config.getCronScheduler();
+    const taskId = job.id ?? 'unknown';
+    // Captured before the awaited RPC below: processJob re-stamps this very
+    // jobs-map entry on the next matching minute, so a spawn that outlasts one
+    // interval would otherwise annotate the *next* fire's run record.
+    const firedAt = job.lastFiredAt;
+    const triggeredAt = firedAt ?? Date.now();
+    const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
+      if (!job.id || firedAt === undefined) return;
+      await scheduler
+        .annotateRunSession(job.id, firedAt, outcome)
+        .catch((error) => {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    };
+    let sessionId: string;
+    try {
+      const response = await this.client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: buildScheduledTaskRunPrompt({
+            id: taskId,
+            name: job.name,
+            cron: job.cronExpr ?? '',
+            prompt: job.prompt,
+            triggeredAt,
+            trigger: 'scheduled',
+          }),
+          completion: 'sent',
+          // Title the child from the task and its trigger time — never from
+          // the built prompt, whose first line is the execution-context
+          // header. Same shape the manual-run route gives its children.
+          name: scheduledTaskRunSessionName(
+            job.name ?? job.prompt,
+            triggeredAt,
+          ),
+          ...(job.id
+            ? {
+                sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+                sourceId: scheduledTaskRunSourceId(job.id),
+              }
+            : {}),
+          callerSessionId: this.sessionId,
+        },
+      );
+      const responseSessionId = response['sessionId'];
+      if (
+        typeof responseSessionId !== 'string' ||
+        responseSessionId.length === 0
+      ) {
+        throw new Error('bridge returned a missing session id');
+      }
+      sessionId = responseSessionId;
+    } catch (error) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      this.#enqueueCronPrompt({
+        prompt: job.prompt,
+        source: 'cron',
+        ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+      });
+      void this.#drainCronQueue();
+      return;
+    }
+    this.relatedAgentIds.add(sessionId);
+    await record({ sessionId });
   }
 
   #startCronSchedulerInRuntime(): Promise<void> {
@@ -8348,6 +9033,7 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -8439,6 +9125,15 @@ export class Session implements SessionContext {
                       );
                       functionCalls.length = 0;
                     }
+                    if (resp.type === StreamEventType.COMPRESSED) {
+                      // In-send compression rewrote the shared history;
+                      // invalidate every retained route count (the
+                      // pre-send hook never sees this path).
+                      this.#recordCompressionTokenCount(
+                        resp.info,
+                        requestRouteKey,
+                      );
+                    }
                   }
                 } catch (error) {
                   streamFailed = true;
@@ -8464,7 +9159,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(ac.signal);
                   }
@@ -8681,6 +9376,36 @@ export class Session implements SessionContext {
       });
     });
 
+    const workflowRegistry = this.config.getWorkflowRunRegistry();
+    this.#workflowStatusChangeCallback = (entry) => {
+      this.#activeWorkChanged();
+      if (entry) this.#rememberWorkflowHistory(entry);
+    };
+    workflowRegistry.setStatusChangeCallback(
+      this.#workflowStatusChangeCallback,
+    );
+    workflowRegistry.setSnapshotPersistedCallback((runId) => {
+      // The run is safely on disk now; drop the unpersisted copy so a
+      // deletion by another session cannot resurrect it on refresh. The
+      // latch makes that retirement stick against the late terminal
+      // emissions draining dispatches still produce (R7-5).
+      this.persistedWorkflowRunIds.add(runId);
+      this.unpersistedWorkflowHistory.delete(runId);
+    });
+    workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+      const entry = workflowRegistry.get(meta.runId);
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.runId,
+        status: meta.status,
+        kind: 'workflow',
+        continuesTodoStopGuardWorkChain:
+          !entry || !this.todoStopGuardBackgroundBaseline.workflows.has(entry),
+        todoWorkChainId: meta.todoWorkChainId,
+      });
+    });
+
     // Session title recorded (auto-generated after a turn, or an in-process
     // /rename) → notify attached clients. A title update is NOT an ACP
     // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
@@ -8703,6 +9428,25 @@ export class Session implements SessionContext {
           .catch(() => {
             // Best-effort: a dropped notification only delays the title
             // until the client's next session-list refresh.
+          });
+      });
+
+    // Shell-detected `gh pr create` bindings persist in the child's own
+    // sidecar write; the daemon never sees it, so carry the catalog-clock
+    // mark — version-watching clients then refetch the binding the same way
+    // they pick up automatic titles.
+    this.config
+      .getSessionService()
+      .setSessionPrBoundCallback((sessionId, pr) => {
+        void this.client
+          .extNotification('qwen/notify/session/pr-binding', {
+            v: 1,
+            sessionId,
+            pr: { number: pr.number, url: pr.url },
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the badge
+            // until the client's next catalog refresh.
           });
       });
 
@@ -8768,8 +9512,8 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
-    if (item.kind === 'agent') {
-      this.activeAgentNotificationAcceptances.add(item.taskId);
+    if (item.kind === 'agent' || item.kind === 'workflow') {
+      this.activeNotificationAcceptances.add(item.taskId);
       this.#activeWorkChanged();
     }
     try {
@@ -8779,8 +9523,8 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
-        if (item.kind === 'agent') {
-          this.activeAgentNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent' || item.kind === 'workflow') {
+          this.activeNotificationAcceptances.delete(item.taskId);
           this.#activeWorkChanged();
         }
       }
@@ -8904,6 +9648,8 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentWorkflowNotificationTaskId =
+          item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
@@ -8922,6 +9668,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
@@ -9042,6 +9789,7 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -9102,6 +9850,12 @@ export class Session implements SessionContext {
                   );
                   functionCalls.length = 0;
                 }
+                if (resp.type === StreamEventType.COMPRESSED) {
+                  // In-send compression rewrote the shared history;
+                  // invalidate every retained route count (the pre-send
+                  // hook never sees this path).
+                  this.#recordCompressionTokenCount(resp.info, requestRouteKey);
+                }
               }
             } catch (error) {
               streamFailed = true;
@@ -9133,7 +9887,7 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
+              this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
@@ -9471,12 +10225,21 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
+    // Only plan-involving transitions touch the revision: entering PLAN starts
+    // a fresh approval cycle and leaving PLAN abandons the draft, but an
+    // approved workflow plan keeps executing in a non-plan mode — switching
+    // between non-plan modes (default → auto-edit/yolo) must not disarm it
+    // mid-execution. Matches the sibling sessionApprovalMode ext route and the
+    // workspaceReload handler; the exit_plan_mode approval path deliberately
+    // retains the revision.
+    if (
+      previousApprovalMode !== approvalMode &&
+      (previousApprovalMode === ApprovalMode.PLAN ||
+        approvalMode === ApprovalMode.PLAN)
+    ) {
+      this.clearActiveTodoPlanRevision();
+    }
     if (approvalMode === ApprovalMode.PLAN) {
-      if (previousApprovalMode !== ApprovalMode.PLAN) {
-        // A redundant plan re-select keeps the revision captured by the
-        // live cycle; only a fresh entry starts a new approval cycle.
-        this.activeTodoPlanRevision = undefined;
-      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -9556,6 +10319,12 @@ export class Session implements SessionContext {
     const isRuntime =
       resolvedRoute?.isRuntime ??
       rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    this.reconcileReasoningSelection(effectiveModelId, {
+      persist: persistDefault,
+    });
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
         ? (resolvedRoute?.modelId ?? parsed.modelId)
@@ -9599,9 +10368,6 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    const persistDefault =
-      !this.requiresManagedConversationBinding &&
-      (options.persistDefault ?? true);
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
@@ -9636,6 +10402,175 @@ export class Session implements SessionContext {
         },
       },
     };
+  }
+
+  getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
+    // Runtime snapshots already include the persisted selection, not its defaults.
+    const authType = this.config.getAuthType?.();
+    const model =
+      authType && !this.config.getActiveRuntimeModelSnapshot?.()
+        ? this.config.getResolvedModelConfig?.(
+            authType,
+            this.config.getModel(),
+            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
+          )
+        : undefined;
+    if (model) return model.generationConfig.reasoning;
+    return (
+      this.settings.merged.model?.generationConfig as
+        | Partial<ContentGeneratorConfig>
+        | undefined
+    )?.reasoning;
+  }
+
+  reloadReasoningSelection(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.User);
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    this.reconcileReasoningSelection(this.config.getModel(), {
+      persist: !this.requiresManagedConversationBinding,
+    });
+  }
+
+  setSessionReasoningSelection(
+    selection: ReasoningSelection | undefined,
+  ): void {
+    this.sessionReasoningSelection = selection;
+  }
+
+  getSessionReasoningSelection(): ReasoningSelection | undefined {
+    return this.sessionReasoningSelection;
+  }
+
+  persistReasoningSelection(selection: ReasoningSelection): void {
+    if (this.requiresManagedConversationBinding) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Reasoning selection cannot be persisted for this session',
+      );
+    }
+
+    const key = 'model.reasoningEffort';
+    const persistScope = getPersistScopeForModelSelection(this.settings);
+    const clears = getWritableScopes(this.settings)
+      .filter(
+        (scope) =>
+          (selection === REASONING_EFFORT_DEFAULT || scope !== persistScope) &&
+          settingExistsInScope(key, this.settings.forScope(scope).settings),
+      )
+      .map((scope) => ({ scope, value: undefined }));
+    const writes =
+      selection === REASONING_EFFORT_DEFAULT
+        ? clears
+        : [{ scope: persistScope, value: selection }, ...clears];
+    const committed: Array<{ scope: SettingScope; value: unknown }> = [];
+    // setValues does not roll back scopes it already wrote.
+    for (const write of writes) {
+      const previous = this.settings.forScope(write.scope).settings.model
+        ?.reasoningEffort;
+      try {
+        this.writeReasoningSelection(write.scope, write.value);
+      } catch (error) {
+        this.settings.reloadScopeFromDisk(write.scope);
+        for (const previousWrite of committed.reverse()) {
+          try {
+            this.writeReasoningSelection(
+              previousWrite.scope,
+              previousWrite.value,
+            );
+          } catch (rollbackError) {
+            this.settings.reloadScopeFromDisk(previousWrite.scope);
+            debugLogger.warn(
+              `Failed to roll back reasoning preference: ${
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError)
+              }`,
+            );
+          }
+        }
+        throw error;
+      }
+      committed.push({ scope: write.scope, value: previous });
+    }
+  }
+
+  private reconcileReasoningSelection(
+    modelId: string,
+    options: { persist: boolean },
+  ): void {
+    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    let hasSessionSelection = this.sessionReasoningSelection !== undefined;
+    if (!hasSessionSelection && rawSelection === undefined) return;
+
+    let selection = hasSessionSelection
+      ? this.sessionReasoningSelection
+      : parseReasoningSelection(rawSelection);
+    const generation = this.config.getContentGeneratorConfig?.();
+    const thinkingMandatory = generation?.thinkingMandatory === true;
+    let supported =
+      selection !== undefined &&
+      selection !== REASONING_EFFORT_DEFAULT &&
+      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+
+    const appliesSessionDefault =
+      hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
+    if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      this.sessionReasoningSelection = undefined;
+      hasSessionSelection = false;
+      selection = parseReasoningSelection(rawSelection);
+      supported =
+        selection !== undefined &&
+        selection !== REASONING_EFFORT_DEFAULT &&
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+    }
+    if (
+      !hasSessionSelection &&
+      rawSelection !== undefined &&
+      !supported &&
+      options.persist
+    ) {
+      try {
+        this.persistReasoningSelection(REASONING_EFFORT_DEFAULT);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to clear incompatible reasoning preference: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
+    if (
+      supported &&
+      generation &&
+      modelReasoning &&
+      !modelReasoning.toggleOnly
+    ) {
+      clearReasoningRequestOverrides(generation);
+    }
+    const effectiveSelection =
+      (supported || appliesSessionDefault) && selection !== undefined
+        ? selection
+        : REASONING_EFFORT_DEFAULT;
+    applyReasoningSelection(
+      this.config,
+      effectiveSelection,
+      this.getDefaultReasoningConfig(),
+    );
+  }
+
+  private writeReasoningSelection(scope: SettingScope, value: unknown): void {
+    const key = 'model.reasoningEffort';
+    this.settings.setValue(scope, key, value, undefined, {
+      throwOnWriteFailure: true,
+    });
+    if (value !== undefined) return;
+    const file = this.settings.forScope(scope);
+    for (const settings of [file.settings, file.originalSettings]) {
+      if (settings)
+        deleteNestedPropertySafe(settings as Record<string, unknown>, key);
+    }
+    this.settings.recomputeMerged();
   }
 
   /**
@@ -10360,9 +11295,14 @@ export class Session implements SessionContext {
   /**
    * Assemble the per-turn system reminders the model needs to see at the
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
-   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * branches in `LlmClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
    * silently inert and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `LlmClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
     const reminders: Part[] = [];
@@ -10381,6 +11321,18 @@ export class Session implements SessionContext {
         reminders.push({ text: getArenaSystemReminder(configPath) });
       } catch {
         // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    // The output-style reminder, exactly as `LlmClient.sendMessageStream`
+    // sends it: the ACP prompt carries the style section, so it needs the
+    // same per-turn nudge or the style fades over a long session.
+    if (this.config.getOutputStyle?.()) {
+      const outputStyle = resolveMainSessionOutputStyle(this.config);
+      if (outputStyle) {
+        reminders.push({
+          text: wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+        });
       }
     }
 
@@ -10443,6 +11395,10 @@ export class Session implements SessionContext {
     let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let todoPlanApprovalGeneration: number | undefined;
+    let todoPlanApprovalRevision:
+      | { planId: string; sourceCallId: string }
+      | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupAgentToolResources = () => {
@@ -11011,7 +11967,7 @@ export class Session implements SessionContext {
             // Parallels coreToolScheduler.ts.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
@@ -11074,8 +12030,16 @@ export class Session implements SessionContext {
                 // Drop through to the manual-approval flow below.
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable';
-                autoModeFallbackMessage = outcome.message;
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write';
+
+                if (
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write'
+                ) {
+                  autoModeFallbackMessage = outcome.message;
+                }
+
                 if (wasAutoModeManualFallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
@@ -11092,6 +12056,46 @@ export class Session implements SessionContext {
 
           let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const cancelStaleTodoPlanApproval = async () => {
+            const configRevision =
+              this.config.getSessionWorkflowPlanRevision?.();
+            if (
+              todoPlanApprovalGeneration === undefined ||
+              !todoPlanApprovalRevision ||
+              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
+                this.activeTodoPlanRevision?.planId ===
+                  todoPlanApprovalRevision.planId &&
+                this.activeTodoPlanRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId &&
+                configRevision?.planId === todoPlanApprovalRevision.planId &&
+                configRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId)
+            ) {
+              return undefined;
+            }
+            try {
+              await confirmationDetails?.onConfirm(
+                ToolConfirmationOutcome.Cancel,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
+              );
+            }
+            onStopAfterPermissionCancel?.();
+            return earlyErrorResponse(
+              new Error(
+                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
+              ),
+              toolName,
+              {
+                status: 'cancelled',
+                errorType: undefined,
+                executionStatus: 'not_started',
+                stopAfterPermissionCancel: true,
+              },
+            );
+          };
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
@@ -11398,6 +12402,22 @@ export class Session implements SessionContext {
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
               );
+              const workflowPlanRevision = isExitPlanModeTool
+                ? this.config.getSessionWorkflowPlanRevision?.()
+                : undefined;
+              const qwenTodoApproval =
+                isExitPlanModeTool &&
+                this.activeTodoPlanRevision &&
+                workflowPlanRevision?.planId ===
+                  this.activeTodoPlanRevision.planId &&
+                workflowPlanRevision.sourceCallId ===
+                  this.activeTodoPlanRevision.sourceCallId
+                  ? this.activeTodoPlanRevision
+                  : undefined;
+              if (qwenTodoApproval) {
+                todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
+                todoPlanApprovalRevision = qwenTodoApproval;
+              }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 options: permissionOptions,
@@ -11416,11 +12436,7 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
-                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
-                      ? {
-                          qwenTodoApproval: this.activeTodoPlanRevision,
-                        }
-                      : {}),
+                    ...(qwenTodoApproval ? { qwenTodoApproval } : {}),
                   },
                 },
               };
@@ -11462,6 +12478,9 @@ export class Session implements SessionContext {
                 if (permissionRequestCancellation) {
                   return permissionRequestCancellation;
                 }
+                const staleTodoPlanApproval =
+                  await cancelStaleTodoPlanApproval();
+                if (staleTodoPlanApproval) return staleTodoPlanApproval;
                 outcome = resolvePermissionOutcome(
                   output,
                   offeredPermissionOptions,
@@ -11791,6 +12810,8 @@ export class Session implements SessionContext {
           if (executionBoundaryCancellation) {
             return executionBoundaryCancellation;
           }
+          const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
+          if (staleTodoPlanApproval) return staleTodoPlanApproval;
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&
@@ -12028,7 +13049,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-              this.activeTodoPlanRevision = undefined;
+              this.clearActiveTodoPlanRevision();
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }
@@ -12447,7 +13468,7 @@ export class Session implements SessionContext {
       });
     } finally {
       if (terminalStatus && terminalStatus !== 'cancelled') {
-        this.config.getGeminiClient().recordCompletedToolCall(toolName, args);
+        this.config.getLlmClient().recordCompletedToolCall(toolName, args);
       }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });
@@ -12489,14 +13510,24 @@ export class Session implements SessionContext {
       : undefined;
 
     switch (result.type) {
-      case 'submit_prompt':
-        // Command wants to submit a prompt to the model
-        // Convert PartListUnion to Part[]
+      case 'submit_prompt': {
+        const expandedPrompt = normalizePartList(result.content);
+        const attachmentBlocks =
+          result.resolvedCommand?.kind === CommandKind.BUILT_IN
+            ? []
+            : originalPrompt.filter((block) => block.type !== 'text');
+        const attachmentParts =
+          attachmentBlocks.length === 0
+            ? []
+            : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
+                deferBridgeConversions: true,
+              });
         return this.#applyBridgeConversionsIfNeeded(
-          normalizePartList(result.content),
+          [...attachmentParts, ...expandedPrompt],
           abortSignal,
           onFullTurnModel,
         );
+      }
 
       case 'message': {
         if (result.messageType === 'error') {
