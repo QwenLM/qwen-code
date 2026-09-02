@@ -118,6 +118,7 @@ import {
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
+import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   resolveSessionRestoreTimeoutMs,
   restoreRetryAfterSeconds,
@@ -317,6 +318,31 @@ function safeTransportFailureCode(error: unknown): string | undefined {
   return typeof code === 'string' && /^[a-z0-9_.-]{1,64}$/iu.test(code)
     ? code
     : undefined;
+}
+
+function safeTransportFailureDetail(error: unknown): string | undefined {
+  if (!isRecord(error) || error['code'] !== 'ndjson_queue_limit_exceeded') {
+    return undefined;
+  }
+  const queueError = error as Partial<NdJsonQueueLimitError>;
+  const budget =
+    typeof queueError.budget === 'string' &&
+    /^[a-z0-9_.-]{1,64}$/iu.test(queueError.budget)
+      ? queueError.budget
+      : 'unknown';
+  const numbers: string[] = [];
+  for (const value of [
+    queueError.requiredBytes,
+    queueError.availableBytes,
+    queueError.maxQueuedBytes,
+  ]) {
+    numbers.push(
+      typeof value === 'number' && Number.isFinite(value)
+        ? String(Math.max(0, Math.floor(value)))
+        : '?',
+    );
+  }
+  return `${budget}:required=${numbers[0]}:available=${numbers[1]}:cap=${numbers[2]}`;
 }
 
 function sessionSourceRequestMeta(
@@ -962,6 +988,12 @@ interface ChannelInfo {
   transportFailureInitiatedTeardown: boolean;
   /** Safe bounded code retained for telemetry; never the raw error message. */
   transportFailureCode?: string;
+  /**
+   * Bounded queue-budget detail for `ndjson_queue_limit_exceeded` transport
+   * failures: which budget fired plus required/available/cap bytes. Derived
+   * from typed error fields only; never the raw error message.
+   */
+  transportFailureDetail?: string;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -4601,6 +4633,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.transportFailed = true;
         info.transportFailureCode = safeTransportFailureCode(error);
+        info.transportFailureDetail = safeTransportFailureDetail(error);
         info.isDying = true;
         info.channelLiveness?.stop();
         clearInFlightExtensionRefreshes(info.connection);
@@ -4707,12 +4740,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     info.transportFailureCode,
                 }
               : {}),
+            ...(info.transportFailureDetail
+              ? {
+                  'qwen-code.daemon.channel.transport_error_detail':
+                    info.transportFailureDetail,
+                }
+              : {}),
             ...(exitInfo?.signalCode
               ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
               : {}),
           });
           writeStderrLine(
-            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}${info.transportFailureDetail ? `, transport_detail=${info.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`,
           );
         }
         for (const sid of sessions) {
@@ -5502,16 +5541,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `applyModelServiceId` for rationale (race against
       // transportClosedReject, publish model_switched on success,
       // model_switch_failed on failure, don't tear down the session).
+      // The outcome is reported to the caller via `modelApplied` so a
+      // create carrying a selection can tell a confirmed switch from a
+      // silent fallback to the agent default model.
+      let modelApplied: boolean | undefined;
       if (modelServiceId) {
-        await applyModelServiceId(
+        modelApplied = await applyModelServiceId(
           entry,
           modelServiceId,
           initTimeoutMs,
           clientId,
-        ).catch(() => {
-          // Already published `model_switch_failed`; session stays
-          // operational on the agent's default model.
-        });
+        ).then(
+          () => true,
+          () => false,
+        );
       }
 
       if (approvalMode) {
@@ -5562,6 +5605,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.parentSessionId
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
+        ...(modelApplied !== undefined ? { modelApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
       };
@@ -11314,7 +11358,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
           );
         }
       }
@@ -11466,7 +11510,51 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     setSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry) return;
-      entry.prs = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
+      const next = prs.map(toSessionPrInfo).slice(-SESSION_PR_LIST_LIMIT);
+      const current = entry.prs ?? [];
+      const sameIssueList = (
+        left: SessionPrInfo['issues'],
+        right: SessionPrInfo['issues'],
+      ): boolean =>
+        JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+      const unchanged =
+        current.length === next.length &&
+        current.every(
+          (p, index) =>
+            p.number === next[index]!.number &&
+            p.url === next[index]!.url &&
+            p.state === next[index]!.state &&
+            sameIssueList(p.issues, next[index]!.issues),
+        );
+      entry.prs = next;
+      if (unchanged) return;
+      // The reconciled list DIVERGES from what the caller's mutation
+      // already published: past the cap the positional merge above and the
+      // sidecar's provenance-ranked cap evict different entries, so the
+      // mutation's own `session_metadata_updated` event carried the
+      // pre-reconcile list, and a revision-gated refetch landing in the
+      // bump→rewrite window cached it with no re-trigger. Publish the
+      // authoritative list and advance the catalog so event consumers and
+      // refetchers converge now instead of on unrelated churn. The
+      // matching-list case above stays silent — reconciliation below the
+      // cap is a no-op and must not double the event stream.
+      markSessionCatalogChanged();
+      try {
+        entry.events.publish({
+          type: 'session_metadata_updated',
+          data: {
+            sessionId,
+            // Echo the current name: SDK folds treat an absent displayName
+            // as "cleared", so a pr-only event must not blank the title.
+            ...(entry.displayName !== undefined
+              ? { displayName: entry.displayName }
+              : {}),
+            prs: entry.prs,
+          },
+        });
+      } catch {
+        /* bus already closed */
+      }
     },
 
     async getSessionArtifacts(sessionId, context) {

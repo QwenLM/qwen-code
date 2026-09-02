@@ -1112,6 +1112,13 @@ export interface DaemonSession {
   sourceId?: string;
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /**
+   * Present on a create response when the request carried `modelServiceId`.
+   * `false` means the spawn-time model switch failed and the session is
+   * running on the agent default model (also surfaced via the
+   * `model_switch_failed` session event).
+   */
+  modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
@@ -1460,6 +1467,26 @@ export interface DaemonSessionListPage {
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
+}
+
+/** One content-search hit: the matching session plus an excerpt of the match. */
+export interface DaemonSessionSearchMatch {
+  session: DaemonSessionSummary;
+  /** Short single-line excerpt of the first matching message. */
+  snippet: string;
+}
+
+export interface DaemonSessionSearchResult {
+  results: DaemonSessionSearchMatch[];
+}
+
+export interface DaemonSessionSearchOptions {
+  /**
+   * Maximum matching sessions to return; the server rejects values outside
+   * 1–50 with 400 `invalid_search_max_results`.
+   */
+  maxResults?: number;
+  signal?: AbortSignal;
 }
 
 export interface DaemonSessionCatalogVersion {
@@ -1961,6 +1988,7 @@ export interface DaemonWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface DaemonWorkspaceProviderModel {
@@ -2981,8 +3009,18 @@ export interface SetModelResult {
 }
 
 /** Returned from `POST /session/:id/config-option`. */
+export type ReasoningSelection =
+  | 'none'
+  | 'default'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  persisted: boolean;
 }
 
 /** Returned from `POST /session/:id/language`. */

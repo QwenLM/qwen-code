@@ -54,6 +54,11 @@ const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {
+  // Every test below resets the module registry and re-imports the full
+  // serve module graph; under heavy parallel CI load that can exceed the
+  // default timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
     vi.resetModules();

@@ -68,6 +68,7 @@ const mockRouterGetTarget = vi.hoisted(() => vi.fn());
 const mockRouterHandleSessionDied = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
+const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
@@ -98,6 +99,7 @@ const mockSessionRouter = vi.hoisted(() =>
     handleSessionDied: mockRouterHandleSessionDied,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
+    setChannelApprovalMode: mockRouterSetChannelApprovalMode,
     setChannelScope: mockRouterSetChannelScope,
   })),
 );
@@ -679,6 +681,10 @@ describe('startCommand.handler', () => {
   it('starts a standalone AcpBridge before creating the channel', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      approvalMode: 'yolo',
+    });
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
     });
@@ -707,9 +713,16 @@ describe('startCommand.handler', () => {
       mockParsedChannelConfig.sessionScope,
       expect.any(String),
     );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'telegram',
+      'yolo',
+    );
     expect(mockCreateChannel).toHaveBeenCalledWith(
       'telegram',
-      mockParsedChannelConfig,
+      expect.objectContaining({
+        ...mockParsedChannelConfig,
+        approvalMode: 'yolo',
+      }),
       bridge,
       expect.objectContaining({ router }),
     );
@@ -1149,6 +1162,7 @@ describe('startCommand.handler', () => {
       cwd: `/tmp/${name}`,
       model: 'shared-model',
       sessionScope: name === 'first' ? 'thread' : 'single',
+      approvalMode: name === 'first' ? 'yolo' : 'default',
     }));
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
@@ -1176,6 +1190,14 @@ describe('startCommand.handler', () => {
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('first', 'thread');
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('second', 'single');
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'first',
+      'yolo',
+    );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'second',
+      'default',
+    );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
       1,
       'first',
