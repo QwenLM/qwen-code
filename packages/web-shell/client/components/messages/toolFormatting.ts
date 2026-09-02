@@ -24,6 +24,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   todo_write: 'TodoList',
   get_goal: 'Goal',
   update_goal: 'UpdateGoal',
+  propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',

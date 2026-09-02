@@ -1081,6 +1081,7 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
   terminate_reason?: string;
   result?: string;
   execution_summary?: string;
+  loop_type?: string;
 
   constructor(
     subagent_name: string,
@@ -1089,6 +1090,7 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
       terminate_reason?: string;
       result?: string;
       execution_summary?: string;
+      loop_type?: string;
     },
   ) {
     this['event.name'] = 'subagent_execution';
@@ -1098,6 +1100,7 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
     this.terminate_reason = options?.terminate_reason;
     this.result = options?.result;
     this.execution_summary = options?.execution_summary;
+    this.loop_type = options?.loop_type;
   }
 }
 

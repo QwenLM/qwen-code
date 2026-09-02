@@ -37,6 +37,18 @@ vi.mock('../utils/debugLogger.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
+vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../services/session-pr-service.js')
+  >()),
+  upsertSessionPrs: vi.fn(),
+}));
+vi.mock('../utils/github-prs.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/github-prs.js')>()),
+  fetchAttributionRepoKeys: vi.fn(),
+  fetchCurrentBranchName: vi.fn(),
+  fetchCurrentBranchPullRequest: vi.fn(),
+}));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
@@ -45,6 +57,12 @@ import {
   type ShellToolParams,
 } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
+import { upsertSessionPrs } from '../services/session-pr-service.js';
+import {
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
+  fetchCurrentBranchPullRequest,
+} from '../utils/github-prs.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
@@ -167,6 +185,12 @@ describe('ShellTool', () => {
         complete: vi.fn(),
         fail: vi.fn(),
       }),
+      getSessionService: vi.fn().mockReturnValue({
+        getPrSessionPathForArchiveState: vi
+          .fn()
+          .mockReturnValue('/test/proj/chats/test-session.pr.json'),
+        emitSessionPrBound: vi.fn(),
+      }),
     } as unknown as Config;
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
@@ -237,6 +261,671 @@ describe('ShellTool', () => {
         maximum: 600000,
       }),
     );
+  });
+
+  describe('gh pr create binding', () => {
+    const fetchCurrentBranchPullRequestMock = vi.mocked(
+      fetchCurrentBranchPullRequest,
+    );
+    const fetchCurrentBranchNameMock = vi.mocked(fetchCurrentBranchName);
+    const fetchAttributionRepoKeysMock = vi.mocked(fetchAttributionRepoKeys);
+    const upsertSessionPrsMock = vi.mocked(upsertSessionPrs);
+
+    beforeEach(() => {
+      // Default attribution identity: the fixture URLs belong to `o/r` and
+      // the session sits on `main`. Tests override per shape.
+      fetchCurrentBranchNameMock.mockResolvedValue('main');
+      fetchAttributionRepoKeysMock.mockResolvedValue({
+        resolved: 'github.com/o/r',
+      });
+      // Default: every offered candidate lands as a new binding. Tests that
+      // simulate an already-bound number override this per test.
+      upsertSessionPrsMock.mockImplementation(
+        async (_filePath, candidates) => ({
+          prs: [],
+          added: candidates.map((candidate) => candidate.number),
+          alreadyBound: [],
+          unresolved: [],
+        }),
+      );
+    });
+
+    async function runShell(
+      command: string,
+      result: Partial<ShellExecutionResult>,
+    ): Promise<void> {
+      const callsBefore = mockShellExecutionService.mock.calls.length;
+      const invocation = shellTool.build({
+        command,
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = invocation.execute(new AbortController().signal);
+      // Wait for THIS invocation's spawn: `.toHaveBeenCalled()` alone is
+      // already true after an earlier runShell in the same test, and
+      // resolving the stale resolver first would orphan the new one (the
+      // pre-spawn attribution snapshot yields before the service call).
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService.mock.calls.length).toBeGreaterThan(
+          callsBefore,
+        ),
+      );
+      resolveExecutionPromise(result as ShellExecutionResult);
+      await resultPromise;
+      // The binding hook is fire-and-forget; give its async gh attribution a
+      // beat so negative assertions cannot pass merely because the hook has
+      // not scheduled yet.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    it('writes the PR sidecar when gh attributes the create to the branch PR', async () => {
+      // A real create: the branch had no PR before the run (pre-run
+      // snapshot `none`), gh resolves the new one after.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --title x --body y', {
+        output: 'noise\nhttps://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [
+          {
+            number: 77,
+            url: 'https://github.com/o/r/pull/77',
+            state: 'open',
+            source: 'create',
+          },
+        ],
+      );
+      // The daemon never sees the child's sidecar write; the catalog
+      // notification is what makes the badge appear.
+      const sessionService = mockConfig.getSessionService() as unknown as {
+        emitSessionPrBound: ReturnType<typeof vi.fn>;
+      };
+      expect(sessionService.emitSessionPrBound).toHaveBeenCalledWith(
+        'test-session',
+        {
+          number: 77,
+          url: 'https://github.com/o/r/pull/77',
+          state: 'open',
+        },
+      );
+    });
+
+    it('binds the PR gh resolved even when a later echo prints another URL', async () => {
+      // A supersede/changelog echo printing a second same-repo URL must not
+      // steer the binding: gh's own resolution for the branch wins.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output:
+          'https://github.com/o/r/pull/100\nsuperseded by https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 100 })],
+      );
+    });
+
+    it('does not bind when the create fails without a URL', async () => {
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
+      await runShell('gh pr create --title x', {
+        output: 'error: not logged in',
+        exitCode: 1,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a non-zero exit even when the output carries a URL', async () => {
+      // A compound command can exit non-zero after another segment printed a
+      // PR URL; only a fully successful run may bind.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
+        number: 1234,
+        url: 'https://github.com/o/r/pull/1234',
+        state: 'open',
+      });
+      await runShell('gh pr create --fill; cat notes.txt', {
+        output: 'https://github.com/o/r/pull/1234\n',
+        exitCode: 1,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a URL that gh did not vouch for', async () => {
+      // The execution gate passes for these shapes, but gh resolves no PR
+      // for the working branch — nothing was created, so nothing binds,
+      // whatever same-repo URL the output carries.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
+      await runShell('gh pr create --fill; cat notes.txt', {
+        output: 'create failed\nhttps://github.com/o/r/pull/1234\n',
+        exitCode: 0,
+        aborted: false,
+      });
+      await runShell(
+        'echo "retry: npm test && gh pr create --fill" && cat pr_url.txt',
+        {
+          output: 'https://github.com/o/r/pull/42\n',
+          exitCode: 0,
+          aborted: false,
+        },
+      );
+      await runShell('echo https://github.com/o/r/pull/42 # && gh pr create', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when gh resolves a PR whose URL is absent from the output', async () => {
+      // `gh pr create --help` passes the execution gate; no PR existed
+      // before the run, gh resolves one after, but this run printed no
+      // created URL for it — the output check declines.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 5,
+        url: 'https://github.com/o/r/pull/5',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --help', {
+        output: 'usage: gh pr create\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('attributes against the execution directory, not the target dir', async () => {
+      // The `directory` parameter may point at another registered
+      // workspace; gh must attribute the repo the command actually ran in,
+      // or a `directory`-parameter create binds nothing (or a wrong-repo
+      // PR whose URL happens to appear in the output).
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir/nested',
+        is_background: false,
+      });
+      const resultPromise = invocation.execute(new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      } as ShellExecutionResult);
+      await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+        '/test/dir/nested',
+        undefined,
+      );
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('passes inline gh credentials from the command to the verification legs', async () => {
+      // The gate advertises `GH_TOKEN=x gh pr create --fill`; both gh legs
+      // must authenticate the way the create itself did, or an inline-token
+      // create with no ambient gh auth verifies bare and silently misses.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('GH_TOKEN=t0ken gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      // The inline record is an OVERLAY of the full process env: the gh
+      // legs receive it as the child's ENTIRE environment, so a bare
+      // partial record would drop PATH/HOME and fail every leg before it
+      // authenticates — and the repo-identity leg needs the token too.
+      const overlayEnv = { ...process.env, GH_TOKEN: 't0ken' };
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+        '/test/dir',
+        overlayEnv,
+      );
+      expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+        '/test/dir',
+        overlayEnv,
+      );
+    });
+
+    it('does not bind when gh resolves a merged or closed PR', async () => {
+      // The retry shape passes the execution gate and exits 0 without
+      // creating anything; gh resolves the branch's EXISTING merged PR, and
+      // the state gate must decline it — binding would stamp 'open' over a
+      // merged state and move the entry to the tail with a fresh createdAt.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'merged',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind an open PR the branch already had before the run', async () => {
+      // The retry shape exits 0 through its view segment and prints the
+      // existing PR's URL. The pre-run snapshot matches the post-run
+      // resolution, proving nothing was created — the session must not be
+      // stamped as creator of a PR it merely resolved (a fresh createdAt
+      // would falsify the badge's binding-time order, and at the cap the
+      // single candidate would evict a genuine binding).
+      fetchCurrentBranchPullRequestMock.mockReset();
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run snapshot errored', async () => {
+      // An errored pre-run fetch proves nothing about the branch's prior
+      // PRs; failing open would bind the branch's existing PR as this
+      // session's creation when the post-run fetch recovers. The post-run
+      // value is a persistent fallback: the errored snapshot declines before
+      // any second fetch, so a second Once would leak into later tests.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'error',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValue({
+        status: 'pr',
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not re-emit when the resolved PR is already bound', async () => {
+      // The pre-run snapshot missed the branch's PR (a gh flake before the
+      // run), so the resolution reaches persistence; the write reports the
+      // number alreadyBound, so nothing is re-stamped and no catalog
+      // notification fires.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+        headRefName: 'main',
+      });
+      upsertSessionPrsMock.mockResolvedValue({
+        prs: [],
+        added: [],
+        alreadyBound: [42],
+        unresolved: [],
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/o/r/pull/42\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [
+          {
+            number: 42,
+            url: 'https://github.com/o/r/pull/42',
+            state: 'open',
+            source: 'create',
+          },
+        ],
+      );
+      const sessionService = mockConfig.getSessionService() as unknown as {
+        emitSessionPrBound: ReturnType<typeof vi.fn>;
+      };
+      expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
+    });
+
+    it('binds when a promote is refused after the command settled', async () => {
+      // The promote abort fires with kind 'background', but the child had
+      // already completed with exit 0 and full output — the run still goes
+      // through the binding gate.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      const setPromoteAc = vi.fn();
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = (invocation as ShellToolInvocation).execute(
+        new AbortController().signal,
+        undefined,
+        {},
+        undefined,
+        setPromoteAc,
+      );
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      const promoteAc = setPromoteAc.mock.calls[0][0] as AbortController;
+      promoteAc.abort({ kind: 'background' });
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: true,
+      } as ShellExecutionResult);
+      await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('does not bind when a promote succeeds mid-run (documented scope)', async () => {
+      // A create promoted to the background settles through the registry:
+      // its output streams to a file and the foreground gate never sees
+      // it. Binding it is out of scope by design (see bindGhPrCreate).
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      // Only the pre-run snapshot is consumed: the post-run leg never runs.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      const setPromoteAc = vi.fn();
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = (invocation as ShellToolInvocation).execute(
+        new AbortController().signal,
+        undefined,
+        {},
+        undefined,
+        setPromoteAc,
+      );
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+        promoted: true,
+        pid: 99999,
+      } as ShellExecutionResult);
+      const result = await resultPromise;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(result.llmContent).toContain('promoted to background');
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind an is_background create (documented scope)', async () => {
+      // No pre-run snapshot is taken for a background run and its settle
+      // never reaches the gate — the documented limitation, pinned so a
+      // change to it is deliberate.
+      const invocation = shellTool.build({
+        command: 'gh pr create --fill',
+        directory: '/test/dir',
+        is_background: true,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      resolveExecutionPromise({
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      } as ShellExecutionResult);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(result.llmContent).toContain('bg_');
+      expect(fetchCurrentBranchPullRequestMock).not.toHaveBeenCalled();
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the command switched branches mid-run', async () => {
+      // A gate-passing compound that checks out another branch resolves the
+      // NEW branch's existing PR post-run (its view segment prints the URL
+      // and exits 0). The resolved head branch differs from the pre-run
+      // branch, so this run did not create it.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 9,
+        url: 'https://github.com/o/r/pull/9',
+        state: 'open',
+        headRefName: 'other-branch',
+      });
+      await runShell(
+        'git checkout other-branch && gh pr create --fill || gh pr view --json url --jq .url',
+        {
+          output: 'https://github.com/o/r/pull/9\n',
+          exitCode: 0,
+          aborted: false,
+        },
+      );
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run branch could not be captured', async () => {
+      // Detached HEAD or a git failure leaves the pre-run branch unproven;
+      // decline instead of binding whatever the post-run fetch resolves.
+      fetchCurrentBranchNameMock.mockResolvedValueOnce(undefined);
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a PR outside the pre-run repo identity', async () => {
+      // An in-command `git remote set-url origin` / `gh repo set-default`
+      // retargets the post-run resolution at another repo whose same-named
+      // branch holds an open PR; the pre-run repo keys decline it.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({
+        resolved: 'github.com/o/r',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 5,
+        url: 'https://github.com/victim/other/pull/5',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
+        output: 'https://github.com/victim/other/pull/5\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the pre-run repo identity could not be resolved', async () => {
+      // gh unable to answer which repo this checkout attributes to —
+      // decline like the errored-snapshot arm instead of binding anywhere.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({});
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+    });
+
+    it('binds a fork-layout create attributed to the parent repo', async () => {
+      // From a fork checkout gh resolves PR operations to the PARENT repo,
+      // so a create legitimately made in this layout carries the parent's
+      // key — the fork-parent identity is part of the pre-run set.
+      fetchAttributionRepoKeysMock.mockResolvedValueOnce({
+        resolved: 'github.com/fork/r',
+        parent: 'github.com/o/r',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('writes the binding to the archived sidecar when the session was archived mid-run', async () => {
+      // An archive transition landing during the gh round-trip must not
+      // strand the binding on a resurrected active sidecar: the location is
+      // re-resolved immediately before the locked mutation.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      const sessionService = mockConfig.getSessionService() as unknown as {
+        getSessionLocation: unknown;
+        getPrSessionPathForArchiveState: ReturnType<typeof vi.fn>;
+      };
+      sessionService.getSessionLocation = vi.fn().mockResolvedValue('archived');
+      sessionService.getPrSessionPathForArchiveState.mockImplementation(
+        (_sessionId: string, state: string) =>
+          `/test/proj/chats-${state}/test-session.pr.json`,
+      );
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats-archived/test-session.pr.json',
+        [expect.objectContaining({ number: 77 })],
+      );
+    });
   });
 
   describe('isCommandAllowed', () => {
@@ -5329,6 +6018,9 @@ describe('ShellTool', () => {
           const invocation = shellTool.build({ command, is_background: false });
           const promise = invocation.execute(mockAbortSignal);
 
+          await vi.waitFor(() =>
+            expect(mockShellExecutionService).toHaveBeenCalled(),
+          );
           resolveExecutionPromise({
             rawOutput: Buffer.from(''),
             output: '',
@@ -5355,6 +6047,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5388,6 +6083,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5418,6 +6116,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5445,6 +6146,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5479,6 +6183,9 @@ describe('ShellTool', () => {
           'gh pr create --title "x" --body "docs mention -b \'flag\' here"';
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5508,6 +6215,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5542,6 +6252,9 @@ describe('ShellTool', () => {
           'gh pr create --title "x" --body "ignored" --body "real summary"';
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5574,6 +6287,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5606,6 +6322,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5637,6 +6356,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5675,6 +6397,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5720,6 +6445,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5757,6 +6485,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',
@@ -5783,6 +6514,9 @@ describe('ShellTool', () => {
         const invocation = shellTool.build({ command, is_background: false });
         const promise = invocation.execute(mockAbortSignal);
 
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
           output: '',

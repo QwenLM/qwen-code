@@ -5,6 +5,7 @@
  */
 
 import {
+  type ModelProposedGoalsMode,
   ApprovalMode,
   APPROVAL_MODES,
   type AuthType,
@@ -45,6 +46,10 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+  stripAnsiAndControl,
+  type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -130,7 +135,14 @@ function formatApprovalModeError(value: string): Error {
   );
 }
 
-function parseApprovalModeValue(value: string): ApprovalMode {
+/**
+ * Normalizes an approval-mode spelling exactly the way boot accepts it:
+ * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
+ * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
+ * daemon's reload convergence so a settings file reload agrees with boot for
+ * every accepted spelling.
+ */
+export function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
   const canonical =
     normalized === 'auto_edit' || normalized === 'autoedit'
@@ -154,6 +166,11 @@ export interface CliArgs {
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
+  // Repeatable at runtime: yargs collects a repeated `--output-style` into an
+  // array despite `type: 'string'`, so the declaration carries the honest
+  // shape rather than leaving a reader to find out via `.trim is not a
+  // function`. `resolveOutputStyle` takes `unknown` and narrows.
+  outputStyle: string | string[] | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
   safeMode?: boolean | undefined;
@@ -608,6 +625,7 @@ export async function parseArguments(): Promise<CliArgs> {
           'append-system-prompt',
           DEFAULT_COMMAND_OPTIONS['append-system-prompt'],
         )
+        .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
         .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
         .option('yolo', DEFAULT_COMMAND_OPTIONS.yolo)
@@ -1274,6 +1292,128 @@ export class SessionIdConflictError extends Error {
     this.name = 'SessionIdConflictError';
     this.sessionId = sessionId;
   }
+}
+
+/**
+ * `goals.modelProposed` reaches core as a closed enum. Anything else in the
+ * settings file (a typo, an older value) falls back to the default rather
+ * than smuggling an unknown mode through.
+ */
+export function normalizeModelProposedGoals(
+  value: unknown,
+): ModelProposedGoalsMode | undefined {
+  return value === 'alwaysAsk' || value === 'disabled' ? value : undefined;
+}
+
+/**
+ * Resolves the output style for this session. `--output-style` wins over
+ * `general.outputStyle`; an unset, empty, or `default` value means no style.
+ * An unknown name is reported and the session falls back to the default
+ * style rather than refusing to start, so a typo in settings.json never
+ * locks the user out.
+ *
+ * Both inputs are typed `unknown` on purpose: `loadSettings` casts parsed
+ * settings.json straight to `Settings` without validating value types, and a
+ * repeated `--output-style` flag makes yargs hand over an array despite
+ * `type: 'string'`. A non-string value warns and falls back to the default
+ * style, on the same no-lockout principle as an unknown name.
+ */
+export function resolveOutputStyle(
+  argvStyle: unknown,
+  settingsStyle: unknown,
+): OutputStyleDefinition | undefined {
+  // yargs collects a repeated string flag into an array; the last value wins,
+  // as it does for every other repeated flag, and the user is told so.
+  let flagValue = argvStyle;
+  if (Array.isArray(argvStyle) && argvStyle.length > 0) {
+    flagValue = argvStyle[argvStyle.length - 1];
+    warnAboutOutputStyle(
+      `--output-style was given ${argvStyle.length} times; using the last value.`,
+    );
+  }
+  // An empty flag (`--output-style ""`) is treated as not given, so it falls
+  // through to the setting; `default` is the explicit way to select no style.
+  // "Empty" is judged on the same normalization the matcher uses below: ES
+  // `trim()` strips whitespace but almost no `\p{Cf}`, so a value made purely
+  // of zero-width/format characters would otherwise count as given and
+  // silently discard the setting, while the visually identical `""` falls
+  // through.
+  const flagName =
+    typeof flagValue === 'string'
+      ? sanitizeOutputStyleName(flagValue)
+      : undefined;
+  const flagGiven =
+    flagValue !== undefined && flagValue !== null && flagName !== '';
+  const raw = flagGiven ? flagValue : settingsStyle;
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const source = flagGiven ? '--output-style' : 'general.outputStyle';
+  if (typeof raw !== 'string') {
+    warnAboutOutputStyle(
+      `Invalid output style value (from ${source}): expected a string, got ${Array.isArray(raw) ? 'an array' : typeof raw}; using the default style.`,
+    );
+    return undefined;
+  }
+  // The flag path already sanitized above to decide "given"; reuse it rather
+  // than normalizing the same value twice.
+  const name =
+    flagGiven && flagName !== undefined
+      ? flagName
+      : sanitizeOutputStyleName(raw);
+  if (!name || name.toLowerCase() === 'default') {
+    return undefined;
+  }
+  const style = getBuiltInOutputStyle(name);
+  if (style) {
+    return style;
+  }
+  const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
+  warnAboutOutputStyle(
+    `Unknown output style "${truncateForDisplay(name)}" (from ${source}); using the default style. Available styles: ${known}.`,
+  );
+  return undefined;
+}
+
+/** Longest unknown-style name echoed back verbatim in the warning. */
+const OUTPUT_STYLE_NAME_ECHO_LIMIT = 64;
+
+/**
+ * A repo-committed `.qwen/settings.json` is untrusted input. Beyond the
+ * terminal escapes `stripAnsiAndControl` removes, Unicode format characters
+ * (bidi overrides, zero-width joiners/spaces, BOM) can reorder or hide text
+ * in the echoed name, so they are dropped here as well.
+ */
+function sanitizeOutputStyleName(raw: string): string {
+  return stripAnsiAndControl(raw)
+    .replace(/\p{Cf}/gu, '')
+    .trim();
+}
+
+function truncateForDisplay(name: string): string {
+  return name.length > OUTPUT_STYLE_NAME_ECHO_LIMIT
+    ? `${name.slice(0, OUTPUT_STYLE_NAME_ECHO_LIMIT)}…`
+    : name;
+}
+
+// `loadCliConfig` runs more than once in a process (sandbox host and child,
+// ACP session re-runs); a misconfigured style should be reported once, not on
+// every pass.
+const outputStyleWarningsShown = new Set<string>();
+
+/** Test hook: forget which output-style warnings were already printed. */
+export function resetOutputStyleWarningsForTesting(): void {
+  outputStyleWarningsShown.clear();
+}
+
+function warnAboutOutputStyle(warning: string): void {
+  if (outputStyleWarningsShown.has(warning)) {
+    return;
+  }
+  outputStyleWarningsShown.add(warning);
+  debugLogger.warn(warning);
+  // eslint-disable-next-line no-console
+  console.error(`WARNING: ${warning}`);
 }
 
 export async function loadCliConfig(
@@ -1986,6 +2126,12 @@ export async function loadCliConfig(
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
+    // Like every other settings-sourced option, the style setting is ignored
+    // in --bare and --safe-mode; the explicit flag still applies.
+    outputStyle: resolveOutputStyle(
+      argv.outputStyle,
+      bareMode || safeMode ? undefined : settings.general?.outputStyle,
+    ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:
       bareMode || safeMode
@@ -2129,6 +2275,7 @@ export async function loadCliConfig(
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2185,6 +2332,9 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    modelProposedGoals: normalizeModelProposedGoals(
+      settings.goals?.modelProposed,
+    ),
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,

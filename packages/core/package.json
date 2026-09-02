@@ -17,6 +17,10 @@
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
     },
+    "./envVarResolver": {
+      "types": "./dist/src/utils/envVarResolver.d.ts",
+      "import": "./dist/src/utils/envVarResolver.js"
+    },
     "./goalWire": {
       "types": "./dist/src/goals/goal-wire.d.ts",
       "import": "./dist/src/goals/goal-wire.js"

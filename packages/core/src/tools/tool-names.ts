@@ -66,6 +66,7 @@ export const ToolNames = {
   REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
 } as const;
 
@@ -123,6 +124,7 @@ export const ToolDisplayNames = {
   REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 

@@ -641,7 +641,11 @@ export class HookSystem {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     return this.sessionHooksManager.addSessionHook(
       sessionId,
