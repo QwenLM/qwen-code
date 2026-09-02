@@ -283,6 +283,23 @@ const PERMISSION_COPY = {
   },
 } as const;
 
+/**
+ * Translate the stock prefix of a scoped always-allow label, keeping the
+ * command/tool scope that exec and mcp confirmations append to it.
+ */
+function localizedScopedAlwaysLabel(
+  label: string,
+  stockLabel: string,
+  localizedLabel: string,
+): string | undefined {
+  if (label === stockLabel) return localizedLabel;
+  const scopeSeparator = ': ';
+  if (!label.startsWith(stockLabel + scopeSeparator)) return undefined;
+  return `${localizedLabel}：${label.slice(
+    stockLabel.length + scopeSeparator.length,
+  )}`;
+}
+
 export interface ChannelLoopController {
   create(input: ChannelLoopInput): Promise<ChannelLoop>;
   createForTarget?(
@@ -3153,17 +3170,19 @@ export abstract class ChannelBase {
     if (this.locale !== 'zh') return undefined;
     const copy = PERMISSION_COPY[this.locale];
     if (option?.kind === 'allow_always') {
-      if (
-        option.optionId === 'proceed_always_project' &&
-        label.startsWith('Always Allow in project')
-      ) {
-        return copy.allowAlwaysProject;
+      if (option.optionId === 'proceed_always_project') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow in project',
+          copy.allowAlwaysProject,
+        );
       }
-      if (
-        option.optionId === 'proceed_always_user' &&
-        label.startsWith('Always Allow for user')
-      ) {
-        return copy.allowAlwaysUser;
+      if (option.optionId === 'proceed_always_user') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow for user',
+          copy.allowAlwaysUser,
+        );
       }
       if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
         return copy.allowAlways;

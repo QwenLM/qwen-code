@@ -11,6 +11,7 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type MockInstance,
 } from 'vitest';
 import {
@@ -71,6 +72,23 @@ const sessionRegistryConfigStub = {
   },
   unregisterSessionRegistry: async () => {},
 };
+
+// main() writes best-effort state under ~/.qwen; some runners — including
+// the review-address verification gate's clean child — inherit a HOME the
+// test process cannot write to. Ordinary CI already overrides HOME, so
+// point it at a scratch directory for this whole file.
+const savedHome = process.env['HOME'];
+const llmTestHome = mkdtempSync(join(tmpdir(), 'qwen-llm-test-home-'));
+process.env['HOME'] = llmTestHome;
+
+afterAll(() => {
+  if (savedHome === undefined) {
+    delete process.env['HOME'];
+  } else {
+    process.env['HOME'] = savedHome;
+  }
+  rmSync(llmTestHome, { recursive: true, force: true });
+});
 
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {

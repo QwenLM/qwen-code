@@ -42,8 +42,12 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type Mock,
 } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
@@ -278,6 +282,23 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  // Config.initialize() creates a real ExtensionStore under ~/.qwen; some
+  // runners — including the review-address verification gate's clean child —
+  // inherit a HOME the test process cannot write to. Ordinary CI already
+  // overrides HOME, so point it at a scratch directory for this suite.
+  const savedHome = process.env['HOME'];
+  const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['HOME'] = suiteHome;
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+    rmSync(suiteHome, { recursive: true, force: true });
+  });
+
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockInitResult: InitializationResult;

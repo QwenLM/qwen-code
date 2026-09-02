@@ -1900,6 +1900,101 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('keeps the scope suffix on localized always-allow labels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-scoped-project', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project: git status',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此项目：git status' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      emitPermission(active.sessionId, 'req-zh-scoped-user', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user: run_shell_command',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(2),
+      );
+      expect(ch.permissionPresentations[1]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此用户：run_shell_command' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('localizes a user-scope only always option for Chinese channels', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-user-always', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: '仅允许本次' },
+        { kind: 'allow_always', label: '始终允许此用户' },
+        { kind: 'deny', label: '拒绝' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('keeps the scope suffix in the Chinese approve-always fallback', async () => {
+      const ch = createChannel({}, { locale: 'zh' });
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-zh-fallback-scoped', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_always_project',
+          kind: 'allow_always',
+          name: 'Always Allow in project: git status',
+        },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+      ]);
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain(
+        '/approve-always 始终允许此项目：git status',
+      );
+
+      await active.finish();
+    });
+
     it('omits persistent permission decisions that were not advertised', async () => {
       const ch = createChannel();
       ch.permissionPresentationResult = { kind: 'presented' };

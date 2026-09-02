@@ -5,10 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, afterAll, describe, expect, it, vi } from 'vitest';
 import { resetHomeEnvBootstrapForTesting } from '../../config/settings.js';
+import { isSlowTestHost } from '../../test-utils/slow-test-host.js';
 import { runQwenServe } from '../run-qwen-serve.js';
 import { getLiveDiscoveryPath } from './discovery.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
@@ -27,6 +29,31 @@ vi.mock('./discovery.js', async (importOriginal) => {
 });
 
 const temporaryDirectories: string[] = [];
+
+// Live serve startup exceeds the ordinary budget on saturated shared
+// hosts; the gate env -i child does not carry RUNNER_NAME, so key on
+// saturation too. Mirrors server-default-bridge-wiring.test.ts.
+const liveTimeoutMs = isSlowTestHost() ? 60_000 : 30_000;
+vi.setConfig({ testTimeout: liveTimeoutMs, hookTimeout: liveTimeoutMs });
+
+// The settings/discovery bootstrap also touches the real HOME; some
+// runners — including the review-address verification gate's clean child —
+// inherit a HOME the test process cannot write to. Ordinary CI already
+// overrides HOME, so point it at a scratch directory for this file.
+const savedHome = process.env['HOME'];
+const liveTestHome = mkdtempSync(
+  path.join(os.tmpdir(), 'qwen-serve-live-home-'),
+);
+process.env['HOME'] = liveTestHome;
+
+afterAll(() => {
+  if (savedHome === undefined) {
+    delete process.env['HOME'];
+  } else {
+    process.env['HOME'] = savedHome;
+  }
+  rmSync(liveTestHome, { recursive: true, force: true });
+});
 
 afterEach(async () => {
   trackedWriteLiveDiscoveryFile.mockClear();
@@ -140,7 +167,7 @@ describe('qwen serve Live Host discovery', () => {
     await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
       code: 'ENOENT',
     });
-  }, 30_000);
+  });
 
   it('publishes a stable Host locator alongside a custom runtime record', async () => {
     const root = await fs.mkdtemp(
@@ -239,7 +266,7 @@ describe('qwen serve Live Host discovery', () => {
     await expect(fs.stat(getLiveDiscoveryPath(stable))).rejects.toMatchObject({
       code: 'ENOENT',
     });
-  }, 30_000);
+  });
 
   it('hands stable discovery ownership to a waiting enabled daemon', async () => {
     const root = await fs.mkdtemp(
@@ -337,5 +364,5 @@ describe('qwen serve Live Host discovery', () => {
     await expect(fs.stat(getLiveDiscoveryPath(stable))).rejects.toMatchObject({
       code: 'ENOENT',
     });
-  }, 30_000);
+  });
 });

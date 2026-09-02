@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -49,9 +50,7 @@ function makeBridge(
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
 // real hang. Give that pool the raised budget its other suites already use.
-const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-  ? 60_000
-  : 15_000;
+const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {

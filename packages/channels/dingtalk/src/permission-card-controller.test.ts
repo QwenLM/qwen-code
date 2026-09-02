@@ -123,6 +123,7 @@ describe('PermissionCardController', () => {
       outTrackId: expect.stringMatching(/^qwen-permission-/),
       target: { chatId: 'cid-1', isGroup: true },
       cardParamMap: expect.objectContaining({
+        question_id: 'permission-once',
         question_title: 'Permission required',
         question_desc: 'Run tests',
         card_status: 'pending',
@@ -271,6 +272,15 @@ describe('PermissionCardController', () => {
         callback(outTrackId, 'allow_once', { actorId: 'intruder' }),
       ),
     ).toEqual({ kind: 'ignored' });
+    expect(
+      controller.claim(
+        callback(outTrackId, 'allow_once', { actorId: 'intruder-2' }),
+      ),
+    ).toEqual({
+      kind: 'forbidden',
+      actorId: 'intruder-2',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
     expect(respond).not.toHaveBeenCalled();
   });
 
@@ -409,5 +419,91 @@ describe('PermissionCardController', () => {
     ).toEqual(['cancelled', 'cancelled']);
     expect(first.respond).not.toHaveBeenCalled();
     expect(second.respond).not.toHaveBeenCalled();
+  });
+  it('accepts checkbox-shaped decision submissions', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = deliveredOutTrackId(client);
+
+    await acceptedExecution(
+      controller.claim(callback(outTrackId, ['allow_once'])),
+    )();
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith('allow_once');
+
+    const second = createContext('permission-2');
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const secondOutTrackId = vi.mocked(client.createAndDeliver).mock
+      .calls[1]![0].outTrackId;
+
+    await acceptedExecution(
+      controller.claim(callback(secondOutTrackId, { value: 'allow_once' })),
+    )();
+    expect(second.respond).toHaveBeenCalledOnce();
+    expect(second.respond).toHaveBeenCalledWith('allow_once');
+  });
+
+  it('ignores a payload-less callback that only carries the cancel action', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = deliveredOutTrackId(client);
+
+    expect(
+      controller.claim(
+        callback(outTrackId, undefined, {
+          actionId: 'cancel',
+          formData: {},
+          hasBusinessPayload: false,
+          isCancel: false,
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('accepts a submit delivered with the requestId action id', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = deliveredOutTrackId(client);
+
+    await acceptedExecution(
+      controller.claim(
+        callback(outTrackId, 'allow_once', { actionId: 'permission-1' }),
+      ),
+    )();
+
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith('allow_once');
+  });
+
+  it('denies through the template built-in cancel flag alone', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = deliveredOutTrackId(client);
+
+    await acceptedExecution(
+      controller.claim(
+        callback(outTrackId, undefined, {
+          actionId: 'permission-1',
+          formData: {},
+          isCancel: true,
+        }),
+      ),
+    )();
+
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith('deny');
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({ card_status: 'cancelled' }),
+      }),
+    );
   });
 });
