@@ -7016,7 +7016,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('status ext methods expose workspace snapshots without secrets', async () => {
+  it('status ext methods expose workspace and session snapshots without secrets', async () => {
     vi.mocked(getMCPDiscoveryState).mockReturnValue(
       MCPDiscoveryState.COMPLETED,
     );
@@ -7235,6 +7235,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockMcpApprovals.getState.mockReturnValue('pending');
 
+    const sessionConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/session-only'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/session-only'),
+      getSessionId: vi.fn().mockReturnValue('session-only'),
+      getMcpServers: vi.fn().mockReturnValue({
+        'session-mcp': {
+          httpUrl: 'https://session.example.com/mcp',
+          headers: { Authorization: 'Bearer session-secret' },
+        },
+      }),
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        getCachedSkills: vi.fn().mockReturnValue([
+          {
+            name: 'session-skill',
+            description: 'Session-only skill',
+            level: 'project',
+            disableModelInvocation: false,
+            body: 'session skill secret body',
+            filePath: '/work/session-only/.qwen/skills/session-skill/SKILL.md',
+          },
+        ]),
+      }),
+      getExtensions: vi.fn().mockReturnValue([]),
+      getResourceRegistry: vi.fn().mockReturnValue({
+        getResourcesByServer: vi.fn().mockReturnValue([]),
+      }),
+      getPromptRegistry: vi.fn().mockReturnValue({
+        getPromptsByServer: vi.fn().mockReturnValue([]),
+      }),
+    } as unknown as Config;
+    const agentSessions = (
+      agent as unknown as {
+        sessions: Map<string, unknown>;
+      }
+    ).sessions;
+    agentSessions.set('session-only', { getConfig: () => sessionConfig });
+    agentSessions.set('other-session', {
+      getConfig: () =>
+        ({
+          ...sessionConfig,
+          getTargetDir: vi.fn().mockReturnValue('/work/other-session'),
+          getWorkingDir: vi.fn().mockReturnValue('/work/other-session'),
+          getSessionId: vi.fn().mockReturnValue('other-session'),
+          getResourceRegistry: vi.fn().mockReturnValue({
+            getResourcesByServer: (name: string) =>
+              name === 'session-mcp'
+                ? [{ uri: 'file:///other-session', serverName: name }]
+                : [],
+          }),
+          getPromptRegistry: vi.fn().mockReturnValue({
+            getPromptsByServer: (name: string) =>
+              name === 'session-mcp'
+                ? [{ name: 'other-session-prompt', serverName: name }]
+                : [],
+          }),
+        }) as unknown as Config,
+    });
+
     const mcp = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceMcp,
       {},
@@ -7255,6 +7318,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
       {},
     )) as unknown as ServeWorkspaceSkillsStatus;
+    const sessionResources = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionResources,
+      { sessionId: 'session-only' },
+    );
     const providers = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceProviders,
       {},
@@ -7437,9 +7504,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).toHaveLength(2);
     expect(skillsAgain).toEqual(skills);
     expect(getCachedSkills).toHaveBeenCalledTimes(2);
-    // Each read validates that the extension sources have not moved, but an
-    // unchanged answer must not cascade into an extension or skill refresh.
-    expect(refreshCacheIfSourcesChanged).toHaveBeenCalledTimes(2);
+    // Each workspace or session read validates that the extension sources
+    // have not moved, but an unchanged answer must not cascade into an
+    // extension or skill refresh.
+    expect(refreshCacheIfSourcesChanged).toHaveBeenCalledTimes(3);
     expect(extensionRefreshCache).not.toHaveBeenCalled();
     expect(skillRefreshCache).not.toHaveBeenCalled();
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
@@ -7451,6 +7519,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(skills)).not.toContain('colliding config only body');
     expect(JSON.stringify(skills)).not.toContain('"skillRoot"');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
+
+    expect(sessionResources).toMatchObject({
+      v: 1,
+      sessionId: 'session-only',
+      workspaceCwd: '/work/session-only',
+      skills: {
+        workspaceCwd: '/work/session-only',
+        initialized: true,
+        skills: [
+          expect.objectContaining({
+            name: 'session-skill',
+            description: 'Session-only skill',
+          }),
+        ],
+      },
+      mcp: {
+        workspaceCwd: '/work/session-only',
+        initialized: true,
+        servers: [
+          expect.objectContaining({
+            name: 'session-mcp',
+            resourceCount: 0,
+            promptCount: 0,
+          }),
+        ],
+      },
+    });
+    expect(JSON.stringify(sessionResources)).not.toContain('docs');
+    expect(JSON.stringify(sessionResources)).not.toContain('review');
+    expect(JSON.stringify(sessionResources)).not.toContain('session-secret');
+    expect(JSON.stringify(sessionResources)).not.toContain(
+      'session skill secret body',
+    );
 
     expect(providers).toMatchObject({
       v: 1,

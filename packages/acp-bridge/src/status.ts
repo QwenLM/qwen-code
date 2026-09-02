@@ -132,6 +132,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionResources: 'qwen/status/session/resources',
   sessionTranscript: 'qwen/status/session/transcript',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
@@ -523,6 +524,19 @@ export interface ServeWorkspaceSkillsStatus {
   initialized: boolean;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+}
+
+/**
+ * Sanitized Skill and MCP snapshots built from one live session's Config.
+ * The nested workspace status envelopes are reused intentionally so their
+ * loading, error, discovery, and compatibility fields remain identical.
+ */
+export interface ServeSessionResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: ServeWorkspaceSkillsStatus;
+  mcp: ServeWorkspaceMcpStatus;
 }
 
 export interface ServeWorkspaceProviderCurrent {

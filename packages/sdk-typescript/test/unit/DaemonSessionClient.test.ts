@@ -1871,6 +1871,25 @@ describe('DaemonSessionClient', () => {
           servers: [],
         });
       }
+      if (req.url.endsWith('/session/s-1/resources')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          skills: {
+            v: 1,
+            workspaceCwd: '/work/a',
+            initialized: true,
+            skills: [],
+          },
+          mcp: {
+            v: 1,
+            workspaceCwd: '/work/a',
+            initialized: true,
+            servers: [],
+          },
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
@@ -1957,6 +1976,12 @@ describe('DaemonSessionClient', () => {
       notStartedServers: 0,
       servers: [],
     });
+    await expect(session.resources()).resolves.toMatchObject({
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      skills: { initialized: true, skills: [] },
+      mcp: { initialized: true, servers: [] },
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
@@ -1982,6 +2007,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/tasks',
       'http://daemon/session/s-1/tasks?includeWorkflows=true',
       'http://daemon/session/s-1/lsp',
+      'http://daemon/session/s-1/resources',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
@@ -1995,6 +2021,7 @@ describe('DaemonSessionClient', () => {
       persist: true,
     });
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

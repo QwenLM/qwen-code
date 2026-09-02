@@ -44,6 +44,7 @@ import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
@@ -1823,6 +1824,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /** Read sanitized Skill and MCP snapshots for a live session. */
+  getSessionResourcesStatus(
+    sessionId: string,
+  ): Promise<ServeSessionResourcesStatus>;
 
   /**
    * Read a page of persisted transcript replay events through the ACP child.

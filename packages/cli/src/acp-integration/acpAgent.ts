@@ -352,6 +352,7 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
   type ServeSessionLspStatus,
+  type ServeSessionResourcesStatus,
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
@@ -6393,6 +6394,7 @@ class QwenAgent implements Agent {
 
   private async buildWorkspaceMcpStatus(
     config: Config,
+    scope: 'workspace' | 'session' = 'workspace',
   ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
@@ -6405,7 +6407,8 @@ class QwenAgent implements Agent {
 
       // Pool snapshot for per-server `entryCount` + `entrySummary`.
       // Captured once outside the per-server loop. Absent when the
-      // pool is disabled.
+      // pool is disabled. Session snapshots intentionally omit these
+      // workspace aggregates so another session cannot affect the result.
       let poolByName: Record<
         string,
         {
@@ -6417,30 +6420,33 @@ class QwenAgent implements Agent {
           }>;
         }
       > = {};
-      try {
-        const snap = this.mcpPool?.getSnapshot();
-        if (snap) poolByName = snap.byName;
-      } catch (err) {
-        // Pool snapshot failures must not crash the wider status —
-        // surface to stderr so silent regressions are visible without
-        // depending on `debugLogger.debug` operator opt-in (matches
-        // the budget-accounting fail-loud pattern below).
-        process.stderr.write(
-          `qwen serve: pool snapshot for workspace MCP status failed: ` +
-            `${err instanceof Error ? err.message : String(err)}\n`,
-        );
+      if (scope === 'workspace') {
+        try {
+          const snap = this.mcpPool?.getSnapshot();
+          if (snap) poolByName = snap.byName;
+        } catch (err) {
+          // Pool snapshot failures must not crash the wider status —
+          // surface to stderr so silent regressions are visible without
+          // depending on `debugLogger.debug` operator opt-in (matches
+          // the budget-accounting fail-loud pattern below).
+          process.stderr.write(
+            `qwen serve: pool snapshot for workspace MCP status failed: ` +
+              `${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
       }
 
       // Pull live accounting + budget config. When the workspace-scoped
       // budget controller is active, prefer its accounting. Manager
-      // fall-back keeps the legacy per-session cell shape.
+      // fall-back keeps the legacy per-session cell shape. Session snapshots
+      // always use their Config's manager rather than workspace accounting.
       let clientCount: number | undefined;
       let clientBudget: number | undefined;
       let budgetMode: ServeMcpBudgetMode | undefined;
       let refusedSet: ReadonlySet<string> = new Set<string>();
       let budgetCellScope: 'workspace' | 'session' = 'session';
       const wsBudget = this.workspaceMcpBudget;
-      if (wsBudget !== undefined) {
+      if (scope === 'workspace' && wsBudget !== undefined) {
         budgetCellScope = 'workspace';
         clientCount = wsBudget.getReservedCount();
         clientBudget = wsBudget.getBudget();
@@ -6637,10 +6643,12 @@ class QwenAgent implements Agent {
               out.resourceCount = this.resolveServerMcpResources(
                 config,
                 name,
+                scope === 'workspace',
               ).length;
               out.promptCount = this.resolveServerMcpPrompts(
                 config,
                 name,
+                scope === 'workspace',
               ).length;
             }
             return out;
@@ -6664,7 +6672,7 @@ class QwenAgent implements Agent {
               ),
             }
           : {}),
-        ...(this.workspaceMcpDiscoveryError
+        ...(scope === 'workspace' && this.workspaceMcpDiscoveryError
           ? {
               errors: [
                 this.errorCell(
@@ -6827,12 +6835,14 @@ class QwenAgent implements Agent {
    * workspace `Config`'s `ResourceRegistry` is authoritative in
    * single-session mode, but in pool mode resources are registered into
    * per-session registries (`SessionMcpView.applyResources`), leaving the
-   * workspace registry empty. Fall back to the first active session that
-   * has this server's resources.
+   * workspace registry empty. Workspace snapshots may fall back to the first
+   * active session that has this server's resources; exact session snapshots
+   * disable that fallback.
    */
   private resolveServerMcpResources(
     config: Config,
     serverName: string,
+    allowSessionFallback = true,
   ): DiscoveredMCPResource[] {
     // Defensive optional-call mirrors useAtCompletion.ts: a partial Config
     // (older snapshot or a test stub) may not expose the registry accessor,
@@ -6841,6 +6851,9 @@ class QwenAgent implements Agent {
     const resources =
       config.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
     if (resources.length > 0) {
+      return resources;
+    }
+    if (!allowSessionFallback) {
       return resources;
     }
     for (const session of this.getActiveSessions()) {
@@ -6871,11 +6884,15 @@ class QwenAgent implements Agent {
   private resolveServerMcpPrompts(
     config: Config,
     serverName: string,
+    allowSessionFallback = true,
   ): DiscoveredMCPPrompt[] {
     // Defensive optional-call — see resolveServerMcpResources.
     const prompts =
       config.getPromptRegistry?.()?.getPromptsByServer(serverName) ?? [];
     if (prompts.length > 0) {
+      return prompts;
+    }
+    if (!allowSessionFallback) {
       return prompts;
     }
     for (const session of this.getActiveSessions()) {
@@ -7152,6 +7169,23 @@ class QwenAgent implements Agent {
         errors: [this.errorCell('skills', error)],
       };
     }
+  }
+
+  private async buildSessionResourcesStatus(
+    sessionId: string,
+  ): Promise<ServeSessionResourcesStatus> {
+    const config = this.sessionOrThrow(sessionId).getConfig();
+    const [skills, mcp] = await Promise.all([
+      this.buildWorkspaceSkillsStatus(config),
+      this.buildWorkspaceMcpStatus(config, 'session'),
+    ]);
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      skills,
+      mcp,
+    };
   }
 
   private buildWorkspaceProvidersStatus(
@@ -8643,6 +8677,18 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionResources: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionResourcesStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
         const sessionId = params['sessionId'];

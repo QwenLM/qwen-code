@@ -4765,6 +4765,18 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.get(
+    '/session/:id/resources',
+    withOwnerReadSession(
+      'GET /session/:id/resources',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionResourcesStatus(sessionId));
+      },
+    ),
+  );
+
   // GET /session/:id/hooks — read-only session-scoped hook status.
   app.get(
     '/session/:id/hooks',

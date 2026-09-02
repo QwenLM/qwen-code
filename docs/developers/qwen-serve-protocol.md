@@ -211,7 +211,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
- 'session_lsp', 'session_status',
+ 'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
@@ -289,6 +289,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `workspace_qualified_memory` advertises the workspace-qualified managed-memory routes: `POST /workspaces/:workspace/memory/{remember,forget,dream}` enqueue tasks and `GET /workspaces/:workspace/memory/{remember,forget,dream}/:taskId` reads them back. It is advertised only when ACP HTTP and multi-workspace runtimes are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. Each registered workspace gets its own task lane; the primary's qualified lane is the same instance as the singular `/workspace/memory` surface, so a task enqueued on one is readable on the other. Resolution is strictly per selected runtime with no primary fallback: an unknown selector returns `400 { code: "workspace_mismatch" }`, an untrusted selector returns `403 { code: "untrusted_workspace" }`, and an inactive or draining runtime returns `503 { code: "workspace_runtime_unavailable" }`. Reads never allocate a lane, so polling a workspace that has no tasks returns `404 { code: "<kind>_task_not_found" }`. Task ids are scoped to their lane and do not survive a workspace reconfiguration or runtime replacement; a stale id returns `404`, not a data-loss condition. When ACP HTTP is disabled the tag is not advertised and a non-primary qualified request returns a non-retryable `501 { code: "workspace_memory_unavailable" }`, while the primary qualified route keeps working through the locally-owned lane.
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
+
+`session_resources` advertises `GET /session/:id/resources`, a read-only pair of sanitized Skill and MCP snapshots built from the selected live session's Config. The route is live-session-owner scoped: it never falls back to the primary runtime and does not infer the session's resources from workspace status. The nested `skills` and `mcp` objects reuse the corresponding workspace status payloads, including their initialization, discovery, error, and compatibility fields. Older daemons return `404`; pre-flight this tag before showing a session resource catalog.
 
 `session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id. In addition to `clientCount` and `hasActivePrompt`, live sessions expose `isWaitingForPermission`, `isWaitingForUserQuestion`, `pendingInteractionCount`, and a retained `turnError` after a failed turn. The error clears when the next prompt actually starts. A live session that has settled a running turn in the current bridge also carries `updatedAt`, the same activity watermark documented under the live-state route; because this route returns the bridge summary directly, the value is not merged with the persisted transcript mtime and may be earlier than the one a session list reports. Both the single-session status response and workspace session lists include `turnError` and `pendingInteractions`: render-ready permission actions or `ask_user_question` questions plus the `requestId` and selectable options required by the existing permission vote routes. Each user question has an `answerKey`; vote with `answers`, for example `{ "0": "Polling" }`, keyed by that value. Persisted-only sessions omit runtime state because no runtime exists. Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
@@ -1231,6 +1233,7 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_resources` → `GET /session/:id/resources`
 - `session_monitor_tool_correlation` → monitor entries from `GET /session/:id/tasks`
   include `toolUseId` for transcript-to-task correlation
 - `session_status` → `GET /session/:id/status`
@@ -2090,6 +2093,41 @@ cannot provide a snapshot, the response includes `statusUnavailable: true`.
 This route exposes only stable client-facing fields. It intentionally omits
 debug internals such as process IDs, spawn args, stderr tails, root URIs, and
 workspace-folder paths.
+
+### `GET /session/:id/resources`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/session/path",
+  "skills": {
+    "v": 1,
+    "workspaceCwd": "/canonical/session/path",
+    "initialized": true,
+    "skills": []
+  },
+  "mcp": {
+    "v": 1,
+    "workspaceCwd": "/canonical/session/path",
+    "initialized": true,
+    "discoveryState": "completed",
+    "servers": []
+  }
+}
+```
+
+This live-session-owner route reads the selected session's Config through its
+own ACP connection. It does not combine the process-global or workspace-level
+status routes, initialize a cold runtime, attach a client, or fall back to the
+primary workspace. Unknown and persisted-only sessions return the existing
+`session_not_found` response.
+
+The nested objects use the exact `GET /workspace/skills` and
+`GET /workspace/mcp` status contracts. Their `workspaceCwd` fields identify
+the Config that produced the snapshot and match the top-level value. Existing
+redaction rules still apply: MCP credentials and headers, environment values,
+Skill bodies, and raw settings never appear in the response.
 
 ### Standalone session lifecycle (`standalone_sessions_v1`)
 

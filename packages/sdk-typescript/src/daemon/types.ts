@@ -1963,6 +1963,15 @@ export interface DaemonWorkspaceSkillsStatus {
   errors?: DaemonStatusCell[];
 }
 
+/** Sanitized Skill and MCP snapshots built from one live session's Config. */
+export interface DaemonSessionResourcesStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: DaemonWorkspaceSkillsStatus;
+  mcp: DaemonWorkspaceMcpStatus;
+}
+
 export interface DaemonWorkspaceAcpStatusResult {
   channelLive: boolean;
 }
