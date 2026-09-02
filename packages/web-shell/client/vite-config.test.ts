@@ -49,6 +49,13 @@ describe('Web Shell MCP App development proxy', () => {
   });
 });
 
+describe('Web Shell standalone session development proxy', () => {
+  it('proxies standalone session routes to the daemon', () => {
+    const proxy = loadConfig().server?.proxy;
+    expect(proxy?.['/standalone/sessions']).toBe(proxy?.['/session']);
+  });
+});
+
 describe('Web Shell client source proxy bypass', () => {
   it('serves session catalog source modules instead of proxying them', () => {
     const sessionProxy = loadConfig().server?.proxy?.['/session'];
