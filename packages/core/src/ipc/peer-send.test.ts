@@ -688,14 +688,33 @@ describe('settleSentPeerMessage', () => {
     }
   });
 
+  it('reports a refusal, and only from pending', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'refused')).toMatchObject({
+      previous: 'pending',
+    });
+
+    // A message already parked was not turned away, so a 'refused'
+    // receipt after a hold is a peer contradicting itself.
+    const held = await sendOne();
+    expect(settleSentPeerMessage(held, 'held')).toBeDefined();
+    expect(settleSentPeerMessage(held, 'refused')).toBeUndefined();
+  });
+
   it('treats a terminal state as final', async () => {
-    for (const terminal of ['denied', 'expired', 'misaddressed'] as const) {
+    for (const terminal of [
+      'denied',
+      'refused',
+      'expired',
+      'misaddressed',
+    ] as const) {
       const id = await sendOne();
       expect(settleSentPeerMessage(id, terminal)).toBeDefined();
       for (const next of [
         'held',
         'delivered',
         'denied',
+        'refused',
         'expired',
         'misaddressed',
       ] as const) {

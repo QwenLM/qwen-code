@@ -95,6 +95,11 @@ export interface PeerReceipt {
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * How long a held message waits, in milliseconds, or null for "until
+   * the session ends". Omitted in tests, which take the default.
+   */
+  getHeldExpiryMs?: () => number | null;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -186,6 +191,9 @@ export class PeerMessaging {
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      ...(options.getHeldExpiryMs !== undefined
+        ? { getHeldExpiryMs: options.getHeldExpiryMs }
+        : {}),
       getSessionId: options.getSessionId,
       deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
       reportStatus: (frame, status) => {
@@ -294,6 +302,14 @@ export class PeerMessaging {
 
   getHeld(): readonly HeldMessage[] {
     return this.gate?.getHeld() ?? [];
+  }
+
+  /**
+   * How long a held message has to live, in milliseconds, or null when
+   * holds do not expire. Used by `/peers` to show what is left.
+   */
+  getHeldExpiryMs(): number | null {
+    return this.gate?.getHeldExpiryMs() ?? null;
   }
 
   /**

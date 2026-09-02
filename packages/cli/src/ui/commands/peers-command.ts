@@ -59,7 +59,33 @@ function preview(text: string, max = 100): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
-export function formatHeldList(held: readonly HeldMessage[]): string {
+/**
+ * How much of a message's hold is left, in words.
+ *
+ * The sender is waiting on this decision and stops waiting when the hold
+ * runs out, so the listing has to say how long the user has — a review
+ * screen that hides its own deadline invites decisions that arrive too
+ * late to mean anything. Rounded up, so "1 minute left" never means
+ * "already gone", and floored at "less than a minute" rather than
+ * counting seconds nobody can act on.
+ */
+function describeRemaining(
+  entry: HeldMessage,
+  expiryMs: number | null,
+): string {
+  if (expiryMs === null) return '';
+  const remaining = entry.heldAt + expiryMs - Date.now();
+  if (remaining <= 0) return ', expiring now';
+  const minutes = Math.ceil(remaining / 60_000);
+  return remaining < 60_000
+    ? ', less than a minute left'
+    : `, ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
+
+export function formatHeldList(
+  held: readonly HeldMessage[],
+  expiryMs: number | null = null,
+): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
@@ -76,7 +102,8 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
     return (
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
-      `      held because ${describeHoldCause(entry.cause)}`
+      `      held because ${describeHoldCause(entry.cause)}` +
+      describeRemaining(entry, expiryMs)
     );
   });
 
@@ -160,7 +187,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: formatHeldList(held),
+        content: formatHeldList(held, peerMessaging.getHeldExpiryMs()),
       };
     }
 

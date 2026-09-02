@@ -4,19 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { ApprovalMode } from '../config/approval-mode.js';
 import {
+  DEFAULT_HELD_EXPIRY_MS,
   describeHoldCause,
   InboundGate,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  parseHeldExpiry,
   type InboundPolicy,
 } from './inbound-gate.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
 
 interface Harness {
   gate: InboundGate;
+  setHeldExpiryMs: (ms: number | null) => void;
   delivered: PeerUserFrame[];
   /** `selfSent` as the gate reported it to `deliver`, per delivery. */
   deliveredAsSelfSent: boolean[];
@@ -36,10 +39,15 @@ function harness(
   initial: {
     mode?: ApprovalMode | null;
     policy?: InboundPolicy;
+    heldExpiryMs?: number | null;
   } = {},
 ): Harness {
   let mode: ApprovalMode | null = initial.mode ?? ApprovalMode.DEFAULT;
   let policy: unknown = initial.policy;
+  let heldExpiryMs: number | null =
+    initial.heldExpiryMs === undefined
+      ? DEFAULT_HELD_EXPIRY_MS
+      : initial.heldExpiryMs;
   let modeThrows = false;
   let policyThrows = false;
   const delivered: PeerUserFrame[] = [];
@@ -57,6 +65,7 @@ function harness(
       if (policyThrows) throw new Error('settings getter exploded');
       return policy as InboundPolicy | undefined;
     },
+    getHeldExpiryMs: () => heldExpiryMs,
     deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
       delivered.push(frame);
@@ -74,6 +83,9 @@ function harness(
     delivered,
     deliveredAsSelfSent,
     statuses,
+    setHeldExpiryMs: (next) => {
+      heldExpiryMs = next;
+    },
     get heldChanges() {
       return state.heldChanges;
     },
@@ -197,12 +209,14 @@ describe('explicit setting', () => {
     expect(h.gate.getHeld()[0].cause).toBe('explicit-setting');
   });
 
-  it('refuse drops the message and tells the sender', () => {
+  it('refuse drops the message and tells the sender nobody saw it', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'refuse' });
     expect(h.gate.admit(frame())).toBe('refused');
     expect(h.delivered).toHaveLength(0);
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)?.status).toBe('denied');
+    // 'refused', not 'denied': nobody reviewed it. The sender should
+    // stop rather than wait for a person to reconsider.
+    expect(h.statuses.at(-1)?.status).toBe('refused');
   });
 
   it('refuse wins even when the mode getter is broken', () => {
@@ -842,7 +856,7 @@ describe('self-sent messages (child token)', () => {
     const h = harness({ policy: 'refuse' });
     const f = frame();
     expect(h.gate.admit(f, own)).toBe('refused');
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'denied' }]);
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'refused' }]);
   });
 
   it('keeps its origin through a manual approval', () => {
@@ -859,5 +873,181 @@ describe('self-sent messages (child token)', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
     const f = frame({ from: '/tmp/own-session.sock' });
     expect(h.gate.admit(f)).toBe('held');
+  });
+});
+
+describe('held message expiry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('expires a held message and tells the sender nobody answered', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const f = frame();
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'held' }]);
+
+    vi.advanceTimersByTime(60_001);
+
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it('leaves a message alone until its hold actually runs out', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    h.gate.admit(frame());
+    vi.advanceTimersByTime(59_000);
+    expect(h.gate.getHeld()).toHaveLength(1);
+    vi.advanceTimersByTime(2_000);
+    expect(h.gate.getHeld()).toHaveLength(0);
+  });
+
+  it('notifies the UI when a message expires', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    h.gate.admit(frame());
+    const before = h.heldChanges;
+    vi.advanceTimersByTime(60_001);
+    expect(h.heldChanges).toBeGreaterThan(before);
+  });
+
+  it('never expires when the lifetime is null', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: null });
+    h.gate.admit(frame());
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.statuses.map((s) => s.status)).toEqual(['held']);
+  });
+
+  it('expires each message on its own clock, oldest first', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const first = frame();
+    h.gate.admit(first);
+    vi.advanceTimersByTime(30_000);
+    const second = frame();
+    h.gate.admit(second);
+
+    // The first is 60 s old here, the second only 30 s.
+    vi.advanceTimersByTime(30_001);
+    expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([second.msgId]);
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: first.msgId,
+      status: 'expired',
+    });
+
+    vi.advanceTimersByTime(30_000);
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({
+      msgId: second.msgId,
+      status: 'expired',
+    });
+  });
+
+  it('is gone rather than releasable once it has expired', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const f = frame();
+    h.gate.admit(f);
+    vi.advanceTimersByTime(60_001);
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('gone');
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it('applies a shortened lifetime to messages already waiting', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 10 * 60_000 });
+    const f = frame();
+    h.gate.admit(f);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(h.gate.getHeld()).toHaveLength(1);
+
+    // The user shortens the hold to a minute; this message is already
+    // two minutes old and should settle at once, not wait eight more.
+    h.setHeldExpiryMs(60_000);
+    h.gate.reevaluate('setting changed');
+
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+  });
+
+  it('gives a longer lifetime to messages already waiting', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    h.gate.admit(frame());
+    vi.advanceTimersByTime(30_000);
+    h.setHeldExpiryMs(10 * 60_000);
+    h.gate.reevaluate('setting changed');
+
+    vi.advanceTimersByTime(60_000);
+    expect(h.gate.getHeld()).toHaveLength(1);
+  });
+
+  it('stops expiring once the lifetime becomes null', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    h.gate.admit(frame());
+    h.setHeldExpiryMs(null);
+    h.gate.reevaluate('setting changed');
+
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(h.gate.getHeld()).toHaveLength(1);
+  });
+
+  it('does not restart the clock when a release fails', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const f = frame();
+    h.gate.admit(f);
+    vi.advanceTimersByTime(50_000);
+
+    h.failDelivery();
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('failed');
+    h.recoverDelivery();
+
+    // Ten seconds of its minute are left, not a fresh minute.
+    vi.advanceTimersByTime(10_001);
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+  });
+
+  it('sweeps on arrival even if the timer never fired', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const old = frame();
+    h.gate.admit(old);
+    // A suspended machine: the clock moves without timers running.
+    vi.setSystemTime(Date.now() + 120_000);
+
+    const fresh = frame();
+    h.gate.admit(fresh);
+    expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([fresh.msgId]);
+    expect(
+      h.statuses.some((s) => s.msgId === old.msgId && s.status === 'expired'),
+    ).toBe(true);
+  });
+
+  it('takes a still-unexpired message through the gate normally', () => {
+    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+    const f = frame();
+    h.gate.admit(f);
+    vi.advanceTimersByTime(30_000);
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.delivered).toHaveLength(1);
+  });
+});
+
+describe('parseHeldExpiry', () => {
+  it('maps each accepted value', () => {
+    expect(parseHeldExpiry('1m')).toBe(60_000);
+    expect(parseHeldExpiry('5m')).toBe(DEFAULT_HELD_EXPIRY_MS);
+    expect(parseHeldExpiry('10m')).toBe(10 * 60_000);
+    expect(parseHeldExpiry('never')).toBeNull();
+  });
+
+  it('falls back to the default rather than to never', () => {
+    // Failing closed here means bounding how long a sender waits, so an
+    // unreadable value must not become an unbounded hold.
+    expect(parseHeldExpiry(undefined)).toBe(DEFAULT_HELD_EXPIRY_MS);
+    expect(parseHeldExpiry('forever')).toBe(DEFAULT_HELD_EXPIRY_MS);
+    expect(parseHeldExpiry(600)).toBe(DEFAULT_HELD_EXPIRY_MS);
+    expect(parseHeldExpiry(null)).toBe(DEFAULT_HELD_EXPIRY_MS);
   });
 });

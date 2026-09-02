@@ -125,6 +125,7 @@ async function start(
     ) => { address: string; previous: 'pending' | 'held' } | undefined;
     reassertSessionRecord?: () => Promise<void>;
     getPolicySetting?: () => InboundPolicy | undefined;
+    getHeldExpiryMs?: () => number | null;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -1374,5 +1375,71 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     expect(submitted[0]).toContain('origin="own-process"');
     expect(submitted[1]).toContain('buffered peer');
     expect(submitted[1]).not.toContain('origin="own-process"');
+  });
+});
+
+describe('held message expiry', () => {
+  it('reports the configured lifetime for the /peers listing', async () => {
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 90_000,
+    });
+    expect(messaging.getHeldExpiryMs()).toBe(90_000);
+  });
+
+  it('reports null when holds do not expire', async () => {
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => null,
+    });
+    expect(messaging.getHeldExpiryMs()).toBeNull();
+  });
+
+  it('expires a held message and receipts the sender', async () => {
+    const sender = await startSenderInbox();
+    const { messaging, submitted } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      // Real timers: the assertions below straddle a socket round trip,
+      // so the window has to outlast `settle()` and still be short
+      // enough to wait out.
+      getHeldExpiryMs: () => 250,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'anyone there?', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+
+    expect(messaging.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    const statuses = receipts
+      .filter((frame) => frame.type === 'control')
+      .map((frame) => (frame as { status: string }).status);
+    expect(statuses).toContain('expired');
+  });
+
+  it('receipts a refusal as refused rather than denied', async () => {
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'refuse',
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'hello', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+
+    const statuses = receipts
+      .filter((frame) => frame.type === 'control')
+      .map((frame) => (frame as { status: string }).status);
+    expect(statuses).toEqual(['refused']);
   });
 });

@@ -62,6 +62,7 @@ function held(over: {
 
 interface Fake {
   getHeld: () => readonly HeldMessage[];
+  getHeldExpiryMs: () => number | null;
   decide: ReturnType<typeof vi.fn>;
   recordHeldListing: ReturnType<typeof vi.fn>;
   heldSetChangedSinceListing: () => boolean;
@@ -103,6 +104,7 @@ beforeEach(() => {
   listed = null;
   fake = {
     getHeld: () => messages,
+    getHeldExpiryMs: () => null,
     decide: vi.fn(() => 'done'),
     recordHeldListing: vi.fn(
       (entries: readonly HeldMessage[]) =>
@@ -515,5 +517,56 @@ describe("formatHeldList for the session's own process", () => {
     const out = formatHeldList([{ ...entry, frame, selfSent: true }]);
     expect(out).toContain('[own process] this session');
     expect(out).not.toContain('unknown session');
+  });
+});
+
+describe('formatHeldList — remaining time', () => {
+  it('says nothing about expiry when holds do not expire', () => {
+    const out = formatHeldList([held({ msgId: 'a1b2c3' })], null);
+    expect(out).not.toContain('left');
+    expect(out).not.toContain('expiring');
+  });
+
+  it('shows how long a message has left', () => {
+    // The sender stops waiting when this runs out, so a review screen
+    // that hides its own deadline invites decisions made too late.
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 60_000 })],
+      5 * 60_000,
+    );
+    expect(out).toContain('4 minutes left');
+  });
+
+  it('rounds up rather than down', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 30_000 })],
+      90_000,
+    );
+    expect(out).toContain('1 minute left');
+  });
+
+  it('does not count seconds nobody can act on', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 55_000 })],
+      60_000,
+    );
+    expect(out).toContain('less than a minute left');
+  });
+
+  it('says so when the hold has already run out', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() - 120_000 })],
+      60_000,
+    );
+    expect(out).toContain('expiring now');
+  });
+
+  it('keeps the hold cause alongside the deadline', () => {
+    const out = formatHeldList(
+      [held({ msgId: 'a1b2c3', heldAt: Date.now() })],
+      5 * 60_000,
+    );
+    expect(out).toContain('held because');
+    expect(out).toContain('5 minutes left');
   });
 });

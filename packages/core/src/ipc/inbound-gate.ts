@@ -40,6 +40,14 @@
  * in-workspace edit fast path runs before its classifier. In either mode,
  * a peer can ask for a file change that no human or classifier sees.
  *
+ * A hold is not open-ended. The sender is blocked on a decision that
+ * only a person can give, so a parked message expires after
+ * `agents.crossSessionHeldExpiry` (five minutes by default) and the
+ * sender is told, rather than being left unable to distinguish "still
+ * waiting" from "never coming". The two negative receipts stay distinct
+ * for the same reason: `refused` means this session's policy turns peer
+ * messages away and nobody looked, `denied` means somebody did.
+ *
  * The sender's half of the parity is self-asserted and unverifiable —
  * nothing authenticates `fromMode`, and any process running as this user
  * can claim anything. It is a cooperation signal that keeps honest
@@ -156,7 +164,13 @@ export interface InboundGateOptions {
   /** Report a terminal outcome back to the sender. Best-effort. */
   reportStatus?: (
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
   ) => void;
   /**
    * The session id this process holds now, when pinning is wired. A
@@ -166,8 +180,56 @@ export interface InboundGateOptions {
    * into the session that replaced its addressee.
    */
   getSessionId?: () => string | undefined;
+  /**
+   * How long a message may sit parked before it expires, in
+   * milliseconds, or null to keep it until the session ends. Read on
+   * every reschedule rather than captured once, so changing the setting
+   * takes effect on messages already waiting.
+   */
+  getHeldExpiryMs?: () => number | null;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
+}
+
+/**
+ * How long a held message waits for a decision by default.
+ *
+ * A hold is a question put to a person who may not be at the keyboard,
+ * and the sender is blocked on the answer. Five minutes is long enough
+ * for someone who is there to notice `/peers` and short enough that a
+ * sender is not left indefinitely unable to tell "still waiting" from
+ * "never coming".
+ */
+export const DEFAULT_HELD_EXPIRY_MS = 5 * 60 * 1000;
+
+/** The hold lifetimes `agents.crossSessionHeldExpiry` accepts. */
+const HELD_EXPIRY_VALUES: Record<string, number | null> = {
+  '1m': 60 * 1000,
+  '5m': DEFAULT_HELD_EXPIRY_MS,
+  '10m': 10 * 60 * 1000,
+  never: null,
+};
+
+/**
+ * Turn the configured hold lifetime into milliseconds, or null for
+ * "never".
+ *
+ * An unset or unrecognized value is the default rather than "never":
+ * this setting decides how long a *sender* waits without an answer, and
+ * failing closed here means bounding that wait, not extending it
+ * indefinitely on a typo.
+ */
+export function parseHeldExpiry(value: unknown): number | null {
+  if (value === undefined) return DEFAULT_HELD_EXPIRY_MS;
+  if (typeof value !== 'string' || !(value in HELD_EXPIRY_VALUES)) {
+    debugLogger.debug(
+      `unrecognized crossSessionHeldExpiry value (using the default): ${String(
+        value,
+      )}`,
+    );
+    return DEFAULT_HELD_EXPIRY_MS;
+  }
+  return HELD_EXPIRY_VALUES[value] ?? null;
 }
 
 /**
@@ -185,15 +247,42 @@ export class InboundGate {
    */
   private readonly settled = new Map<
     string,
-    'delivered' | 'denied' | 'expired' | 'misaddressed'
+    'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed'
   >();
   private shuttingDown = false;
+  /**
+   * One timer for the whole buffer, armed for the message that expires
+   * first. A timer per message would be up to `MAX_HELD_MESSAGES` of
+   * them, all firing to do the same sweep.
+   */
+  private expiryTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: InboundGateOptions) {}
 
   /** Messages currently parked, oldest first. */
   getHeld(): readonly HeldMessage[] {
     return this.held;
+  }
+
+  /**
+   * The current hold lifetime in milliseconds, or null when holds do not
+   * expire. Exposed so `/peers` can tell the user how long a message has
+   * left rather than making them guess.
+   */
+  getHeldExpiryMs(): number | null {
+    if (this.options.getHeldExpiryMs === undefined) {
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
+    try {
+      return this.options.getHeldExpiryMs();
+    } catch (error) {
+      debugLogger.debug(
+        `held-expiry getter threw; falling back to the default: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return DEFAULT_HELD_EXPIRY_MS;
+    }
   }
 
   /**
@@ -279,6 +368,11 @@ export class InboundGate {
     frame: PeerUserFrame,
     origin: PeerOrigin = { selfSent: false },
   ): GateDecision {
+    // Timers can be starved or slept through (a suspended laptop), so
+    // every entry point sweeps before it reads the buffer rather than
+    // trusting the timer to have fired.
+    this.expireOverdue();
+
     // An id that is already settled has a final answer: repeat its
     // receipt and stop. This is what keeps a re-send from re-parking a
     // swapped body under a handle the user already reviewed.
@@ -316,7 +410,11 @@ export class InboundGate {
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
-      void this.report(frame, 'denied');
+      // Not 'denied': nobody looked at it. A sender told its message was
+      // declined waits for a person to change their mind; one told the
+      // session refuses peer messages knows to stop.
+      this.recordSettled(frame.msgId, 'refused');
+      void this.report(frame, 'refused');
       return 'refused';
     }
 
@@ -364,6 +462,7 @@ export class InboundGate {
     );
     void this.report(frame, 'held');
     this.notifyHeldChange();
+    this.rescheduleExpiry();
     return 'held';
   }
 
@@ -383,6 +482,9 @@ export class InboundGate {
     msgId: string,
     decision: 'approve' | 'deny',
   ): 'done' | 'failed' | 'gone' {
+    // Before the lookup: an expired message must read as 'gone' rather
+    // than be released by a user acting on a listing that has gone stale.
+    this.expireOverdue();
     const index = this.held.findIndex((entry) => entry.frame.msgId === msgId);
     if (index === -1) return 'gone';
     const [entry] = this.held.splice(index, 1);
@@ -396,12 +498,17 @@ export class InboundGate {
         this.recordSettled(entry.frame.msgId, 'misaddressed');
         void this.report(entry.frame, 'misaddressed');
         this.notifyHeldChange();
+        this.rescheduleExpiry();
         return 'gone';
       }
       if (!this.tryDeliver(entry.frame, originOf(entry))) {
+        // Parked again at its old position, keeping its original
+        // `heldAt`: a failed release does not restart the clock, or a
+        // full input queue could keep a message alive indefinitely.
         this.held.splice(index, 0, entry);
         void this.report(entry.frame, 'held');
         this.notifyHeldChange();
+        this.rescheduleExpiry();
         return 'failed';
       }
       this.recordSettled(entry.frame.msgId, 'delivered');
@@ -411,6 +518,7 @@ export class InboundGate {
       void this.report(entry.frame, 'denied');
     }
     this.notifyHeldChange();
+    this.rescheduleExpiry();
     return 'done';
   }
 
@@ -425,6 +533,11 @@ export class InboundGate {
    * Returns the number of messages released.
    */
   reevaluate(reason: string): number {
+    // Runs on every settings change, which is also how a changed hold
+    // lifetime reaches the buffer: sweep against the new one, then re-arm
+    // the timer for whatever survives.
+    this.expireOverdue();
+    this.rescheduleExpiry();
     if (this.held.length === 0) return 0;
 
     const stillHeld: HeldMessage[] = [];
@@ -438,6 +551,9 @@ export class InboundGate {
         release.push(entry);
       } else if (policy === 'refuse') {
         dropped += 1;
+        // 'denied', not 'refused': this message was admitted and parked,
+        // and what settles it now is the user switching the setting —
+        // a decision, made after the fact, by a person.
         this.recordSettled(entry.frame.msgId, 'denied');
         void this.report(entry.frame, 'denied');
       } else {
@@ -469,6 +585,7 @@ export class InboundGate {
 
     this.held.length = 0;
     this.held.push(...stillHeld);
+    this.rescheduleExpiry();
 
     if (release.length > 0 || dropped > 0) {
       debugLogger.debug(
@@ -487,6 +604,10 @@ export class InboundGate {
    */
   shutdown(): Promise<void> {
     this.shuttingDown = true;
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
     if (this.held.length === 0) return Promise.resolve();
     const settling = this.held.splice(0, this.held.length);
     debugLogger.debug(
@@ -505,7 +626,7 @@ export class InboundGate {
   /** Remember a settled id, pruning the oldest beyond the cap. */
   private recordSettled(
     msgId: string,
-    verdict: 'delivered' | 'denied' | 'expired' | 'misaddressed',
+    verdict: 'delivered' | 'denied' | 'refused' | 'expired' | 'misaddressed',
   ): void {
     const key = canonicalizeMsgId(msgId);
     // Delete-then-set refreshes recency: Map iterates in insertion
@@ -541,7 +662,13 @@ export class InboundGate {
    */
   private report(
     frame: PeerUserFrame,
-    status: 'held' | 'denied' | 'expired' | 'delivered' | 'misaddressed',
+    status:
+      | 'held'
+      | 'denied'
+      | 'refused'
+      | 'expired'
+      | 'delivered'
+      | 'misaddressed',
   ): Promise<void> {
     try {
       return Promise.resolve(this.options.reportStatus?.(frame, status));
@@ -568,6 +695,69 @@ export class InboundGate {
       );
       return false;
     }
+  }
+
+  /**
+   * Settle every message whose hold has run out.
+   *
+   * Expiry is judged against the lifetime configured *now*, not the one
+   * in force when each message arrived: shortening the setting expires a
+   * backlog that is already too old, and lengthening it gives the
+   * backlog the longer window. Either reading is defensible; this one
+   * has the property that what `/peers` shows as remaining is what
+   * actually happens.
+   */
+  private expireOverdue(): void {
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null || this.held.length === 0) return;
+    const deadline = Date.now() - expiryMs;
+    const survivors: HeldMessage[] = [];
+    const expired: HeldMessage[] = [];
+    for (const entry of this.held) {
+      (entry.heldAt <= deadline ? expired : survivors).push(entry);
+    }
+    if (expired.length === 0) return;
+
+    this.held.length = 0;
+    this.held.push(...survivors);
+    for (const entry of expired) {
+      debugLogger.debug(
+        `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
+      );
+      this.recordSettled(entry.frame.msgId, 'expired');
+      void this.report(entry.frame, 'expired');
+    }
+    this.notifyHeldChange();
+  }
+
+  /**
+   * Arm the timer for whichever message expires first, or clear it when
+   * nothing is waiting and when holds do not expire.
+   *
+   * Called after every change to the buffer. Unref'd: a session with a
+   * message parked should still be able to exit, and shutdown settles
+   * the backlog anyway.
+   */
+  private rescheduleExpiry(): void {
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
+    if (this.shuttingDown) return;
+    const expiryMs = this.getHeldExpiryMs();
+    if (expiryMs === null) return;
+    const oldest = this.held[0];
+    if (oldest === undefined) return;
+
+    // Never negative, and never zero: a zero-delay timer that fires
+    // inside the same tick as the change that armed it would recurse.
+    const delay = Math.max(1, oldest.heldAt + expiryMs - Date.now());
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null;
+      this.expireOverdue();
+      this.rescheduleExpiry();
+    }, delay);
+    this.expiryTimer.unref?.();
   }
 
   private notifyHeldChange(): void {
