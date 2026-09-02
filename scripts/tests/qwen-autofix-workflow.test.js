@@ -23188,6 +23188,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     '  expect(four()).toBe(4);',
     '});',
   ];
+  // A spy and its restore: member calls that throw nothing, so deleting
+  // them removes no assertion.
+  const WT_SPY = [
+    "import { it, expect, vi } from 'vitest';",
+    "it('a', () => {",
+    "  const spy = vi.spyOn(console, 'warn').mockReturnValue(undefined);",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(2);',
+    '  spy.mockRestore();',
+    '});',
+  ];
   // Main-side drift that ADDS assertions to the branch-added block's file:
   // a merge carrying this in is freight, and it shields nothing.
   const WT_MAIN_DRIFT = [
@@ -23531,6 +23542,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       },
       round: ['git rm -q python/tests/test_wrapper.py', AGENT_COMMIT],
     },
+    // The `*_tests.rs` suffix this repo's cua-driver crates use: neither
+    // `**/tests/*.rs` nor `**/*_test.rs` matches it, and `assert_eq!`
+    // matches no JS density RE, so the deletion arm is its only signal.
+    'rust-tests-suffix-delete': {
+      files: {
+        'pkg/browser/v2_tests.rs': [
+          '#[test]',
+          'fn opens_the_page() {',
+          '    assert_eq!(load(), Ok(()));',
+          '}',
+        ],
+      },
+      round: ['git rm -q pkg/browser/v2_tests.rs', AGENT_COMMIT],
+    },
     // A dash-prefixed root filename is a legal git name and is enumerated
     // by the `**/` pathspec — the ack lookup must survive it too.
     'dash-ack': {
@@ -23652,6 +23677,33 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git add pkg/a.test.ts && git commit -qm main-weakens',
       ],
       round: ['git reset -q --hard origin/main', AGENT_COMMIT],
+    },
+    // The modified-file twin: main weakens the test, the round syncs onto
+    // it and then renames a symbol without losing an assertion. The ridden
+    // commit is status M, so a recount base recorded only for files the ride
+    // ADDED leaves the verdict-time recount charging main's delta to the
+    // round.
+    'ff-main-modify-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-weakens',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(uno()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
     },
     // Main deletes a pre-existing test; the round merges the deletion in
     // as freight and its own commit re-adds the file WEAKENED. The re-add
@@ -24134,6 +24186,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             '  expect(two()).toBe(2);',
             '});',
           ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Negative control for the matcher-tail census: counting every
+    // `.ident(` in the blob charged this honest deletion as three removed
+    // assertion lines, so the census is scoped to continuation-shaped lines.
+    'honest-spy-delete': {
+      files: { 'pkg/a.test.ts': WT_SPY },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_SPY.filter((l) => !l.includes('spy')),
         }),
         AGENT_COMMIT,
       ],
@@ -24951,6 +25015,55 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             '  ctx.skip();',
             '  expect(one()).toBe(1);',
             '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Negative control for the body-call arm: a condition-valued dynamic
+    // skip is the runtime spelling of the .skipIf environment guard, which
+    // the doctrine exempts on every arm.
+    'ctx-skip-conditional': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', (ctx) => {",
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', (ctx) => {",
+            "  ctx.skip(process.platform === 'win32', 'requires the POSIX harness');",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The same arm with the condition removed: a reason-only dynamic skip
+    // is unconditional and stays charged.
+    'ctx-skip-reason': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', (ctx) => {",
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', (ctx) => {",
+            "  ctx.skip('no writable fixture root outside the workspace');",
+            '  expect(one()).toBe(1);',
             '});',
           ],
         }),
@@ -26894,6 +27007,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     },
   );
 
+  it('rejects deleting a Rust test file named *_tests.rs', () => {
+    const r = runGate({ weaken: 'rust-tests-suffix-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/browser/v2_tests.rs');
+    expect(r.rejection).toContain('test file deleted');
+  });
+
   it('charges a weakening of a test the round merged in from main', () => {
     // A test main landed arrives through the round's OWN merge: for the
     // round's post-merge commits it is pre-existing coverage, and the
@@ -26932,6 +27052,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // fast-forwarded main commit is main's side — freight, exactly as
       // when the same delta crosses a real merge.
       const r = runGate({ weaken: 'ff-main-weaken-freight' });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge a rename in a file its fast-forward synced from main',
+    () => {
+      const r = runGate({ weaken: 'ff-main-modify-freight' });
       expect(r.status).toBe(0);
       expect(r.advisories).not.toContain('weakened or removed pre-existing');
     },
@@ -27225,6 +27354,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // A /[...]/ class carrying /* must not corrupt the strip into
       // swallowing the intact assertions that follow it.
       const r = runGate({ weaken: 'regex-class-control' });
+      expect(r.status).toBe(0);
+      expect(r.outputs).toContain('outcome=fixed');
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge a round that deletes only spy and mock setup lines',
+    () => {
+      const r = runGate({ weaken: 'honest-spy-delete' });
       expect(r.status).toBe(0);
       expect(r.outputs).toContain('outcome=fixed');
       expect(r.advisories).not.toContain('weakened or removed pre-existing');
@@ -27573,6 +27712,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('skip/todo marker(s) added');
   });
+
+  it('rejects a reason-only dynamic skip injected into a test body', () => {
+    const r = runGate({ weaken: 'ctx-skip-reason' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    "does not charge vitest's condition-valued dynamic skip",
+    () => {
+      // skip(cond, reason) is the runtime form of the .skipIf environment
+      // guard this repo already writes; charging it rejects an honest
+      // platform-conditional test.
+      const r = runGate({ weaken: 'ctx-skip-conditional' });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
 
   it('rejects swapping an assertion for a property-accessed matcher', () => {
     // expect(two()).toBe; throws nothing — the access-only line may earn

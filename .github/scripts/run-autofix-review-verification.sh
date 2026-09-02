@@ -1142,7 +1142,14 @@ fi
 # and the repo's non-JS test shapes belong here too. Whole-file deletions
 # are language-agnostic; the JS-syntax density REs simply never match the
 # non-JS bytes, so those files are judged by the deletion arm alone.
-WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(exclude,glob)**/__snapshots__/**')
+# The limit of that promise: a Rust module carrying an inline
+# `#[cfg(test)] mod tests` block lives in src/*.rs beside production code,
+# so no pathspec can select those tests without also selecting every Rust
+# production file -- and charging a production-file deletion as a test
+# deletion would break the language-agnostic deletion rule above. Such a
+# file is outside every arm here, in-place weakening included; only Rust
+# test files whose NAME marks them as tests are enumerated.
+WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(glob)**/*_tests.rs' ':(exclude,glob)**/__snapshots__/**')
 # Member calls like console.assert( print and continue in Node — they
 # never fail a test — so the assert forms carry the left-boundary idiom
 # the skip RE uses, and the member arm requires the CALL: a member
@@ -1194,6 +1201,15 @@ WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()
 # assertions fused into one line), symmetrically on both blobs. The arm
 # only ever RAISES the deletion signal: a member call that throws nothing
 # can only over-charge the del side, the documented fail-closed direction.
+# Scoped to CONTINUATION-shaped lines -- a stripped line whose first
+# non-space byte is ')' or '.' -- because that is the only shape this arm
+# exists to see: the matcher tail of a multi-line-formatted assertion.
+# Counting every member call in the blob instead charged ordinary
+# non-assertion test code (vi.spyOn(...).mockReturnValue(...), a spy's
+# .mockRestore(), an array .map/.filter rewrite) as removed assertions,
+# and that is the common case, not a rare tail: across 285 sampled test
+# files 250 carry more member calls than assertion heads, and the census
+# counted 47041 member calls where the scoped one counts 3499.
 WEAKEN_MATCHER_TAIL_RE='[.][A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*([?][.])?[(]'
 # Collector-modifier member calls (.skip(, .each(, .concurrent(, ...) are
 # not assertions: the tail census must not count them, or a genuine
@@ -1219,9 +1235,18 @@ WEAKEN_MATCHER_TAIL_EXCLUDE_RE='[.](skipIf|runIf|skip|todo|fails|failing|each|fo
 # (it.each(table)('x', { skip: true }, fn) disables the parameterized
 # test the same way); and the runtime body call skip( — ctx.skip()
 # disables a pre-existing test with no collector edit. The body arm
-# demands ( immediately after skip so .skipIf( stays exempt.
+# demands ( immediately after skip so .skipIf( stays exempt, and carries
+# the options arm's condition-valued exemption: ctx.skip(cond, reason) is
+# vitest's dynamic spelling of the environment guard this repo already
+# writes as skip(process.platform === 'win32', 'requires the POSIX daemon
+# harness'), so charging it rejects an honest platform-conditional test.
+# The `true` LITERAL stays charged on both spellings, exactly as in the
+# options arm. A condition the exemption cannot see is still charged — an
+# over-charge, which one ack entry answers: a single-argument skip(cond),
+# and any condition carrying its own comma or close paren, so
+# skip(isWindows(), 'reason') charges like the unconditional form.
 # shellcheck disable=SC2016  # the $ bytes are regex character-class literals, not shell expansions
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(each|for)[[:space:]]*[(][^)]*[)][[:space:]]*)*[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\('
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(each|for)[[:space:]]*[(][^)]*[)][[:space:]]*)*[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\(([^,)]*\)|[[:space:]]*true[[:space:]]*[,)])'
 # Measured weakenings travel as parallel indexed arrays, never a
 # newline/tab-joined string: filenames are branch-controlled bytes, and a
 # name carrying a newline or tab splits a delimited record into fragments
@@ -1486,27 +1511,33 @@ weaken_count_absent() {
     END { print c + 0 }
   ' <(printf '%s\n' "${2}") <(printf '%s\n' "${1}")
 }
-# Total matches of regex ${1} across the stream, minus the matches of the
-# exclusion ${2} -- match-count semantics, not the line count grep -c
-# reports: gsub returns the substitution count and "&" replaces each match
-# with itself. The patterns travel through ENVIRON for the same
-# escape-processing reason weaken_count_absent uses.
+# Total matches of regex ${1} across the CONTINUATION-shaped lines of the
+# stream -- first non-space byte ')' or '.', the matcher-chain tail shape
+# the census is scoped to -- minus the matches of the exclusion ${2}.
+# Match-count semantics, not the line count grep -c reports: gsub returns
+# the substitution count and "&" replaces each match with itself. The line
+# guard wraps BOTH patterns, so the exclusion stays a subset of what the
+# tail arm counted and the census cannot go negative. The patterns travel
+# through ENVIRON for the same escape-processing reason weaken_count_absent
+# uses.
 weaken_match_count() {
   WEAKEN_COUNT_RE="${1}" WEAKEN_EXCLUDE_RE="${2}" awk '
     BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"]; xre = ENVIRON["WEAKEN_EXCLUDE_RE"]; c = 0 }
-    { c += gsub(re, "&"); c -= gsub(xre, "&") }
+    /^[[:space:]]*[).]/ { c += gsub(re, "&"); c -= gsub(xre, "&") }
     END { print c + 0 }
   '
 }
 # The freight census at match-count semantics: total matches of regex ${3}
-# on lines of ${1} whose exact text is absent from ${2} -- the per-line
-# classification weaken_count_absent applies, summed per match for the
-# matcher-tail arm.
+# on CONTINUATION-shaped lines of ${1} whose exact text is absent from ${2}
+# -- the per-line classification weaken_count_absent applies, summed per
+# match for the matcher-tail arm and scoped to the same line shape
+# weaken_match_count uses, so the freight term and the census it adjusts
+# count the same population.
 weaken_count_absent_matches() {
   WEAKEN_COUNT_RE="${3}" WEAKEN_EXCLUDE_RE="${4}" awk '
     BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"]; xre = ENVIRON["WEAKEN_EXCLUDE_RE"] }
     NR == FNR { seen[$0] = 1; next }
-    !($0 in seen) { c += gsub(re, "&"); c -= gsub(xre, "&") }
+    !($0 in seen) && /^[[:space:]]*[).]/ { c += gsub(re, "&"); c -= gsub(xre, "&") }
     END { print c + 0 }
   ' <(printf '%s\n' "${2}") <(printf '%s\n' "${1}")
 }
@@ -1766,6 +1797,22 @@ while IFS= read -r c; do
       weaken_recount_base_set "${weaken_mf}" "${c}"
     done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
       -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+    # A file main only MODIFIED during the ride is status M at every ridden
+    # commit, so the added-file feeder above records no recount base for it
+    # and the verdict-time recount spans pre-round -> tip: main's own delta
+    # is charged to a round that merely syncs onto main and then renames a
+    # symbol. Record the base for the modified and typechanged files too.
+    # Deliberately NOT routed through WEAKEN_MERGE_TOUCHED, which also
+    # disables the byte-identity netting skip -- that skip must still apply
+    # to a round restoring an ff-ridden file to its exact pre-round bytes.
+    # Status D is left out: the ridden commit holds no blob to recount from,
+    # and the pre-round base is the right one for a main-side deletion the
+    # round then re-adds.
+    while IFS= read -r -d '' weaken_mf; do
+      [[ -n "${weaken_mf}" ]] || continue
+      weaken_recount_base_set "${weaken_mf}" "${c}"
+    done < <(git diff --name-only -z --no-renames --diff-filter=MT "${c}^" "${c}" \
+      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
     continue
   fi
   # M, D, and T: a file deleted in one round commit and re-added weakened in
@@ -1863,18 +1910,18 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
     # escapes both. Recount the whole round at verdict time — stripped
     # base and tip densities per arm, the larger signal wins, the same
     # rule the per-commit arms apply within one commit. The base is the
-    # pre-round ref, except for files a main-derived merge touched or
-    # introduced: they recount from that merge's RESULT blob, because
-    # merge result to tip is exactly the round's post-merge authorship —
+    # pre-round ref, except where the ledger records one — a file a
+    # main-derived merge touched or introduced, or one a fast-forwarded
+    # main modified: those recount from that commit's RESULT blob,
+    # because result to tip is exactly the round's post-sync authorship —
     # main's own delta that crossed the merge neither charges nor
     # shields, and a pre->tip recount would charge it.
-    weaken_round_ref="origin/${BRANCH}"
-    if weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" ||
-      weaken_member "${f}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
-      weaken_round_ref="$(weaken_recount_base_get "${f}")" || weaken_round_ref=''
-    fi
-    if [[ -n "${weaken_round_ref}" ]] &&
-      git cat-file -e "${weaken_round_ref}:${f}" 2> /dev/null &&
+    # Read the ledger, not set membership: every writer of the two merge
+    # sets records a base beside it, and the fast-forward arm records bases
+    # for files that belong to neither set.
+    weaken_round_ref="$(weaken_recount_base_get "${f}")" ||
+      weaken_round_ref="origin/${BRANCH}"
+    if git cat-file -e "${weaken_round_ref}:${f}" 2> /dev/null &&
       git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
       weaken_round_old="$(git show "${weaken_round_ref}:${f}" 2> /dev/null)" || weaken_round_old=''
       weaken_round_new="$(git show "${BRANCH}:${f}" 2> /dev/null)" || weaken_round_new=''
