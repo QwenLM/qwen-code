@@ -329,7 +329,27 @@ function runScenario(
       [
         '#!/bin/bash',
         'if [ "${1:-}" = "api" ]; then',
-        '  printf \'%s\\n\' "${STUB_TIMELINE:-}"',
+        // supersede_reverted_during_run resolves the credential's own login
+        // so it can refuse force-push events the reviewed agent authored
+        // with the GH_TOKEN it inherits (R22-1).
+        '  if [ "${2:-}" = "user" ]; then',
+        // A failed identity read yields no stdout, like the real gh: exit
+        // status alone would still leave the login captured.
+        '    [ "${STUB_BOT_LOGIN_STATUS:-0}" = "0" ] || exit "${STUB_BOT_LOGIN_STATUS}"',
+        '    printf \'%s\\n\' "${STUB_BOT_LOGIN:-qwen-ci-bot}"',
+        '    exit 0',
+        '  fi',
+        // The real API returns only the columns the query selects, so the
+        // actor column appears only once the workflow asks for it: a
+        // pre-actor build still sees the three-column shape it requested.
+        '  case "$*" in',
+        '    *actor*)',
+        '      printf \'%s\\n\' "${STUB_TIMELINE:-}" | while IFS= read -r line; do',
+        '        [ -n "$line" ] && printf \'%s %s\\n\' "$line" "${STUB_TIMELINE_ACTOR-pr-author}"',
+        '      done',
+        '      ;;',
+        '    *) printf \'%s\\n\' "${STUB_TIMELINE:-}" ;;',
+        '  esac',
         '  exit "${STUB_TIMELINE_STATUS:-0}"',
         'fi',
         'att="$(cat "$ATT" 2>/dev/null || echo 0)"',
@@ -5796,6 +5816,52 @@ describe('review supersede salvage (#10110)', () => {
       expect(forgedDate.status).toBe(1);
       expect(forgedDate.raw).toContain('FAIL ');
       expect(forgedDate.raw).not.toContain('Superseded early:');
+      // R22-1: the witness is unforgeable only against an actor that is not
+      // this step's OWN credential. The reviewed agent inherits
+      // GH_TOKEN=CI_BOT_PAT, and neither the git wrapper (proxy env + exec)
+      // nor guard_api_write (four comment/review endpoints) blocks a
+      // repos/*/git/refs/* write — so an injected agent force-pushes the
+      // head EXPECTED→X→EXPECTED itself and authors the very pair above.
+      // Accepting it cedes green with nothing posted, and the push queues
+      // the successor run that repeats it against the same content.
+      const botPair = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: pair,
+          STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
+        },
+      });
+      expect(botPair.attempts).toBe(1);
+      expect(botPair.status).toBe(1);
+      expect(botPair.raw).toContain('FAIL ');
+      expect(botPair.raw).not.toContain('Superseded early:');
+      // The identity read is what separates the two authors, so an
+      // unavailable identity must not fall through to accepting every
+      // actor-bearing event: an unattributable witness keeps the red
+      // failure the cede's contract prefers.
+      const noIdentity = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: pair,
+          STUB_BOT_LOGIN_STATUS: '1',
+        },
+      });
+      expect(noIdentity.attempts).toBe(1);
+      expect(noIdentity.status).toBe(1);
+      expect(noIdentity.raw).toContain('FAIL ');
+      expect(noIdentity.raw).not.toContain('Superseded early:');
+      // A null actor (the schema allows one) is unattributable the same way:
+      // the selection's `// ""` fallback must not read as "someone else".
+      const noActor = runScenario('cede_revert_kill', {
+        armWatcher: true,
+        extraEnv: { ...base, STUB_TIMELINE: pair, STUB_TIMELINE_ACTOR: '' },
+      });
+      expect(noActor.attempts).toBe(1);
+      expect(noActor.status).toBe(1);
+      expect(noActor.raw).toContain('FAIL ');
+      expect(noActor.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5985,6 +6051,23 @@ describe('review supersede salvage (#10110)', () => {
       expect(insideMargin.status).toBe(1);
       expect(insideMargin.raw).toContain('FAIL ');
       expect(insideMargin.raw).not.toContain('Superseded early:');
+      // R22-1's kill-record arm: the corroboration has to be a back-push by
+      // SOMEONE ELSE. The agent that planted the record can author the
+      // back-push too with the inherited CI_BOT_PAT, and past the poll
+      // margin it is otherwise indistinguishable from the genuine shape the
+      // normal-push cede replay pins.
+      const botBackPush = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 75000).toISOString()}`,
+          STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
+        },
+      });
+      expect(botBackPush.attempts).toBe(1);
+      expect(botBackPush.status).toBe(1);
+      expect(botBackPush.raw).toContain('FAIL ');
+      expect(botBackPush.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

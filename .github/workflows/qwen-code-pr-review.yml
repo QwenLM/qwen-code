@@ -2054,18 +2054,29 @@ jobs:
           # fail() on a run that really was superseded. A branch only
           # returns to a head it left by force-push, so a force-push that
           # landed BACK on the expected head during this run is the
-          # move-then-revert signature; timeline events are server-side —
-          # the reviewed agent cannot forge them while the read goes
-          # through QWEN_CI_REAL_GH instead of a gh planted in the
-          # agent-writable $proxy_bin PATH prepend (live_head_moved
-          # carries the full rationale). A match cedes clean; an
-          # unavailable or silent timeline keeps the red failure.
+          # move-then-revert signature; timeline events are server-side, so
+          # the reviewed agent cannot forge the READ while it goes through
+          # QWEN_CI_REAL_GH instead of a gh planted in the agent-writable
+          # $proxy_bin PATH prepend (live_head_moved carries the full
+          # rationale) — but it can AUTHOR the events: it inherits this
+          # step's GH_TOKEN, and neither the git wrapper nor guard_api_write
+          # blocks a ref write. Only a push by another actor witnesses the
+          # move. A match cedes clean; an unavailable or silent timeline
+          # keeps the red failure.
           supersede_reverted_during_run() {
-            local owner repo events before after at departed=0
+            local owner repo events before after at actor bot_login departed=0
             owner="${REPO:-}"
             repo="${owner##*/}"
             owner="${owner%%/*}"
-            events="$("${QWEN_CI_REAL_GH:-gh}" api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "")' 2>/dev/null)" || return 1
+            # The events below witness a move only while someone OTHER than
+            # this credential pushed them, so resolve its login first — the
+            # dynamic read the fallback-comment dedup already relies on.
+            # Pinned like every read here, and an unreadable identity
+            # returns 1 instead of accepting every actor-bearing event: an
+            # unattributable witness keeps the red failure, never a cede.
+            bot_login="$("${QWEN_CI_REAL_GH:-gh}" api user --jq '.login' 2>/dev/null || true)"
+            [ -n "$bot_login" ] || return 1
+            events="$("${QWEN_CI_REAL_GH:-gh}" api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } actor { login } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "") + " " + (.actor.login // "")' 2>/dev/null)" || return 1
             [ -n "$events" ] || return 1
             # The watcher's kill record covers the modal supersede shape —
             # a normal fast-forward departure emits no force-push event, so
@@ -2097,7 +2108,8 @@ jobs:
               # agent-writable prepend, and a planted `date` answering -d
               # with a future epoch lifts the triggering event past any
               # bound (R16-3).
-              while read -r before after at; do
+              while read -r before after at actor; do
+                case "$actor" in ''|"$bot_login") continue ;; esac
                 at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
                 [ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ] || continue
                 if [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
@@ -2115,7 +2127,8 @@ jobs:
             # tolerance below START_TS is seconds of clock skew, and a lost
             # cede stays a visible red failure while a forged one suppresses
             # the review silently.
-            while read -r before after at; do
+            while read -r before after at actor; do
+              case "$actor" in ''|"$bot_login") continue ;; esac
               at="$("${QWEN_CI_REAL_DATE:-date}" -d "$at" +%s 2>/dev/null || echo 0)"
               [ "$at" -ge "$(( START_TS - 15 ))" ] || continue
               if [ "$departed" = "1" ] && [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
