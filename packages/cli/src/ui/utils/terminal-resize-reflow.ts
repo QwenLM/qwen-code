@@ -520,9 +520,10 @@ export function installTerminalResizeReflow(
   ): boolean => {
     const width = stdout.columns ?? lastWidth;
     const rows = stdout.rows ?? 0;
-    // A reset write never carries Ink's synced trailing-newline slot; a
-    // trailing empty element is a genuinely blank bottom row of the live
-    // frame and must stay in the anchoring window.
+    // The synced trailing-newline slot was trimmed at store time (keyed on
+    // the published non-fullscreen decision); a trailing empty element left
+    // here is a genuinely blank bottom row of the live frame and must stay
+    // in the anchoring window.
     const pendingLines = pendingResetFrame.split('\n');
     const candidate = (trailing: boolean): string[] | null => {
       const height =
@@ -725,12 +726,10 @@ export function installTerminalResizeReflow(
             debugLogger.debug('first-frame', { state: 'armed' });
           } else if (stripAnsi(after).trim() !== '') {
             // VP overflow full reset: the write carries the full live frame
-            // but may prepend re-emitted <Static> transcript (agent tabs),
-            // and the bytes omit the trailing-newline slot Ink syncs for
-            // non-fullscreen frames. Defer the anchor until the next diff's
-            // head count validates the trailing live-frame window; the last
-            // good model stays the fallback replay meanwhile.
-            pendingResetFrame = after;
+            // but may prepend re-emitted <Static> transcript (agent tabs).
+            // Defer the anchor until the next diff's head count validates the
+            // trailing live-frame window; the last good model stays the
+            // fallback replay meanwhile.
             // Ink publishes the fullscreen decision for exactly this write;
             // consume it so the deferred anchor slots the window the way
             // log.sync() did (a later reset re-publishes its own).
@@ -742,6 +741,17 @@ export function installTerminalResizeReflow(
             delete (stdout as unknown as Record<symbol, unknown>)[
               INK_RESET_FULLSCREEN
             ];
+            // A non-fullscreen reset writes outputToRender = output + '\n'
+            // (patched ink.js), so the payload carries Ink's synced
+            // trailing-newline slot. Trim exactly that slot before deferring,
+            // keyed on the published decision rather than a blanket strip, so
+            // the anchor windows the live frame the way log.sync() did; a
+            // trailing empty element left after the trim is a genuinely blank
+            // bottom row and stays.
+            pendingResetFrame =
+              pendingResetFullscreen === false && after.endsWith('\n')
+                ? after.slice(0, -1)
+                : after;
             debugLogger.debug('reset', {
               pending: true,
               markerKnown: pendingResetFullscreen !== undefined,

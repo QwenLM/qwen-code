@@ -1076,7 +1076,8 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
           '\n' +
-          reset.join('\n'),
+          reset.join('\n') +
+          '\n',
       );
       const next = reset.slice();
       next[5] = 'POST-RESET-UPDATE';
@@ -1120,13 +1121,12 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const prev = frameLines(20, 45);
       stdout.write(ansiEscapes.eraseLines(45) + prev.join('\n'));
       // The reply collapses below the viewport: Ink writes clearTerminal +
-      // the frame WITHOUT the trailing '\n' it hands to log.sync(), so the
-      // next same-height diff carries cursorUp(lines), not cursorUp(lines-1).
-      // The new frame is sub-viewport, so Ink publishes non-fullscreen and
-      // syncs the slot.
+      // outputToRender, which carries the synced trailing-newline slot of the
+      // new sub-viewport frame (Ink publishes non-fullscreen). The next
+      // same-height diff carries cursorUp(lines), reflecting the slot.
       const reset = frameLines(20, 30).map((line) => `${line}-r3`);
       publishResetFullscreen(stdout, false);
-      stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
+      stdout.write(ansiEscapes.clearTerminal + reset.join('\n') + '\n');
       const next = reset.slice();
       next[2] = 'COLLAPSED-UPDATE';
       stdout.write(
@@ -1636,14 +1636,16 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const transcript = ['committed-a', 'committed-b'];
       const live = frameLines(20, 10).map((line) => `${line}-r6`);
       // The bottom composited row is blank (e.g. a height-constrained dialog
-      // padding shorter content); a reset write carries no slot to pop it.
+      // padding shorter content). The reset write also carries the synced
+      // slot; the anchor trims exactly that slot and keeps this blank row.
       live[9] = '';
       publishResetFullscreen(stdout, false);
       stdout.write(
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
           '\n' +
-          live.join('\n'),
+          live.join('\n') +
+          '\n',
       );
       const next = live.slice();
       next[5] = 'POST-RESET-UPDATE';
@@ -1659,6 +1661,52 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const replay = stdout.written[0]!;
       expect(replay).toContain('POST-RESET-UPDATE');
       expect(replay).toContain('line-0-');
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a non-fullscreen reset carrying the synced trailing-newline slot', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Production byte shape: patched Ink writes outputToRender =
+      // output + '\n' for a non-fullscreen reset, so the payload carries the
+      // synced trailing-newline slot. The deferred anchor must trim exactly
+      // that slot (keyed on the published non-fullscreen decision) or it
+      // slots [row2..rowN, ''] — dropping the first live row and adding a
+      // phantom blank one.
+      const transcript = ['committed-a', 'committed-b'];
+      const live = frameLines(20, 10).map((line) => `${line}-r14`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n') +
+          '\n',
+      );
+      const next = live.slice();
+      next[5] = 'POST-RESET-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('POST-RESET-UPDATE');
+      expect(replay).toContain(live[0]!);
+      expect(replay).toContain(live[9]!);
       expect(replay).not.toContain('committed-');
     } finally {
       restore();
@@ -1681,7 +1729,8 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
           '\n' +
-          live.join('\n'),
+          live.join('\n') +
+          '\n',
       );
       const next = live.slice(0, 7);
       next[1] = 'SHRUNK-AFTER-RESET';
