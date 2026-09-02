@@ -41,7 +41,12 @@ function parseReasoningSelection(
 }
 
 export function mapProviderStatus(
-  status: DaemonWorkspaceProvidersStatus | undefined,
+  status:
+    | Pick<
+        DaemonWorkspaceProvidersStatus,
+        'current' | 'approvalMode' | 'providers'
+      >
+    | undefined,
   preferredCurrentModel?: string,
 ): {
   models: DaemonModelInfo[];

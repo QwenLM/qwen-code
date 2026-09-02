@@ -255,7 +255,10 @@ import {
   SLASH_COMMAND_PATTERN,
 } from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { isVisibleComposerModel } from './utils/composerModels';
+import {
+  isStandaloneModelPickerUnavailable,
+  isVisibleComposerModel,
+} from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -2711,6 +2714,11 @@ export function App({
     [pendingSessionContext, settledSessionContext],
   );
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  // The composer picker chooses the target of the next session, so a
+  // projectless draft keeps it enabled: that is where "no workspace" is
+  // chosen. An attached projectless session hides it again.
+  const composerWorkspaceSelectEnabled =
+    workspaceContextActive || connection.sessionId === undefined;
   const pendingNonWorkspaceNavigation =
     pendingSessionContext !== undefined &&
     pendingSessionContext.kind !== 'workspace' &&
@@ -8986,12 +8994,26 @@ export function App({
     onError(new Error(connection.error));
   }, [connection.error, onError]);
 
+  const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
-    setCurrentModel(connection.currentModel ?? '');
+    const next = connection.currentModel;
+    // A late standalone options publish lands as an undefined→value change;
+    // never let it overwrite a model the user already picked while waiting.
+    const wasLateHydration =
+      prevConnectionModelRef.current === undefined && next !== undefined;
+    prevConnectionModelRef.current = next;
+    setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
+  const prevConnectionModeRef = useRef(connection.currentMode);
   useLayoutEffect(() => {
-    setCurrentMode(connection.currentMode ?? 'default');
+    const next = connection.currentMode;
+    const wasLateHydration =
+      prevConnectionModeRef.current === undefined && next !== undefined;
+    prevConnectionModeRef.current = next;
+    setCurrentMode((prev) =>
+      wasLateHydration && prev !== 'default' ? prev : (next ?? 'default'),
+    );
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
@@ -9820,6 +9842,9 @@ export function App({
     },
     [switchWorkspace],
   );
+  const handleSelectComposerStandalone = useCallback(() => {
+    void createNewSession({ kind: 'global' });
+  }, [createNewSession]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -11594,6 +11619,16 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
+              if (
+                isStandaloneModelPickerUnavailable({
+                  sessionId: connectionRef.current.sessionId,
+                  sessionContextKind: effectiveSessionContext?.kind,
+                  models: connectionRef.current.models,
+                })
+              ) {
+                pushToast('info', t('model.unavailable'));
+                return true;
+              }
               setModelDialogMode('main');
             }
             return true;
@@ -13368,18 +13403,29 @@ export function App({
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
-    if (composerToolbarActions) return composerToolbarActions;
     const defaults =
       isChatEmptyState || !environmentGitReplacementEnabled
         ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
         : DEFAULT_COMPOSER_TOOLBAR_ACTIONS;
-    return composerToolbarAdditionalActions?.length
-      ? [...defaults, ...composerToolbarAdditionalActions]
-      : defaults;
+    const configured =
+      composerToolbarActions ??
+      (composerToolbarAdditionalActions?.length
+        ? [...defaults, ...composerToolbarAdditionalActions]
+        : defaults);
+    return isStandaloneModelPickerUnavailable({
+      sessionId: connection.sessionId,
+      sessionContextKind: effectiveSessionContext?.kind,
+      models: connection.models,
+    })
+      ? configured.filter((action) => action !== 'model')
+      : configured;
   }, [
     composerToolbarActions,
     composerToolbarAdditionalActions,
+    connection.models,
+    connection.sessionId,
     environmentGitReplacementEnabled,
+    effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
   const useMobileWelcomeMiddleLayout =
@@ -14118,15 +14164,16 @@ export function App({
                       );
                     }
                   }}
+                  // A cwd-less New task inherits the current context: a
+                  // workspace chat stays in its workspace and a cold draft
+                  // lands on the primary one. Projectless targets are chosen
+                  // in the composer's workspace picker instead.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                        : { kind: 'inherit' },
                     )
-                  }
-                  globalNewSessionUsesStandalone={
-                    standaloneSessionsSupported && !lockedWorkspaceCwd
                   }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
@@ -15761,7 +15808,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
                           }
@@ -15776,7 +15823,9 @@ export function App({
                                 : selectedWorkspaceCwd
                               : undefined
                           }
-                          workspaceSelectionDisabled={!workspaceContextActive}
+                          workspaceSelectionDisabled={
+                            !composerWorkspaceSelectEnabled
+                          }
                           atWorkspaceCwd={
                             workspaceContextActive
                               ? (ordinaryWorkspaces.find(
@@ -15796,8 +15845,21 @@ export function App({
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
                           onSelectWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          standaloneTargetSupported={
+                            composerWorkspaceSelectEnabled &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                          }
+                          selectedStandaloneTarget={
+                            effectiveSessionContext?.kind === 'standalone'
+                          }
+                          onSelectStandaloneTarget={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectComposerStandalone
                               : undefined
                           }
                           scratchWorkspaceSupported={
@@ -15909,7 +15971,15 @@ export function App({
                             setShowApprovalModeDialog((v) => !v)
                           }
                           onSelectModel={() =>
-                            setModelDialogMode((v) => (v ? null : 'main'))
+                            isStandaloneModelPickerUnavailable({
+                              sessionId: connection.sessionId,
+                              sessionContextKind: effectiveSessionContext?.kind,
+                              models: connection.models,
+                            })
+                              ? pushToast('info', t('model.unavailable'))
+                              : setModelDialogMode((v) =>
+                                  v ? null : 'main',
+                                )
                           }
                           onShowContext={() =>
                             showContextUsage('/context', false)
