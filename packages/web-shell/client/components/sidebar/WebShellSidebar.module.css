@@ -607,6 +607,26 @@
   background: var(--muted-foreground);
 }
 
+.sessionGroupIcon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionGroupIcon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .sessionGroupTitle {
   min-width: 0;
   overflow: hidden;
