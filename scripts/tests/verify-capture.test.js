@@ -213,15 +213,23 @@ describe('verify-capture helper', () => {
     const { data, info } = await sharp(png)
       .raw()
       .toBuffer({ resolveWithObject: true });
-    // FG_DEFAULT is #d4d4d4 — look for a pixel matching it.
-    let hasFallback = false;
+    // FG_DEFAULT is #d4d4d4. Text is anti-aliased, and how many pixels land
+    // exactly on it depends on the host's font rasterisation: hosts without
+    // fontconfig fonts render almost entirely blended pixels, so the exact
+    // scan flaked. Count pixels closer to the fallback grey than to the
+    // #1e1e1e background instead — deleting the guard ships fill="undefined",
+    // which librsvg paints black, and black on #1e1e1e never reaches this
+    // bright.
+    let fallbackPixels = 0;
     for (let i = 0; i + 2 < data.length; i += info.channels) {
-      if (data[i] === 0xd4 && data[i + 1] === 0xd4 && data[i + 2] === 0xd4) {
-        hasFallback = true;
-        break;
+      if (data[i] >= 0x80 && data[i + 1] >= 0x80 && data[i + 2] >= 0x80) {
+        fallbackPixels += 1;
       }
     }
-    expect(hasFallback, '256-colour text did not render as #d4d4d4').toBe(true);
+    expect(
+      fallbackPixels,
+      '256-colour text did not render as #d4d4d4',
+    ).toBeGreaterThan(0);
   });
 
   // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground
