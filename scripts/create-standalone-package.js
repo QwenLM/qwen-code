@@ -56,6 +56,19 @@ const TARGET_CLIPBOARD_PACKAGE = new Map([
   ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
 ]);
 
+// Temporary OpenTUI preview: platform packages whose native render library is
+// resolved at runtime via `import('@opentui/core-<platform>-<arch>')`. Linux
+// is glibc-only: the bundled Bun runtime is glibc-linked and cannot start on
+// musl hosts, so shipping -musl render packages would claim support the
+// archive cannot deliver.
+const TARGET_OPENTUI_PACKAGES = new Map([
+  ['darwin-arm64', ['@opentui/core-darwin-arm64']],
+  ['darwin-x64', ['@opentui/core-darwin-x64']],
+  ['linux-arm64', ['@opentui/core-linux-arm64']],
+  ['linux-x64', ['@opentui/core-linux-x64']],
+  ['win-x64', ['@opentui/core-win32-x64']],
+]);
+
 const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
@@ -84,6 +97,12 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'review-sources.sha256',
   'locales',
   'examples',
+  // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+  // web-tree-sitter wasm, native render library) relocated by
+  // copy_bundle_assets.js; the bundled renderer sets OTUI_ASSET_ROOT to this
+  // directory for code-block syntax highlighting. copyOpenTuiAddon syncs the
+  // target's native library into it.
+  'opentui-assets',
   // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
   // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
   // web-shell workspace has been built; optional, so it's allowed but not
@@ -120,6 +139,10 @@ async function main() {
     fail(`--target must be one of: ${Array.from(TARGETS.keys()).join(', ')}`);
   }
 
+  if (args.runtime !== 'node' && args.runtime !== 'bun') {
+    fail('--runtime must be either "node" or "bun"');
+  }
+
   if (!args.nodeArchive) {
     fail('--node-archive is required');
   }
@@ -146,18 +169,27 @@ async function main() {
     fs.mkdirSync(packageRoot, { recursive: true });
     fs.mkdirSync(runtimeExtractDir, { recursive: true });
 
-    copyRuntimeAssets(packageRoot, outDir);
+    copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
+    if (args.runtime === 'bun') {
+      copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
+    }
     extractNodeArchive(nodeArchive, runtimeExtractDir);
     const nodeDir = path.join(packageRoot, 'node');
-    copyExtractedNode(runtimeExtractDir, nodeDir);
+    if (args.runtime === 'bun') {
+      installBunRuntime(runtimeExtractDir, nodeDir, target);
+      validateBunRuntime(target, packageRoot);
+    } else {
+      copyExtractedNode(runtimeExtractDir, nodeDir);
+    }
     validateNodeRuntime(target, nodeDir);
-    writeShims(packageRoot);
+    writeShims(packageRoot, args.runtime);
     writeManifest(packageRoot, {
       version,
       target,
       nodeArchive: path.basename(nodeArchive),
+      runtime: args.runtime,
     });
 
     if (fs.existsSync(outputPath)) {
@@ -187,8 +219,10 @@ function parseArgs(argv) {
   const args = {
     help: false,
     nativeModulesDir: undefined,
+    opentuiModulesDir: undefined,
     outDir: undefined,
     nodeArchive: undefined,
+    runtime: 'node',
     skipChecksums: false,
     target: undefined,
     version: undefined,
@@ -205,12 +239,20 @@ function parseArgs(argv) {
         args.target = readOptionValue(argv, index, arg);
         index += 1;
         break;
+      case '--runtime':
+        args.runtime = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
       case '--node-archive':
         args.nodeArchive = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--native-modules-dir':
         args.nativeModulesDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--opentui-modules-dir':
+        args.opentuiModulesDir = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--out-dir':
@@ -248,10 +290,18 @@ Usage:
 
 Options:
   --target TARGET         One of: ${Array.from(TARGETS.keys()).join(', ')}
+  --runtime RUNTIME       Runtime archive flavor: "node" (default) or "bun".
+                          Temporary OpenTUI preview: "bun" installs the Bun
+                          binary at the bundled runtime path so the OpenTUI
+                          renderer (needs bun:ffi) works standalone.
   --node-archive PATH     Downloaded Node.js runtime archive.
   --native-modules-dir DIR
                           Staged native node_modules directory. Missing
                           clipboard packages are fatal when this is supplied.
+  --opentui-modules-dir DIR
+                          Staged node_modules directory holding @opentui
+                          platform packages. Used with --runtime bun; missing
+                          packages are fatal when this is supplied.
   --out-dir DIR           Output directory. Defaults to dist/standalone.
   --version VERSION       Qwen Code version. Defaults to package.json version.
   --skip-checksums        Do not update SHA256SUMS. Used by release packaging.
@@ -287,11 +337,16 @@ function readPackageVersion() {
   return packageJson.version;
 }
 
-function copyRuntimeAssets(packageRoot, outDir) {
+function copyRuntimeAssets(packageRoot, outDir, runtime) {
   const libDir = path.join(packageRoot, 'lib');
   const skippedDistEntry = topLevelDistEntryForPath(outDir);
   fs.mkdirSync(libDir, { recursive: true });
 
+  // Classic Node packaging carries no renderer payload: the OpenTUI backend
+  // needs bun:ffi, and cross-built archives would hold another platform's
+  // native library, so the all-or-nothing asset gate could never activate.
+  // (--runtime=bun copies it here and prunes it to the target's libraries in
+  // copyOpenTuiAddon.)
   for (const entry of fs.readdirSync(distDir)) {
     // Standalone rebuilds a clean, target-trimmed lib/node_modules via the
     // native addon copy steps. If a local dist/node_modules exists from older
@@ -301,6 +356,7 @@ function copyRuntimeAssets(packageRoot, outDir) {
       entry === skippedDistEntry ||
       entry === '.DS_Store' ||
       entry === 'node_modules' ||
+      (entry === 'opentui-assets' && runtime !== 'bun') ||
       DIST_NPM_PACKAGE_ONLY_ENTRIES.has(entry)
     ) {
       continue;
@@ -442,6 +498,80 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
   assertNoSymlinks(
     modulesDest,
     'Bundled clipboard addon still contains symlinks.',
+  );
+}
+
+// Temporary OpenTUI preview: bundle the target's @opentui platform package(s)
+// into lib/node_modules so the backend's runtime
+// `import('@opentui/core-<platform>-<arch>')` resolves inside the archive.
+function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
+  const packageNames = TARGET_OPENTUI_PACKAGES.get(target) || [];
+  const modulesSrc = path.resolve(
+    opentuiModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  // The relocated OpenTUI asset root written by copy_bundle_assets.js carries
+  // only the BUILD host's native library; sync this TARGET's libraries into
+  // it so the runtime's OTUI_ASSET_ROOT completeness check (which includes
+  // the native library) passes inside the archive.
+  const assetRoot = path.join(packageRoot, 'lib', 'opentui-assets');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+
+  for (const packageName of packageNames) {
+    const packageSrc = path.join(modulesSrc, packageName);
+    const nativeLibraries = fs.existsSync(path.join(packageSrc, 'package.json'))
+      ? fs
+          .readdirSync(packageSrc)
+          .filter((entry) => /\.(dylib|so|dll)$/.test(entry))
+      : [];
+
+    if (nativeLibraries.length === 0) {
+      const message = `OpenTUI platform package ${packageName} for ${target} is missing from ${modulesSrc}`;
+      if (opentuiModulesDir) {
+        fail(`Required ${message}`);
+      }
+      console.warn(`[standalone] ${message}; OpenTUI renderer unavailable.`);
+      continue;
+    }
+
+    fs.cpSync(packageSrc, path.join(modulesDest, packageName), copyOpts);
+
+    for (const library of nativeLibraries) {
+      const assetDestDir = path.join(assetRoot, packageName);
+      fs.mkdirSync(assetDestDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(packageSrc, library),
+        path.join(assetDestDir, library),
+      );
+    }
+  }
+
+  // The relocated tree ships the BUILD host's platform library; any other
+  // platform package directory is dead weight the runtime can never load.
+  if (packageNames.length > 0) {
+    const targetBasenames = new Set(
+      packageNames.map((packageName) => packageName.split('/')[1]),
+    );
+    const scopeDir = path.join(assetRoot, '@opentui');
+    if (fs.existsSync(scopeDir)) {
+      for (const entry of fs.readdirSync(scopeDir)) {
+        if (/^core-/.test(entry) && !targetBasenames.has(entry)) {
+          fs.rmSync(path.join(scopeDir, entry), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+    }
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled OpenTUI addon still contains symlinks.',
   );
 }
 
@@ -669,24 +799,108 @@ function validateNodeRuntime(target, nodeDir) {
   }
 }
 
-function writeShims(packageRoot) {
+function validateBunRuntime(target, packageRoot) {
+  const relativePath =
+    target === 'win-x64'
+      ? path.join('bun', 'bun.exe')
+      : path.join('bun', 'bin', 'bun');
+  const executablePath = path.join(packageRoot, relativePath);
+
+  if (!fs.existsSync(executablePath)) {
+    fail(`Bun runtime for ${target} must contain ${relativePath}.`);
+  }
+
+  if (target !== 'win-x64') {
+    const mode = fs.statSync(executablePath).mode;
+    if ((mode & 0o111) === 0) {
+      fail(
+        `Bun runtime for ${target} must provide executable ${relativePath}.`,
+      );
+    }
+  }
+}
+
+// Temporary OpenTUI preview support: Bun release archives contain a single
+// executable (`bun` / `bun.exe`). It is installed under `bun/` and launched
+// by that name — Bun invoked as `node` enters its node-compat CLI mode,
+// which breaks the interactive TUI. A placeholder is also placed at the
+// classic `node/bin/node` path so installer scripts that validate that
+// layout keep working unchanged. It must be a REGULAR file: the installers
+// refuse archives containing symlinks or hardlinks, and a hardlink mirror
+// tripped exactly that check. Unix gets a tiny exec shim (zero size cost);
+// Windows gets a plain copy because a `.sh` shim cannot impersonate an exe.
+function installBunRuntime(extractDir, nodeDir, target) {
+  const executableName = target === 'win-x64' ? 'bun.exe' : 'bun';
+  const sourcePath = findFileRecursive(extractDir, executableName);
+  if (!sourcePath) {
+    fail(`Bun runtime archive did not contain ${executableName}.`);
+  }
+
+  const targetConfig = TARGETS.get(target);
+  const packageRoot = path.dirname(nodeDir);
+  const bunRelativePath =
+    target === 'win-x64'
+      ? path.join('bun', 'bun.exe')
+      : path.join('bun', 'bin', 'bun');
+  const bunPath = path.join(packageRoot, bunRelativePath);
+  fs.mkdirSync(path.dirname(bunPath), { recursive: true });
+  fs.copyFileSync(sourcePath, bunPath);
+  fs.chmodSync(bunPath, 0o755);
+
+  // Installer-script compatibility mirror at the Node.js layout path.
+  const compatPath = path.join(nodeDir, ...targetConfig.nodeExecutable);
+  fs.mkdirSync(path.dirname(compatPath), { recursive: true });
+  if (target === 'win-x64') {
+    fs.copyFileSync(bunPath, compatPath);
+  } else {
+    fs.writeFileSync(
+      compatPath,
+      '#!/usr/bin/env sh\n' +
+        '# OpenTUI preview: the bundled runtime is Bun; this placeholder keeps\n' +
+        '# installers that validate the classic Node.js layout working.\n' +
+        'exec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+    );
+  }
+  fs.chmodSync(compatPath, 0o755);
+}
+
+function findFileRecursive(dir, fileName) {
+  for (const entry of fs.readdirSync(dir)) {
+    const fullPath = path.join(dir, entry);
+    if (fs.statSync(fullPath).isDirectory()) {
+      const nested = findFileRecursive(fullPath, fileName);
+      if (nested) {
+        return nested;
+      }
+    } else if (entry === fileName) {
+      return fullPath;
+    }
+  }
+  return undefined;
+}
+
+function writeShims(packageRoot, runtime) {
   const binDir = path.join(packageRoot, 'bin');
   fs.mkdirSync(binDir, { recursive: true });
 
+  const unixRuntime =
+    runtime === 'bun' ? '$ROOT/bun/bin/bun' : '$ROOT/node/bin/node';
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"
+QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "${unixRuntime}" "$ROOT/lib/cli-entry.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
   fs.writeFileSync(unixShimPath, unixShim);
   fs.chmodSync(unixShimPath, 0o755);
 
+  const windowsRuntime =
+    runtime === 'bun' ? '%ROOT%\\bun\\bun.exe' : '%ROOT%\\node\\node.exe';
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
 set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"
-"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*
+"${windowsRuntime}" "%ROOT%\\lib\\cli-entry.js" %*
 exit /b %ERRORLEVEL%
 `;
   fs.writeFileSync(path.join(binDir, 'qwen.cmd'), windowsShim);
@@ -701,6 +915,7 @@ function writeManifest(packageRoot, manifest) {
         name: '@qwen-code/qwen-code',
         version: manifest.version,
         target: manifest.target,
+        runtime: manifest.runtime || 'node',
         nodeArchive: manifest.nodeArchive,
         createdAt: new Date().toISOString(),
       },
