@@ -4585,13 +4585,16 @@ describe('createServeApp', () => {
       // the primary.
       const primaryInvoke = vi.fn().mockResolvedValue(undefined);
       const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryPublish = vi.fn();
+      const secondaryPublish = vi.fn();
       const primaryBridge = {
-        ...fakeBridge(),
+        ...fakeBridge({ knownClientIds: ['client-1'] }),
         invokeWorkspaceCommand: primaryInvoke,
-        publishWorkspaceEvent: vi.fn(),
+        publishWorkspaceEvent: primaryPublish,
       } as unknown as AcpSessionBridge;
       const secondaryBridge = {
         invokeWorkspaceCommand: secondaryInvoke,
+        publishWorkspaceEvent: secondaryPublish,
       } as unknown as AcpSessionBridge;
       const registry = createWorkspaceRegistry([
         makeWorkspaceRuntimeForTest({
@@ -4634,6 +4637,7 @@ describe('createServeApp', () => {
         .post('/workspace/settings')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
         .send({
           scope: 'user',
           key: 'experimental.sessionWorkflow',
@@ -4656,6 +4660,20 @@ describe('createServeApp', () => {
         SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
         { enabled: expect.any(Boolean) },
       );
+      const expectedEvent = {
+        type: 'settings_changed',
+        data: {
+          key: 'experimental.sessionWorkflow',
+          value: true,
+          scope: 'user',
+        },
+        originatorClientId: 'client-1',
+      };
+      expect(primaryPublish).toHaveBeenCalledWith(expectedEvent);
+      expect(secondaryPublish).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: expectedEvent.data,
+      });
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {

@@ -14,10 +14,13 @@
  * present it on its first line before any frame is read, which narrows
  * "can reach the socket path" to "can read this session's 0600 registry
  * record" and is what a permissionless transport (a named pipe) will rely
- * on entirely. The token authenticates the connection, not the sender:
- * Node cannot read `SO_PEERCRED` without a native addon, so a frame's
- * claimed `from` is still unauthenticated and kept only for reply
- * routing — any process holding the token can write any `from` it likes.
+ * on entirely. A second token, `childToken`, goes only to processes this
+ * session spawns, and is the one fact about a sender the inbox can vouch
+ * for: a connection that presents it was opened by something this session
+ * itself started. Beyond that, a token authenticates the connection, not
+ * the sender: Node cannot read `SO_PEERCRED` without a native addon, so a
+ * frame's claimed `from` is still unauthenticated and kept only for reply
+ * routing — any process holding a token can write any `from` it likes.
  * Everything downstream is built on that assumption: the inbound gate
  * decides whether a message may act, and the envelope tells the model the
  * content is not from its user.
@@ -71,9 +74,27 @@ export interface PeerInboxOptions {
    * admits every connection, which only tests use.
    */
   requiredToken?: string;
-  /** Called for each well-formed frame. Must not throw. */
-  onFrame: (frame: PeerFrame) => void;
+  /**
+   * A second token the auth line may present instead of `requiredToken`.
+   * Never published: it reaches only the processes this session spawns,
+   * so a connection that authenticates with it is known to come from one
+   * of them, and `onFrame` is told so. Ignored unless `requiredToken` is
+   * set — without an admission requirement there is nothing to tell apart.
+   */
+  childToken?: string;
+  /**
+   * Called for each well-formed frame. Must not throw. `auth` says which
+   * token admitted the connection, and is absent when the inbox requires
+   * none.
+   */
+  onFrame: (frame: PeerFrame, auth?: PeerConnectionAuth) => void;
 }
+
+/**
+ * Which token a connection presented: the published one any peer holds,
+ * or the child token only this session's own processes were given.
+ */
+export type PeerConnectionAuth = 'peer' | 'child';
 
 export interface PeerInbox {
   readonly socketPath: string;
@@ -180,6 +201,7 @@ export async function startPeerInbox(
     });
 
     let authed = options.requiredToken === undefined;
+    let auth: PeerConnectionAuth | undefined;
     // destroy() does not stop lines already buffered from this chunk, and
     // a failed line followed by a *valid* auth line must not resurrect
     // the connection — the refusal is terminal.
@@ -189,10 +211,10 @@ export async function startPeerInbox(
         if (refused) return;
         if (!authed) {
           const presented = parsePeerAuthLine(line);
-          if (
-            presented !== null &&
-            tokenMatches(options.requiredToken!, presented)
-          ) {
+          if (presented !== null) {
+            auth = authKindOf(options, presented);
+          }
+          if (auth !== undefined) {
             authed = true;
             return;
           }
@@ -211,7 +233,7 @@ export async function startPeerInbox(
           return;
         }
         try {
-          options.onFrame(frame);
+          options.onFrame(frame, auth);
         } catch (error) {
           debugLogger.error(`onFrame threw: ${describe(error)}`);
         }
@@ -320,6 +342,27 @@ function tokenMatches(expected: string, presented: string): boolean {
   const a = Buffer.from(expected);
   const b = Buffer.from(presented);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Which of the inbox's tokens a presented one is, or undefined for none.
+ *
+ * Both comparisons always run so a wrong token costs the same whichever
+ * one it was aiming at.
+ */
+function authKindOf(
+  options: Pick<PeerInboxOptions, 'requiredToken' | 'childToken'>,
+  presented: string,
+): PeerConnectionAuth | undefined {
+  const peer =
+    options.requiredToken !== undefined &&
+    tokenMatches(options.requiredToken, presented);
+  const child =
+    options.childToken !== undefined &&
+    tokenMatches(options.childToken, presented);
+  if (peer) return 'peer';
+  if (child) return 'child';
+  return undefined;
 }
 
 function describe(error: unknown): string {
