@@ -1063,6 +1063,9 @@ importers:
 
   packages/qwen-live:
     dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: ^0.14.1
+        version: 0.14.1(zod@4.4.3)
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript
