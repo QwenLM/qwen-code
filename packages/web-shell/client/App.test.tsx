@@ -2489,6 +2489,57 @@ describe('task activity key', () => {
     });
   });
 
+  it('does not replace a fresh attachment listing with a stale response', async () => {
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    vi.useFakeTimers();
+    const stale = deferred<DaemonSessionAttachmentReference[]>();
+    const fresh = deferred<DaemonSessionAttachmentReference[]>();
+    mockSessionActions.listAttachments
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(fresh.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    mockConnection.capabilities = { ...mockConnection.capabilities };
+    rerender();
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    await act(async () => {
+      fresh.resolve([
+        {
+          type: 'resource',
+          attachmentId: 'new.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        },
+      ]);
+      await fresh.promise;
+    });
+    await act(async () => {
+      stale.resolve([
+        {
+          type: 'resource',
+          attachmentId: 'old.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        },
+      ]);
+      await stale.promise;
+    });
+
+    expect(container.textContent).toContain('new.txt');
+    expect(container.textContent).not.toContain('old.txt');
+  });
+
   it('reuses attachments when returning to a loaded session', async () => {
     mockConnection.capabilities.features = ['session_attachment_list'];
     vi.useFakeTimers();
@@ -3496,6 +3547,45 @@ describe('task activity key', () => {
       );
     });
 
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+  });
+
+  it('rejects a partial page during lazy transcript restoration', async () => {
+    mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: 'historical-session',
+      events: [],
+      hasMore: false,
+      partial: true,
+      replayError: 'Replay conversion failed for this page',
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'subagent:historical-session:stored-agent',
+          tabs: [
+            {
+              id: 'subagent:historical-session:stored-agent',
+              kind: 'subagent',
+              title: 'Historical agent',
+              sessionId: 'historical-session',
+              rootToolCallId: 'stored-agent',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledOnce(),
+      );
+    });
     expect(container.querySelector('[role="alert"]')).not.toBeNull();
   });
 

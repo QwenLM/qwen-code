@@ -4217,6 +4217,7 @@ export function App({
     sessionKey: '',
     fetchedAt: 0,
   });
+  const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
   // The attachments panel is fed by the daemon's attachment store, never by
@@ -4285,10 +4286,12 @@ export function App({
         sessionKey: logicalSessionKey,
         fetchedAt: Date.now(),
       };
+      const requestId = ++sessionAttachmentsRequestIdRef.current;
       const listing = sessionActions.listAttachments();
       void listing
         .then((attachments) => {
           if (
+            sessionAttachmentsRequestIdRef.current === requestId &&
             sessionAttachmentsOwner.isCurrent() &&
             sessionAttachmentsRequestEligibleRef.current
           ) {
@@ -5348,6 +5351,9 @@ export function App({
               },
             );
             if (!owner.isCurrent()) return;
+            if (page.partial || page.replayError) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
             events.unshift(...page.events);
             pageCount += 1;
             for (const event of page.events) {
