@@ -110,7 +110,14 @@ export interface DaemonChannelBridgeOptions {
    * instead, as before the upload path existed.
    */
   sessionAttachments?: boolean;
-  /** The daemon advertises the `session_permission_vote` capability. */
+  /**
+   * The daemon advertises the `session_permission_vote` capability.
+   *
+   * Unconditional in `SERVE_CAPABILITY_REGISTRY` since the session-scoped route
+   * landed, and older than the channel worker itself, so the daemon-managed
+   * worker never takes the legacy branch below. Retained for parity with
+   * `sessionAttachments`, and for hosts that construct this bridge themselves.
+   */
   sessionPermissionVote?: boolean;
 }
 
