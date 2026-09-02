@@ -16,7 +16,12 @@ describe('estimateJsonStringBytes', () => {
       const want = Buffer.byteLength(JSON.stringify(value));
       if (got !== want) mismatches.push({ code, got, want });
     }
-    expect(mismatches).toEqual([]);
+    expect({ count: mismatches.length, first: mismatches.slice(0, 5) }).toEqual(
+      {
+        count: 0,
+        first: [],
+      },
+    );
   });
 
   it('matches JSON.stringify for paired surrogates and mixed escaping', () => {
