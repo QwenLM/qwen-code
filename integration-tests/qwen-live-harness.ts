@@ -133,8 +133,13 @@ export async function readLiveDiscovery(
 // -- qwen-live daemon process --------------------------------------------------
 
 export interface SpawnQwenLiveOptions {
-  serveUrl: string;
-  serveToken: string;
+  serveUrl?: string;
+  serveToken?: string;
+  /**
+   * Backends JSON (QWEN_LIVE_BACKENDS). When set it replaces the implicit
+   * qwen-code serve backend entirely.
+   */
+  backends?: string;
   realtimeEndpoint: string;
   dataDir: string;
   discoveryDir: string;
@@ -167,8 +172,12 @@ export async function spawnQwenLive(
       DASHSCOPE_API_KEY: opts.apiKey ?? QWEN_LIVE_API_KEY,
       QWEN_LIVE_REALTIME_ENDPOINT: opts.realtimeEndpoint,
       QWEN_LIVE_REALTIME_MODEL: opts.model ?? QWEN_LIVE_REALTIME_MODEL,
-      QWEN_LIVE_SERVE_URL: opts.serveUrl,
-      QWEN_SERVER_TOKEN: opts.serveToken,
+      ...(opts.backends
+        ? { QWEN_LIVE_BACKENDS: opts.backends }
+        : {
+            QWEN_LIVE_SERVE_URL: opts.serveUrl,
+            QWEN_SERVER_TOKEN: opts.serveToken,
+          }),
       QWEN_LIVE_DATA_DIR: opts.dataDir,
       QWEN_LIVE_DISCOVERY_DIR: opts.discoveryDir,
       QWEN_LIVE_CWD: opts.cwd,
@@ -722,7 +731,7 @@ export async function bootLiveStack(
  * returns the realtime connection the daemon opened against the fake
  * DashScope server and the call epoch (from the `listening` host.state).
  */
-export async function startLiveCall(stack: LiveStack): Promise<{
+export async function startLiveCall(stack: LiveStack | AcpLiveStack): Promise<{
   epoch: number;
   conn: Awaited<ReturnType<FakeDashScopeServer['waitForConnection']>>;
 }> {
@@ -735,4 +744,180 @@ export async function startLiveCall(stack: LiveStack): Promise<{
     { timeoutMs: 20_000, fromIndex: stateIndex },
   );
   return { epoch: listening.epoch, conn };
+}
+
+// -- ACP backend fixtures (M4) ---------------------------------------------------
+
+/** The qwen CLI bundle `qwen --acp` children run from (same one serve uses). */
+const QWEN_CLI_BIN =
+  process.env['TEST_CLI_PATH'] ??
+  path.resolve(__dirname, '../packages/cli/dist/index.js');
+
+export interface BootAcpStackOptions {
+  makeOpenAIHandler: (info: { workspaceDir: string }) => FakeOpenAIHandler;
+  /**
+   * "acp" boots only an acp backend (it is the default);
+   * "multi" boots serve as default plus acp as a secondary backend.
+   */
+  mode: 'acp' | 'multi';
+}
+
+export interface AcpLiveStack {
+  workspaceDir: string;
+  homeDir: string;
+  dataDir: string;
+  discoveryDir: string;
+  fakeOpenAI: FakeOpenAIServer;
+  /** Present in "multi" mode only. */
+  serve?: SpawnedDaemon;
+  /** Present in "multi" mode only (harness-prewarmed serve session id). */
+  prewarmSessionId?: string;
+  fakeDash: FakeDashScopeServer;
+  live: SpawnedQwenLive;
+  host: FakeHost;
+  dispose(): Promise<void>;
+}
+
+export async function bootAcpLiveStack(
+  options: BootAcpStackOptions,
+): Promise<AcpLiveStack> {
+  const workspaceDir = realpathSync(
+    mkdtempSync(path.join(tmpdir(), 'qwen-live-acp-ws-')),
+  );
+  const homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-live-acp-home-'));
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'qwen-live-acp-data-'));
+  const discoveryDir = mkdtempSync(path.join(tmpdir(), 'qwen-live-acp-disc-'));
+  const qwenHome = path.join(homeDir, '.qwen');
+  mkdirSync(qwenHome, { recursive: true });
+  writeFileSync(
+    path.join(qwenHome, 'settings.json'),
+    JSON.stringify({ ui: { enableFollowupSuggestions: false } }),
+  );
+
+  const disposers: Array<() => Promise<void> | void> = [];
+  const disposeAll = async () => {
+    for (const dispose of disposers.reverse()) {
+      try {
+        await dispose();
+      } catch {
+        /* keep tearing down */
+      }
+    }
+    if (
+      !process.env['QWEN_LIVE_E2E_KEEP'] &&
+      process.env['KEEP_OUTPUT'] !== 'true'
+    ) {
+      for (const dir of [workspaceDir, homeDir, dataDir, discoveryDir]) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  };
+
+  try {
+    const fakeOpenAI = await startFakeOpenAIServer(
+      options.makeOpenAIHandler({ workspaceDir }),
+    );
+    disposers.push(() => fakeOpenAI.close());
+
+    let serve: SpawnedDaemon | undefined;
+    let prewarmSessionId: string | undefined;
+    if (options.mode === 'multi') {
+      serve = await spawnDaemon({
+        workspaceCwd: workspaceDir,
+        token: SERVE_TOKEN,
+        bootTimeoutMs: 30_000,
+        env: {
+          HOME: homeDir,
+          QWEN_HOME: qwenHome,
+          QWEN_ACP_LOCAL_READ_ROOTS: '',
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: fakeOpenAI.baseUrl,
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+          NO_PROXY: '127.0.0.1,localhost',
+          no_proxy: '127.0.0.1,localhost',
+          http_proxy: '',
+          https_proxy: '',
+          HTTP_PROXY: '',
+          HTTPS_PROXY: '',
+          ALL_PROXY: '',
+          all_proxy: '',
+        },
+      });
+      disposers.push(() => serve!.dispose());
+      const prewarm = await serve.client.createOrAttachSession({
+        workspaceCwd: workspaceDir,
+        sessionScope: 'thread',
+      });
+      prewarmSessionId = prewarm.sessionId;
+    }
+
+    const fakeDash = await startFakeDashScopeServer();
+    disposers.push(() => fakeDash.close());
+
+    const acpBackend = {
+      name: 'qwen-acp',
+      kind: 'acp',
+      command: process.execPath,
+      args: [QWEN_CLI_BIN, '--acp', '--no-chat-recording'],
+      env: {
+        HOME: homeDir,
+        QWEN_HOME: qwenHome,
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeOpenAI.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+      cwd: workspaceDir,
+      ...(options.mode === 'acp' ? { default: true } : {}),
+    };
+    const backends =
+      options.mode === 'multi'
+        ? [
+            {
+              name: 'qwen-code',
+              kind: 'qwen-code',
+              serveUrl: serve!.base,
+              token: SERVE_TOKEN,
+              default: true,
+            },
+            acpBackend,
+          ]
+        : [acpBackend];
+
+    const live = await spawnQwenLive({
+      realtimeEndpoint: fakeDash.url,
+      dataDir,
+      discoveryDir,
+      cwd: workspaceDir,
+      backends: JSON.stringify(backends),
+      bootTimeoutMs: 30_000,
+    });
+    disposers.push(() => live.dispose());
+
+    const host = new FakeHost(discoveryDir);
+    disposers.push(() => {
+      host.close();
+    });
+    await host.connect();
+
+    return {
+      workspaceDir,
+      homeDir,
+      dataDir,
+      discoveryDir,
+      fakeOpenAI,
+      ...(serve ? { serve } : {}),
+      ...(prewarmSessionId ? { prewarmSessionId } : {}),
+      fakeDash,
+      live,
+      host,
+      dispose: disposeAll,
+    };
+  } catch (error) {
+    await disposeAll();
+    throw error;
+  }
 }

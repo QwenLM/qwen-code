@@ -71,7 +71,7 @@
           "type": "string"
         },
         "outputStyle": {
-          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style.",
+          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style. Change it with /output-style.",
           "type": "string"
         },
         "vimMode": {
@@ -3636,7 +3636,7 @@
           }
         },
         "sessionWorkflow": {
-          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.",
+          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.",
           "type": "boolean",
           "default": false
         },
