@@ -119,6 +119,7 @@ import {
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
+import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   resolveSessionRestoreTimeoutMs,
   restoreRetryAfterSeconds,
@@ -318,6 +319,31 @@ function safeTransportFailureCode(error: unknown): string | undefined {
   return typeof code === 'string' && /^[a-z0-9_.-]{1,64}$/iu.test(code)
     ? code
     : undefined;
+}
+
+function safeTransportFailureDetail(error: unknown): string | undefined {
+  if (!isRecord(error) || error['code'] !== 'ndjson_queue_limit_exceeded') {
+    return undefined;
+  }
+  const queueError = error as Partial<NdJsonQueueLimitError>;
+  const budget =
+    typeof queueError.budget === 'string' &&
+    /^[a-z0-9_.-]{1,64}$/iu.test(queueError.budget)
+      ? queueError.budget
+      : 'unknown';
+  const numbers: string[] = [];
+  for (const value of [
+    queueError.requiredBytes,
+    queueError.availableBytes,
+    queueError.maxQueuedBytes,
+  ]) {
+    numbers.push(
+      typeof value === 'number' && Number.isFinite(value)
+        ? String(Math.max(0, Math.floor(value)))
+        : '?',
+    );
+  }
+  return `${budget}:required=${numbers[0]}:available=${numbers[1]}:cap=${numbers[2]}`;
 }
 
 function sessionSourceRequestMeta(
@@ -963,6 +989,12 @@ interface ChannelInfo {
   transportFailureInitiatedTeardown: boolean;
   /** Safe bounded code retained for telemetry; never the raw error message. */
   transportFailureCode?: string;
+  /**
+   * Bounded queue-budget detail for `ndjson_queue_limit_exceeded` transport
+   * failures: which budget fired plus required/available/cap bytes. Derived
+   * from typed error fields only; never the raw error message.
+   */
+  transportFailureDetail?: string;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -4602,6 +4634,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.transportFailed = true;
         info.transportFailureCode = safeTransportFailureCode(error);
+        info.transportFailureDetail = safeTransportFailureDetail(error);
         info.isDying = true;
         info.channelLiveness?.stop();
         clearInFlightExtensionRefreshes(info.connection);
@@ -4708,12 +4741,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     info.transportFailureCode,
                 }
               : {}),
+            ...(info.transportFailureDetail
+              ? {
+                  'qwen-code.daemon.channel.transport_error_detail':
+                    info.transportFailureDetail,
+                }
+              : {}),
             ...(exitInfo?.signalCode
               ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
               : {}),
           });
           writeStderrLine(
-            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}${info.transportFailureDetail ? `, transport_detail=${info.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`,
           );
         }
         for (const sid of sessions) {
@@ -5503,16 +5542,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `applyModelServiceId` for rationale (race against
       // transportClosedReject, publish model_switched on success,
       // model_switch_failed on failure, don't tear down the session).
+      // The outcome is reported to the caller via `modelApplied` so a
+      // create carrying a selection can tell a confirmed switch from a
+      // silent fallback to the agent default model.
+      let modelApplied: boolean | undefined;
       if (modelServiceId) {
-        await applyModelServiceId(
+        modelApplied = await applyModelServiceId(
           entry,
           modelServiceId,
           initTimeoutMs,
           clientId,
-        ).catch(() => {
-          // Already published `model_switch_failed`; session stays
-          // operational on the agent's default model.
-        });
+        ).then(
+          () => true,
+          () => false,
+        );
       }
 
       if (approvalMode) {
@@ -5563,6 +5606,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.parentSessionId
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
+        ...(modelApplied !== undefined ? { modelApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
       };

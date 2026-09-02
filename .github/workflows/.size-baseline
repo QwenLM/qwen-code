@@ -19,7 +19,7 @@
 9256 build-and-publish-image.yml
 49610 cd-cua-driver.yml
 2076 cd-mobile-mcp.yml
-102891 ci.yml
+111021 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 31677 desktop-release.yml

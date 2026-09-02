@@ -529,12 +529,16 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
-    await expect(actions.createSession({ approvalMode: 'yolo' })).resolves.toBe(
-      nextSession,
-    );
+    await expect(
+      actions.createSession({
+        approvalMode: 'yolo',
+        modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      }),
+    ).resolves.toBe(nextSession);
 
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
     });
     expect(createDetachedSession).not.toHaveBeenCalled();
     expect(getConnection()).toMatchObject({
@@ -858,6 +862,27 @@ describe('createDaemonSessionActions', () => {
       expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects a per-call model for workspace creation', async () => {
+    const createDetachedSession = vi.fn();
+    const createDetachedStandaloneSession = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+      createDetachedSession,
+      createDetachedStandaloneSession,
+    });
+
+    await expect(
+      actions.createSession({ modelServiceId: 'qwen3.8-max(USE_OPENAI)' }),
+    ).rejects.toThrow(
+      'Per-call modelServiceId is only supported for standalone session creation',
+    );
+    expect(createDetachedSession).not.toHaveBeenCalled();
+    expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+  });
 
   it('does not apply the generic create timeout to standalone create', async () => {
     vi.useFakeTimers();
