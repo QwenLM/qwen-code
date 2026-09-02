@@ -22,6 +22,7 @@ import { escapeWorkflowCommand } from '../release-script-utils.js';
 import {
   classifyRunOutput,
   createRunClassifier,
+  createStreamConsumer,
   describeSilentFailure,
   runAndReport,
 } from '../run-release-workspace-tests.js';
@@ -188,6 +189,35 @@ describe('createRunClassifier', () => {
     const { summaryLines } = classifier.finish(pending);
     expect(summaryLines.length).toBeLessThanOrEqual(4);
     expect(summaryLines.at(-1)).toContain('199 passed');
+  });
+});
+
+describe('createStreamConsumer', () => {
+  it('reads a multi-byte rule character split across raw chunks', () => {
+    // Cut inside the three bytes of the first ⎯ (U+23AF): decoding each raw
+    // chunk on its own turns it into U+FFFD, the edge strip no longer
+    // recognizes the opening rule line, and the block reaches the report
+    // still wearing its rule runs.
+    const bytes = Buffer.from(GREEN_WITH_UNHANDLED_ERROR, 'utf8');
+    const cut = bytes.indexOf(Buffer.from('⎯', 'utf8')) + 1;
+    const written = [];
+    const sink = {
+      write: (chunk) => {
+        written.push(Buffer.from(chunk));
+        return true;
+      },
+    };
+    const consumer = createStreamConsumer(createRunClassifier());
+
+    consumer.write(bytes.subarray(0, cut), sink, 'out');
+    consumer.write(bytes.subarray(cut), sink, 'out');
+    const result = consumer.finish();
+
+    expect(result.unhandledBlocks).toHaveLength(1);
+    expect(result.unhandledBlocks[0]).toMatch(/^Unhandled Errors\n/);
+    expect(result.unhandledBlocks[0]).not.toContain('\uFFFD');
+    // The passthrough stays byte-identical whatever the decoding did.
+    expect(Buffer.concat(written).equals(bytes)).toBe(true);
   });
 });
 

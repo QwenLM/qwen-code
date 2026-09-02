@@ -23,6 +23,7 @@
 
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { escapeWorkflowCommand, isMainModule } from './release-script-utils.js';
 
 // Matching ESC is the point; the GitHub log API also renders it as a literal
@@ -145,6 +146,43 @@ export function createRunClassifier() {
 }
 
 /**
+ * Wires one child's output streams into a classifier. A multi-byte character
+ * can be split across pipe chunks, and decoding each raw chunk on its own
+ * (`chunk.toString('utf8')`) turns the split character into U+FFFD — and a
+ * rule line whose `⎯` became U+FFFD no longer matches RULE_RE, so the block
+ * that line opened or closed silently vanishes from the report. Each stream
+ * gets its own decoder ahead of the line splitter; the sink still receives
+ * the raw chunk untouched.
+ *
+ * @param {ReturnType<typeof createRunClassifier>} classifier
+ */
+export function createStreamConsumer(classifier) {
+  const decoders = {
+    out: new StringDecoder('utf8'),
+    err: new StringDecoder('utf8'),
+  };
+  const pending = { out: '', err: '' };
+  return {
+    /** Feeds one raw chunk from stream `key`; the sink sees it unchanged. */
+    write(chunk, sink, key) {
+      pending[key] = classifier.write(decoders[key].write(chunk), pending[key]);
+      sink.write(chunk);
+    },
+    /**
+     * Flushes whatever partial character each decoder still holds, then the
+     * partial line each stream still holds, and returns the classification.
+     */
+    finish() {
+      for (const key of ['err', 'out']) {
+        pending[key] = classifier.write(decoders[key].end(), pending[key]);
+      }
+      if (pending.err) classifier.push(pending.err);
+      return classifier.finish(pending.out);
+    },
+  };
+}
+
+/**
  * Convenience wrapper for a run whose output is already in hand.
  *
  * @param {string} text
@@ -225,11 +263,10 @@ export async function runAndReport({
   // outside the very process already running under a heap cap. Classify as
   // the output streams past and keep only the bounded state the report needs,
   // rather than holding the whole run in memory to scan it once at the end.
-  const classifier = createRunClassifier();
-  // One remainder per stream: a chunk can end mid-line, and splicing a half
-  // line of stdout onto the next stderr chunk would invent a line neither
-  // stream printed.
-  const pending = { out: '', err: '' };
+  // One consumer per run: a chunk can end mid-line or mid-character, and
+  // splicing a half line of stdout onto the next stderr chunk would invent a
+  // line neither stream printed.
+  const consumer = createStreamConsumer(createRunClassifier());
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env,
@@ -242,12 +279,8 @@ export async function runAndReport({
       // loses a program path containing a space.
       shell: process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command),
     });
-    const consume = (chunk, sink, key) => {
-      pending[key] = classifier.write(chunk.toString('utf8'), pending[key]);
-      sink.write(chunk);
-    };
-    child.stdout.on('data', (chunk) => consume(chunk, stdout, 'out'));
-    child.stderr.on('data', (chunk) => consume(chunk, stderr, 'err'));
+    child.stdout.on('data', (chunk) => consumer.write(chunk, stdout, 'out'));
+    child.stderr.on('data', (chunk) => consumer.write(chunk, stderr, 'err'));
     child.on('error', reject);
     child.on('close', (code, signal) => {
       // A signal death has no exit code; report it as a failure rather than
@@ -256,8 +289,7 @@ export async function runAndReport({
     });
   });
 
-  if (pending.err) classifier.push(pending.err);
-  const classification = classifier.finish(pending.out);
+  const classification = consumer.finish();
   const report = describeSilentFailure(classification, exitCode);
   if (!report) return exitCode;
 
