@@ -8,16 +8,22 @@
  * Server side of same-machine peer messaging: one UNIX domain socket per
  * session, accepting NDJSON frames.
  *
- * Access control is filesystem permissions and nothing else. The socket
- * directory is 0700 and the socket itself is 0600, so only this uid can
- * connect. Node cannot read `SO_PEERCRED` without a native addon, so a
- * frame's claimed origin is *not* authenticated beyond that: any process
- * running as this user can write any `from` it likes. Everything
- * downstream is built on that assumption — the inbound gate decides
- * whether a message may act, and the envelope tells the model the content
- * is not from its user.
+ * Access control is filesystem permissions plus a connection token. The
+ * socket directory is 0700 and the socket itself is 0600, so only this
+ * uid can connect; when `requiredToken` is set, a connection must also
+ * present it on its first line before any frame is read, which narrows
+ * "can reach the socket path" to "can read this session's 0600 registry
+ * record" and is what a permissionless transport (a named pipe) will rely
+ * on entirely. The token authenticates the connection, not the sender:
+ * Node cannot read `SO_PEERCRED` without a native addon, so a frame's
+ * claimed `from` is still unauthenticated and kept only for reply
+ * routing — any process holding the token can write any `from` it likes.
+ * Everything downstream is built on that assumption: the inbound gate
+ * decides whether a message may act, and the envelope tells the model the
+ * content is not from its user.
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
@@ -25,6 +31,7 @@ import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   MAX_FRAME_BYTES,
+  parsePeerAuthLine,
   parsePeerFrame,
   type PeerFrame,
 } from './peer-frames.js';
@@ -58,6 +65,12 @@ export const CONNECTION_IDLE_TIMEOUT_MS = 30_000;
 export interface PeerInboxOptions {
   /** Defaults to this process's resolved socket path. */
   socketPath?: string;
+  /**
+   * When set, a connection's first line must be an auth line presenting
+   * exactly this token; anything else drops the connection unread. Unset
+   * admits every connection, which only tests use.
+   */
+  requiredToken?: string;
   /** Called for each well-formed frame. Must not throw. */
   onFrame: (frame: PeerFrame) => void;
 }
@@ -166,8 +179,30 @@ export async function startPeerInbox(
       socket.destroy();
     });
 
+    let authed = options.requiredToken === undefined;
+    // destroy() does not stop lines already buffered from this chunk, and
+    // a failed line followed by a *valid* auth line must not resurrect
+    // the connection — the refusal is terminal.
+    let refused = false;
     const read = createLineReader(
       (line) => {
+        if (refused) return;
+        if (!authed) {
+          const presented = parsePeerAuthLine(line);
+          if (
+            presented !== null &&
+            tokenMatches(options.requiredToken!, presented)
+          ) {
+            authed = true;
+            return;
+          }
+          debugLogger.debug(
+            'dropping a connection whose first line did not authenticate: no valid auth line, or token mismatch',
+          );
+          refused = true;
+          socket.destroy();
+          return;
+        }
         const frame = parsePeerFrame(line);
         if (frame === null) {
           debugLogger.debug(
@@ -274,6 +309,17 @@ export async function startPeerInbox(
       debugLogger.debug(`peer inbox closed: ${socketPath}`);
     },
   };
+}
+
+/**
+ * Constant-time comparison. A same-uid peer has better channels than a
+ * byte-by-byte timing oracle, but a permissionless transport (the named
+ * pipe this token exists for) may not share that property.
+ */
+function tokenMatches(expected: string, presented: string): boolean {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(presented);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function describe(error: unknown): string {

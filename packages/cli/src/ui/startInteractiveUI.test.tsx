@@ -198,6 +198,29 @@ describe('startInteractiveUI cross-session messaging', () => {
     expect(reassertSessionRegistryRecord).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards the inbox token, not only the address, into the record', async () => {
+    // Regressing this callback to `(ipcPath) => …(ipcPath)` type-checks —
+    // fewer parameters is assignable — and every record would then
+    // advertise an address with no token: peers resolve it, fail to
+    // authenticate, and every send is dropped while still reporting 'sent'.
+    const config = makeConfig();
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      updateSessionRegistryIpcPath: (
+        ipcPath: string | undefined,
+        ipcToken?: string,
+      ) => Promise<void>;
+    };
+    await options.updateSessionRegistryIpcPath('/run/self.sock', 'tok-abc');
+    expect(config.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+      '/run/self.sock',
+      'tok-abc',
+    );
+  });
+
   it('reads the session id live, so /clear moves the pin with the session', async () => {
     // `startNewSession` reassigns Config's session id in place, so /clear,
     // /new and /resume all leave the same Config answering with a new id.

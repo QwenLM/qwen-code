@@ -18,7 +18,6 @@ import {
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionGroup,
   DaemonSessionGroupColor,
@@ -26,10 +25,10 @@ import type {
   DaemonSessionGroupPresetColor,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceRemovalActivity,
   SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
+  FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
   CalendarClockIcon,
@@ -83,8 +82,10 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
 import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
@@ -95,6 +96,7 @@ import {
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
+import { isLocalDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -117,6 +119,11 @@ import {
   replaceOwnedCollapsedSessionSectionIds,
 } from './collapsedSessionSections';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
+import {
+  collectScheduledTaskSession,
+  getScheduledTaskSessionGroup,
+  type ScheduledTaskSessionSection,
+} from './scheduled-task-session-groups';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -155,19 +162,12 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
-// Mirrors `SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX` in acp-bridge/session-source.ts
-// (the client cannot import that package). Per-run scheduled task children keep
-// the `default` source type so they list with ordinary conversations.
-const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
-
 type SidebarSessionSource = 'default' | 'channel';
 
 function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
   return (
     session.sourceType === 'scheduled_task' ||
-    (session.sourceType === 'default' &&
-      session.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
-        true)
+    getScheduledTaskSessionGroup(session) !== undefined
   );
 }
 
@@ -213,6 +213,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'sessionsOverview'
+  | 'workspacesOverview'
   | 'splitView'
   | 'daemonStatus'
   | 'collapse';
@@ -324,7 +325,7 @@ const SESSION_GROUP_COLORS: DaemonSessionGroupPresetColor[] = [
 
 type GroupEditorMode = 'create' | 'edit';
 
-type SessionSectionKind = 'color' | 'group' | 'recent';
+type SessionSectionKind = 'color' | 'group' | 'scheduled-task' | 'recent';
 
 interface SessionSection {
   id: string;
@@ -381,6 +382,8 @@ interface WebShellSidebarProps {
    * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
+  /** Opens the Workspaces overview panel (table of registered workspaces). */
+  onOpenWorkspacesOverview?: () => void;
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
@@ -878,6 +881,7 @@ export function WebShellSidebar({
   onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
+  onOpenWorkspacesOverview,
   onOpenSplitView,
   canOpenSplitView,
   onNewSession,
@@ -968,11 +972,13 @@ export function WebShellSidebar({
       ? sessionSource
       : 'default'
     : undefined;
-  const channelGroupingEnabled = Boolean(
-    projectFeaturesEnabled &&
-      selectedSessionSource === 'channel' &&
-      workspace.capabilities?.features.includes('channel_management'),
+  const channelManagementEnabled = Boolean(
+    workspace.capabilities?.features.includes('channel_management'),
   );
+  const channelGroupingEnabled =
+    projectFeaturesEnabled &&
+    selectedSessionSource === 'channel' &&
+    channelManagementEnabled;
   const {
     data: channelCatalogData,
     catalog: channelTypeCatalog,
@@ -1284,6 +1290,29 @@ export function WebShellSidebar({
   if (prevOrganizationEnabled !== organizationEnabled) {
     setPrevOrganizationEnabled(organizationEnabled);
     setGroupsCatalogReady(!organizationEnabled);
+    if (organizationEnabled) {
+      // An org-disabled settle may already have consumed the Tasks latch
+      // against scheduled-task sections alone — possibly while the Channels
+      // tab was selected. Re-arm the source whose catalog gains manual
+      // groups so the first organized settle registers them as initial
+      // instead of collapsing them.
+      awaitingInitialSessionCatalogBySourceRef.current.default = true;
+    }
+  }
+  // The channel-grouping branch clears `groups` while the Channels tab is
+  // selected; when switching back to Tasks, close the gate during that same
+  // render so the settle cannot consume the first-sync latch against the
+  // empty catalog before the organized groups reload lands.
+  const [prevSessionSource, setPrevSessionSource] = useState(sessionSource);
+  if (prevSessionSource !== sessionSource) {
+    setPrevSessionSource(sessionSource);
+    if (
+      organizationEnabled &&
+      sessionSource === 'default' &&
+      channelManagementEnabled
+    ) {
+      setGroupsCatalogReady(false);
+    }
   }
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const [projectExpanded, setProjectExpanded] = useState(() =>
@@ -1296,22 +1325,11 @@ export function WebShellSidebar({
   const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [bodyScrolled, setBodyScrolled] = useState(false);
-  const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
-    useState<DaemonWorkspaceCapability | null>(null);
-  const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
-    useState<DaemonWorkspaceRemovalActivity | null>(null);
-  const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
-    useState(false);
   const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
   const [workspaceRenameSubmitting, setWorkspaceRenameSubmitting] =
     useState(false);
-  const workspaceRemovalMountedRef = useRef(false);
-  const workspaceRemovalDismissedRef = useRef(false);
-  const [
-    workspaceRemovalRemoteInProgress,
-    setWorkspaceRemovalRemoteInProgress,
-  ] = useState(false);
+  const sidebarMountedRef = useRef(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
   const [autoExpandWorkspace, setAutoExpandWorkspace] = useState<{
@@ -1344,10 +1362,9 @@ export function WebShellSidebar({
   }, [primaryWorkspaceExpansionId]);
 
   useEffect(() => {
-    workspaceRemovalMountedRef.current = true;
+    sidebarMountedRef.current = true;
     return () => {
-      workspaceRemovalMountedRef.current = false;
-      workspaceRemovalDismissedRef.current = true;
+      sidebarMountedRef.current = false;
     };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1422,6 +1439,16 @@ export function WebShellSidebar({
       'dynamic_workspace_registration',
     ),
   );
+  // Host-local affordance: the daemon opens the folder on ITS host, so the
+  // button is only honest when the browser sits on that same machine.
+  const localOpenEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_open'),
+    ) && isLocalDaemon();
+  const localTerminalEnabled =
+    Boolean(
+      connection.capabilities?.features?.includes('workspace_local_terminal'),
+    ) && isLocalDaemon();
   const workspaceOverviewEnabled = workspaceOverview !== false;
   const workspaceOverviewItems =
     workspaceOverview === false
@@ -2429,7 +2456,7 @@ export function WebShellSidebar({
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
-      if (!workspaceRemovalMountedRef.current) return;
+      if (!sidebarMountedRef.current) return;
       if (selectedWorkspaceCwd === removed.cwd) {
         onSelectWorkspace?.(undefined);
       }
@@ -2440,10 +2467,7 @@ export function WebShellSidebar({
       } catch {
         // The mutation already converged; a later refresh will reconcile.
       }
-      if (!workspaceRemovalMountedRef.current) return;
-      setWorkspaceRemovalCandidate(null);
-      setWorkspaceRemovalActivity(null);
-      setWorkspaceRemovalRemoteInProgress(false);
+      if (!sidebarMountedRef.current) return;
       void reload().catch(() => undefined);
       void reloadArchived().catch(() => undefined);
     },
@@ -2457,16 +2481,19 @@ export function WebShellSidebar({
     ],
   );
 
-  const requestWorkspaceRemoval = useCallback(
-    (candidate: DaemonWorkspaceCapability) => {
-      if (workspaceRemovalSubmitting) return;
-      workspaceRemovalDismissedRef.current = false;
-      setWorkspaceRemovalActivity(null);
-      setWorkspaceRemovalRemoteInProgress(false);
-      setWorkspaceRemovalCandidate(candidate);
-    },
-    [workspaceRemovalSubmitting],
-  );
+  const workspaceRemoval = useWorkspaceRemoval({
+    removeWorkspace: (workspaceId, options) =>
+      workspaceActions.removeWorkspace(workspaceId, options),
+    onRemoved: reconcileRemovedWorkspace,
+    onError,
+    errorMessage: t('sidebar.removeWorkspaceError'),
+    // The forced retry cannot target the workspace the active session lives
+    // in; the dialog explains and disables it, the hook enforces it against
+    // a stale click.
+    blockForce: (candidate) =>
+      Boolean(connection.sessionId) &&
+      connection.workspaceCwd === candidate.cwd,
+  });
 
   const requestWorkspaceRename = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
@@ -2519,6 +2546,32 @@ export function WebShellSidebar({
     [onError, t],
   );
 
+  const openWorkspaceFolderLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceFolderFailed'));
+        // Rethrow so the hover popover keeps its idle icon on a failure the
+        // toast already reported.
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
+  const openWorkspaceTerminalLocally = useCallback(
+    async (cwd: string): Promise<void> => {
+      try {
+        await workspace.client.workspaceByCwd(cwd).openTerminalLocally();
+      } catch (error) {
+        onError(error, t('sidebar.openWorkspaceTerminalFailed'));
+        throw error;
+      }
+    },
+    [onError, t, workspace.client],
+  );
+
   const reloadWorkspaceRuntime = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
       // Deferred so a client without the reload method (older SDK) reports
@@ -2536,142 +2589,6 @@ export function WebShellSidebar({
     },
     [onError, t, workspace.client],
   );
-
-  const confirmWorkspaceRemoval = useCallback(async () => {
-    const candidate = workspaceRemovalCandidate;
-    if (!candidate || workspaceRemovalSubmitting) return;
-    const force = workspaceRemovalActivity !== null;
-    if (
-      force &&
-      connection.sessionId &&
-      connection.workspaceCwd === candidate.cwd
-    ) {
-      return;
-    }
-    setWorkspaceRemovalSubmitting(true);
-    try {
-      await workspaceActions.removeWorkspace(candidate.id, { force });
-      await reconcileRemovedWorkspace(candidate);
-    } catch (error) {
-      if (!workspaceRemovalMountedRef.current) return;
-      if (error instanceof DaemonHttpError) {
-        const body = error.body as
-          | {
-              code?: unknown;
-              activity?: DaemonWorkspaceRemovalActivity;
-            }
-          | undefined;
-        if (
-          error.status === 409 &&
-          body?.code === 'workspace_busy' &&
-          body.activity
-        ) {
-          setWorkspaceRemovalActivity(body.activity);
-          return;
-        }
-        if (error.status === 400 && body?.code === 'workspace_mismatch') {
-          await reconcileRemovedWorkspace(candidate);
-          return;
-        }
-        if (
-          error.status === 409 &&
-          (body?.code === 'workspace_removal_in_progress' ||
-            body?.code === 'workspace_registration_in_progress')
-        ) {
-          setWorkspaceRemovalRemoteInProgress(true);
-          let lastError: unknown = error;
-          let exhaustedTransientRetries = true;
-          for (let attempt = 0; attempt < 20; attempt++) {
-            if (
-              !workspaceRemovalMountedRef.current ||
-              workspaceRemovalDismissedRef.current
-            ) {
-              return;
-            }
-            await new Promise((resolve) => window.setTimeout(resolve, 250));
-            if (
-              !workspaceRemovalMountedRef.current ||
-              workspaceRemovalDismissedRef.current
-            ) {
-              return;
-            }
-            try {
-              await workspaceActions.removeWorkspace(candidate.id, { force });
-              await reconcileRemovedWorkspace(candidate);
-              return;
-            } catch (retryError) {
-              if (!workspaceRemovalMountedRef.current) return;
-              lastError = retryError;
-              if (retryError instanceof DaemonHttpError) {
-                const retryBody = retryError.body as
-                  | {
-                      code?: unknown;
-                      activity?: DaemonWorkspaceRemovalActivity;
-                    }
-                  | undefined;
-                if (
-                  retryError.status === 400 &&
-                  retryBody?.code === 'workspace_mismatch'
-                ) {
-                  await reconcileRemovedWorkspace(candidate);
-                  return;
-                }
-                if (
-                  retryError.status === 409 &&
-                  retryBody?.code === 'workspace_busy' &&
-                  retryBody.activity
-                ) {
-                  setWorkspaceRemovalRemoteInProgress(false);
-                  setWorkspaceRemovalActivity(retryBody.activity);
-                  return;
-                }
-                if (
-                  retryError.status === 409 &&
-                  (retryBody?.code === 'workspace_removal_in_progress' ||
-                    retryBody?.code === 'workspace_registration_in_progress')
-                ) {
-                  continue;
-                }
-              }
-              exhaustedTransientRetries = false;
-              break;
-            }
-          }
-          if (
-            !workspaceRemovalMountedRef.current ||
-            workspaceRemovalDismissedRef.current
-          ) {
-            return;
-          }
-          setWorkspaceRemovalRemoteInProgress(false);
-          onError(
-            exhaustedTransientRetries
-              ? new Error(
-                  'Workspace removal remained in progress after retries.',
-                )
-              : lastError,
-            t('sidebar.removeWorkspaceError'),
-          );
-          return;
-        }
-      }
-      onError(error, t('sidebar.removeWorkspaceError'));
-    } finally {
-      if (workspaceRemovalMountedRef.current) {
-        setWorkspaceRemovalSubmitting(false);
-      }
-    }
-  }, [
-    connection.sessionId,
-    connection.workspaceCwd,
-    onError,
-    reconcileRemovedWorkspace,
-    t,
-    workspaceActions,
-    workspaceRemovalActivity,
-    workspaceRemovalCandidate,
-    workspaceRemovalSubmitting,
-  ]);
 
   const handleNewSession = useCallback(
     (workspaceCwd?: string) => {
@@ -3855,7 +3772,6 @@ export function WebShellSidebar({
   );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
-    if (!organizationEnabled) return [];
     const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
@@ -3863,6 +3779,10 @@ export function WebShellSidebar({
       DaemonSessionSummary[]
     >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
+    const scheduledTaskSections = new Map<
+      string,
+      ScheduledTaskSessionSection
+    >();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
@@ -3878,7 +3798,11 @@ export function WebShellSidebar({
     for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
-      if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
+      if (
+        organizationEnabled &&
+        session.color &&
+        SESSION_GROUP_COLORS.includes(session.color)
+      ) {
         const bucket = sessionsByColor.get(session.color) ?? [];
         bucket.push(session);
         sessionsByColor.set(session.color, bucket);
@@ -3890,6 +3814,9 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
+        continue;
+      }
+      if (collectScheduledTaskSession(scheduledTaskSections, session)) {
         continue;
       }
       // On sources with a Pinned section, a pinned session without a
@@ -3936,6 +3863,9 @@ export function WebShellSidebar({
         sessions: groupSessions,
       });
     }
+    for (const section of scheduledTaskSections.values()) {
+      sections.push({ ...section, kind: 'scheduled-task' });
+    }
     if (recentSessions.length > 0 && sections.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,
@@ -3964,8 +3894,8 @@ export function WebShellSidebar({
       // until it settles; wait for a page fetched for the channel source.
       if (settledSessionsSourceRef.current !== 'channel') return;
     } else {
-      if (!organizationEnabled) return;
-      if (!groupsCatalogReady || !sessionsCatalogReady) return;
+      if (!sessionsCatalogReady) return;
+      if (organizationEnabled && !groupsCatalogReady) return;
     }
     const unseenIds = activeSections
       .map((section) => section.id)
@@ -4156,7 +4086,8 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
-      const time = stamp ? formatRelativeTime(stamp, t) : '';
+      // Rows stay text-only; the precise date lives in the hover popover.
+      const time = stamp ? formatDateTime(stamp) : '';
       const busy = busySessionIds.has(sessionIdentity);
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
@@ -4424,6 +4355,18 @@ export function WebShellSidebar({
                   Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
                 )}
                 data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
+            ) : null}
+            {session.hasActivePrompt &&
+            !scheduledTaskIcon &&
+            !completedUnread ? (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
+                data-web-shell-session-running
                 aria-hidden="true"
               />
             ) : null}
@@ -4809,9 +4752,6 @@ export function WebShellSidebar({
     if (selectedSessionSource === 'channel') {
       return renderFlatSessions();
     }
-    if (!organizationEnabled) {
-      return renderFlatSessions();
-    }
     if (sessionSections.length === 0) {
       return renderFlatSessions();
     }
@@ -4826,6 +4766,11 @@ export function WebShellSidebar({
           label={section.label}
           count={section.sessions.length}
           color={section.color}
+          icon={
+            section.kind === 'scheduled-task' ? (
+              <CalendarClockIcon data-web-shell-scheduled-task-group />
+            ) : undefined
+          }
           limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
@@ -5130,120 +5075,13 @@ export function WebShellSidebar({
             }}
           />
         )}
-        {workspaceRemovalCandidate && (
-          <DialogShell
-            title={t('sidebar.removeWorkspaceTitle')}
-            size="sm"
-            onClose={() => {
-              if (
-                !workspaceRemovalSubmitting ||
-                workspaceRemovalRemoteInProgress
-              ) {
-                workspaceRemovalDismissedRef.current = true;
-                setWorkspaceRemovalCandidate(null);
-                setWorkspaceRemovalActivity(null);
-                setWorkspaceRemovalRemoteInProgress(false);
-              }
-            }}
-          >
-            <div className={styles.confirmContent}>
-              <p className={styles.confirmDescription}>
-                {workspaceRemovalActivity
-                  ? t('sidebar.removeWorkspaceBusy', {
-                      name: workspaceRemovalCandidate.cwd,
-                    })
-                  : t('sidebar.removeWorkspaceConfirm', {
-                      name: workspaceRemovalCandidate.cwd,
-                    })}
-              </p>
-              {workspaceRemovalActivity && (
-                <ul className={styles.workspaceRemovalActivityList}>
-                  <li>
-                    {t('sidebar.removeWorkspaceSessions', {
-                      count: workspaceRemovalActivity.sessions,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspacePrompts', {
-                      count: workspaceRemovalActivity.activePrompts,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceStarts', {
-                      count: workspaceRemovalActivity.pendingSessionStarts,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceConnections', {
-                      count: workspaceRemovalActivity.acpConnections,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceMemoryTasks', {
-                      count: workspaceRemovalActivity.memoryTasks,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceWorkers', {
-                      count: workspaceRemovalActivity.channelWorkers,
-                    })}
-                  </li>
-                  <li>
-                    {t('sidebar.removeWorkspaceVoiceSessions', {
-                      count: workspaceRemovalActivity.voiceSessions ?? 0,
-                    })}
-                  </li>
-                </ul>
-              )}
-              {workspaceRemovalActivity &&
-                connection.sessionId &&
-                connection.workspaceCwd === workspaceRemovalCandidate.cwd && (
-                  <p className={styles.confirmDescription}>
-                    {t('sidebar.removeWorkspaceCurrentSession')}
-                  </p>
-                )}
-              {workspaceRemovalRemoteInProgress && (
-                <p className={styles.confirmDescription}>
-                  {t('sidebar.removeWorkspaceInProgress')}
-                </p>
-              )}
-              <div className={styles.confirmActions}>
-                <button
-                  className={styles.secondaryButton}
-                  type="button"
-                  disabled={
-                    workspaceRemovalSubmitting &&
-                    !workspaceRemovalRemoteInProgress
-                  }
-                  onClick={() => {
-                    workspaceRemovalDismissedRef.current = true;
-                    setWorkspaceRemovalCandidate(null);
-                    setWorkspaceRemovalActivity(null);
-                    setWorkspaceRemovalRemoteInProgress(false);
-                  }}
-                >
-                  {t('common.cancel')}
-                </button>
-                <button
-                  className={styles.dangerButton}
-                  type="button"
-                  disabled={
-                    workspaceRemovalSubmitting ||
-                    workspaceRemovalRemoteInProgress ||
-                    (workspaceRemovalActivity !== null &&
-                      Boolean(connection.sessionId) &&
-                      connection.workspaceCwd === workspaceRemovalCandidate.cwd)
-                  }
-                  onClick={() => void confirmWorkspaceRemoval()}
-                >
-                  {workspaceRemovalActivity
-                    ? t('sidebar.forceRemoveWorkspace')
-                    : t('sidebar.removeWorkspace')}
-                </button>
-              </div>
-            </div>
-          </DialogShell>
-        )}
+        <WorkspaceRemovalDialog
+          removal={workspaceRemoval}
+          currentSessionInCandidate={
+            Boolean(connection.sessionId) &&
+            connection.workspaceCwd === workspaceRemoval.candidate?.cwd
+          }
+        />
         {groupEditor && (
           <DialogShell
             title={groupEditorTitle}
@@ -5840,7 +5678,16 @@ export function WebShellSidebar({
                             )}
                             overviewEnabled={workspaceOverviewEnabled}
                             overviewItems={workspaceOverviewItems}
-                            compact={footerTight}
+                            onOpenPathLocally={
+                              localOpenEnabled
+                                ? openWorkspaceFolderLocally
+                                : undefined
+                            }
+                            onOpenTerminalLocally={
+                              localTerminalEnabled
+                                ? openWorkspaceTerminalLocally
+                                : undefined
+                            }
                             gitBranchWanted={
                               Boolean(onNewWorktreeSession) &&
                               !lockedWorkspaceCwd
@@ -5896,6 +5743,28 @@ export function WebShellSidebar({
                                               copyWorkspacePath(ws),
                                           }
                                         : {}),
+                                      ...(localOpenEnabled &&
+                                      ws.trusted &&
+                                      realPath
+                                        ? {
+                                            openFolder: () => {
+                                              void openWorkspaceFolderLocally(
+                                                ws.cwd,
+                                              ).catch(() => undefined);
+                                            },
+                                          }
+                                        : {}),
+                                      ...(localTerminalEnabled &&
+                                      ws.trusted &&
+                                      realPath
+                                        ? {
+                                            openTerminal: () => {
+                                              void openWorkspaceTerminalLocally(
+                                                ws.cwd,
+                                              ).catch(() => undefined);
+                                            },
+                                          }
+                                        : {}),
                                       ...(ws.trusted
                                         ? {
                                             newSession: () =>
@@ -5933,14 +5802,26 @@ export function WebShellSidebar({
                                       ...(canRemove
                                         ? {
                                             remove: () =>
-                                              requestWorkspaceRemoval(ws),
+                                              workspaceRemoval.request(ws),
                                           }
                                         : {}),
                                     };
+                                    // The section caps the folder name so the
+                                    // git chip never slides under this overlay;
+                                    // the count drives the cap's width. The
+                                    // menu trigger is absent under a lock.
+                                    const headerActionCount =
+                                      (ws.trusted
+                                        ? 1 +
+                                          Number(canOrganizeWorkspace(ws.cwd))
+                                        : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                     return (
                                       <div
                                         className={
                                           styles.workspaceHeaderActions
+                                        }
+                                        data-workspace-action-count={
+                                          headerActionCount
                                         }
                                         style={{
                                           visibility:
@@ -6009,9 +5890,9 @@ export function WebShellSidebar({
                                             actions={menuActions}
                                             overview={overview}
                                             disabled={
-                                              (workspaceRemovalSubmitting &&
-                                                workspaceRemovalCandidate?.id ===
-                                                  ws.id) ||
+                                              (workspaceRemoval.submitting &&
+                                                workspaceRemoval.candidate
+                                                  ?.id === ws.id) ||
                                               (workspaceRenameSubmitting &&
                                                 workspaceRenameCandidate?.id ===
                                                   ws.id)
@@ -6036,9 +5917,16 @@ export function WebShellSidebar({
                                             onPointerDownOutside={
                                               handleSessionMenuPointerDownOutside
                                             }
-                                            onCloseAutoFocus={
-                                              handleSessionMenuCloseAutoFocus
-                                            }
+                                            onCloseAutoFocus={(event) => {
+                                              // Radix restores focus to the
+                                              // trigger, which lives inside the
+                                              // details popover's focus-open
+                                              // anchor — without suppression the
+                                              // popover reopens 300 ms after
+                                              // every menu close and never
+                                              // closes.
+                                              event.preventDefault();
+                                            }}
                                           />
                                         )}
                                       </div>
@@ -6054,6 +5942,17 @@ export function WebShellSidebar({
                           ) : null}
                         </Fragment>
                       ))}
+                      {onOpenWorkspacesOverview && !lockedWorkspaceCwd && (
+                        <button
+                          className={styles.manageWorkspacesRow}
+                          type="button"
+                          data-testid="manage-workspaces"
+                          onClick={onOpenWorkspacesOverview}
+                        >
+                          <FolderKanbanIcon aria-hidden="true" />
+                          <span>{t('sidebar.manageWorkspaces')}</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </>
@@ -6144,6 +6043,21 @@ export function WebShellSidebar({
                     onClick={onOpenSessions}
                   >
                     <LayoutGridIcon size={16} strokeWidth={1.2} />
+                  </button>
+                )}
+              {projectFeaturesEnabled &&
+                onOpenWorkspacesOverview &&
+                !lockedWorkspaceCwd &&
+                footerItems.has('workspacesOverview') && (
+                  <button
+                    className={styles.collapseButton}
+                    type="button"
+                    data-testid="footer-workspaces-overview"
+                    title={t('sidebar.manageWorkspaces')}
+                    aria-label={t('sidebar.manageWorkspaces')}
+                    onClick={onOpenWorkspacesOverview}
+                  >
+                    <FolderKanbanIcon size={16} strokeWidth={1.2} />
                   </button>
                 )}
               {projectFeaturesEnabled &&

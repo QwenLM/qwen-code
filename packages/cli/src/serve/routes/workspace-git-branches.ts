@@ -288,6 +288,13 @@ async function handlePull(
     });
     return;
   }
+  if (fetchOnly && (stash || force)) {
+    res.status(400).json({
+      error: 'invalid_fetch_only_combination',
+      message: 'fetchOnly cannot be combined with stash or force',
+    });
+    return;
+  }
   try {
     const result = await gitPull(cwd, { rebase, fetchOnly, stash, force }, env);
     // A successful stash pull can still carry git's notice about a failed
