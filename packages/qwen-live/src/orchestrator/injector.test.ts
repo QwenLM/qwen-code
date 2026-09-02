@@ -70,16 +70,55 @@ afterEach(() => {
 });
 
 describe('Injector window conditions', () => {
-  it('holds items while the user is speaking and delivers on speech stop', () => {
+  it('deduplicates a replayed permission while its ask is queued', () => {
+    injector.noteSpeechStarted();
+    const permission: InjectorItem = {
+      kind: 'permission',
+      requestId: 'r1',
+      context: '[PERMISSION req_1] allow?',
+      spoken: 'Should I allow it?',
+    };
+
+    injector.enqueue(permission);
+    injector.enqueue(permission);
+    expect(injector.pendingCount).toBe(1);
+
+    injector.noteInputCommitted();
+    expect(sink.contextCalls).toEqual(['[PERMISSION req_1] allow?']);
+    expect(sink.speechCalls).toEqual(['Should I allow it?']);
+  });
+
+  it('holds items through speech stop and delivers on input commit', () => {
     injector.noteSpeechStarted();
     injector.enqueue(complete('tests passed'));
 
     expect(sink.contextCalls).toEqual([]);
     expect(injector.pendingCount).toBe(1);
 
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
 
     expect(sink.contextCalls).toEqual(['tests passed']);
+    expect(injector.pendingCount).toBe(0);
+  });
+
+  it('reports estimated playback pending when user speech starts', () => {
+    injector.noteOutputAudio(48_000);
+
+    expect(injector.noteSpeechStarted()).toBe(true);
+    injector.noteOutputCleared();
+    expect(injector.noteSpeechStarted()).toBe(false);
+  });
+
+  it('drops the old quiet gap when speech starts after playback ends', () => {
+    injector.noteOutputAudio(48_000);
+    vi.advanceTimersByTime(1_100);
+
+    expect(injector.noteSpeechStarted()).toBe(false);
+    injector.enqueue(complete('arrived while speaking', 'Result ready.'));
+    injector.noteInputCommitted();
+
+    expect(sink.contextCalls).toEqual(['arrived while speaking']);
+    expect(sink.speechCalls).toEqual(['Result ready.']);
     expect(injector.pendingCount).toBe(0);
   });
 
@@ -262,7 +301,7 @@ describe('Injector progress throttling', () => {
     // survive it, or the job goes silent for the whole window.
     injector.noteSpeechStarted();
     expect(injector.pendingCount).toBe(0);
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
     injector.noteResponseDone();
 
     vi.advanceTimersByTime(1_000);
@@ -276,7 +315,7 @@ describe('Injector progress throttling', () => {
     expect(sink.contextCalls).toEqual(['p1']);
 
     injector.noteSpeechStarted();
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
     vi.advanceTimersByTime(1_000);
     injector.enqueue({ kind: 'progress', context: 'p2', jobHandle: 'job_1' });
 
@@ -300,7 +339,7 @@ describe('Injector queue maintenance', () => {
     expect(injector.pendingCount).toBe(2);
 
     injector.noteResponseDone();
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
     expect(sink.contextCalls).toEqual(['needs approval\nfinished']);
   });
 
@@ -383,7 +422,7 @@ describe('Injector size caps', () => {
     injector.noteSpeechStarted();
     injector.enqueue(complete('a'.repeat(4_000)));
     injector.enqueue(complete('b'.repeat(4_000)));
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
 
     expect(sink.contextCalls).toHaveLength(1);
     expect(sink.contextCalls[0]).toHaveLength(6_000);
@@ -395,7 +434,7 @@ describe('Injector size caps', () => {
     injector.noteSpeechStarted();
     injector.enqueue(complete('one', 'x'.repeat(200)));
     injector.enqueue(complete('two', 'y'.repeat(200)));
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
 
     expect(sink.speechCalls).toHaveLength(1);
     // Whole-line greedy join: the second line would breach the cap, so
@@ -406,7 +445,7 @@ describe('Injector size caps', () => {
   it('truncates a single over-long spoken line with an ellipsis', () => {
     injector.noteSpeechStarted();
     injector.enqueue(complete('ctx', 'z'.repeat(400)));
-    injector.noteSpeechStopped();
+    injector.noteInputCommitted();
 
     expect(sink.speechCalls).toHaveLength(1);
     expect(sink.speechCalls[0]).toBe(`${'z'.repeat(280)}…`);

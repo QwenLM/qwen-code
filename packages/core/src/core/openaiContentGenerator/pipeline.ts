@@ -672,7 +672,11 @@ export class ContentGenerationPipeline {
           ];
           yield response;
         }
-      } else if (context.pendingThinkingTagCandidate) {
+      } else if (
+        context.pendingThinkingTagCandidate ||
+        (context.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+          context.taggedThinkingParser?.hasUnclosedThought())
+      ) {
         throw new InvalidStreamError(
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
@@ -1358,7 +1362,7 @@ export class ContentGenerationPipeline {
       ? new StreamingToolCallParser()
       : undefined;
     const responseParsingOptions =
-      this.config.provider.getResponseParsingOptions?.();
+      this.config.provider.getResponseParsingOptions?.(effectiveModel);
     const taggedThinkingParser =
       isStreaming && responseParsingOptions?.taggedThinkingTags
         ? new TaggedThinkingParser()
