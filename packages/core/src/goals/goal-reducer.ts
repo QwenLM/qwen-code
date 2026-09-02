@@ -14,6 +14,7 @@ import {
   isGoalEvidenceProofKind,
   isGoalLimitKind,
   isGoalTokenBudgetSpent,
+  validateGoalPauseReason,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -137,7 +138,15 @@ export function reduceGoalControl(
         snapshotOf(current),
       );
     }
-    return transitionGoal(current, transition.now, { status: 'paused' });
+    // A pause without a reason clears `lastReason` rather than keeping it.
+    // The field is rendered as the reason the Goal is in its current state,
+    // and the value it would otherwise hold is the previous turn's verifier
+    // rejection -- which explains why the Goal was still running, not why it
+    // stopped.
+    return transitionGoal(current, transition.now, {
+      status: 'paused',
+      lastReason: request.reason,
+    });
   }
 
   if (current.status === 'complete') {
@@ -257,7 +266,31 @@ export function parseGoalControlRequest(
         value['expectedGoalId'],
         value['expectedRevision'],
       );
-    case 'pause':
+    case 'pause': {
+      if (
+        !hasOnlyKeys(value, [
+          'action',
+          'expectedGoalId',
+          'expectedRevision',
+          'reason',
+        ]) ||
+        !isExpectedVersion(value)
+      ) {
+        return undefined;
+      }
+      const reason = value['reason'];
+      if (reason !== undefined) {
+        if (typeof reason !== 'string' || validateGoalPauseReason(reason)) {
+          return undefined;
+        }
+      }
+      return {
+        action: 'pause',
+        expectedGoalId: value['expectedGoalId'],
+        expectedRevision: value['expectedRevision'],
+        ...(reason === undefined ? {} : { reason }),
+      };
+    }
     case 'resume':
     case 'clear':
       if (

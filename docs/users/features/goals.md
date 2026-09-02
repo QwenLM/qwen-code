@@ -16,6 +16,14 @@ A Goal keeps Qwen Code working across turns until a stated condition is met. Set
 
 Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
 
+## Interrupting a Goal
+
+Cancelling a Goal turn pauses the Goal. Press Esc while the model is answering or while its tools are still running, and the turn stops, the Goal moves to `paused`, and the card and `/goal` both say why it stopped. Nothing continues until you run `/goal resume`.
+
+Typing a message while a Goal is active does not pause it. Your message runs as the next Goal turn, so use it to steer the work; use `/goal pause` or `/goal clear` to stop it.
+
+Every pause states its reason: that you interrupted it, that you ran `/goal pause`, that the model hit its output limit, or that the turn failed. A Goal stopped by a limit keeps the reason for that limit instead.
+
 ## How a Goal is judged
 
 The verifier never runs commands or reads files on its own. It only sees what is already in the transcript:

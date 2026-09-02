@@ -34,6 +34,8 @@ import {
   createDebugLogger,
   ToolNames,
   goalToolResultProvenance,
+  goalPauseReasonForFailure,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
@@ -592,7 +594,11 @@ export const useLlmStream = (
     }
   }, []);
   const failClosedGoalTurn = useCallback(
-    async (binding: GoalTurnBinding, reason: string): Promise<void> => {
+    async (
+      binding: GoalTurnBinding,
+      reason: string,
+      options?: { userCancelled?: boolean },
+    ): Promise<void> => {
       if (!binding.controller.signal.aborted) {
         binding.controller.abort(reason);
       }
@@ -613,6 +619,9 @@ export const useLlmStream = (
               action: 'pause',
               expectedGoalId: binding.permit.goalId,
               expectedRevision: binding.permit.revision,
+              reason: options?.userCancelled
+                ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                : goalPauseReasonForFailure(reason),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause invalid Goal tool batch', error);
@@ -4189,6 +4198,7 @@ export const useLlmStream = (
               await failClosedGoalTurn(
                 goalBinding,
                 'Goal turn ended without a valid continuation',
+                { userCancelled: turnCancelledRef.current },
               );
             }
           }
@@ -5306,6 +5316,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: turnCancelledRef.current },
           );
         }
         endToolInteraction('cancelled');
@@ -5338,8 +5349,35 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: turnCancelledRef.current },
           );
         }
+        endToolInteraction('cancelled');
+        return;
+      }
+
+      // A Goal tool batch the user cancelled stops the Goal, even when some
+      // of its tools had already finished. Without this, the batch falls
+      // through to the ordinary submit path below: the cancelled tool's
+      // `[Operation Cancelled]` result goes back to the model as one more
+      // tool result, the model reads it as a transient failure, and the Goal
+      // keeps running the objective the user just interrupted. The
+      // all-cancelled branch above already stops for the simpler shape.
+      const someToolsCancelled = llmTools.some(
+        (toolCall) => toolCall.status === 'cancelled',
+      );
+      if (toolGoalBinding && someToolsCancelled && turnCancelledRef.current) {
+        // Keep every function call paired with a response before stopping, so
+        // the history the next Goal turn resumes from stays well-formed.
+        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        markToolsAsSubmitted(
+          llmTools.map((toolCall) => toolCall.request.callId),
+        );
+        await failClosedGoalTurn(
+          toolGoalBinding,
+          'Goal tool batch was cancelled',
+          { userCancelled: true },
+        );
         endToolInteraction('cancelled');
         return;
       }
@@ -5758,6 +5796,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
+            { userCancelled: turnCancelledRef.current },
           );
         }
         endToolInteraction('cancelled');

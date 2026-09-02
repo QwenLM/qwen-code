@@ -257,6 +257,13 @@ export type GoalControlRequest =
       action: 'pause';
       expectedGoalId: string;
       expectedRevision: number;
+      /**
+       * Why the Goal is being paused, in the user's words rather than the
+       * model's. A pause without one clears `lastReason`: a stopped Goal
+       * showing the previous turn's verifier rejection reads as the reason
+       * it stopped, which it is not.
+       */
+      reason?: string;
     }
   | {
       action: 'resume';
@@ -327,6 +334,62 @@ export function validateGoalProposalReason(reason: string): string | null {
     return `Goal proposal reason exceeds ${GOAL_PROPOSAL_REASON_MAX_BYTES} UTF-8 bytes`;
   }
   return null;
+}
+
+/** Upper bound on a pause reason, which a user reads in a card. */
+export const GOAL_PAUSE_REASON_MAX_CHARACTERS = 500;
+
+export function validateGoalPauseReason(reason: string): string | null {
+  if (!reason.trim()) return 'Goal pause reason must not be empty';
+  if ([...reason].length > GOAL_PAUSE_REASON_MAX_CHARACTERS) {
+    return `Goal pause reason exceeds ${GOAL_PAUSE_REASON_MAX_CHARACTERS} characters`;
+  }
+  return null;
+}
+
+/**
+ * The pause reasons every host shares.
+ *
+ * They are constants rather than per-host prose so that the same event reads
+ * the same way in the TUI card, `/goal`, an ACP client, and a headless
+ * `goal_state` event -- and so a test can assert on the event rather than on
+ * one host's wording.
+ */
+export const GOAL_PAUSE_REASON_USER_INTERRUPT =
+  'Interrupted by the user. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+export const GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT =
+  'The model hit its output limit before the turn finished. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
+  'A Stop hook blocked this session too many times in a row. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
+  'The session closed before the turn finished. Run /goal resume to continue.';
+
+function truncateGoalPauseReason(reason: string): string {
+  const codePoints = [...reason];
+  return codePoints.length <= GOAL_PAUSE_REASON_MAX_CHARACTERS
+    ? reason
+    : `${codePoints.slice(0, GOAL_PAUSE_REASON_MAX_CHARACTERS - 1).join('')}\u2026`;
+}
+
+/** The pause reason for a Goal turn that failed rather than being stopped. */
+export function goalPauseReasonForFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal turn could not finish: ${detail}. Run /goal resume to continue.`
+      : 'The Goal turn could not finish. Run /goal resume to continue.',
+  );
+}
+
+/** The pause reason for a headless run that hit one of its own budgets. */
+export function goalPauseReasonForRunBudget(budget: string): string {
+  const detail = budget.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped at its ${detail} budget. Resume the Goal in a later run.`
+      : 'The headless run stopped at a budget. Resume the Goal in a later run.',
+  );
 }
 
 export type GoalStateCause =

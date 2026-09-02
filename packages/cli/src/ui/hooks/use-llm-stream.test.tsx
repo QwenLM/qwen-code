@@ -30,6 +30,7 @@ import {
   ApprovalMode,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   LlmEventType as ServerLlmEventType,
   MessageSenderType,
   SendMessageType,
@@ -4521,6 +4522,7 @@ describe('useLlmStream', () => {
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: expect.stringContaining('could not finish'),
     });
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4661,6 +4663,7 @@ describe('useLlmStream', () => {
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: expect.stringContaining('could not finish'),
     });
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4669,6 +4672,190 @@ describe('useLlmStream', () => {
       errorMessage: 'stale Goal tool context',
       errorType: 'continuation_goal_context_stale',
     });
+  });
+
+  it('pauses the Goal when the user cancels part of a Goal tool batch', async () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-partial-cancel',
+      revision: 2,
+      turnId: 'turn-partial-cancel',
+    };
+    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const activeSnapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'keep going',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-partial' },
+        turnCount: 1,
+        activeTimeMs: 5,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => permit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => activeSnapshot),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
+    const completedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-partial-cancel',
+          goalContext: permit,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    const cancelledTool = (callId: string): TrackedCancelledToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-partial-cancel',
+          goalContext: permit,
+        },
+        status: 'cancelled',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: '[Operation Cancelled]' }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCancelledToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    // The batch is still executing when the user interrupts, which is what
+    // puts the hook in `Responding` and lets a cancel land at all.
+    let currentToolCalls: TrackedToolCall[] = [];
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+    const { result, rerender } = renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    // Bind an active Goal turn whose stream schedules another tool, so the
+    // binding is still live when the next batch arrives.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'cont-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([completedTool('setup-tool')]);
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // The user interrupts while the scheduled tool is still running. One tool
+    // in the batch had already finished, so the batch that follows is neither
+    // "all cancelled" nor a clean continuation: without the partial-cancel
+    // branch it goes back to the model as an ordinary tool result and the
+    // Goal keeps running the objective the user just interrupted.
+    currentToolCalls = [
+      {
+        request: {
+          callId: 'cont-tool',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-partial-cancel',
+          goalContext: permit,
+        },
+        status: 'executing',
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'cont-tool',
+        } as unknown as AnyToolInvocation,
+        startTime: Date.now(),
+      } as unknown as TrackedExecutingToolCall,
+    ];
+    rerender();
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    mockAddItem.mockClear();
+    await act(async () => {
+      await capturedOnComplete?.([
+        completedTool('done-tool'),
+        cancelledTool('cont-tool'),
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      });
+    });
+    expect(finishTurn).toHaveBeenCalledWith(permit);
+    // No second model call: the interrupted batch never reached the model.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
 
   it('finishes a Goal turn without another model call after update_goal', async () => {

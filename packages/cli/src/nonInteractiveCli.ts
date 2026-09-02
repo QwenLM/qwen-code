@@ -69,6 +69,9 @@ import {
   shouldRunVisionBridge,
   splitImageParts,
   GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  goalPauseReasonForRunBudget,
   addAgentOutputMessageAttributes,
   endInteractionSpan,
   getErrorType,
@@ -662,7 +665,10 @@ export async function runNonInteractive(
     };
     let settlingGoalTurn: HeadlessGoalTurn | undefined;
     let goalTurnSettlement: Promise<void> | undefined;
-    const failClosedActiveGoalTurn = (reason: string): Promise<void> => {
+    const failClosedActiveGoalTurn = (
+      reason: string,
+      pauseReason?: string,
+    ): Promise<void> => {
       const turn = activeGoalTurn;
       if (!turn) return Promise.resolve();
       if (settlingGoalTurn === turn && goalTurnSettlement) {
@@ -689,6 +695,7 @@ export async function runNonInteractive(
                 action: 'pause',
                 expectedGoalId: turn.permit.goalId,
                 expectedRevision: turn.permit.revision,
+                reason: pauseReason ?? goalPauseReasonForFailure(reason),
               });
             } catch (error) {
               debugLogger.warn('Failed to pause terminal headless Goal', error);
@@ -733,6 +740,9 @@ export async function runNonInteractive(
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            reason: goalPauseReasonForFailure(
+              'the headless run ended before the turn finished',
+            ),
           })
           .then(() => undefined)
           .catch((error) => {
@@ -801,6 +811,9 @@ export async function runNonInteractive(
       });
       await failClosedActiveGoalTurn(
         exceeded?.message ?? 'Headless Goal execution was cancelled',
+        exceeded
+          ? goalPauseReasonForRunBudget(exceeded.kind)
+          : GOAL_PAUSE_REASON_USER_INTERRUPT,
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {

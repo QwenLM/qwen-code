@@ -177,6 +177,11 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
@@ -2562,6 +2567,7 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         } else {
           await runtime.releaseTurn(turn.turnKey);
@@ -2617,6 +2623,13 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            reason: cancelledByUser
+              ? GOAL_PAUSE_REASON_USER_INTERRUPT
+              : result?.stopReason === 'max_tokens'
+                ? GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT
+                : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+                  ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                  : goalPauseReasonForFailure('the turn failed'),
           });
           return;
         }
@@ -2654,6 +2667,7 @@ export class Session implements SessionContext {
         action: 'pause',
         expectedGoalId: goal.goalId,
         expectedRevision: goal.revision,
+        reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       });
     } catch (error) {
       debugLogger.warn(
@@ -4477,6 +4491,7 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: queuedGoalTurn.permit.goalId,
             expectedRevision: queuedGoalTurn.permit.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         }
       } catch (error) {

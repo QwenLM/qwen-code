@@ -38,6 +38,8 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -23519,6 +23521,7 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: permit.goalId,
             expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
@@ -23870,6 +23873,7 @@ describe('Session', () => {
           action: 'pause',
           expectedGoalId: permit.goalId,
           expectedRevision: permit.revision,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
         });
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
@@ -28031,6 +28035,7 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: 'goal-1',
             expectedRevision: 3,
+            reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
           });
         });
 
