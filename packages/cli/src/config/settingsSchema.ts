@@ -2604,13 +2604,13 @@ const SETTINGS_SCHEMA = {
     properties: {
       codeModeOnly: {
         type: 'boolean',
-        label: 'Code Mode Only',
+        label: 'Code Mode Only (Experimental)',
         category: 'Tools',
         requiresRestart: true,
         default: false,
         description:
-          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available.',
-        showInDialog: false,
+          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+        showInDialog: true,
       },
       sandbox: {
         type: 'object',

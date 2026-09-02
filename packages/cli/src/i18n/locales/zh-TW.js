@@ -682,6 +682,7 @@ export default {
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
+  'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
