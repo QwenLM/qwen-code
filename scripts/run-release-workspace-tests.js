@@ -236,8 +236,11 @@ export async function runAndReport({
       stdio: ['inherit', 'pipe', 'pipe'],
       // Node >= 22 refuses to spawn a .cmd shim without a shell (the
       // CVE-2024-27980 hardening, whose opt-out the 22 line removed), and the
-      // repo pins Node 22. scripts/dev.js spawns its shims the same way.
-      shell: process.platform === 'win32',
+      // repo pins Node 22. scripts/dev.js spawns its shims the same way. Only
+      // a shim goes through the shell: cmd.exe re-parses the joined command
+      // line, which mangles quoted arguments handed to a real executable and
+      // loses a program path containing a space.
+      shell: process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command),
     });
     const consume = (chunk, sink, key) => {
       pending[key] = classifier.write(chunk.toString('utf8'), pending[key]);

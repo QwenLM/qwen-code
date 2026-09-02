@@ -562,58 +562,66 @@ describe('release workflow', () => {
     }
   });
 
-  it('passes --retry only when the release schedule asks for one', () => {
-    // The flag reaches every workspace's vitest, where a command line option
-    // outranks the config. Passing --retry=0 on stable releases would switch
-    // off a workspace's own retry (packages/sdk-typescript) on this lane
-    // alone, so the stable path must omit the flag rather than zero it.
-    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
-      (step) => step.name === 'Run Workspace Tests',
-    );
-    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+  // Bash-driven: the stub npm is a '#!/bin/sh' script and the step body
+  // itself uses a bash array. On Windows the wrapper spawns npm.cmd through
+  // cmd.exe, which resolves the REAL npm via PATHEXT past the extensionless
+  // stub and runs the actual suite inside the test — so win32 skips it and
+  // Linux CI remains the authoritative coverage.
+  it.skipIf(process.platform === 'win32')(
+    'passes --retry only when the release schedule asks for one',
+    () => {
+      // The flag reaches every workspace's vitest, where a command line option
+      // outranks the config. Passing --retry=0 on stable releases would switch
+      // off a workspace's own retry (packages/sdk-typescript) on this lane
+      // alone, so the stable path must omit the flag rather than zero it.
+      const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+        (step) => step.name === 'Run Workspace Tests',
+      );
+      const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
 
-    for (const [retry, expected] of [
-      ['2', '--retry=2'],
-      ['', null],
-    ]) {
-      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
-      try {
-        const stub = join(dir, 'npm');
-        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
-        chmodSync(stub, 0o755);
+      for (const [retry, expected] of [
+        ['2', '--retry=2'],
+        ['', null],
+      ]) {
+        const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+        try {
+          const stub = join(dir, 'npm');
+          writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
+          chmodSync(stub, 0o755);
 
-        const result = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', script],
-          {
-            env: {
-              ...process.env,
-              PATH: `${dir}:${process.env['PATH']}`,
-              VITEST_RETRY: retry,
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', script],
+            {
+              env: {
+                ...process.env,
+                PATH: `${dir}:${process.env['PATH']}`,
+                VITEST_RETRY: retry,
+              },
+              encoding: 'utf8',
             },
-            encoding: 'utf8',
-          },
-        );
+          );
 
-        expect(result.status, result.stderr).toBe(0);
-        const args = result.stdout.split('\0');
-        expect(args.pop()).toBe('');
-        expect(args, retry).toContain('--passWithNoTests');
-        // An empty positional would reach vitest as a test-name filter.
-        expect(args, retry).not.toContain('');
-        if (expected) {
-          expect(args, retry).toContain(expected);
-        } else {
-          expect(
-            args.some((arg) => arg.startsWith('--retry')),
-            retry,
-          ).toBe(false);
+          expect(result.status, result.stderr).toBe(0);
+          const args = result.stdout.split('\0');
+          expect(args.pop()).toBe('');
+          expect(args, retry).toContain('--passWithNoTests');
+          // An empty positional would reach vitest as a test-name filter.
+          expect(args, retry).not.toContain('');
+          if (expected) {
+            expect(args, retry).toContain(expected);
+          } else {
+            expect(
+              args.some((arg) => arg.startsWith('--retry')),
+              retry,
+            ).toBe(false);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
         }
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
       }
-    }
-  });
+    },
+  );
 
   it('discovers at least one test file in every test:ci workspace', () => {
     // --passWithNoTests lets a shard that received no files exit 0, but it
