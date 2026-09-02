@@ -466,6 +466,10 @@ jobs:
       - name: 'Verify Prepared Package'
         run: |-
           npm run bundle
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
           npm run prepare:package
 
   quality_typecheck:

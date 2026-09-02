@@ -200,8 +200,9 @@ function buildImage(imageName, dockerfile) {
       writeFileSync(argv.outputFile, finalImageName);
     }
   } catch (error) {
-    if (!streamBuildOutput) {
+    if (!streamBuildOutput && (error?.stdout || error?.stderr)) {
       printCapturedBuildOutput(error);
+      error.message = `${sandboxCommand} build failed — output printed above`;
     }
     throw error;
   } finally {
