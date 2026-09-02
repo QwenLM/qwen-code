@@ -71,13 +71,12 @@ function gitOpts() {
  *
  * Memoized per DIRECTORY, which is also why it needs no test seam: every
  * fixture stands its plant up in a fresh temp dir, so a cached verdict can
- * never be served for a different one. The cache is not a weakening: a pointer
- * rewritten
- * after any gate answers is the TOCTOU residual this whole design documents and
- * does not close (`scratch-tree` states it, and `fetch-pr` asks twice to narrow
- * rather than to close it). Outside a review temp dir the answer costs no
- * syscall at all — `mountRootFor` returns null on a string scan — so the
- * ordinary checkout never pays for this.
+ * never be served for a different one. The cache is not a weakening either — a
+ * pointer rewritten after any gate has answered is the TOCTOU residual this
+ * whole design documents and does not close (`scratch-tree` states it, and
+ * `fetch-pr` asks twice to narrow it rather than to claim it closed). Outside a
+ * review temp dir the answer costs no syscall at all — `mountRootFor` returns
+ * null on a string scan — so an ordinary checkout never pays for this.
  */
 let launchDirVerdict: { cwd: string; refusal: string | null } | null = null;
 

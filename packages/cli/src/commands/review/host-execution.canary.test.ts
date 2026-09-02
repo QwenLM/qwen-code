@@ -53,6 +53,7 @@ import { makeGitProbe } from './comment-status.js';
 import { captureLocalDiff } from './lib/local-diff.js';
 import { git, gitOpt } from './lib/git.js';
 import { runBaseTree } from './base-tree.js';
+import { runRevertHunk } from './revert-hunk.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
 
@@ -341,6 +342,39 @@ describe('a planted repository reaches no host-side execution', () => {
       });
 
       expect(JSON.stringify(report)).not.toContain('reusing it');
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'revert-hunk refuses a scratch tree whose pointer was rewritten',
+    () => {
+      // `git apply` writes into the tree without running a filter, so this arm
+      // claims no execution — what it refuses is deciding a probe's outcome on
+      // `check-attr` and `ls-files` answers that come out of the plant. The
+      // refusal is a harness fact: nothing is claimed about the hunk.
+      const { tree, canary } = poisoned();
+      const patch = join(tmp('qwen-canary-patch-'), 'p.diff');
+      writeFileSync(
+        patch,
+        [
+          'diff --git a/a.ts b/a.ts',
+          'index 0000000..1111111 100644',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-export const x = 1;',
+          '+export const x = 2;',
+          '',
+        ].join('\n'),
+      );
+      const report = runRevertHunk({
+        diff: patch,
+        tree,
+        hunk: 'a.ts:1',
+      } as unknown as Parameters<typeof runRevertHunk>[0]);
+      expect(report.applied).toBe(false);
+      expect(JSON.stringify(report)).toContain('review temp dir');
       expect(existsSync(canary)).toBe(false);
     },
   );

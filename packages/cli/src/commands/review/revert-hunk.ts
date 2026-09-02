@@ -64,7 +64,7 @@ import {
   unquote,
   stripHeaderTimestamp,
 } from './lib/diff-plan.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { sanitizedGitEnv, untrustedGitfile } from './lib/worktree.js';
 import { assertWritableOutPath } from './lib/paths.js';
 import {
   ignoreBrokenPipe,
@@ -813,6 +813,26 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       hunk: entry,
       harnessFailure: true,
       note: `--tree ${JSON.stringify(args.tree)} is a SUBDIRECTORY of a work tree, not its root — git apply resolves the patch's paths against the toplevel and silently SKIPS any that fall outside this subdirectory, exiting 0 without touching them, so applied:true would be a false witness over an unchanged file. Point --tree at the work-tree root (the scratch worktree); nothing was changed.`,
+    };
+  }
+  // ...and the repository the reads below resolve to must be the tree's own.
+  // `--show-toplevel` above still prints this tree when the gitfile has been
+  // rewritten to a planted admin entry — that is exactly the shape the
+  // location gate exists for — while `check-attr` and `ls-files` below then
+  // answer out of the plant: the EOL regime this function refuses a conversion
+  // on, and the target's own shape, both decided by whoever wrote the pointer.
+  // A scratch tree is inside the directory the sandbox hands the reviewed code
+  // read-write, so that writer is the code under review.
+  //
+  // A harness fact, like every other refusal here: nothing about the hunk is
+  // being claimed, and the tree is untouched.
+  const untrusted = untrustedGitfile(tree);
+  if (untrusted !== null) {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `--tree ${JSON.stringify(args.tree)}: ${untrusted} — the attribute and index reads this needs would come from whichever repository that pointer names, so no revert is attempted. Reset the scratch tree (\`qwen review scratch-tree\`) and retry; nothing was changed.`,
     };
   }
   const targetPath = treePath(tree, targetBytes);
