@@ -105,10 +105,11 @@ describe('autofix gate load clamps', () => {
     vi.resetModules();
     // Re-imported under the stub: the configs read the env at import time,
     // and the static imports above already resolved the non-ECS branch.
-    const [core, cli, acpBridge] = await Promise.all([
+    const [core, cli, acpBridge, webShell] = await Promise.all([
       import('../../packages/core/vitest.config.js'),
       import('../../packages/cli/vitest.config.js'),
       import('../../packages/acp-bridge/vitest.config.js'),
+      import('../../packages/web-shell/vitest.config.js'),
     ]);
     vi.unstubAllEnvs();
 
@@ -135,8 +136,13 @@ describe('autofix gate load clamps', () => {
     );
 
     // 60_000 / 60_000 / '25%' on the ECS branch of core and cli;
-    // acp-bridge sets the two timeouts but defines no maxWorkers.
-    for (const config of [core.default, cli.default, acpBridge.default]) {
+    // acp-bridge and web-shell set the two timeouts but define no maxWorkers.
+    for (const config of [
+      core.default,
+      cli.default,
+      acpBridge.default,
+      webShell.default,
+    ]) {
       expect(String(config.test?.testTimeout)).toBe(clamps['testTimeout']);
       expect(String(config.test?.hookTimeout)).toBe(clamps['hookTimeout']);
     }

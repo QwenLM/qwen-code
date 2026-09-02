@@ -45,7 +45,10 @@ import {
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
-import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
+import type {
+  NdJsonMessageObservation,
+  NdJsonQueueSaturationInfo,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
@@ -4926,6 +4929,21 @@ async function runQwenServeImpl(
       daemonLog,
       emitTelemetryLog: core.emitDaemonLog,
     });
+    // Saturation now backpressures the agent pipe for a bounded grace
+    // window instead of tearing the channel down immediately (#10162).
+    // Warn at episode start so field diagnosis doesn't begin at the
+    // `channel exited` breadcrumb.
+    // `callHook` in ndJsonStream already isolates hook throws from the
+    // transport, so this needs no guard of its own.
+    const warnAcpQueueSaturated = (info: NdJsonQueueSaturationInfo): void => {
+      daemonLog.warn('ACP NDJSON decoded queue saturated', {
+        requiredBytes: info.requiredBytes,
+        availableBytes: info.availableBytes,
+        maxQueuedMessages: info.maxQueuedMessages,
+        maxQueuedBytes: info.maxQueuedBytes,
+        queueSaturationGraceMs: info.graceMs,
+      });
+    };
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;
       promptQueueWaitStats.totalMs += durationMs;
@@ -5097,6 +5115,7 @@ async function runQwenServeImpl(
             bytes,
             message,
           }),
+        onQueueSaturated: warnAcpQueueSaturated,
       },
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6003,6 +6022,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6661,6 +6681,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
