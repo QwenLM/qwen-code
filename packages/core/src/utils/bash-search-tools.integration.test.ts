@@ -106,20 +106,16 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
       execute("rg --files | rg '([.]txt|[.]env|[.]yml)$'"),
     ]);
 
-    for (const [label, output] of [
-      ['rg', rgOutput],
-      ['grep', grepOutput],
-      ['files', fileOutput],
-    ] as const) {
-      expect(output, label).toContain('visible.txt');
-      expect(output, label).toContain('allowed.env');
-      expect(output, label).toContain('.hidden.txt');
-      expect(output, label).toContain('.github/ci.yml');
-      expect(output, label).not.toContain('.git/config');
-      expect(output, label).not.toContain('git-secret.txt');
-      expect(output, label).not.toContain('nested-secret.txt');
-      expect(output, label).not.toContain('blocked.env');
-      expect(output, label).not.toContain('qwen-secret.txt');
+    for (const output of [rgOutput, grepOutput, fileOutput]) {
+      expect(output).toContain('visible.txt');
+      expect(output).toContain('allowed.env');
+      expect(output).toContain('.hidden.txt');
+      expect(output).toContain('.github/ci.yml');
+      expect(output).not.toContain('.git/config');
+      expect(output).not.toContain('git-secret.txt');
+      expect(output).not.toContain('nested-secret.txt');
+      expect(output).not.toContain('blocked.env');
+      expect(output).not.toContain('qwen-secret.txt');
     }
   });
 
