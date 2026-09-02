@@ -80,6 +80,7 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
 
 interface FakeSession extends DaemonChannelSessionClient {
   prompt: ReturnType<typeof vi.fn>;
+  btw: ReturnType<typeof vi.fn>;
   uploadAttachment: ReturnType<typeof vi.fn>;
   removeAttachment: ReturnType<typeof vi.fn>;
   events: ReturnType<typeof vi.fn>;
@@ -98,6 +99,7 @@ function createFakeSession(
     workspaceCwd: '/repo',
     lastEventId: undefined,
     prompt: vi.fn().mockImplementation(async () => ({})),
+    btw: vi.fn().mockResolvedValue({ sessionId, answer: 'side answer' }),
     uploadAttachment: vi.fn(),
     removeAttachment: vi.fn().mockResolvedValue(true),
     events: vi.fn((opts?: { signal?: AbortSignal }) => {
@@ -142,6 +144,45 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('forwards BTW to the exact daemon session with its abort signal', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const controller = new AbortController();
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.btw('session-1', 'what changed?', controller.signal),
+    ).resolves.toEqual({ sessionId: 'session-1', answer: 'side answer' });
+    expect(session.btw).toHaveBeenCalledWith('what changed?', {
+      signal: controller.signal,
+    });
+    events.close();
+    bridge.stop();
+  });
+
+  it('fails closed when the daemon session has no BTW method', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    delete (session as Partial<FakeSession>).btw;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.btw('session-1', 'question')).rejects.toThrow(
+      'not supported',
+    );
+    events.close();
+    bridge.stop();
+  });
+
   it('deletes an internal session through its owning workspace', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

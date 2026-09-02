@@ -100,6 +100,7 @@ import {
 // instead of silently degrading the worker to the pre-capability behavior.
 const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
 const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
+const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
 const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
@@ -240,7 +241,7 @@ export function createDaemonSessionFactory({
 
 export function createDaemonChannelBridgeFacade(
   bridge: ChannelAgentBridge,
-  opts: { exposeShellCommand: boolean },
+  opts: { exposeBtw: boolean; exposeShellCommand: boolean },
 ): ChannelAgentBridge {
   const facade: ChannelAgentBridge = {
     get availableCommands() {
@@ -253,6 +254,10 @@ export function createDaemonChannelBridgeFacade(
     prompt: bridge.prompt.bind(bridge),
     cancelSession: bridge.cancelSession.bind(bridge),
   };
+
+  if (opts.exposeBtw && bridge.btw) {
+    facade.btw = bridge.btw.bind(bridge);
+  }
 
   if (bridge.respondToPermission) {
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
@@ -581,6 +586,7 @@ export async function runChannelDaemonWorker(
   try {
     await abortableStartup(bridge.start(), startupSignal);
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: capabilities.features.includes(SESSION_BTW_FEATURE),
       exposeShellCommand: capabilities.features.includes(
         SESSION_SHELL_COMMAND_FEATURE,
       ),
