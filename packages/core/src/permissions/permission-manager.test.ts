@@ -1702,12 +1702,9 @@ function makeConfig(
      * of the permission rules (#10075).
      */
     eagerTools: string[];
-    /** Live folder trust; absent reads as trusted. */
-    isTrustedFolder: () => boolean;
   }> = {},
 ): PermissionManagerConfig {
   return {
-    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -3080,74 +3077,6 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
     });
 
-    it('a trust-gated allow rule is suspended while the folder is untrusted and restored with trust', async () => {
-      // A project skill's `allowedTools` are repository-controlled: they
-      // auto-approve only while the folder is trusted, re-read at every
-      // decision, so a revocation mid-session takes effect at the next
-      // tool call and a later grant of trust restores the rule — the
-      // second side of the gate applied on the way in.
-      let trusted = true;
-      pm = new PermissionManager(
-        makeConfig({ isTrustedFolder: () => trusted }),
-      );
-      pm.initialize();
-      const call = { toolName: 'run_shell_command', command: 'git commit' };
-      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
-      expect(await pm.evaluate(call)).toBe('allow');
-
-      trusted = false;
-      expect(await pm.evaluate(call)).toBe('ask');
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'npm test',
-        }),
-      ).toBe('allow');
-      // The effective-rules listing agrees with the decision.
-      expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
-        false,
-      );
-
-      trusted = true;
-      expect(await pm.evaluate(call)).toBe('allow');
-    });
-
-    it('an ungated grant of the same raw rule outranks the repo grant — the dedup must not inherit the suspension', async () => {
-      // A project skill grants `Bash(git *)` trust-gated; a user-level
-      // skill later grants the identical raw. The dedup keeps one entry,
-      // and it must carry the WIDER grant: the user's, which no folder
-      // trust suspends. A gated re-arrival (skill reload) stays a skip.
-      let trusted = true;
-      pm = new PermissionManager(
-        makeConfig({ isTrustedFolder: () => trusted }),
-      );
-      pm.initialize();
-      const call = { toolName: 'run_shell_command', command: 'git commit' };
-      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
-      trusted = false;
-      expect(await pm.evaluate(call)).toBe('allow');
-      // Re-adding the gated rule (a reload cycle) neither duplicates nor
-      // re-gates the entry the user now holds.
-      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(await pm.evaluate(call)).toBe('allow');
-      expect(
-        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
-          .allow,
-      ).toHaveLength(1);
-    });
-
-    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
-      pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git commit',
-        }),
-      ).toBe('allow');
-    });
-
     it('addSessionAllowRule deduplicates identical rules', () => {
       pm.addSessionAllowRule('Bash(git *)');
       pm.addSessionAllowRule('Bash(git *)');
@@ -3240,7 +3169,7 @@ describe('PermissionManager', () => {
       pm.initialize();
 
       expect(
-        pm.hasMatchingAskRule({
+        await pm.hasMatchingAskRule({
           toolName: 'run_shell_command',
           command: 'git add file && git commit -m "msg"',
         }),
@@ -3254,14 +3183,14 @@ describe('PermissionManager', () => {
       pm.initialize();
 
       expect(
-        pm.hasMatchingAskRule({
+        await pm.hasMatchingAskRule({
           toolName: 'run_shell_command',
           command: 'git add file && git commit -m "msg"',
         }),
       ).toBe(true);
     });
 
-    it('matches an ask rule through a symlinked path', () => {
+    it('matches an ask rule through a symlinked path', async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
       try {
         const protectedDir = path.join(root, 'protected');
@@ -3278,7 +3207,7 @@ describe('PermissionManager', () => {
         pm.initialize();
 
         expect(
-          pm.hasMatchingAskRule({
+          await pm.hasMatchingAskRule({
             toolName: 'edit',
             filePath: path.join(link, 'file.txt'),
           }),
@@ -4067,7 +3996,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe('deny');
   });
 
-  it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
+  it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
@@ -4077,7 +4006,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
     pm.initialize();
     expect(
-      pm.hasRelevantRules({
+      await pm.hasRelevantRules({
         toolName: 'run_shell_command',
         command: "cd src && bash -lc 'echo ok > generated.txt'",
         cwd: '/repo',
@@ -4085,7 +4014,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(false);
   });
 
-  it('does not treat canonical-only allow matches as relevant', () => {
+  it('does not treat canonical-only allow matches as relevant', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
     try {
       const allowedDir = path.join(root, 'allowed');
@@ -4104,13 +4033,13 @@ describe('PermissionManager — compound shell write attribution', () => {
       pm.initialize();
 
       expect(
-        pm.hasRelevantRules({
+        await pm.hasRelevantRules({
           toolName: 'edit',
           filePath: path.join(link, 'file.txt'),
         }),
       ).toBe(false);
       expect(
-        pm.hasRelevantRules({
+        await pm.hasRelevantRules({
           toolName: 'run_shell_command',
           command: `echo allowed > ${path.join(link, 'file.txt')}`,
           cwd: root,
@@ -4121,7 +4050,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     }
   });
 
-  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
+  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
@@ -4131,7 +4060,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
     pm.initialize();
     expect(
-      pm.hasRelevantRules({
+      await pm.hasRelevantRules({
         toolName: 'run_shell_command',
         command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
         cwd: '/repo',
@@ -4139,7 +4068,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(true);
   });
 
-  it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
+  it('hasRelevantRules sees protected writes after `cd` before compound recursion', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsDeny: ['Write(.qwen/settings.json)'],
@@ -4149,7 +4078,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
     pm.initialize();
     expect(
-      pm.hasRelevantRules({
+      await pm.hasRelevantRules({
         toolName: 'run_shell_command',
         command: "cd .qwen && bash -lc 'echo {} > settings.json'",
         cwd: '/repo',
@@ -4157,7 +4086,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(true);
   });
 
-  it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
+  it('hasMatchingAskRule sees writes after `cd` into a subdir', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
@@ -4167,7 +4096,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
     pm.initialize();
     expect(
-      pm.hasMatchingAskRule({
+      await pm.hasMatchingAskRule({
         toolName: 'run_shell_command',
         command: "cd .qwen && bash -lc 'echo {} > settings.json'",
         cwd: '/repo',
@@ -4186,7 +4115,7 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
     pm.initialize();
     expect(
-      pm.hasRelevantRules({
+      await pm.hasRelevantRules({
         toolName: 'run_shell_command',
         command: 'cd "$TARGET" && echo hi > ../settings.json',
         cwd: '/repo',
@@ -4291,7 +4220,7 @@ describe('PermissionManager — toolParams end-to-end', () => {
     ).toBeUndefined();
   });
 
-  it('hasRelevantRules returns true when param matcher rule exists', () => {
+  it('hasRelevantRules returns true when param matcher rule exists', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsAsk: ['Agent(model:opus)'],
@@ -4300,14 +4229,14 @@ describe('PermissionManager — toolParams end-to-end', () => {
     pm.initialize();
 
     expect(
-      pm.hasRelevantRules({
+      await pm.hasRelevantRules({
         toolName: 'agent',
         toolParams: { model: 'opus' },
       }),
     ).toBe(true);
   });
 
-  it('hasMatchingAskRule returns true when param matcher ask rule matches', () => {
+  it('hasMatchingAskRule returns true when param matcher ask rule matches', async () => {
     const pm = new PermissionManager(
       makeConfig({
         permissionsAsk: ['Agent(model:opus)'],
@@ -4316,7 +4245,7 @@ describe('PermissionManager — toolParams end-to-end', () => {
     pm.initialize();
 
     expect(
-      pm.hasMatchingAskRule({
+      await pm.hasMatchingAskRule({
         toolName: 'agent',
         toolParams: { model: 'opus' },
       }),

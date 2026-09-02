@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import nodePath from 'node:path';
 import {
   parseRules,
   parseRule,
@@ -14,13 +15,23 @@ import {
   toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
-import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
+import {
+  createConservativeWriteOperation,
+  extractShellOperationsAcrossCommand,
+} from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
+import {
+  analyzeShellWritesAST,
+  type ShellAstWriteAnalysis,
+} from './shell-write-ast.js';
 import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  normalizeMonitorCommand,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -88,12 +99,6 @@ export interface PermissionManagerConfig {
   getProjectRoot?(): string;
   /** Current working directory (for resolving path patterns). */
   getCwd?(): string;
-  /**
-   * Live folder trust. Read on every permission decision for the session
-   * allow rules a project skill granted (`trustGated`): those apply only
-   * while the folder is trusted. Absent means trusted.
-   */
-  isTrustedFolder?(): boolean;
   /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
@@ -322,7 +327,7 @@ export class PermissionManager {
             }
           : undefined;
       const cwd = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperationsAcrossCommand(command, cwd);
+      const ops = await this.extractShellVirtualOpsForEvaluation(command, cwd);
       virtualDecision = this.evaluateShellVirtualOps(ops, pathCtx);
       // deny short-circuits — most restrictive verdict possible.
       if (virtualDecision === 'deny') return 'deny';
@@ -370,14 +375,11 @@ export class PermissionManager {
   }
 
   /**
-   * Evaluate a single (non-compound) context against all rules.
+   * Evaluate a single (non-compound) context against explicit rules only.
    *
-   * For shell commands (run_shell_command), the result is the most restrictive
-   * of:
-   *   1. The base decision from Bash / command-pattern rules.
-   *   2. The decision derived from virtual file / network operations extracted
-   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
-   *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
+   * Shell virtual operations are reconciled once in the async top-level
+   * `evaluate()` pass. Re-running the raw tokenizer here would bypass that AST
+   * reconciliation and resurrect stale path-less redirect operations.
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
     const {
@@ -432,7 +434,7 @@ export class PermissionManager {
       }
       // Priority 3: allow rules
       for (const rule of [
-        ...this.activeSessionAllowRules(),
+        ...this.sessionRules.allow,
         ...this.persistentRules.allow,
       ]) {
         if (matchesRule(rule, ...matchArgs)) return 'allow';
@@ -443,40 +445,119 @@ export class PermissionManager {
     // `deny` is the most restrictive result — no further checks needed.
     if (baseDecision === 'deny') return 'deny';
 
-    // For shell commands: evaluate virtual file/network operations extracted
-    // from the command string against Read/Edit/Write/WebFetch/ListFiles rules.
-    //
-    // Virtual ops can only ESCALATE a decision (to 'ask' or 'deny').
-    // A 'default' virtual result means "shell semantics have no opinion" — it
-    // must never downgrade an explicit 'allow' decision from a Bash rule.
-    // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
-    // should return 'allow', not be downgraded to 'default'.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
-      const cwd = pathCtx?.cwd ?? process.cwd();
-      // Use the compound-aware extractor here too so a single
-      // `evaluateSingle` call on a segment like
-      // `bash -lc 'echo > .qwen/settings.json'` still surfaces the inner
-      // write to virtual-op rules. The cross-command cd-tracking pass at
-      // the top of `evaluate()` handles `cd && wrapper` patterns —
-      // per-segment unwrapping handles wrappers in isolation.
-      const virtualDecision = this.evaluateShellVirtualOps(
-        extractShellOperationsAcrossCommand(command, cwd),
-        pathCtx,
-      );
-      if (
-        virtualDecision !== 'default' &&
-        DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[baseDecision]
-      ) {
-        return virtualDecision;
-      }
-    }
-
     return baseDecision;
   }
 
   /**
+   * Reconcile the lightweight shell semantic extractor with tree-sitter.
+   *
+   * The tokenizer remains useful for exact paths and command semantics, but it
+   * must not be the authority for whether shell redirection exists: quote
+   * provenance, glued operators, substitutions, brace/glob expansion and
+   * clobber syntax are all represented correctly by the AST. Whenever the AST
+   * proves a write redirect that the concrete virtual ops cannot represent, a
+   * path-less conservative Write op is added.
+   */
+  private async extractShellVirtualOpsForEvaluation(
+    command: string,
+    cwd: string,
+  ): Promise<ShellOperation[]> {
+    let ops = extractShellOperationsAcrossCommand(command, cwd);
+
+    let analysis: ShellAstWriteAnalysis;
+    try {
+      analysis = await analyzeShellWritesAST(command);
+    } catch (error) {
+      debugLogger.warn(
+        `PermissionManager: shell AST redirect analysis failed; applying conservative fallback: ${String(error)}`,
+      );
+      if (command.includes('>')) {
+        return [...ops, createConservativeWriteOperation()];
+      }
+      return ops;
+    }
+
+    // AST parsing succeeded, so tokenizer-only path-less redirect floors are
+    // no longer authoritative. Real unresolved redirects are re-added below
+    // from AST evidence. This prevents comments, [[ > ]], fd duplication,
+    // static &> redirects and /dev/null from spuriously escalating to `ask`.
+    const hasNestedShellPayload = splitCompoundCommand(command).some(
+      (segment) =>
+        stripShellWrapper(segment) !== segment ||
+        /\btimeout\b[\s\S]*\b(?:bash|sh|zsh|dash|ksh)\s+-(?:l?c|cl)\b/.test(
+          segment,
+        ) ||
+        /(?:^|[;&|()]\s*)eval(?:\s|$)/.test(segment),
+    );
+    if (!hasNestedShellPayload) {
+      ops = ops.filter(
+        (op) => op.virtualTool !== 'write_file' || op.filePath !== undefined,
+      );
+    }
+
+    // /dev/null redirect writes are intentionally ignored by the legacy
+    // extractor. Keep spaced <> / numeric-fd spellings aligned with that
+    // contract even if the lightweight tokenizer produced a phantom op.
+    if (analysis.devNullRedirects > 0) {
+      let remaining = analysis.devNullRedirects;
+      ops = ops.filter((op) => {
+        if (
+          remaining > 0 &&
+          op.virtualTool === 'write_file' &&
+          op.filePath?.replace(/\\/g, '/') === '/dev/null'
+        ) {
+          remaining--;
+          return false;
+        }
+        return true;
+      });
+    }
+
+    let needsConservativeWrite = false;
+
+    for (const redirect of analysis.redirects) {
+      if (!redirect.staticTarget) {
+        needsConservativeWrite = true;
+        continue;
+      }
+
+      const target = redirect.staticTarget.replace(/\\/g, '/');
+      const relativeTarget = target.replace(/^\.\//, '');
+      const normalizedCwd = cwd.replace(/\\/g, '/').replace(/\/$/, '');
+      const expectedPath = nodePath.posix.normalize(
+        redirect.absolute ? target : `${normalizedCwd}/${relativeTarget}`,
+      );
+      let represented = false;
+
+      ops = ops.map((op) => {
+        if (op.virtualTool !== 'write_file' || !op.filePath) return op;
+        const filePath = op.filePath.replace(/\\/g, '/');
+        const matches = filePath === expectedPath;
+        if (!matches) return op;
+        represented = true;
+
+        // An absolute redirect target is independent of a preceding dynamic
+        // `cd`. The AST can prove this even when the lightweight token matcher
+        // failed to recognise a glued `>/abs/path` spelling.
+        if (redirect.absolute && op.pathMayDependOnCwd) {
+          return { ...op, pathMayDependOnCwd: false };
+        }
+        return op;
+      });
+
+      if (!represented) needsConservativeWrite = true;
+    }
+
+    if (needsConservativeWrite) {
+      ops.push(createConservativeWriteOperation());
+    }
+
+    return ops;
+  }
+
+  /**
    * Evaluate a list of virtual operations (derived from shell command analysis)
-   * against all current rules.  Returns the most restrictive matching decision,
+   * against all current rules. Returns the most restrictive matching decision,
    * or `'default'` if no rule matches any operation.
    *
    * Each operation is evaluated as if it were a direct invocation of its
@@ -648,9 +729,10 @@ export class PermissionManager {
     // already populate `ctx.cwd` from the monitor's `directory` parameter
     // (see permission-helpers.ts), and the spread below preserves it. That
     // is what makes relative-path rules — including those derived from
-    // virtual shell ops in evaluateSingle() — resolve against the monitor's
-    // working directory rather than the global config cwd. Direct callers
-    // of `evaluate()` that bypass that helper must pass `cwd` themselves.
+    // virtual shell ops in the top-level `evaluate()` pass — resolve against
+    // the monitor's working directory rather than the global config cwd.
+    // Direct callers of `evaluate()` that bypass that helper must pass `cwd`
+    // themselves.
     return {
       ...ctx,
       command: normalizeMonitorCommand(ctx.command).safetyCommand,
@@ -969,25 +1051,8 @@ export class PermissionManager {
   /**
    * Check whether any rule (allow, ask, or deny) in the current rule set
    * matches the given invocation context.
-   *
-   * This allows the scheduler to skip the full `evaluate()` call when no
-   * rules are relevant, preserving the tool's `getDefaultPermission()` result
-   * as-is.
-   *
-   * "Relevant" means at least one rule's toolName matches AND, if the rule
-   * has a specifier, it also matches the context's command/filePath/domain.
-   *
-   * Examples for Shell executing `git clone xxx`:
-   *   - "Bash"               → matches (tool-level rule, no specifier)
-   *   - "Bash(git *)"        → matches (git sub-command wildcard)
-   *   - "Bash(git clone *)"  → matches (exact sub-command wildcard)
-   *   - "Bash(git add *)"    → no match (different sub-command)
-   *   - "Edit"               → no match (different tool)
-   *
-   * @param ctx - Permission check context.
-   * @returns true if at least one rule matches.
    */
-  hasRelevantRules(ctx: PermissionCheckContext): boolean {
+  async hasRelevantRules(ctx: PermissionCheckContext): Promise<boolean> {
     ctx = this.normalizePermissionContext(ctx);
     const {
       toolName,
@@ -1009,7 +1074,7 @@ export class PermissionManager {
         : undefined;
 
     const allowRules = [
-      ...this.activeSessionAllowRules(),
+      ...this.sessionRules.allow,
       ...this.persistentRules.allow,
     ];
     const restrictiveRules = [
@@ -1026,7 +1091,10 @@ export class PermissionManager {
     // for `cd .qwen && bash -lc 'echo > settings.json'`.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      const ops = await this.extractShellVirtualOpsForEvaluation(
+        command,
+        cwdForOps,
+      );
       if (
         ops.some((op) => {
           if (
@@ -1068,9 +1136,12 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        const results = await Promise.all(
+          subCommands.map((subCmd) =>
+            this.hasRelevantRules({ ...ctx, command: subCmd }),
+          ),
         );
+        return results.some(Boolean);
       }
     }
 
@@ -1094,14 +1165,8 @@ export class PermissionManager {
 
   /**
    * Returns true when the invocation is matched by an explicit `ask` rule.
-   *
-   * This is intentionally narrower than `evaluate(ctx) === 'ask'`. Shell
-   * commands can resolve to `ask` simply because they are non-read-only and no
-   * explicit allow/deny rule matched. That fallback should still allow users to
-   * create new allow rules, so callers must only hide "Always allow" when a
-   * real ask rule matched.
    */
-  hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
+  async hasMatchingAskRule(ctx: PermissionCheckContext): Promise<boolean> {
     ctx = this.normalizePermissionContext(ctx);
     const {
       toolName,
@@ -1129,7 +1194,10 @@ export class PermissionManager {
     // wrapper-unwrapping requirement applies to ask rules.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      const ops = await this.extractShellVirtualOpsForEvaluation(
+        command,
+        cwdForOps,
+      );
       if (
         ops.some((op) => {
           if (
@@ -1166,9 +1234,12 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+        const results = await Promise.all(
+          subCommands.map((subCmd) =>
+            this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+          ),
         );
+        return results.some(Boolean);
       }
     }
 
@@ -1200,22 +1271,6 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * The session allow rules in force right now: every rule the user granted,
-   * plus the repository-granted (`trustGated`) ones only while the folder is
-   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
-   * live under an IDE connection — so a revocation mid-session suspends a
-   * project skill's grants at the next decision, and a later grant of trust
-   * restores them, the second side of the gate `applySideEffects` enforces
-   * on the way in.
-   */
-  private activeSessionAllowRules(): PermissionRule[] {
-    const trusted = this.config.isTrustedFolder?.() ?? true;
-    return trusted
-      ? this.sessionRules.allow
-      : this.sessionRules.allow.filter((rule) => !rule.trustGated);
-  }
-
-  /**
    * Add a session-level allow rule (in-memory, cleared when the session ends).
    * Used when the user clicks "Always allow for this session".
    *
@@ -1223,31 +1278,17 @@ export class PermissionManager {
    * this can neither reveal nor hide a tool (#10075).
    *
    * @param raw - The raw rule string, e.g. "Bash(git status)".
-   * @param options - `trustGated`: the grant came from repository-controlled
-   *   configuration (a project skill's `allowedTools`) and applies only
-   *   while the folder is trusted — see `PermissionRule.trustGated`.
    */
-  addSessionAllowRule(raw: string, options?: { trustGated?: boolean }): void {
+  addSessionAllowRule(raw: string): void {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
-      if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
         return;
       }
-      // AUTO mode invariant: while dangerous allow rules are stripped,
-      // any newly added allow rule that is itself dangerous must be
-      // stashed alongside the strip rather than made active. Without
-      // this, a user clicking "Always allow" on a fallback prompt for
-      // a Bash invocation could persist `Bash` or `Bash(python *)` and
-      // every subsequent AUTO call would bypass the classifier. See
-      // dangerousRules.ts for the classifier-bypass criteria.
       if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
-        // Deduplicate on raw string — matches the persistent-stash branch
-        // in addPersistentRule. A repeated "Always allow" choice for the
-        // same rule must not pile copies into the session stash.
         const exists = this.strippedAllowRules.session.some(
           (r) => r.raw === rule.raw,
         );
@@ -1259,19 +1300,7 @@ export class PermissionManager {
         );
         return;
       }
-      // Deduplicate on raw string — mirrors addPersistentRule and the
-      // dangerous-stash branch above. Reload cycles (e.g. /unskill +
-      // re-invoke) re-run applySkillAllowedTools; without this guard the
-      // skill's allowedTools list would accumulate on every cycle.
-      // The kept entry's trust gating takes the WIDER of the two grants: a
-      // user grant of the same raw outranks a repo grant, so an ungated
-      // arrival clears the flag on the kept entry — otherwise the user's
-      // grant would inherit the repo grant's suspension when folder trust
-      // is revoked. A gated re-arrival (a skill reload) stays an
-      // idempotent skip and never re-gates a rule the user holds.
-      const existing = this.sessionRules.allow.find((r) => r.raw === rule.raw);
-      if (existing) {
-        if (!options?.trustGated) existing.trustGated = false;
+      if (this.sessionRules.allow.some((r) => r.raw === rule.raw)) {
         return;
       }
       this.sessionRules.allow.push(rule);
@@ -1331,13 +1360,6 @@ export class PermissionManager {
       );
       return rule;
     }
-    // AUTO mode invariant: see addSessionAllowRule above. A dangerous
-    // allow rule persisted while in AUTO must not become active until
-    // the user exits AUTO — otherwise an "Always allow" choice on a
-    // fallback prompt would bypass the classifier from that point on.
-    // The settings.json write is still performed by the caller (this
-    // method only manages the in-memory ruleset), so the rule reaches
-    // disk and will activate normally on the next non-AUTO start.
     if (
       type === 'allow' &&
       this.strippedAllowRules &&
@@ -1354,7 +1376,6 @@ export class PermissionManager {
       );
       return rule;
     }
-    // Deduplicate: skip if a rule with the same raw string already exists
     const exists = this.persistentRules[type].some((r) => r.raw === rule.raw);
     if (!exists) {
       this.persistentRules[type].push(rule);
@@ -1434,7 +1455,7 @@ export class PermissionManager {
     addRules(this.persistentRules.deny, 'deny', 'user');
     addRules(this.sessionRules.ask, 'ask', 'session');
     addRules(this.persistentRules.ask, 'ask', 'user');
-    addRules(this.activeSessionAllowRules(), 'allow', 'session');
+    addRules(this.sessionRules.allow, 'allow', 'session');
     addRules(this.persistentRules.allow, 'allow', 'user');
 
     return result;

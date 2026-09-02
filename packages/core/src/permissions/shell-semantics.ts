@@ -65,9 +65,9 @@ export interface ShellOperation {
   /** Domain name without port (for web_fetch operations). */
   domain?: string;
   /**
-   * True when this operation was extracted after a dynamic `cd` whose target
-   * cannot be statically resolved. Consumers that enforce protected relative
-   * paths should treat this as conservative signal, not as a concrete path.
+   * True when cwd/path attribution is intentionally conservative, either after
+   * a dynamic `cd` or for an unresolved dynamic write redirect. Consumers
+   * should treat this as a conservative signal, not as a concrete path.
    */
   cwdUnknown?: boolean;
   /**
@@ -75,6 +75,15 @@ export interface ShellOperation {
    * do not depend on cwd; relative redirect/path arguments do.
    */
   pathMayDependOnCwd?: boolean;
+}
+
+/** Create the canonical fail-closed operation used for unresolved shell writes. */
+export function createConservativeWriteOperation(): ShellOperation {
+  return {
+    virtualTool: 'write_file',
+    cwdUnknown: true,
+    pathMayDependOnCwd: true,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,9 +150,10 @@ function trimShellSyntax(token: string): string {
   while (start < end && token[start] === '(') {
     start++;
   }
+  const fdDupRedirectOperator = /^(?:\d+)?>&$/.test(token.slice(start));
   while (end > start) {
     const ch = token[end - 1];
-    if (ch !== ')' && ch !== '&') break;
+    if (ch !== ')' && (ch !== '&' || fdDupRedirectOperator)) break;
     end--;
   }
 
@@ -216,6 +226,116 @@ interface RedirectResult {
   writeFiles: string[];
 }
 
+/** True for fd-duplication/close targets (`&3`, `&-`), not file writes. */
+function isFileDescriptorTarget(target: string): boolean {
+  return /^&(?:\d+|-)$/.test(target);
+}
+
+/**
+ * A redirect destination is a filesystem word by shell grammar. Do not reuse
+ * command-argument heuristics here: names like `123`, `-x`, and `--weird` are
+ * perfectly valid redirect filenames. Only expansion/glob forms are unresolved.
+ */
+function isStaticRedirectFilesystemTarget(target: string): boolean {
+  if (!target || target === '/dev/null') return false;
+  if (isFileDescriptorTarget(target) || isNetworkPseudoDevice(target)) {
+    return false;
+  }
+  return !/[$`*?\[\]{}]/.test(target);
+}
+
+/**
+ * Conservatively detect shell write-redirection forms that the lightweight
+ * token extractor cannot prove to be a single static filesystem target.
+ * This operates on the raw command so glued redirects and expansions cannot
+ * disappear merely because whitespace tokenization missed them.
+ */
+function hasUnresolvedWriteRedirect(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || ch !== '>') continue;
+    // The first character owns a >> operator; never scan its second > again.
+    if (command[i - 1] === '>') continue;
+
+    // Ignore comparison-like text inside double quotes and fd duplication.
+    if (inDouble) continue;
+    let fdAlloc = false;
+    if (command[i - 1] === '}') {
+      let k = i - 2;
+      while (k >= 0 && /[A-Za-z0-9_]/.test(command[k]!)) k--;
+      fdAlloc = k >= 0 && command[k] === '{' && k < i - 2;
+    }
+    let j = i + 1;
+    if (command[j] === '>') j++;
+    if (command[j] === '|') j++;
+    while (command[j] === ' ' || command[j] === '\t') j++;
+    if (command[j] === '&') {
+      let k = j + 1;
+      while (command[k] === ' ' || command[k] === '\t') k++;
+      if (command[k] === '-') {
+        k++;
+        if (k >= command.length || /[\s;&|)]/.test(command[k]!)) continue;
+      } else {
+        const digitStart = k;
+        while (k < command.length && /\d/.test(command[k]!)) k++;
+        if (
+          k > digitStart &&
+          (k >= command.length || /[\s;&|)]/.test(command[k]!))
+        ) {
+          continue;
+        }
+      }
+      return true;
+    }
+    let target = '';
+    let q: string | undefined;
+    for (; j < command.length; j++) {
+      const c = command[j]!;
+      if (!q && (c === "'" || c === '"')) {
+        q = c;
+        target += c;
+        continue;
+      }
+      if (q && c === q) {
+        target += c;
+        q = undefined;
+        continue;
+      }
+      if (!q && /[\s;&|]/.test(c)) break;
+      target += c;
+    }
+    const unquoted = target.replace(/^(["'])(.*)\1$/, '$2');
+    if (!unquoted || unquoted === '/dev/null') continue;
+    if (fdAlloc || /[$`*?\[\]{}]/.test(unquoted) || target.startsWith('&'))
+      return true;
+    // Glued/no-space and clobber forms are not reliably represented by the
+    // legacy whitespace tokenizer; force the conservative floor.
+    const prev = command[i - 1];
+    if ((prev && !/\s|[0-9<]/.test(prev)) || command[i + 1] === '|')
+      return true;
+  }
+  return false;
+}
+
 /**
  * A bash /dev/tcp/<host>/<port> or /dev/udp/... redirect target opens a
  * network socket, not a file. Such targets must not be reported as file
@@ -245,21 +365,40 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     const tok = tokens[i]!;
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
+    if (tok === '>&' || /^\d+>&$/.test(tok)) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
+      if (target) {
+        const isFdDuplication = /^\d+$/.test(target) || target === '-';
+        if (
+          tok === '>&' &&
+          !isFdDuplication &&
+          target !== '/dev/null' &&
+          looksLikePath(target) &&
+          !isNetworkPseudoDevice(target)
+        ) {
           writeFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '>>' || tok === '1>>') {
+    } else if (/^(?:\d+|&)?>>?$/.test(tok)) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
+      if (target) {
+        if (isStaticRedirectFilesystemTarget(target)) {
           writeFiles.push(resolvePath(target, cwd));
+        }
+        toRemove.add(i);
+        toRemove.add(i + 1);
+        i++;
+      }
+    } else if (tok === '<>' || /^\d+<>$/.test(tok)) {
+      const target = tokens[i + 1];
+      if (target) {
+        if (isStaticRedirectFilesystemTarget(target)) {
+          const resolved = resolvePath(target, cwd);
+          readFiles.push(resolved);
+          writeFiles.push(resolved);
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -299,7 +438,7 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|(?:\d+)?<>|(?:\d+)?>&|(?:\d+|&)?>>?|<)(.+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
@@ -307,15 +446,17 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
           toRemove.add(i);
           continue;
         }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
+        const isFdDuplication =
+          op.endsWith('>&') && (/^\d+$/.test(target) || target === '-');
+        if (!isFdDuplication && isStaticRedirectFilesystemTarget(target)) {
+          const resolved = resolvePath(target, cwd);
           if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
+            readFiles.push(resolved);
+          } else if (op.endsWith('<>')) {
+            readFiles.push(resolved);
+            writeFiles.push(resolved);
+          } else if (!op.endsWith('>&') || op === '>&') {
+            writeFiles.push(resolved);
           }
         }
         toRemove.add(i);
@@ -1933,6 +2074,10 @@ export function extractShellOperations(
   const tokens = tokenize(simpleCommand);
   if (tokens.length === 0) return [];
 
+  // Preserve a conservative signal when the shell proves there is a write
+  // redirect but its destination is dynamic (for example $PWD/file).
+  const unresolvedWriteRedirect = hasUnresolvedWriteRedirect(simpleCommand);
+
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
@@ -1954,6 +2099,7 @@ export function extractShellOperations(
         virtualTool: 'write_file' as const,
         filePath: p,
       })),
+      ...(unresolvedWriteRedirect ? [createConservativeWriteOperation()] : []),
     ];
   }
 
@@ -2020,6 +2166,7 @@ export function extractShellOperations(
       virtualTool: 'write_file' as const,
       filePath: p,
     })),
+    ...(unresolvedWriteRedirect ? [createConservativeWriteOperation()] : []),
   );
 
   return ops;
@@ -2065,6 +2212,9 @@ function resolveCdTargetCwd(
 ): CdResolution {
   const words = tokenize(command);
   extractRedirects(words, cwd);
+  while (words[0] === 'builtin' || words[0] === 'command') {
+    words.shift();
+  }
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -2091,7 +2241,12 @@ function resolveCdTargetCwd(
   }
 
   const target = words[targetIndex] ?? process.env['HOME'];
-  if (!target || target === '-' || isDynamicShellPath(target)) {
+  if (
+    !target ||
+    target === '-' ||
+    isDynamicShellPath(target) ||
+    (target.startsWith('~') && target !== '~' && !target.startsWith('~/'))
+  ) {
     return { kind: 'dynamic' };
   }
 
@@ -2268,8 +2423,13 @@ function walkCompoundCommand(
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
+  let previousTerminator: string | undefined;
 
   for (const { command: sub, terminator } of subCommands) {
+    const incomingTerminator = previousTerminator;
+    const conditionallyReached =
+      incomingTerminator === '&&' || incomingTerminator === '||';
+    previousTerminator = terminator;
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
@@ -2280,8 +2440,15 @@ function walkCompoundCommand(
     const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {
-        effectiveCwd = cdTarget.cwd;
-        cwdUnknown = cdTarget.cwdUnknown;
+        if (
+          conditionallyReached &&
+          !(incomingTerminator === '&&' && terminator === '&&')
+        ) {
+          cwdUnknown = true;
+        } else {
+          effectiveCwd = cdTarget.cwd;
+          cwdUnknown = cdTarget.cwdUnknown;
+        }
       }
       continue;
     }
@@ -2331,7 +2498,7 @@ function hasAbsolutePathTokenForOperation(
 ): boolean {
   for (const token of tokenize(command)) {
     const redirectTarget = token.match(
-      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)(.+)$/,
+      /^(?:(?:\d+)?<>|(?:\d+)?>&|(?:\d+|&)?>>?|<)(.+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (
