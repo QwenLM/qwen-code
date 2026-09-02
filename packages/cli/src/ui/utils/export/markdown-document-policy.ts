@@ -80,10 +80,31 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
   const source = value.replace(/\r\n?/g, '\n');
   let inlineDelimiters = 0;
   let bracketDepth = 0;
-  let fence: { character: string; length: number } | undefined;
-  let htmlBlock = false;
+  let fence:
+    | { character: string; length: number; blockquoteDepth: number }
+    | undefined;
+  let htmlBlockDepth: number | undefined;
+  const blockquoteMarkerPattern = / {0,3}>[ \t]?/y;
   for (const line of source.split('\n')) {
-    const fenceText = line.replace(/^ {0,3}/, '');
+    const blockquoteOffsets = [0];
+    let contentOffset = 0;
+    let blockquoteDepth = 0;
+    while (!fence || blockquoteDepth < fence.blockquoteDepth) {
+      blockquoteMarkerPattern.lastIndex = contentOffset;
+      const blockquoteMarker = blockquoteMarkerPattern.exec(line);
+      if (!blockquoteMarker) break;
+      contentOffset = blockquoteMarkerPattern.lastIndex;
+      blockquoteDepth += 1;
+      blockquoteOffsets.push(contentOffset);
+      if (!fence && blockquoteDepth > MAX_MARKDOWN_BLOCKQUOTE_DEPTH) {
+        return false;
+      }
+    }
+    const contentLine = line.slice(contentOffset);
+    if (fence && blockquoteDepth < fence.blockquoteDepth) fence = undefined;
+    const fenceText = (
+      fence ? line.slice(blockquoteOffsets[fence.blockquoteDepth]) : contentLine
+    ).replace(/^ {0,3}/, '');
     const fenceRun = /^(`+|~+)/.exec(fenceText)?.[1];
     if (fence) {
       if (
@@ -95,35 +116,37 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
       }
       continue;
     }
-    if (htmlBlock && line.trim() === '') htmlBlock = false;
-    if (!htmlBlock && startsConservativeHtmlBlock(line)) htmlBlock = true;
-    if (!htmlBlock && fenceRun && fenceRun.length >= 3) {
+    if (
+      htmlBlockDepth !== undefined &&
+      (blockquoteDepth < htmlBlockDepth ||
+        line.slice(blockquoteOffsets[htmlBlockDepth]).trim() === '')
+    ) {
+      htmlBlockDepth = undefined;
+    }
+    if (
+      htmlBlockDepth === undefined &&
+      startsConservativeHtmlBlock(contentLine)
+    ) {
+      htmlBlockDepth = blockquoteDepth;
+    }
+    if (htmlBlockDepth === undefined && fenceRun && fenceRun.length >= 3) {
       const character = fenceRun[0];
       const info = fenceText.slice(fenceRun.length);
       if (character !== '`' || !info.includes('`')) {
-        fence = { character, length: fenceRun.length };
+        fence = { character, length: fenceRun.length, blockquoteDepth };
         continue;
       }
     }
 
     let leadingIndent = 0;
-    for (const character of line) {
+    for (const character of contentLine) {
       if (character === ' ') leadingIndent += 1;
       else if (character === '\t') leadingIndent += 4;
       else break;
       if (leadingIndent > MAX_MARKDOWN_LEADING_INDENT) return false;
     }
-    const blockquotePrefix = /^ {0,3}((?:>[ \t]?)+)/.exec(line)?.[1];
-    if (
-      blockquotePrefix &&
-      [...blockquotePrefix].filter((character) => character === '>').length >
-        MAX_MARKDOWN_BLOCKQUOTE_DEPTH
-    ) {
-      return false;
-    }
-
     let escaped = false;
-    for (const character of line) {
+    for (const character of contentLine) {
       if (escaped) {
         escaped = false;
         continue;
@@ -369,8 +392,9 @@ function demoteFence(
 ): Replacement | undefined {
   const range = rangeOf(node);
   if (!range) return undefined;
-  const lineEnd = value.indexOf('\n', range.start);
-  const end = lineEnd === -1 || lineEnd > range.end ? range.end : lineEnd;
+  const relativeLineEnd = value.slice(range.start, range.end).search(/[\r\n]/);
+  const end =
+    relativeLineEnd === -1 ? range.end : range.start + relativeLineEnd;
   const opening = value.slice(range.start, end);
   const match = /^(`{3,}|~{3,})[ \t]*(\S+)(.*)$/.exec(opening);
   if (!match) return undefined;

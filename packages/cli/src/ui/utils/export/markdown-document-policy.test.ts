@@ -81,6 +81,18 @@ describe('markdown document policy', () => {
       `<div>\n\`\`\`\n\n${'a*'.repeat(20_000)}]`,
     ],
     [
+      'fence marker in a blockquoted HTML block',
+      `> <div>\n> \`\`\`\n>\n> ${'a*'.repeat(20_000)}]`,
+    ],
+    [
+      'deeper fence marker in a blockquoted HTML block',
+      `> <div>\n> > \`\`\`\n> > ${'a*'.repeat(2_100)}]`,
+    ],
+    [
+      'fence marker before leaving a blockquoted HTML block',
+      `> <div>\n> \`\`\`\n${'a*'.repeat(2_100)}]`,
+    ],
+    [
       'fence marker after an unterminated HTML block tag',
       `<div\n\`\`\`\n\n${'a*'.repeat(20_000)}]`,
     ],
@@ -105,6 +117,24 @@ describe('markdown document policy', () => {
 
     expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(input);
     expect(activePolicy.onComplexityLimit).not.toHaveBeenCalled();
+  });
+
+  it('keeps blockquote-like content inside an unquoted fence', () => {
+    const activePolicy = policy();
+    const input = ['```text', '> ```', 'a*'.repeat(3_000), '```'].join('\n');
+
+    expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(input);
+    expect(activePolicy.onComplexityLimit).not.toHaveBeenCalled();
+  });
+
+  it('ends a fenced block when its blockquote container ends', () => {
+    const activePolicy = policy();
+    const input = ['> ```text', `${'a*'.repeat(3_000)}]`].join('\n');
+
+    expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(
+      '[markdown omitted: complexity limit exceeded]',
+    );
+    expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
   });
 
   it('reports complexity loss from rich-task transformation', () => {

@@ -1267,6 +1267,37 @@ describe('ExportTranscriptDocumentV1', () => {
     });
   });
 
+  it.each([
+    ['unquoted', (body: string) => ['```text', body, '```'].join('\n')],
+    [
+      'blockquoted',
+      (body: string) => ['> ```text', `> ${body}`, '> ```'].join('\n'),
+    ],
+    [
+      'nested blockquoted',
+      (body: string) => ['>  > ```text', `>  > ${body}`, '>  > ```'].join('\n'),
+    ],
+  ])('preserves delimiter-heavy code in %s fences', (_name, createContent) => {
+    const content = createContent('a*'.repeat(3_000));
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('delimiter-heavy-code', null, {
+          message: { role: 'user', parts: [{ text: content }] },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: content,
+    });
+    expect(document.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'markdown_complexity_exceeded' }),
+    );
+  });
+
   it('marks rich-task complexity fallback as incomplete', () => {
     const document = createExportTranscriptDocumentV1(
       [
@@ -1550,6 +1581,38 @@ describe('ExportTranscriptDocumentV1', () => {
       count: 1,
     });
   });
+
+  it.each([
+    ['CRLF', '\r\n'],
+    ['bare CR', '\r'],
+  ])(
+    'freezes rich rendering without aborting for %s fences',
+    (_name, lineEnding) => {
+      const content = Array.from(
+        { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks + 1 },
+        (_, index) =>
+          ['```js', `console.log(${index});`, '```'].join(lineEnding),
+      ).join(lineEnding);
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('rich-line-endings', null, {
+            message: { role: 'user', parts: [{ text: content }] },
+          }),
+        ],
+        sessionData,
+        EXPORT_OPTIONS,
+      );
+      const text =
+        document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+      expect(text).toContain('```text [source fallback: js]');
+      expect(document.diagnostics).toContainEqual({
+        code: 'rich_render_budget_exceeded',
+        severity: 'warning',
+        count: 1,
+      });
+    },
+  );
 
   it('counts renderer-compatible fence variants and container fences', () => {
     const fence = (index: number): string => {
