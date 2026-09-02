@@ -114,6 +114,7 @@ export interface DaemonConnectionState {
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
@@ -321,6 +322,7 @@ export interface DaemonCommandInfo {
   argumentHint?: string;
   autoSubmit?: boolean;
   source?: string;
+  altNames?: string[];
   raw: DaemonAvailableCommand;
 }
 
@@ -474,12 +476,14 @@ export interface DaemonSessionActions {
    * `options.approvalMode` seeds the session's approval mode in the create
    * request itself, so the daemon applies it atomically at spawn instead of
    * requiring a follow-up `setApprovalMode` call.
+   * `options.modelServiceId` is a standalone-only atomic create override.
    *
    * `options.sourceType` records immutable creator attribution.
    */
   createSession(options?: {
     workspaceCwd?: string;
     sessionContext?: DaemonProductSessionContext;
+    modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };

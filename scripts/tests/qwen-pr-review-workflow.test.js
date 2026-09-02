@@ -2687,7 +2687,7 @@ describe('supersede step and ci.yml rc-handling, executed', () => {
   function runCiFragment(wrapper) {
     const dir = mkdtempSync(join(tmpdir(), 'ci-rc-'));
     try {
-      const stub = join(dir, '.github/scripts/ci');
+      const stub = join(dir, 'trusted-ci-classifier/.github/scripts/ci');
       mkdirSync(stub, { recursive: true });
       writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
       chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
