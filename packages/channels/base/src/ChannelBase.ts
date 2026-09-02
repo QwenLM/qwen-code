@@ -698,12 +698,26 @@ export abstract class ChannelBase {
         message = `BTW #${request.id} failed. Please try again.`;
       }
       if (!this.isBtwCurrent(sessionId, request)) return;
-      await this.sendThreadMessage(
-        request.chatId,
-        request.threadId,
-        message,
-        request.sourceLabel,
-      );
+      try {
+        await this.sendThreadMessage(
+          request.chatId,
+          request.threadId,
+          message,
+          request.sourceLabel,
+        );
+      } catch (error) {
+        try {
+          await this.sendThreadMessage(
+            request.chatId,
+            request.threadId,
+            `BTW #${request.id} failed. Please try again.`,
+            request.sourceLabel,
+          );
+        } catch {
+          // Best effort only; the original delivery failure is logged by the caller.
+        }
+        throw error;
+      }
     } finally {
       if (this.activeBtw.get(sessionId) === request) {
         this.activeBtw.delete(sessionId);
@@ -3962,9 +3976,11 @@ export abstract class ChannelBase {
       }
 
       const sessionId = await this.currentSessionId(envelope);
-      const agentCommands = sessionId
-        ? this.getAgentCommandsForSession(sessionId)
-        : this.bridge.availableCommands;
+      const agentCommands = (
+        sessionId
+          ? this.getAgentCommandsForSession(sessionId)
+          : this.bridge.availableCommands
+      ).filter((command) => !this.commands.has(command.name));
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {

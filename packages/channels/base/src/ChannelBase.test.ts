@@ -41,6 +41,12 @@ import type { CreatePairingRequestResult } from './PairingStore.js';
 // Concrete test implementation
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
+  threadMessages: Array<{
+    chatId: string;
+    threadId: string | undefined;
+    text: string;
+    sourceLabel: string | undefined;
+  }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
   proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
@@ -112,6 +118,15 @@ class TestChannel extends ChannelBase {
       throw this.sendMessageError;
     }
     this.sent.push({ chatId, text });
+  }
+  protected override async sendThreadMessage(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    this.threadMessages.push({ chatId, threadId, text, sourceLabel });
+    await super.sendThreadMessage(chatId, threadId, text, sourceLabel);
   }
   disconnect() {
     this.connected = false;
@@ -5021,6 +5036,27 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/help' }));
 
       expect(ch.sent[0]!.text).not.toContain('/btw');
+    });
+
+    it('/help lists locally handled agent commands only once', async () => {
+      (
+        bridge as unknown as {
+          availableCommands: Array<{ name: string; description: string }>;
+        }
+      ).availableCommands = [
+        { name: 'btw', description: 'Ask a side question' },
+        { name: 'compress', description: 'Compress context' },
+      ];
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '/help' }));
+
+      const help = ch.sent[0]!.text;
+      expect(help.match(/^\/btw\b/gmu)).toHaveLength(1);
+      expect(help).toContain(
+        'Agent commands (forwarded to Qwen Code):\n/compress — Compress context',
+      );
+      expect(help).not.toContain('/btw — Ask a side question');
     });
 
     it("/help shows this session's agent commands when available", async () => {
@@ -16120,6 +16156,40 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('preserves thread routing and named-task attribution through answer delivery', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-btw-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new review', threadId: 'thread-1' }),
+        );
+        ch.sent = [];
+        ch.threadMessages = [];
+
+        await ch.handleInbound(
+          envelope({ text: '/btw question', threadId: 'thread-1' }),
+        );
+        await vi.waitFor(() => expect(ch.threadMessages).toHaveLength(2));
+
+        expect(ch.threadMessages).toEqual([
+          {
+            chatId: 'chat1',
+            threadId: 'thread-1',
+            text: expect.stringMatching(/^BTW #[a-f0-9]{8} received\./u),
+            sourceLabel: '[review]',
+          },
+          {
+            chatId: 'chat1',
+            threadId: 'thread-1',
+            text: expect.stringMatching(/^BTW #[a-f0-9]{8}\n\nside answer$/u),
+            sourceLabel: '[review]',
+          },
+        ]);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('bypasses channel-memory intent handling', async () => {
       const channelMemory = createChannelMemory();
       const memoryIntentClassifier = {
@@ -16266,6 +16336,41 @@ describe('ChannelBase', () => {
           true,
         ),
       );
+    });
+
+    it('reports answer delivery failure and releases the concurrency slot', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      let failAnswer = true;
+      ch.sendMessage = async (chatId, text) => {
+        if (failAnswer && text.includes('side answer')) {
+          failAnswer = false;
+          throw new Error('secret delivery detail');
+        }
+        await sendMessage(chatId, text);
+      };
+      try {
+        await ch.handleInbound(envelope({ text: '/btw first' }));
+        await vi.waitFor(() => expect(ch.sent).toHaveLength(2));
+
+        expect(ch.sent[1]?.text).toMatch(
+          /^BTW #[a-f0-9]{8} failed\. Please try again\.$/u,
+        );
+        expect(ch.sent[1]?.text).not.toContain('secret delivery detail');
+
+        await ch.handleInbound(envelope({ text: '/btw second' }));
+        await vi.waitFor(() => expect(bridge.btw).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() =>
+          expect(ch.sent.some(({ text }) => text.endsWith('side answer'))).toBe(
+            true,
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('runs side questions concurrently for different sessions', async () => {
