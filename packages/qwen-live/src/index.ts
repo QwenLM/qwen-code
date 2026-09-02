@@ -17,8 +17,9 @@ import { loadConfig } from './config.js';
 import { LiveDaemon } from './daemon.js';
 import { LiveLogger } from './logger.js';
 
-export { loadConfig, type LiveConfig } from './config.js';
+export { loadConfig, type BackendConfig, type LiveConfig } from './config.js';
 export { LiveDaemon } from './daemon.js';
+export { BackendRegistry } from './adaptor/registry.js';
 export type {
   BackendAdaptor,
   BackendCapabilities,
