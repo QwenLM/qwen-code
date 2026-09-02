@@ -20,7 +20,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 96 * 1024 * 1024;
+// A runaway-growth guard, not a size target: it exists to catch a bundle that
+// suddenly ships something it shouldn't (node_modules, sourcemaps, a second
+// copy of vendor/), and the headroom above the real package is deliberate.
+// Raised 80 MiB -> 96 MiB in #6691 and 96 MiB -> 112 MiB here; each raise
+// happened because ordinary feature growth reached the ceiling and blocked a
+// release. Measured at the raise: 101,897,869 bytes (97.2 MiB) for
+// 0.22.3-release-7df5ac68, of which vendor/ripgrep is 24 MiB and
+// web-shell/assets 18 MiB.
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 112 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
