@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
+import path from 'node:path';
 import { createDebugLogger } from './debugLogger.js';
 
 interface LocalGitConfigRisk {
@@ -108,7 +109,7 @@ const PARTIAL_CLONE_FILTER_KEY = new RegExp(
 const MERGE_DRIVER_KEY = new RegExp(MERGE_DRIVER_KEY_PATTERN, 'i');
 
 const BOOLEAN_VALUE = /^(?:true|false|yes|no|on|off|0|1)$/i;
-const SIGNATURE_PLACEHOLDER = /%G[?GKFPST]/;
+const SIGNATURE_PLACEHOLDER = /%G/;
 
 // Git accepts textual booleans plus multiple numeric spellings (for example
 // +1, 0x1 and unit-suffixed non-zero values). At this security boundary only
@@ -122,12 +123,44 @@ const isGitTrueValue = (value: string): boolean => {
   return Number.isNaN(numeric) ? true : numeric !== 0;
 };
 
+function hasExecutablePostIndexChangeHook(cwd: string): boolean {
+  const result = spawnSync(
+    'git',
+    ['-C', cwd, 'rev-parse', '--git-path', 'hooks'],
+    {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024,
+      timeout: 1000,
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0 || typeof result.stdout !== 'string') return true;
+
+  const hooksDir = result.stdout.trim();
+  if (!hooksDir) return true;
+  const hookPath = path.resolve(cwd, hooksDir, 'post-index-change');
+  try {
+    const hook = statSync(hookPath);
+    if (!hook.isFile()) return false;
+    // Git for Windows does not use the POSIX executable bits the same way as
+    // Unix Git. Conservatively treat an existing hook file as executable there.
+    return process.platform === 'win32' || (hook.mode & 0o111) !== 0;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' ? false : true;
+  }
+}
+
 export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
   try {
     if (!statSync(cwd).isDirectory()) return NO_RISK;
   } catch {
     return NO_RISK;
   }
+
+  // Default .git/hooks is executable state even when no core.hooksPath config
+  // exists, so it must be probed independently from `git config --get-regexp`.
+  const executablePostIndexChangeHook = hasExecutablePostIndexChangeHook(cwd);
 
   const result = spawnSync(
     'git',
@@ -149,7 +182,11 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
     },
   );
 
-  if (result.status === 1) return NO_RISK;
+  if (result.status === 1) {
+    return executablePostIndexChangeHook
+      ? { ...NO_RISK, hooksPath: true }
+      : NO_RISK;
+  }
   if (result.status !== 0 || typeof result.stdout !== 'string') {
     return PROBE_FAILED;
   }
@@ -246,7 +283,9 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
     mergeDriver: hasLocalValueMatching(MERGE_DRIVER_KEY),
     alternateRefsCommand:
       alternateRefsCommand !== undefined && alternateRefsCommand !== '',
-    hooksPath: hooksPath !== undefined && hooksPath !== '',
+    hooksPath:
+      executablePostIndexChangeHook ||
+      (hooksPath !== undefined && hooksPath !== ''),
   };
 
   const activeRisks = Object.entries(risk)
