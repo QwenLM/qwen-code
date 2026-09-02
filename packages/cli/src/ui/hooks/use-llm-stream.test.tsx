@@ -3527,6 +3527,9 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+        expect.objectContaining({ isConcurrentSideQuery: true }),
+      );
 
       // History scans, in call order: (1) the accept settlement captures
       // the pushed boundary entry for the debt fingerprint; (2) the
