@@ -21,10 +21,13 @@ const pidfileLock = vi.hoisted(() => ({
   acquire: vi.fn(),
   release: vi.fn(),
   failures: 0,
+  failureCode: 'ELOCKED',
 }));
 const processIdentity = vi.hoisted(() => ({
   currentToken: 'boot-id:current-start' as string | null,
   tokenReads: [] as Array<string | null>,
+  localBootId: 'boot-id' as string | null,
+  pidNamespace: 4026531836 as number | null,
 }));
 
 vi.mock('node:fs', () => {
@@ -106,7 +109,7 @@ vi.mock('proper-lockfile', () => ({
         const error = new Error(
           'Lock file is already being held',
         ) as NodeJS.ErrnoException;
-        error.code = 'ELOCKED';
+        error.code = pidfileLock.failureCode;
         throw error;
       }
       return pidfileLock.release;
@@ -122,6 +125,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     processIdentity.tokenReads.length > 0
       ? processIdentity.tokenReads.shift()!
       : processIdentity.currentToken,
+  readLocalBootId: () => processIdentity.localBootId,
+  readPidNamespaceId: () => processIdentity.pidNamespace,
   isSameProcess: (pid: number, procStart: string | null | undefined) => {
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
@@ -168,8 +173,11 @@ beforeEach(() => {
   pidfileLock.acquire.mockClear();
   pidfileLock.release.mockClear();
   pidfileLock.failures = 0;
+  pidfileLock.failureCode = 'ELOCKED';
   processIdentity.currentToken = 'boot-id:current-start';
   processIdentity.tokenReads.length = 0;
+  processIdentity.localBootId = 'boot-id';
+  processIdentity.pidNamespace = 4026531836;
 });
 
 afterEach(() => {
@@ -245,6 +253,66 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(filePath in fsStore).toBe(false);
   });
 
+  it('records the writer PID namespace alongside the process token', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServiceInfo(['dingtalk']);
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      procStart: 'boot-id:current-start',
+      pidNs: 4026531836,
+    });
+  });
+
+  it('keeps a pidfile another machine wrote into this shared home', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'foreign-boot-id:old-start',
+      pidNs: 4026531836,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
+  it('keeps a pidfile another PID namespace wrote on this machine', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      pidNs: 4026532999,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
+  it('keeps a tokenized pidfile while the local boot id is unreadable', () => {
+    const filePath = getPidFilePath();
+    processIdentity.localBootId = null;
+    fsStore[filePath] = JSON.stringify({
+      pid: 1234,
+      procStart: 'boot-id:old-start',
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
+    expect(filePath in fsStore).toBe(true);
+  });
+
   it('serializes stale cleanup through the shared pidfile lock', () => {
     const filePath = getPidFilePath();
     fsStore[filePath] = JSON.stringify({
@@ -270,6 +338,23 @@ describe('writeServiceInfo + readServiceInfo', () => {
     expect(readServiceInfo()).toBeNull();
     expect(pidfileLock.acquire).toHaveBeenCalledTimes(3);
     expect(pidfileLock.release).toHaveBeenCalledOnce();
+  });
+
+  it('rethrows a lock failure that is not contention without retrying', () => {
+    pidfileLock.failures = 1;
+    pidfileLock.failureCode = 'EACCES';
+
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      readServiceInfo();
+    } catch (error) {
+      thrown = error as NodeJS.ErrnoException;
+    }
+
+    expect(thrown?.code).toBe('EACCES');
+    expect(thrown?.message).not.toContain('10 seconds');
+    expect(pidfileLock.acquire).toHaveBeenCalledOnce();
+    expect(pidfileLock.release).not.toHaveBeenCalled();
   });
 
   it('keeps legacy live pidfiles that do not carry a process-start token', () => {
@@ -622,6 +707,12 @@ describe('writeServiceInfo + readServiceInfo', () => {
       },
       {
         pid: 1234,
+        pidNs: 'foreign',
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+      },
+      {
+        pid: 1234,
         startedAt: new Date().toISOString(),
         channels: [],
         workers: 'invalid',
@@ -697,11 +788,40 @@ describe('removeServiceInfo', () => {
     writeServiceInfo(['dingtalk']);
     const info = readServiceInfo()!;
 
-    removeServiceInfo({ ...info, startedAt: '2026-01-01T00:00:00.000Z' });
-    expect(getPidFilePath() in fsStore).toBe(true);
+    for (const successor of [
+      { ...info, startedAt: '2026-01-01T00:00:00.000Z' },
+      { ...info, pid: info.pid + 1 },
+      { ...info, procStart: 'boot-id:successor-start' },
+      { ...info, owner: 'serve' as const },
+    ]) {
+      removeServiceInfo(successor);
+      expect(getPidFilePath() in fsStore).toBe(true);
+    }
 
     removeServiceInfo(info);
     expect(getPidFilePath() in fsStore).toBe(false);
+  });
+
+  it('matches a legacy identity and a tokenless one when removing', () => {
+    const filePath = getPidFilePath();
+    const legacy = {
+      owner: 'channel' as const,
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['dingtalk'],
+    };
+
+    fsStore[filePath] = JSON.stringify(legacy);
+    removeServiceInfo(legacy);
+    expect(filePath in fsStore).toBe(false);
+
+    fsStore[filePath] = JSON.stringify({ ...legacy, procStart: null });
+    removeServiceInfo({ ...legacy, procStart: null });
+    expect(filePath in fsStore).toBe(false);
+
+    fsStore[filePath] = JSON.stringify({ ...legacy, procStart: null });
+    removeServiceInfo(legacy);
+    expect(filePath in fsStore).toBe(true);
   });
 });
 
@@ -797,6 +917,23 @@ describe('signalService', () => {
 
     expect(signalService(1234, 'SIGKILL', 'boot-id:old-start')).toBe(false);
     expect(process.kill).not.toHaveBeenCalled();
+  });
+
+  it('delivers the signal when the process token matches', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(signalService(1234, 'SIGTERM', 'boot-id:current-start')).toBe(true);
+    expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
+  });
+
+  it('retries a transient token read before refusing to signal', () => {
+    processIdentity.tokenReads.push(null, 'boot-id:recorded-start');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(signalService(1234, 'SIGTERM', 'boot-id:recorded-start')).toBe(true);
+    expect(process.kill).toHaveBeenCalledWith(1234, 'SIGTERM');
   });
 });
 

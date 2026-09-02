@@ -13,6 +13,8 @@ import {
 import * as path from 'node:path';
 import {
   isSameProcess,
+  readLocalBootId,
+  readPidNamespaceId,
   readProcStartToken,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -30,6 +32,13 @@ export interface ServiceInfo {
   pid: number;
   /** Start-time token guarding against PID reuse; absent in legacy files. */
   procStart?: string | null;
+  /**
+   * PID-namespace inode of the writer. One `~/.qwen` can be shared across
+   * namespaces and machines, where a PID number resolves to a different
+   * process, so a reader needs this to recognise a record that is not its
+   * own; absent in legacy files.
+   */
+  pidNs?: number | null;
   startedAt: string;
   channels: string[];
   servePid?: number;
@@ -76,6 +85,13 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
   ) {
     return null;
   }
+  if (
+    info.pidNs !== undefined &&
+    info.pidNs !== null &&
+    typeof info.pidNs !== 'number'
+  ) {
+    return null;
+  }
 
   const workers = parseServiceInfoWorkers(info.workers);
   if (workers === null) return null;
@@ -84,6 +100,7 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
     owner,
     pid: info.pid,
     ...(info.procStart !== undefined ? { procStart: info.procStart } : {}),
+    ...(info.pidNs !== undefined ? { pidNs: info.pidNs } : {}),
     startedAt: info.startedAt,
     channels: info.channels,
     ...(info.servePid !== undefined ? { servePid: info.servePid } : {}),
@@ -153,6 +170,28 @@ function unlinkPidFile(filePath: string): boolean {
   }
 }
 
+/** The boot-id prefix of a `<boot_id>:<starttime>` token, or null. */
+function bootIdOf(procStart: string | null | undefined): string | null {
+  if (procStart == null) return null;
+  const separator = procStart.indexOf(':');
+  return separator === -1 ? null : procStart.slice(0, separator);
+}
+
+/**
+ * True when this machine and PID namespace could have written `info`. A record
+ * from another boot or namespace describes PIDs that resolve to different
+ * processes here, so whatever a local probe says about that number proves
+ * nothing about the writer; an identity this side cannot read is likewise no
+ * evidence, and a legacy record carries none at all.
+ */
+function isLocalIdentity(info: ServiceInfo): boolean {
+  if (info.pidNs !== undefined && info.pidNs !== readPidNamespaceId()) {
+    return false;
+  }
+  const recordBootId = bootIdOf(info.procStart);
+  return recordBootId === null || recordBootId === readLocalBootId();
+}
+
 /**
  * Serialize all pidfile readers and writers. `proper-lockfile` uses an atomic
  * lock directory and recovers abandoned locks after their acquisition is stale.
@@ -189,7 +228,9 @@ export function readServiceInfo(): ServiceInfo | null {
 
     if (!isSameProcess(info.pid, info.procStart)) {
       // Stale PID or recycled PID — clean up without signalling its new owner.
-      unlinkPidFile(filePath);
+      // A record another machine or namespace wrote is left for a reader on
+      // its own side: sweeping it would hide a live service from itself.
+      if (isLocalIdentity(info)) unlinkPidFile(filePath);
       return null;
     }
 
@@ -235,6 +276,7 @@ export function writeServiceInfo(channels: string[]): void {
     owner: 'channel',
     pid: process.pid,
     procStart: readPidfileProcessToken(process.pid),
+    pidNs: readPidNamespaceId(),
     startedAt: new Date().toISOString(),
     channels,
   };
@@ -260,6 +302,7 @@ export function writeServeServiceInfo({
     owner: 'serve',
     pid: servePid,
     procStart,
+    pidNs: readPidNamespaceId(),
     startedAt,
     channels,
     servePid,
@@ -326,6 +369,7 @@ export function reserveServeServiceInfo({
     owner: 'serve',
     pid: servePid,
     procStart: readPidfileProcessToken(servePid),
+    pidNs: readPidNamespaceId(),
     startedAt: new Date().toISOString(),
     channels,
     servePid,
@@ -389,7 +433,8 @@ export function removeServeServiceInfo(
 
 /**
  * Send a signal to the running service.
- * Returns true if signal was sent, false if process not found.
+ * Returns true if the signal was sent, false if the process is gone or its
+ * recorded start token could not be confirmed.
  */
 export function signalService(
   pid: number,
@@ -400,7 +445,13 @@ export function signalService(
     return false;
   }
 
-  if (procStart != null && readProcStartToken(pid) !== procStart) return false;
+  if (procStart != null) {
+    // An unreadable token and a recycled PID both compare unequal, and the
+    // caller treats a refusal as licence to drop the record: retry once, as
+    // the write path does, before concluding the PID belongs to someone else.
+    const current = readProcStartToken(pid) ?? readProcStartToken(pid);
+    if (current !== procStart) return false;
+  }
 
   try {
     process.kill(pid, signal);

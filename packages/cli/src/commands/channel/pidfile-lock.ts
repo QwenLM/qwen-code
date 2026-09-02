@@ -3,6 +3,10 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 
 const RETRY_DELAYS_MS = [10, 20, 30, 40, 50] as const;
+// proper-lockfile stamps the lock mtime once at acquisition and never refreshes
+// it during a synchronous hold, so an operation outlasting this window lets a
+// second process take the lock over mid-operation. Every locked pidfile
+// operation must stay a bounded handful of local syscalls.
 const STALE_LOCK_MS = 10_000;
 const sleepState = new Int32Array(new SharedArrayBuffer(4));
 

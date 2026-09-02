@@ -4,6 +4,7 @@ const mockReadServiceInfo = vi.hoisted(() => vi.fn());
 const mockSignalService = vi.hoisted(() => vi.fn());
 const mockWaitForExit = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
+const mockIsSameProcess = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockStopChannelWorker = vi.hoisted(() => vi.fn());
@@ -20,6 +21,10 @@ vi.mock('./pidfile.js', () => ({
   removeServiceInfo: mockRemoveServiceInfo,
 }));
 
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  isSameProcess: mockIsSameProcess,
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
   writeStderrLine: mockWriteStderrLine,
@@ -27,10 +32,24 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 import { stopCommand } from './stop.js';
 
+const runningService = {
+  owner: 'channel',
+  pid: 1234,
+  procStart: 'boot-id:recorded-start',
+  startedAt: '2026-01-01T00:00:00.000Z',
+  channels: ['telegram'],
+};
+
 async function invokeStop(argv: Record<string, unknown> = {}): Promise<void> {
   const handler = stopCommand.handler;
   if (!handler) throw new Error('stop handler missing');
   await handler({ _: [], $0: 'qwen', ...argv } as never);
+}
+
+function exitThrows(): void {
+  vi.spyOn(process, 'exit').mockImplementation((code) => {
+    throw new Error(`process.exit: ${String(code)}`);
+  });
 }
 
 beforeEach(() => {
@@ -43,13 +62,7 @@ afterEach(() => {
 
 describe('stopCommand', () => {
   it('threads the recorded process token through signal and wait operations', async () => {
-    mockReadServiceInfo.mockReturnValue({
-      owner: 'channel',
-      pid: 1234,
-      procStart: 'boot-id:recorded-start',
-      startedAt: '2026-01-01T00:00:00.000Z',
-      channels: ['telegram'],
-    });
+    mockReadServiceInfo.mockReturnValue(runningService);
     mockSignalService.mockReturnValue(true);
     mockWaitForExit.mockResolvedValue(true);
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
@@ -78,9 +91,7 @@ describe('stopCommand', () => {
       startedAt: '2026-01-01T00:00:00.000Z',
       channels: ['telegram'],
     });
-    vi.spyOn(process, 'exit').mockImplementation((code) => {
-      throw new Error(`process.exit: ${String(code)}`);
-    });
+    exitThrows();
 
     await expect(invokeStop()).rejects.toThrow('process.exit: 1');
 
@@ -88,6 +99,57 @@ describe('stopCommand', () => {
     expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('managed by qwen serve'),
+    );
+  });
+
+  it('keeps the record of a service a refused SIGTERM left running', async () => {
+    mockReadServiceInfo.mockReturnValue(runningService);
+    mockSignalService.mockReturnValue(false);
+    mockIsSameProcess.mockReturnValue(true);
+    exitThrows();
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 1');
+
+    expect(mockIsSameProcess).toHaveBeenCalledWith(
+      1234,
+      'boot-id:recorded-start',
+    );
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('still running'),
+    );
+  });
+
+  it('cleans up a refused SIGTERM once the process is confirmed gone', async () => {
+    mockReadServiceInfo.mockReturnValue(runningService);
+    mockSignalService.mockReturnValue(false);
+    mockIsSameProcess.mockReturnValue(false);
+    exitThrows();
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    expect(mockRemoveServiceInfo).toHaveBeenCalledWith(runningService);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Failed to send signal — process may have already exited.',
+    );
+  });
+
+  it('keeps the record of a service that survives SIGKILL', async () => {
+    mockReadServiceInfo.mockReturnValue(runningService);
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(false);
+    exitThrows();
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 1');
+
+    expect(mockSignalService).toHaveBeenCalledWith(
+      1234,
+      'SIGKILL',
+      'boot-id:recorded-start',
+    );
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('still running'),
     );
   });
 
