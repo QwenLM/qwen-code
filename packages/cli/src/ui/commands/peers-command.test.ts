@@ -273,6 +273,19 @@ describe('formatHeldList', () => {
     const out = formatHeldList([held({ msgId: 'task\u0007' })]);
     expect(out).not.toContain('\u0007');
   });
+
+  it('keeps a peer-supplied own-process label distinct from a real one', () => {
+    const peer = held({
+      msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+      fromName: 'own process',
+    });
+    const peerOut = formatHeldList([peer]);
+    const selfOut = formatHeldList([{ ...peer, selfSent: true }]);
+
+    expect(peerOut).toContain('[peer] own process');
+    expect(selfOut).toContain('[own process] own process');
+    expect(peerOut).not.toBe(selfOut);
+  });
 });
 
 describe('/peers', () => {
@@ -500,7 +513,7 @@ describe("formatHeldList for the session's own process", () => {
     const frame = { ...entry.frame };
     delete frame.from;
     const out = formatHeldList([{ ...entry, frame, selfSent: true }]);
-    expect(out).toContain('own process');
+    expect(out).toContain('[own process] this session');
     expect(out).not.toContain('unknown session');
   });
 });

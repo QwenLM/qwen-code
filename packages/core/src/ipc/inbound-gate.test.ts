@@ -857,7 +857,7 @@ describe('self-sent messages (child token)', () => {
     // A frame cannot spell "self-sent" in any field; the flag is a
     // separate argument the inbox supplies. Omitting it means peer.
     const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ from: process.env['QWEN_CODE_MESSAGING_SOCKET'] });
+    const f = frame({ from: '/tmp/own-session.sock' });
     expect(h.gate.admit(f)).toBe('held');
   });
 });

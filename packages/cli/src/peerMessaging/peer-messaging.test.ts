@@ -635,6 +635,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toContain('early bird');
+    expect(submitted[0]).not.toContain('origin="own-process"');
   });
 
   it('sends a delivery receipt back to the sender', async () => {
@@ -1232,13 +1233,27 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     // Two independent draws: a child must not be able to pass as a peer.
     expect(childToken).not.toBe(token);
 
-    // And it is the token the inbox actually requires.
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+
+    // Both generated capabilities are the ones the inbox actually accepts.
     await sendPeerFrame(
       started.socketPath!,
       buildUserFrame({ content: 'with the generated token' }),
       { authToken: token },
     );
+    await sendPeerFrame(
+      started.socketPath!,
+      buildUserFrame({ content: 'with the generated child token' }),
+      { authToken: childToken },
+    );
     await settle();
+    expect(submitted).toHaveLength(2);
+    expect(submitted[0]).not.toContain('origin="own-process"');
+    expect(submitted[1]).toContain('origin="own-process"');
   });
 
   it("delivers a child-token message the parity rule would hold, as the session's own", async () => {
@@ -1309,5 +1324,55 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     });
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toContain('origin="own-process"');
+  });
+
+  it('keeps both origins when a later arrival retries a partial flush', async () => {
+    const policy = { value: undefined as InboundPolicy | undefined };
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => policy.value,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'buffered child' }),
+      { authToken: TEST_CHILD_TOKEN },
+    );
+    await settle();
+    policy.value = 'accept';
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'buffered peer', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    const submitted: string[] = [];
+    let refuseOnce = true;
+    started.setSubmitFn((modelText) => {
+      if (refuseOnce) {
+        refuseOnce = false;
+        return false;
+      }
+      submitted.push(modelText);
+      return true;
+    });
+
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'trigger drain', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(3);
+    expect(submitted[0]).toContain('buffered child');
+    expect(submitted[0]).toContain('origin="own-process"');
+    expect(submitted[1]).toContain('buffered peer');
+    expect(submitted[1]).not.toContain('origin="own-process"');
   });
 });
