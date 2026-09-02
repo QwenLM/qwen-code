@@ -7,13 +7,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FatalConfigError, Storage } from '@qwen-code/qwen-code-core';
 import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
   LoadedSettings,
   loadSettings,
   resetHomeEnvBootstrapForTesting,
   SettingScope,
+  SETTINGS_VERSION,
+  SETTINGS_VERSION_KEY,
   type SettingsFile,
 } from './settings.js';
 
@@ -31,21 +35,23 @@ function settingsFile(
 
 describe('project runtime settings', () => {
   let tempDir: string;
-  let previousQwenHome: string | undefined;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-project-runtime-'));
-    previousQwenHome = process.env['QWEN_HOME'];
-    process.env['QWEN_HOME'] = path.join(tempDir, 'home');
+    vi.stubEnv('QWEN_HOME', path.join(tempDir, 'home'));
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(tempDir, 'system', 'settings.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(tempDir, 'system-defaults', 'settings.json'),
+    );
     resetHomeEnvBootstrapForTesting();
   });
 
   afterEach(() => {
-    if (previousQwenHome === undefined) {
-      delete process.env['QWEN_HOME'];
-    } else {
-      process.env['QWEN_HOME'] = previousQwenHome;
-    }
+    vi.unstubAllEnvs();
     resetHomeEnvBootstrapForTesting();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -153,6 +159,180 @@ describe('project runtime settings', () => {
     expect(
       (current.merged as unknown as Record<string, unknown>)['theme'],
     ).toBeUndefined();
+  });
+
+  it('reloads settings against the environment captured at load time', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+    const envKey = 'PROJECT_RUNTIME_CAPTURED_VALUE';
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        model: { name: `$${envKey}` },
+      }),
+    );
+    const environment = { ...process.env, [envKey]: 'captured' };
+    const loaded = loadSettings(workspace, {
+      environment,
+      readOnly: true,
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+
+    const previousValue = process.env[envKey];
+    process.env[envKey] = 'live-after-load';
+    try {
+      loaded.reloadScopeFromDisk(SettingScope.Workspace);
+      expect(loaded.merged.model?.name).toBe('captured');
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = previousValue;
+      }
+    }
+  });
+
+  it('merges non-workspace hooks independently of workspace trust', () => {
+    const hook = (command: string) =>
+      ({
+        PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command }] }],
+      }) as unknown as NonNullable<SettingsFile['settings']['hooks']>;
+    const loaded = new LoadedSettings(
+      settingsFile('/system', { hooks: hook('system') }),
+      settingsFile('/defaults', { hooks: hook('defaults') }),
+      settingsFile('/user', { hooks: hook('user') }),
+      settingsFile('/workspace', { hooks: hook('workspace') }),
+      true,
+      new Set(),
+    );
+
+    expect(loaded.getUserHooks()?.['PreToolUse']).toEqual([
+      { matcher: '*', hooks: [{ type: 'command', command: 'defaults' }] },
+      { matcher: '*', hooks: [{ type: 'command', command: 'user' }] },
+      { matcher: '*', hooks: [{ type: 'command', command: 'system' }] },
+    ]);
+  });
+
+  it('persists unresolved migrated settings and clears the pending scope', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+    const envKey = 'PROJECT_RUNTIME_MIGRATION_VALUE';
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ theme: `$${envKey}` }));
+    const loaded = loadSettings(workspace, {
+      environment: { ...process.env, [envKey]: 'resolved-secret' },
+      readOnly: true,
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+
+    loaded.persistInMemoryMigrations();
+
+    expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))).toEqual({
+      ui: { theme: `$${envKey}` },
+      [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+    });
+    expect(loaded.migratedInMemoryScopes.size).toBe(0);
+  });
+
+  it('does not consume corruption state during a readOnly load', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const userSettingsPath = path.join(
+      process.env['QWEN_HOME']!,
+      'settings.json',
+    );
+    fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+    fs.writeFileSync(userSettingsPath, '{}');
+    process.env[ENV_CORRUPTED_PATH] = `${userSettingsPath}.corrupted`;
+    process.env[ENV_WAS_RECOVERED] = '1';
+
+    try {
+      const loaded = loadSettings(workspace, {
+        readOnly: true,
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+        `${userSettingsPath}.corrupted`,
+      );
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+      expect(loaded.corruptedPath).toBeUndefined();
+      expect(loaded.wasRecovered).toBe(false);
+    } finally {
+      delete process.env[ENV_CORRUPTED_PATH];
+      delete process.env[ENV_WAS_RECOVERED];
+    }
+  });
+
+  it('does not load a target environment during a readOnly load', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const envKey = 'PROJECT_RUNTIME_READ_ONLY_VALUE';
+    const previousValue = process.env[envKey];
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, '.env'), `${envKey}=target-value\n`);
+    delete process.env[envKey];
+
+    try {
+      loadSettings(workspace, {
+        readOnly: true,
+        workspaceTrusted: true,
+      });
+
+      expect(process.env[envKey]).toBeUndefined();
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = previousValue;
+      }
+    }
+  });
+
+  it('does not recreate a deleted settings file when persisting a migration', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }));
+    const loaded = loadSettings(workspace, {
+      readOnly: true,
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+    fs.rmSync(settingsPath);
+
+    loaded.persistInMemoryMigrations();
+
+    expect(fs.existsSync(settingsPath)).toBe(false);
+    expect(loaded.migratedInMemoryScopes.size).toBe(0);
+  });
+
+  it('preserves a concurrent settings edit when persisting a migration', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }));
+    const loaded = loadSettings(workspace, {
+      readOnly: true,
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ theme: 'light', custom: 'keep-me' }),
+    );
+
+    loaded.persistInMemoryMigrations();
+
+    expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))).toEqual({
+      ui: { theme: 'light' },
+      custom: 'keep-me',
+      [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+    });
+    expect(loaded.migratedInMemoryScopes.size).toBe(0);
   });
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(

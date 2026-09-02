@@ -703,6 +703,15 @@ export class LoadedSettings {
     for (const scope of this.migratedInMemoryScopes) {
       const file = this.forScope(scope);
       try {
+        if (!fs.existsSync(file.path)) {
+          this.migratedInMemoryScopes.delete(scope);
+          continue;
+        }
+        if (fs.readFileSync(file.path, 'utf-8') !== file.rawJson) {
+          if (!this.reloadScopeFromDisk(scope)) {
+            continue;
+          }
+        }
         const written = updateSettingsFilePreservingFormat(
           file.path,
           file.originalSettings,
@@ -1070,6 +1079,7 @@ export function loadSettings(
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
           (opts.consumeCorruptionEnvVars ?? true) &&
+          !opts.readOnly &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
           scope === SettingScope.User
@@ -1290,7 +1300,7 @@ export function loadSettings(
 
   // loadEnvironment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  if (!opts.skipLoadEnvironment) {
+  if (!opts.skipLoadEnvironment && !opts.readOnly) {
     loadEnvironment(tempMergedSettings, workspaceDir);
   }
 

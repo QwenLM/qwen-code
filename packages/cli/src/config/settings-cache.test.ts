@@ -123,26 +123,44 @@ describe('loadSettingsCached', () => {
 
   it('gives each daemon session an isolated mutable settings instance', () => {
     const otherWorkspace = path.join(tmpRoot, 'project-b');
+    const envKey = `${TEST_ENV_PREFIX}CAPTURED`;
+    vi.stubEnv(envKey, 'captured-before-cache');
     writeJson(
       workspaceSettingsPath(),
-      versioned({ permissions: { allow: ['rule-a'] } }),
+      versioned({
+        model: { name: `$${envKey}` },
+        permissions: { allow: ['rule-a'] },
+      }),
     );
     writeJson(
       workspaceSettingsPath(otherWorkspace),
-      versioned({ permissions: { allow: ['rule-b'] } }),
+      versioned({
+        model: { name: `$${envKey}` },
+        permissions: { allow: ['rule-b'] },
+      }),
     );
 
     const firstSession = loadSettingsCachedForSession(workspaceDir);
+    process.env[envKey] = 'mutated-after-cache';
     const siblingSession = loadSettingsCachedForSession(workspaceDir);
     const cachedSource = loadSettingsCached(workspaceDir);
     expect(firstSession).not.toBe(siblingSession);
     expect(firstSession.workspace).not.toBe(cachedSource.workspace);
-    firstSession.replaceWith(loadSettingsCachedForSession(otherWorkspace));
+    expect(siblingSession.reloadScopeFromDisk(SettingScope.Workspace)).toBe(
+      true,
+    );
+    expect(siblingSession.merged.model?.name).toBe('captured-before-cache');
+    const previous = firstSession.replaceWith(
+      loadSettingsCachedForSession(otherWorkspace),
+    );
 
     expect(firstSession.merged.permissions?.allow).toEqual(['rule-b']);
+    expect(firstSession.merged.model?.name).toBe('mutated-after-cache');
     expect(siblingSession.merged.permissions?.allow).toEqual(['rule-a']);
     expect(loadSettingsCached(workspaceDir)).toBe(cachedSource);
     expect(cachedSource.merged.permissions?.allow).toEqual(['rule-a']);
+    firstSession.replaceWith(previous);
+    expect(firstSession.merged.model?.name).toBe('captured-before-cache');
 
     siblingSession.setValue(
       SettingScope.Workspace,
@@ -156,7 +174,7 @@ describe('loadSettingsCached', () => {
       JSON.parse(
         fs.readFileSync(workspaceSettingsPath(otherWorkspace), 'utf8'),
       ),
-    ).not.toHaveProperty('model');
+    ).toHaveProperty('model.name', `$${envKey}`);
   });
 
   it('reloads when the user settings file changes', () => {
