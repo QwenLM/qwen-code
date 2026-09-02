@@ -144,9 +144,9 @@ export function buildOmniMediaGuidanceSection(config: Config): string | null {
   const recallGuidance =
     config.getOmniMemoryConfig?.()?.recall.mode === 'active'
       ? `
-- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<file>: an opaque session handle for that media. It is the ONLY identity you can use to reference the file — you will never be given its real path.
-- BEFORE reprocessing media (extracting frames, transcribing, clipping), call \`${ToolNames.OMNI_RECALL_MEDIA_MEMORY}\` with that handle: earlier sessions may already have produced the transcript, keyframes or excerpt you need, and it returns instantly. It also reports honest gaps — which channels were never processed — and can suggest which tool closes them.
-- Handles also work as the \`resourceId\` argument of the media tools below, in place of a path.`
+- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<ref>: how you reference that media. For a local file you read, <ref> is its absolute path — you can re-read it or point tools at it directly. For media with no path you can see (tool results, URLs, recalled memory), <ref> is an opaque session handle.
+- BEFORE reprocessing media (extracting frames, transcribing, clipping), call \`${ToolNames.OMNI_RECALL_MEDIA_MEMORY}\` with that <ref>: earlier sessions may already have produced the transcript, keyframes or excerpt you need, and it returns instantly. It also reports honest gaps — which channels were never processed — and can suggest which tool closes them.
+- The same <ref> names the media for the media tools below: pass a path as \`inputPath\`, a handle as \`resourceId\`.`
       : '';
 
   // Active preprocessing contract, authored per policy in settings and

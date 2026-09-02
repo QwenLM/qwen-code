@@ -22,8 +22,11 @@ export interface MediaResourceBinding {
   fileVersionId: MediaFileVersionId;
   rootFileId: MediaFileId;
   /** Harness-side locator (absolute local path or promoted object path).
-   * Consumed when a tool call resolves resourceId → inputPath; NEVER
-   * included in a model-visible payload (M §5.2/§15). */
+   * Consumed when a tool call resolves resourceId → inputPath. For a
+   * model-visible LOCAL source the annotation surfaces this path in place
+   * of the handle (see `formatResourcePathText`); for path-less sources
+   * (tool/URL/recall media) it is an internal object-store path and stays
+   * off the model-visible payload (M §5.2/§15). */
   fileRef: string;
   mediaType: OmniModality;
 }
@@ -75,12 +78,24 @@ export class MediaResourceRegistry {
   /** Look up a binding by its harness-side locator. Lets collection paths
    * that only hold a resolved `inputPath` (a gated model call, where the
    * gate already turned the handle back into a path) recover the memory
-   * identity without re-hashing the file. */
+   * identity without re-hashing the file, and lets recall reverse a
+   * path-form annotation back to its handle.
+   *
+   * When the same locator has been bound more than once this session (the
+   * same file re-read after its bytes changed, minting a distinct version),
+   * the LATEST binding wins: a path names "the file at this path", and the
+   * most recently delivered version is the one the model is currently
+   * looking at. A path cannot name an older version — that ambiguity is the
+   * price of showing the path instead of the version-specific handle, and
+   * two path annotations for two versions in ONE request collapse to the
+   * latest. */
   resolveByFileRef(fileRef: string): MediaResourceBinding | undefined {
+    let latest: MediaResourceBinding | undefined;
+    // Insertion order === mint order, so the last match is the newest.
     for (const binding of this.byVersionId.values()) {
-      if (binding.fileRef === fileRef) return binding;
+      if (binding.fileRef === fileRef) latest = binding;
     }
-    return undefined;
+    return latest;
   }
 
   /** Every locator this session currently has a handle for. GC treats

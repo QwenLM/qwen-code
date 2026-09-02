@@ -390,6 +390,90 @@ describe('readMediaViaOmniDelivery result shape', () => {
     expect(parts[2]).toHaveProperty('fileData');
   });
 
+  it('keeps the handle form when the binding fileRef is not the read path', async () => {
+    // Mirror image of the path-form test above: a path-less source (tool /
+    // URL media) binds with an internal object-store `fileRef` that is NOT
+    // the path the model read, so it must keep the opaque handle — there is
+    // no model-visible path to show. The real pipeline never produces a
+    // divergent fileRef for a user read (sourceFileRef === filePath), so the
+    // fallback is exercised at the resolve() seam via a wrapper registry.
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(
+          mockRecognized('image', { width: 1920, height: 1080 }),
+        ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.png'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        async putFile() {
+          return { objectPath: '/tmp/obj.png', deduped: false };
+        }
+        getOmniRootDir() {
+          return tmpDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        async uploadFile() {
+          return 'oss://bucket/key';
+        }
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const { parseResourceHandleText } = await import('./disclosure.js');
+    const real = new MediaResourceRegistry();
+    // bind() delegates; resolve() reports a fileRef that differs from the
+    // read path (as an object-store locator would), forcing the handle form.
+    const registry = {
+      bind: (input: Parameters<MediaResourceRegistry['bind']>[0]) =>
+        real.bind(input),
+      resolve: (id: string) => {
+        const b = real.resolve(id);
+        return b ? { ...b, fileRef: `${b.fileRef}.object-store` } : undefined;
+      },
+      resolveByFileRef: (ref: string) => real.resolveByFileRef(ref),
+      resolveVersion: (v: string) => real.resolveVersion(v),
+      activeFileRefs: () => real.activeFileRefs(),
+    } as unknown as InstanceType<typeof MediaResourceRegistry>;
+
+    const filePath = await realFile('pic.png');
+    const result = await readMediaViaOmniDelivery({
+      filePath,
+      config: {
+        ...deliveryConfig(),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    const handleText = parts[0]!['text'] as string;
+    // Handle form, NOT the path: the object-store fileRef is not the read
+    // path, so the model gets the opaque handle it can still recall with.
+    expect(handleText).toContain('：media-');
+    expect(handleText).not.toContain(filePath);
+    const resourceId = parseResourceHandleText(handleText);
+    expect(resourceId).toBeDefined();
+    expect(real.resolve(resourceId!)).toMatchObject({ mediaType: 'image' });
+  });
+
   it('returns a bare fileData part for audio (no zoom hint)', async () => {
     vi.doMock('./ffmpeg.js', () => ({
       isFfmpegAvailable: vi.fn().mockResolvedValue(true),

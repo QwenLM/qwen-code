@@ -117,18 +117,23 @@ describe('omni memory sideQuery selector', () => {
     } as unknown as Config;
   }
 
-  /** Record one image into the store and bind its session handle. */
-  async function recordAndBind(): Promise<string> {
+  /** Record one image into the store under `fileRef` and bind its session
+   * handle. `sha256` is parameterized so callers can mint a distinct file
+   * VERSION at the same path. */
+  async function recordAndBindFileRef(
+    fileRef: string,
+    sha256: string = 'a'.repeat(64),
+  ): Promise<string> {
     const memory = new MediaMemoryService(path.join(tmpDir, 'omni'));
     const binding = await memory.recordFileRecognized({
-      fileRef: path.join(tmpDir, 'pic.png'),
-      sha256: 'a'.repeat(64),
+      fileRef,
+      sha256,
       mediaType: 'image',
       metadata: { width: 32, height: 32 },
       sizeBytes: 1234,
       mimeType: 'image/png',
       origin: 'user',
-      source: { protocol: 'local', locator: 'pic.png' },
+      source: { protocol: 'local', locator: path.basename(fileRef) },
       recognition: {
         ingestionConfigHash: '',
         detectorVersion: 'omni-sniff-ffprobe/1',
@@ -137,9 +142,14 @@ describe('omni memory sideQuery selector', () => {
     });
     return registry.bind({
       ...binding!,
-      fileRef: path.join(tmpDir, 'pic.png'),
+      fileRef,
       mediaType: 'image',
     }).resourceId;
+  }
+
+  /** Record one image into the store and bind its session handle. */
+  function recordAndBind(): Promise<string> {
+    return recordAndBindFileRef(path.join(tmpDir, 'pic.png'));
   }
 
   describe('extractRequestResourceIds', () => {
@@ -186,6 +196,46 @@ describe('omni memory sideQuery selector', () => {
         { text: formatResourcePathText(path.join(tmpDir, 'never-seen.png')) },
       ];
       expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+    });
+
+    it('resolves a path-form annotation whose filename ends in whitespace', async () => {
+      // A trailing space is a legal POSIX filename char; it rides in the
+      // fileRef and the annotation. Parsing must NOT trim it away, or the
+      // exact-equality resolveByFileRef misses and the file's memory is
+      // silently dropped from passive recall.
+      const fileRef = path.join(tmpDir, 'pic.png ');
+      const resourceId = await recordAndBindFileRef(fileRef);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path-form annotation whose filename ends in a handle-shaped suffix', async () => {
+      // The escaped separator must not be misread as a handle boundary; the
+      // whole path resolves back to its own binding.
+      const fileRef = path.join(tmpDir, 'clip：media-3-9f2cabcd');
+      const resourceId = await recordAndBindFileRef(fileRef);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path form embedded in a line with leading whitespace', async () => {
+      // Annotations can be flattened into a larger part with indentation;
+      // leading whitespace is line formatting, not part of the path.
+      const resourceId = await recordAndBind();
+      const parts = [
+        {
+          text: `context\n   ${formatResourcePathText(
+            path.join(tmpDir, 'pic.png'),
+          )}\nmore`,
+        },
+      ];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
     });
   });
 

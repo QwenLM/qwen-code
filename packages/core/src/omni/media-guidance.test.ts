@@ -202,7 +202,7 @@ describe('buildOmniMediaGuidanceSection — policy descriptions', () => {
 });
 
 describe('buildOmniMediaGuidanceSection — recall guidance', () => {
-  it('explains the handle marker and the recall-before-reprocessing contract in active mode', () => {
+  it('explains the resource marker and the recall-before-reprocessing contract in active mode', () => {
     const section = buildOmniMediaGuidanceSection(
       stubConfig({ recallMode: 'active' }),
     )!;
@@ -212,8 +212,10 @@ describe('buildOmniMediaGuidanceSection — recall guidance', () => {
     expect(section).toContain(OMNI_RESOURCE_HANDLE_TEXT_PREFIX);
     expect(section).toContain('omni_recall_media_memory');
     expect(section).toMatch(/BEFORE reprocessing/);
-    // And it must say the handle is the only identity available.
-    expect(section).toMatch(/never be given its real path/);
+    // It must describe BOTH annotation forms: the absolute path for a local
+    // file the model read, and the opaque handle for path-less media.
+    expect(section).toMatch(/absolute path/);
+    expect(section).toMatch(/opaque session handle/);
   });
 
   it('says nothing about the recall tool in sideQuery mode', () => {

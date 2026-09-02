@@ -128,11 +128,20 @@ export function formatTranscriptText(
   return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${transcript}`;
 }
 
-/** Marks a text Part as a session resource-handle annotation: the opaque
- * `resourceId` minted for a delivered media resource (memory design M
- * §5.2). The model references this handle in `omni_recall_media_memory`
- * requests (and other omni tools that accept a resourceId) — it is the
- * ONLY identity the model ever sees for the underlying file. */
+/** Marks a text Part as a session resource annotation. It carries one of
+ * two forms, both prefixed identically and told apart at parse time:
+ *   - handle form ({@link formatResourceHandleText}): the opaque
+ *     `resourceId` minted for the resource (memory design M §5.2) — used
+ *     for path-less sources (tool/URL/recall media) whose real locator is
+ *     an internal object-store path the model must never see;
+ *   - path form ({@link formatResourcePathText}): the ABSOLUTE PATH of a
+ *     model-visible local file, shown in place of the handle because the
+ *     model already holds that path and can re-read it or point tools at
+ *     it directly.
+ * The model references whichever value it is shown in
+ * `omni_recall_media_memory` (and other omni tools that accept a
+ * resourceId / inputPath); recall resolves the path form back to the
+ * session handle. */
 export const OMNI_RESOURCE_HANDLE_TEXT_PREFIX = '【媒体资源】';
 
 /** Model-facing resource-handle annotation for one delivered resource. */
@@ -144,14 +153,26 @@ export function formatResourceHandleText(
 }
 
 /** Extract the resourceId from a handle annotation emitted by
- * {@link formatResourceHandleText}, or undefined for any other text. The
- * handle grammar is harness-minted (`media-<n>-<hex>`), so parsing keys
- * on it rather than on the displayName (which may itself contain the
- * separator). */
+ * {@link formatResourceHandleText}, or undefined for any other text
+ * (including the path form). The handle grammar is harness-minted
+ * (`media-<n>-<hex>`), so parsing keys on it rather than on the displayName
+ * (which may itself contain the separator).
+ *
+ * The split is located at the FIRST UNESCAPED separator via
+ * {@link splitAnnotationBody} — an escape-blind end-anchored regex would
+ * misread a path form whose filename ends in a handle-shaped suffix (e.g.
+ * `/tmp/clip：media-3-9f2cabcd`, whose separator the writer ESCAPED) as a
+ * handle. Only a payload matching the exact handle grammar is accepted, so
+ * a genuine path can never masquerade as one. */
 export function parseResourceHandleText(text: string): string | undefined {
   if (!text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) return undefined;
-  const match = /：(media-\d+-[0-9a-f]+)$/.exec(text);
-  return match?.[1];
+  const split = splitAnnotationBody(
+    text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length),
+  );
+  if (!split) return undefined;
+  return /^media-\d+-[0-9a-f]+$/.test(split.payload)
+    ? split.payload
+    : undefined;
 }
 
 /**
@@ -159,12 +180,13 @@ export function parseResourceHandleText(text: string): string | undefined {
  * real local path: the ABSOLUTE PATH stands in for the opaque handle. Used
  * when the source is a model-visible local file (the model already holds
  * the path and can read_file it or point tools at it directly), so an
- * opaque `media-<n>-<hex>` handle would be redundant noise. Passive recall
- * still recovers the session handle from the path via
- * `MediaResourceRegistry.resolveByFileRef` — the binding is registered
- * regardless of which form is shown. Path-less sources (tool/URL media,
- * whose real locator is an internal object-store path) keep the handle
- * form ({@link formatResourceHandleText}): no usable path exists to show.
+ * opaque `media-<n>-<hex>` handle would be redundant noise. Recall (both
+ * the active tool and the passive selector) recovers the session handle
+ * from the path via `MediaResourceRegistry.resolveByFileRef` — the binding
+ * is registered regardless of which form is shown. Path-less sources
+ * (tool/URL media, whose real locator is an internal object-store path)
+ * keep the handle form ({@link formatResourceHandleText}): no usable path
+ * exists to show.
  *
  * Carries NO `：<payload>` separator, which is exactly how
  * {@link parseResourcePathText} tells it apart from the handle form.

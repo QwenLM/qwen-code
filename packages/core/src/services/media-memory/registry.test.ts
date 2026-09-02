@@ -67,6 +67,19 @@ describe('MediaResourceRegistry', () => {
     expect(second.resourceId).not.toBe(first.resourceId);
   });
 
+  it('resolveByFileRef returns the LATEST version bound at a locator', () => {
+    // Two versions of the same file at one path (re-read after the bytes
+    // changed) mint distinct handles. A path-form annotation names the file,
+    // not a version, so the reversal must pick the version the model is
+    // currently looking at — the most recently bound one — rather than the
+    // first ever bound.
+    const registry = new MediaResourceRegistry();
+    const first = registry.bind(BINDING);
+    const second = registry.bind({ ...BINDING, fileVersionId: 'v-movie-2' });
+    expect(second.resourceId).not.toBe(first.resourceId);
+    expect(registry.resolveByFileRef(BINDING.fileRef)).toBe(second);
+  });
+
   it('never resolves a handle it did not issue', () => {
     const registry = new MediaResourceRegistry();
     registry.bind(BINDING);

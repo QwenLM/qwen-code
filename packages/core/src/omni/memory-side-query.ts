@@ -92,16 +92,32 @@ export function extractRequestResourceIds(
     // Annotations may be embedded per-line inside a larger flattened part.
     for (const line of text.split('\n')) {
       const trimmed = line.trim();
-      // The handle form (path-less media) names the resourceId directly. The
-      // path form (model-visible local media) names the absolute path, which
-      // the registry maps back to the SAME session handle it issued for that
-      // file (resolveByFileRef) — so passive recall keys on both forms.
+      // The handle form (path-less media) names the resourceId directly;
+      // surrounding whitespace on an embedded line is not part of the
+      // grammar, so match against the trimmed line.
       let resourceId = parseResourceHandleText(trimmed);
       if (!resourceId) {
-        const filePath = parseResourcePathText(trimmed);
-        resourceId = filePath
-          ? registry.resolveByFileRef(filePath)?.resourceId
-          : undefined;
+        // The path form (model-visible local media) names the absolute
+        // path, which the registry maps back to the SAME session handle it
+        // issued for that file (resolveByFileRef) — so passive recall keys
+        // on both forms. A filename may legally END in whitespace (POSIX),
+        // so prefer the left-trimmed line (which preserves those trailing
+        // characters) and fall back to the fully-trimmed line for the case
+        // where the trailing whitespace was only line formatting. A path
+        // containing a newline cannot survive this per-line split and is
+        // inherently unaddressable here.
+        const leftTrimmed = line.replace(/^\s+/, '');
+        for (const candidate of [
+          parseResourcePathText(leftTrimmed),
+          parseResourcePathText(trimmed),
+        ]) {
+          if (!candidate) continue;
+          const binding = registry.resolveByFileRef(candidate);
+          if (binding) {
+            resourceId = binding.resourceId;
+            break;
+          }
+        }
       }
       if (!resourceId || seen.has(resourceId)) continue;
       if (!registry.resolve(resourceId)) continue;

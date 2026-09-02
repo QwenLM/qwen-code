@@ -14,6 +14,7 @@ import {
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
   parseResourceHandleText,
+  parseResourcePathText,
   splitAnnotationBody,
   unescapeAnnotationName,
 } from './disclosure.js';
@@ -289,15 +290,32 @@ function mediaFor(
 function consumeAnnotationPart(turn: TurnAccumulator, text: string): boolean {
   if (text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) {
     const resourceId = parseResourceHandleText(text);
-    if (!resourceId) return false;
-    // Name = body minus the end-anchored `：<resourceId>` (the id grammar
-    // is harness-minted, so this parse never guesses at the name).
-    const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
-    const name = unescapeAnnotationName(
-      body.slice(0, body.length - resourceId.length - 1),
-    );
-    mediaFor(turn, name).resourceId = resourceId;
-    return true;
+    if (resourceId) {
+      // Handle form. Name = body minus the end-anchored `：<resourceId>`
+      // (the id grammar is harness-minted, so this parse never guesses at
+      // the name).
+      const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
+      const name = unescapeAnnotationName(
+        body.slice(0, body.length - resourceId.length - 1),
+      );
+      mediaFor(turn, name).resourceId = resourceId;
+      return true;
+    }
+    // Path form (model-visible local media): the annotation shows the
+    // file's ABSOLUTE PATH and carries no session handle. The exporter is a
+    // pure reader with no live registry (bindings never persist), so it
+    // cannot recover a resourceId — but the media entry must still exist,
+    // or the turn drops its media and the session filter never seeds the
+    // file's memory closure. Key the entry by the path's BASENAME: the
+    // file-record join is on the local source locator, and local sources
+    // record `locator: displayName` (index.ts) with displayName defaulting
+    // to the basename.
+    const filePath = parseResourcePathText(text);
+    if (filePath) {
+      mediaFor(turn, path.basename(filePath));
+      return true;
+    }
+    return false;
   }
   for (const [prefix, apply] of [
     [
@@ -614,9 +632,7 @@ function filterToSession(
     for (const media of turn.request.media) mediaNames.add(media.name);
   }
 
-  const filesByVersion = new Map(
-    memory.files.map((f) => [f.fileVersionId, f]),
-  );
+  const filesByVersion = new Map(memory.files.map((f) => [f.fileVersionId, f]));
   const versionsByFile = new Map<string, OmniTrajectoryFileRecord[]>();
   for (const f of memory.files) {
     const list = versionsByFile.get(f.fileId) ?? [];
@@ -747,9 +763,7 @@ export async function writeOmniTrajectoryJsonl(
     // Writing the trajectory over the raw transcript would irreversibly
     // destroy the non-reconstructible source this pipeline exists to
     // capture.
-    throw new Error(
-      'trajectory outPath must differ from the transcript path',
-    );
+    throw new Error('trajectory outPath must differ from the transcript path');
   }
   const records = await exportOmniTrajectory(options);
   await fs.mkdir(path.dirname(outPath), { recursive: true });

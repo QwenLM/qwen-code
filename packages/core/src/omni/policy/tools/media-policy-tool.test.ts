@@ -16,6 +16,7 @@ import {
   createPolicyToolTimeoutBudget,
   DEFAULT_POLICY_TOOL_TIMEOUT_MS,
   formatBytesShort,
+  MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   resolvePolicyToolTimeoutMs,
   policyOutputFileName,
   validateMediaPolicyIoParams,
@@ -242,12 +243,17 @@ describe('assertMediaPolicyIo', () => {
     ).rejects.toThrow(/not a regular file/);
   });
 
-  it('rejects a missing output directory', async () => {
+  it('rejects a missing output directory and never creates it', async () => {
     const inputPath = path.join(root, 'in.bin');
     await fs.writeFile(inputPath, 'x');
-    await expect(
-      assertMediaPolicyIo({ inputPath, outputDir: path.join(root, 'nope') }),
-    ).rejects.toThrow(/output directory not found/);
+    const outputDir = path.join(root, 'nope');
+    await expect(assertMediaPolicyIo({ inputPath, outputDir })).rejects.toThrow(
+      /output directory not found/,
+    );
+    // The schema tells the model the directory must already exist and is
+    // not created automatically; enforce that contract — the rejection must
+    // leave nothing behind.
+    await expect(fs.access(outputDir)).rejects.toThrow();
   });
 
   it('rejects a symlinked output directory', async () => {
@@ -260,6 +266,18 @@ describe('assertMediaPolicyIo', () => {
     await expect(
       assertMediaPolicyIo({ inputPath, outputDir: linkDir }),
     ).rejects.toThrow(/not a real directory/);
+  });
+});
+
+describe('MEDIA_POLICY_IO_SCHEMA_PROPERTIES', () => {
+  it('documents that outputDir must already exist and is not auto-created', () => {
+    // Model-facing schema text: the tool rejects (never creates) a
+    // nonexistent outputDir (see assertMediaPolicyIo). Pin the wording so a
+    // future edit cannot silently tell the model a different contract than
+    // the tool honors.
+    const description = MEDIA_POLICY_IO_SCHEMA_PROPERTIES.outputDir.description;
+    expect(description).toMatch(/existing directory/);
+    expect(description).toMatch(/not created automatically/);
   });
 });
 

@@ -186,6 +186,62 @@ describe('MediaMemoryRecallService — request validation', () => {
       }),
     ).rejects.toThrow(/not issued in this session/);
   });
+
+  it('resolves the ABSOLUTE PATH shown for a model-visible local source', async () => {
+    // A local file the model read is annotated with its path, not a handle;
+    // the model passes that path to recall, which must reverse it to the
+    // session binding (resolveByFileRef) and recall exactly as the handle
+    // would — not reject it as unknown.
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    bindSource(source); // binds fileRef === moviePath
+
+    const result = await recallService().recall({
+      resourceIds: [moviePath],
+      query: 'what happens in the movie',
+    });
+
+    expect(result.status).toBe('hit');
+    expect(result.files).toEqual([
+      {
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        current: true,
+        mediaType: 'video',
+      },
+    ]);
+  });
+
+  it('deduplicates a handle and the path form of the same resource', async () => {
+    // The handle and the path resolve to ONE binding; recall must treat the
+    // pair as a single resource, not push duplicate gaps/advice for it.
+    const source = await recognizeMovie();
+    const resourceId = bindSource(source);
+    const result = await recallService().recall({
+      resourceIds: [resourceId, moviePath],
+      query: 'what happens in the movie',
+    });
+    expect(result.files).toEqual([
+      {
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        current: true,
+        mediaType: 'video',
+      },
+    ]);
+  });
+
+  it('still rejects an identifier that is neither a handle nor a bound path', async () => {
+    const source = await recognizeMovie();
+    const resourceId = bindSource(source);
+    await expect(
+      recallService().recall({
+        resourceIds: [resourceId, '/not/a/bound/path.mkv'],
+        query: 'anything',
+      }),
+    ).rejects.toThrow(/not issued in this session/);
+  });
 });
 
 describe('MediaMemoryRecallService — full graph recall', () => {

@@ -84,6 +84,18 @@ describe('resource annotation forms', () => {
     expect(parseResourcePathText(text)).toBe(p);
   });
 
+  it('does not misread a path ending in a handle-shaped suffix as a handle', () => {
+    // A file literally named `.../clip：media-3-9f2cabcd` (full-width colon
+    // is a legal filename char). The writer escapes the separator, so an
+    // escape-aware parser must NOT split at it: the whole body is the path,
+    // and the handle parser rejects it — otherwise passive recall would key
+    // on the wrong (or an unissued) handle.
+    const p = '/tmp/clip：media-3-9f2cabcd';
+    const text = formatResourcePathText(p);
+    expect(parseResourceHandleText(text)).toBeUndefined();
+    expect(parseResourcePathText(text)).toBe(p);
+  });
+
   it('non-annotation text parses as neither form', () => {
     expect(parseResourcePathText('just some text')).toBeUndefined();
     expect(parseResourceHandleText('just some text')).toBeUndefined();
