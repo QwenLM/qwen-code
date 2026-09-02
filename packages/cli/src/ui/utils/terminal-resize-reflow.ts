@@ -473,6 +473,11 @@ export function installTerminalResizeReflow(
   // VP only: the alternate-screen entry clear arms a one-shot capture of the
   // first bare frame; incremental diffs alone cannot reconstruct a frame.
   let expectFirstFrame = false;
+  // A rejected frame-shaped diff means the terminal advanced through bytes
+  // this parser could not model. Preserve the last complete frame for a
+  // stale-but-coherent repaint, but do not apply later keep-ops to it until
+  // an authoritative full frame or reset anchor re-synchronizes the model.
+  let modelStale = false;
   // VP only: a clearTerminal reset write carries the full live frame but may
   // prepend re-emitted <Static> transcript (agent tabs), and omits the
   // trailing-newline slot Ink syncs for non-fullscreen frames — hold it and
@@ -505,6 +510,7 @@ export function installTerminalResizeReflow(
     }
     pendingResetFrame = '';
     pendingResetFullscreen = undefined;
+    modelStale = false;
     model.content = content;
     model.columns = stdout.columns ?? lastWidth;
     // Ink appends the cursor suffix AFTER the frame's trailing newline, so
@@ -520,17 +526,28 @@ export function installTerminalResizeReflow(
   ): boolean => {
     const width = stdout.columns ?? lastWidth;
     const rows = stdout.rows ?? 0;
-    // The synced trailing-newline slot was trimmed at store time (keyed on
-    // the published non-fullscreen decision); a trailing empty element left
-    // here is a genuinely blank bottom row of the live frame and must stay
-    // in the anchoring window.
+    // With a published non-fullscreen decision, the synced trailing-newline
+    // slot was trimmed at store time. Without a marker, candidate selection
+    // below excludes that slot only while testing the slotted interpretation;
+    // any trailing empty element left after the relevant trim is a genuinely
+    // blank bottom row of the live frame and must stay in the anchor window.
     const pendingLines = pendingResetFrame.split('\n');
     const candidate = (trailing: boolean): string[] | null => {
+      // Without Ink's marker, a non-fullscreen reset still carries its synced
+      // trailing-newline slot in the raw payload. Exclude that empty element
+      // only from the slotted candidate; the slotless candidate must continue
+      // to classify the untrimmed payload.
+      const basis =
+        trailing &&
+        pendingResetFullscreen === undefined &&
+        pendingLines[pendingLines.length - 1] === ''
+          ? pendingLines.slice(0, -1)
+          : pendingLines;
       const height =
         (shrink ? shrink.eraseCount + headCount : headCount + 1) -
         (trailing ? 1 : 0);
-      if (height <= 0 || height > pendingLines.length) return null;
-      return pendingLines.slice(-height);
+      if (height <= 0 || height > basis.length) return null;
+      return basis.slice(-height);
     };
     let anchor: string[] | null = null;
     let trailing = false;
@@ -561,6 +578,7 @@ export function installTerminalResizeReflow(
     if (anchor === null) return false;
     pendingResetFrame = '';
     pendingResetFullscreen = undefined;
+    modelStale = false;
     model.content = anchor.join('\n') + (trailing ? '\n' : '');
     model.columns = width;
     model.trailingNewline = trailing;
@@ -610,24 +628,29 @@ export function installTerminalResizeReflow(
         chunk,
       );
       const resetAt = chunk.indexOf(CLEAR_TERMINAL);
-      if (match && (!isVP || sequenceAtWriteHead(chunk, match.index))) {
+      if (
+        match &&
+        (resetAt === -1 || resetAt > match.index) &&
+        (!isVP || sequenceAtWriteHead(chunk, match.index))
+      ) {
         const content = chunk.slice(match.index + match[0].length);
         const eraseCount = countOccurrences(match[0], ERASE_LINE);
         // VP incremental shrink-diff frames carry the erase prefix in front
         // of a cursorUp to the frame top plus line ops; apply them as a
         // transform instead of mistaking the fragment for a full frame.
         const head = isVP ? parseDiffHead(content) : null;
+        const frameDiff =
+          head !== null &&
+          startsWithLineOp(content, head.pos) &&
+          !CURSOR_SUFFIX_ONLY_RE.test(content.slice(head.pos));
         let incrementalShrinkDiff = false;
-        if (head !== null) {
+        if (frameDiff) {
           if (pendingResetFrame !== '' && startsWithLineOp(content, head.pos)) {
             anchorPendingReset(head.headCount, { eraseCount });
           }
-          incrementalShrinkDiff = applyIncrementalDiff(
-            model,
-            content,
-            currentWidth,
-            { eraseCount },
-          );
+          incrementalShrinkDiff =
+            !modelStale &&
+            applyIncrementalDiff(model, content, currentWidth, { eraseCount });
           debugLogger.debug('shrink-diff', {
             applied: incrementalShrinkDiff,
             eraseCount,
@@ -663,6 +686,15 @@ export function installTerminalResizeReflow(
             modelFrame(content, true);
             expectFrame = false;
             expectFirstFrame = false;
+            barePrintableCount = 0;
+            burstCaptured = false;
+          } else if (frameDiff) {
+            // A rejected diff is a complete render, not log.clear followed by
+            // a bare redraw. Keep the coherent pre-diff model as a stale
+            // fallback and do not arm a handoff that could capture a later
+            // unrelated write as the live frame.
+            modelStale = true;
+            expectFrame = false;
             barePrintableCount = 0;
             burstCaptured = false;
           } else {
@@ -767,6 +799,10 @@ export function installTerminalResizeReflow(
       } else if (expectFrame) {
         const printable = stripAnsi(chunk).trim() !== '';
         const diffHead = parseDiffHead(chunk);
+        const frameDiff =
+          diffHead !== null &&
+          startsWithLineOp(chunk, diffHead.pos) &&
+          !CURSOR_SUFFIX_ONLY_RE.test(chunk.slice(diffHead.pos));
         // The commit's bare writes land in one synchronous render; a bare
         // write this late is a stray (notification bell, kitty APC image,
         // tmux DCS), not the handoff, and disarms the arm. VP exceptions —
@@ -805,7 +841,11 @@ export function installTerminalResizeReflow(
           // storing a diff-shaped write as a frame corrupts the model
           // whether the diff applies or not.
           barePrintableCount++;
-          if (isVP && applyIncrementalDiff(model, chunk, currentWidth)) {
+          if (
+            isVP &&
+            !modelStale &&
+            applyIncrementalDiff(model, chunk, currentWidth)
+          ) {
             debugLogger.debug('diff', { applied: true, armed: true });
             expectFrame = false;
             expectFirstFrame = false;
@@ -817,6 +857,11 @@ export function installTerminalResizeReflow(
               // resized (and clear-window-blanked) viewport no longer shows.
               chunk = CLEAR_VIEWPORT + model.content;
             }
+          } else if (frameDiff) {
+            modelStale = true;
+            expectFrame = false;
+            barePrintableCount = 0;
+            burstCaptured = false;
           } else if (diffHead === null) {
             if (modelFrame(chunk, barePrintableCount > 1 && !late)) {
               burstCaptured = true;
@@ -862,7 +907,15 @@ export function installTerminalResizeReflow(
           anchorPendingReset(diffHead.headCount);
         }
         if (model.content !== '') {
-          const applied = applyIncrementalDiff(model, chunk, currentWidth);
+          const frameDiff =
+            diffHead !== null &&
+            startsWithLineOp(chunk, diffHead.pos) &&
+            !CURSOR_SUFFIX_ONLY_RE.test(chunk.slice(diffHead.pos));
+          const applied =
+            frameDiff &&
+            !modelStale &&
+            applyIncrementalDiff(model, chunk, currentWidth);
+          if (frameDiff && !applied) modelStale = true;
           debugLogger.debug('diff', { applied });
           if (applied && Date.now() < clearUntil) {
             // Clear-window rule: a diff inside the window cannot paint its

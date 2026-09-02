@@ -1469,6 +1469,76 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('does not advance a stale model after unsupported line content rejects a diff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const rejected = prev.slice();
+      rejected[4] = `unsupported-${ESC}6n-content`;
+      stdout.write(
+        incrementalDiffFrame(prev, rejected, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      const followUp = rejected.slice();
+      followUp[0] = 'FOLLOW-UP-MUST-NOT-MIX';
+      stdout.write(
+        incrementalDiffFrame(rejected, followUp, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain(prev[0]!);
+      expect(replay).toContain(prev[4]!);
+      expect(replay).not.toContain('FOLLOW-UP-MUST-NOT-MIX');
+      expect(replay).not.toContain('unsupported-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not arm a late bare-frame handoff after rejecting a shrink diff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      stdout.write(
+        ansiEscapes.eraseLines(3) +
+          `${ESC}3A${CURSOR_NEXT_LINE}${CURSOR_TO_COL0}REJECTED${ERASE_END_LINE}`,
+      );
+      now += 100;
+      const stray = frameLines(12, 9).map((line) => `STRAY-${line}`);
+      stdout.write(stray.join('\n'));
+
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain(prev[0]!);
+      expect(replay).toContain(prev[9]!);
+      expect(replay).not.toContain('STRAY-');
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
   it('keeps the good frame when the armed handoff receives a rejected bare diff', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
@@ -1708,6 +1778,78 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       expect(replay).toContain(live[0]!);
       expect(replay).toContain(live[9]!);
       expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a marker-less reset carrying the synced trailing-newline slot', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const transcript = ['committed-a', 'committed-b'];
+      const live = frameLines(20, 10).map((line) => `${line}-markerless`);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n') +
+          '\n',
+      );
+      const next = live.slice();
+      next[5] = 'MARKERLESS-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('MARKERLESS-UPDATE');
+      expect(replay).toContain(live[0]!);
+      expect(replay).toContain(live[9]!);
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('routes a reset before an erase prefix through reset anchoring', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const boot = frameLines(20, 10).map((line) => `${line}-boot`);
+      stdout.write(ansiEscapes.eraseLines(10) + boot.join('\n'));
+      const live = frameLines(20, 10).map((line) => `${line}-reset`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          ansiEscapes.eraseLines(1) +
+          'static-transcript\n' +
+          live.join('\n') +
+          '\n',
+      );
+
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain(boot[0]!);
+      expect(replay).not.toContain('static-transcript');
+      expect(
+        (stdout as unknown as Record<symbol, unknown>)[INK_RESET_FULLSCREEN],
+      ).toBeUndefined();
     } finally {
       restore();
     }
