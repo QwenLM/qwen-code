@@ -325,10 +325,11 @@ function safeTransportFailureDetail(error: unknown): string | undefined {
     return undefined;
   }
   const queueError = error as Partial<NdJsonQueueLimitError>;
-  const budget = queueError.budget;
-  if (typeof budget !== 'string' || !/^[a-z0-9_.-]{1,64}$/iu.test(budget)) {
-    return undefined;
-  }
+  const budget =
+    typeof queueError.budget === 'string' &&
+    /^[a-z0-9_.-]{1,64}$/iu.test(queueError.budget)
+      ? queueError.budget
+      : 'unknown';
   const numbers: string[] = [];
   for (const value of [
     queueError.requiredBytes,

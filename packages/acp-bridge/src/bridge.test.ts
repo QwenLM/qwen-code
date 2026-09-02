@@ -12768,6 +12768,69 @@ describe('createAcpSessionBridge', () => {
     bridge.killAllSync();
   });
 
+  it('records which budget fired on a transport-guard channel exit', async () => {
+    const neverPrompt = deferred<never>();
+    const handle = makeChannel({ promptImpl: () => neverPrompt.promise });
+    const failure = deferred<unknown>();
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+      kill: () => deferred<never>().promise,
+    };
+    const event = vi.fn();
+    const channelLifecycle = vi.fn();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event,
+      injectPromptContext: (request) => request,
+      metrics: {
+        sessionLifecycle: vi.fn(),
+        channelLifecycle,
+        promptQueueWait: vi.fn(),
+        promptDuration: vi.fn(),
+        cancelled: vi.fn(),
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge.sendPrompt(first.sessionId, {
+      sessionId: first.sessionId,
+      prompt: [{ type: 'text', text: 'stay pending' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    failure.resolve(
+      Object.assign(new Error('bounded transport queue failed'), {
+        code: 'ndjson_queue_limit_exceeded',
+        budget: 'prepared_response',
+        maxQueuedMessages: 256,
+        maxQueuedBytes: 67108864,
+        requiredBytes: 262144,
+        availableBytes: 0,
+      }),
+    );
+    await expect(prompt).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    handle.crash({ exitCode: null, signalCode: 'SIGTERM' });
+    await vi.waitFor(() =>
+      expect(event).toHaveBeenCalledWith(
+        'channel.exited',
+        expect.objectContaining({
+          'qwen-code.daemon.channel.transport_failed': true,
+          'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+          'qwen-code.daemon.channel.transport_error_code':
+            'ndjson_queue_limit_exceeded',
+          'qwen-code.daemon.channel.transport_error_detail':
+            'prepared_response:required=262144:available=0:cap=67108864',
+        }),
+      ),
+    );
+    await bridge.shutdown();
+  });
+
   it('does not publish a channel whose transport fails during initialize', async () => {
     const failure = deferred<unknown>();
     const transportError = Object.assign(new Error('frame failed'), {
