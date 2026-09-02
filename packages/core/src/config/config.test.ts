@@ -7725,6 +7725,28 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('relocateWorkingDirectory should carry the session pr-bound callback to the fresh SessionService', async () => {
+    // The callback is registered once at session init; relocation resets
+    // sessionService, so a later `gh pr create` must still reach it.
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const seen: Array<{ sessionId: string; number: number }> = [];
+    config.getSessionService().setSessionPrBoundCallback((sessionId, pr) => {
+      seen.push({ sessionId, number: pr.number });
+    });
+
+    await config.relocateWorkingDirectory(newDir, newDir, {
+      skipProcessChdir: true,
+      skipArtifactMigration: true,
+    });
+
+    config
+      .getSessionService()
+      .emitSessionPrBound('s1', { number: 2, url: 'https://x.y/o/r/pull/2' });
+
+    expect(seen).toEqual([{ sessionId: 's1', number: 2 }]);
+  });
+
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
