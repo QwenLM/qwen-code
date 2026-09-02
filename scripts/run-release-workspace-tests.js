@@ -1,0 +1,248 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Runs the release workspace test suite and, when it exits non-zero without a
+ * single failing test, says so instead of leaving the operator to search a
+ * 10,000-line log for a `FAIL` that is not there.
+ *
+ * That combination is not hypothetical. `packages/core/vitest.config.ts` sets
+ * `dangerouslyIgnoreUnhandledErrors` to false on Linux, so one leaked async
+ * error fails a run whose tests all passed — release run 33576013293 exited 1
+ * with "211 passed / 9480 tests passed" as its last words, and the release
+ * notification reported it as an ordinary quality failure. Whatever the next
+ * leak turns out to be, this makes the shape of the failure legible from the
+ * job's annotations alone.
+ *
+ * Output is streamed through unchanged; this only adds an annotation after the
+ * fact, and only when the run failed with nothing failing in it.
+ */
+
+import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+
+// Matching ESC is the point; the GitHub log API also renders it as a literal
+// "^[" pair, and both forms have to come out before the text is scanned.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /(?:\x1b|\^\[)\[[0-9;]*m/g;
+// Vitest frames its unhandled-error report with a run of these; the same
+// character opens the per-error sections inside the block.
+const RULE_RE = /^[⎯\s]+$/;
+const UNHANDLED_START_RE = /Unhandled Errors?/;
+const FAIL_LINE_RE = /(^|\s)FAIL(\s|$)/;
+const FAILED_COUNT_RE = /^\s*(Test Files|Tests)\s+\d+\s+failed/;
+const SUMMARY_RE = /^\s*(Test Files|Tests)\s+\S/;
+// The block is bounded so a pathological run cannot turn one annotation into
+// the whole log; the head of an unhandled error is where the cause lives.
+const MAX_BLOCK_LINES = 60;
+const MAX_TAIL_LINES = 40;
+
+/**
+ * Reduces a run's output to the three things that decide how the failure is
+ * reported: whether any test failed, what the unhandled-error blocks said, and
+ * what the run's last summary lines were.
+ *
+ * @param {string} text
+ * @returns {{
+ *   hasFailingTests: boolean,
+ *   unhandledBlocks: string[],
+ *   summaryLines: string[],
+ *   tailLines: string[],
+ * }}
+ */
+export function classifyRunOutput(text) {
+  const lines = String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(ANSI_RE, ''));
+
+  let hasFailingTests = false;
+  const unhandledBlocks = [];
+  const summaryLines = [];
+  const tailLines = [];
+
+  let capturing = null;
+
+  for (const line of lines) {
+    if (line.trim()) {
+      tailLines.push(line);
+      if (tailLines.length > MAX_TAIL_LINES) tailLines.shift();
+    }
+
+    if (FAIL_LINE_RE.test(line) || FAILED_COUNT_RE.test(line)) {
+      hasFailingTests = true;
+    }
+
+    if (SUMMARY_RE.test(line)) {
+      summaryLines.push(line.trim());
+    }
+
+    if (capturing) {
+      // A rule line closes the block, but only once it holds something: the
+      // block opens with a rule line of its own.
+      if (RULE_RE.test(line) && capturing.some((entry) => entry.trim())) {
+        unhandledBlocks.push(capturing.join('\n').trim());
+        capturing = null;
+        continue;
+      }
+      if (capturing.length >= MAX_BLOCK_LINES) {
+        unhandledBlocks.push(
+          `${capturing.join('\n').trim()}\n… truncated at ${MAX_BLOCK_LINES} lines`,
+        );
+        capturing = null;
+        continue;
+      }
+      capturing.push(line);
+      continue;
+    }
+
+    if (UNHANDLED_START_RE.test(line)) {
+      capturing = [line.replace(RULE_RE, '').trim()];
+    }
+  }
+
+  if (capturing?.some((entry) => entry.trim())) {
+    unhandledBlocks.push(capturing.join('\n').trim());
+  }
+
+  // Only the tail of the summary matters: the release suite runs one vitest
+  // per workspace, so an early workspace's totals say nothing about the exit.
+  return {
+    hasFailingTests,
+    unhandledBlocks,
+    summaryLines: summaryLines.slice(-4),
+    tailLines,
+  };
+}
+
+/** Escapes a value for a GitHub Actions annotation payload. */
+export function escapeAnnotation(value) {
+  return String(value)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A');
+}
+
+/**
+ * Builds what to say about a finished run. Returns null when the run needs no
+ * commentary: it passed, or it failed with failing tests that speak for
+ * themselves.
+ *
+ * @param {ReturnType<typeof classifyRunOutput>} classification
+ * @param {number} exitCode
+ * @returns {{ title: string, body: string } | null}
+ */
+export function describeSilentFailure(classification, exitCode) {
+  if (exitCode === 0) return null;
+  if (classification.hasFailingTests) return null;
+
+  const summary = classification.summaryLines.length
+    ? classification.summaryLines.join('\n')
+    : '(no vitest summary line found)';
+
+  if (classification.unhandledBlocks.length > 0) {
+    const blocks = classification.unhandledBlocks.join('\n\n');
+    return {
+      title: `Workspace tests exited ${exitCode} with no failing test`,
+      body: [
+        `The suite reported no failing test and still exited ${exitCode}: vitest`,
+        'caught an error outside any test, which fails the run on Linux because',
+        'packages/core/vitest.config.ts sets dangerouslyIgnoreUnhandledErrors to',
+        'false there. Nothing in the log carries a FAIL line.',
+        '',
+        blocks,
+        '',
+        summary,
+      ].join('\n'),
+    };
+  }
+
+  return {
+    title: `Workspace tests exited ${exitCode} with no failing test`,
+    body: [
+      `The suite reported no failing test and no unhandled error, and still`,
+      `exited ${exitCode}. The run's last lines were:`,
+      '',
+      classification.tailLines.join('\n'),
+      '',
+      summary,
+    ].join('\n'),
+  };
+}
+
+/**
+ * Runs the command, streaming its output, and reports a silent non-zero exit.
+ *
+ * @returns {Promise<number>} the child's exit code
+ */
+export async function runAndReport({
+  command,
+  args,
+  env = process.env,
+  stdout = process.stdout,
+  stderr = process.stderr,
+  summaryPath = process.env['GITHUB_STEP_SUMMARY'],
+} = {}) {
+  const chunks = [];
+  const exitCode = await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk) => {
+      chunks.push(chunk);
+      stdout.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      chunks.push(chunk);
+      stderr.write(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      // A signal death has no exit code; report it as a failure rather than
+      // letting `null` become a passing 0 downstream.
+      resolve(code ?? (signal ? 1 : 0));
+    });
+  });
+
+  const classification = classifyRunOutput(
+    Buffer.concat(chunks).toString('utf8'),
+  );
+  const report = describeSilentFailure(classification, exitCode);
+  if (!report) return exitCode;
+
+  stdout.write(
+    `::error title=${escapeAnnotation(report.title)}::${escapeAnnotation(report.body)}\n`,
+  );
+  stderr.write(`\n${report.title}\n\n${report.body}\n`);
+
+  if (summaryPath) {
+    try {
+      appendFileSync(
+        summaryPath,
+        `### ${report.title}\n\n\`\`\`\n${report.body}\n\`\`\`\n`,
+      );
+    } catch (error) {
+      // The summary is a convenience; never let writing it change the outcome.
+      stderr.write(`(could not write the job summary: ${error.message})\n`);
+    }
+  }
+
+  return exitCode;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const passthrough = process.argv.slice(2).filter((arg, index, all) => {
+    // `node script.js -- --shard=1/3` keeps npm's own separator out of the way;
+    // drop only the leading one so a later `--` still reaches vitest.
+    return !(arg === '--' && all.slice(0, index).every((a) => a !== '--'));
+  });
+  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const exitCode = await runAndReport({
+    command,
+    args: ['run', 'test:release:workspaces', '--', ...passthrough],
+  });
+  process.exit(exitCode);
+}

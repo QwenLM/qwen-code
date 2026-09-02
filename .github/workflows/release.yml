@@ -526,7 +526,13 @@ jobs:
           # Nightly and preview releases may absorb a transient timing failure;
           # stable releases remain strict and never retry a failed test.
           VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}"
-        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
+        # Through the wrapper rather than npm directly: a vitest run can exit
+        # non-zero with every test green (an unhandled error fails the run on
+        # Linux, where dangerouslyIgnoreUnhandledErrors is false), and that
+        # failure carries no FAIL line for anyone to find. The wrapper streams
+        # the suite's output untouched and adds an annotation only for that
+        # case. See run 33576013293: 211 files, 9480 tests passed, exit 1.
+        run: 'node scripts/run-release-workspace-tests.js -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'

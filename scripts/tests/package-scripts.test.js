@@ -458,7 +458,11 @@ describe('package scripts', () => {
     expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
       buildJob.indexOf(buildStep),
     );
-    expect(workspaceTestStep).toContain('npm run test:release:workspaces');
+    // The wrapper runs test:release:workspaces for the job; what matters here
+    // is that the release lane still does not fall back to the CI script.
+    expect(workspaceTestStep).toContain(
+      'node scripts/run-release-workspace-tests.js',
+    );
     expect(workspaceTestStep).not.toContain('npm run test:ci');
     expect(scriptsTestStep).toContain('npm run test:scripts');
     for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {

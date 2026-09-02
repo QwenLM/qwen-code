@@ -537,8 +537,11 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
+    // Through the wrapper, which reports a non-zero exit that no failing test
+    // explains; the sharding, --passWithNoTests and --retry it forwards are
+    // what the suite itself still receives.
     expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"',
+      'node scripts/run-release-workspace-tests.js -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"',
     );
     expect(testStep.env.VITEST_RETRY).toBe(
       "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}",
