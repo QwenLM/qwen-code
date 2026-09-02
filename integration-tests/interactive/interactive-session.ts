@@ -26,6 +26,11 @@ const { Terminal } = xtermHeadless;
 type Terminal = InstanceType<typeof Terminal>;
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from '../renderer-matrix.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -91,7 +96,13 @@ export class InteractiveSession {
 
     const baseEnv = { ...process.env };
     delete baseEnv['NO_COLOR'];
-    const env = options?.env ?? baseEnv;
+    // The renderer matrix pins QWEN_TUI_RENDERER last so a test's own env
+    // cannot silently switch the renderer mid-matrix.
+    const env = {
+      ...baseEnv,
+      ...options?.env,
+      ...e2eRendererEnv(pickE2eRenderer()),
+    };
 
     const terminal = new Terminal({
       cols,
@@ -101,13 +112,17 @@ export class InteractiveSession {
     });
 
     const bundlePath = join(__dirname, '..', '..', 'dist/cli.js');
-    const ptyProcess = pty.spawn('node', [bundlePath, ...args], {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd,
-      env: env as Record<string, string>,
-    });
+    const ptyProcess = pty.spawn(
+      resolveE2eCliCommand(pickE2eRenderer()),
+      [bundlePath, ...args],
+      {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env: env as Record<string, string>,
+      },
+    );
 
     const session = new InteractiveSession(ptyProcess, terminal);
     await session.waitFor('Type your message', 30_000);
