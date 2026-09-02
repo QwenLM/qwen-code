@@ -458,6 +458,26 @@ describe('restoreWorktreeContext', () => {
     expect(warnings.length).toBeGreaterThan(0);
   });
 
+  it('rejects and clears a sidecar that names the managed root itself', async () => {
+    const managedRoot = path.join(tmpDir, '.qwen', 'worktrees');
+    await fs.mkdir(managedRoot, { recursive: true });
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      originalCwd: tmpDir,
+      worktreePath: managedRoot,
+    });
+    const warnings: unknown[] = [];
+
+    const result = await restoreWorktreeContext(filePath, (error) =>
+      warnings.push(error),
+    );
+
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+    expect(warnings).toHaveLength(1);
+  });
+
   it('cleans up stale sidecar when worktree dir is gone', async () => {
     // sample.worktreePath points at /repo/.qwen/... which does not exist.
     await writeWorktreeSession(filePath, sample);

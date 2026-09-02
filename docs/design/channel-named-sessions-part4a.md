@@ -447,20 +447,28 @@ repair/retry. If an absent sidecar is indistinguishable from an ordinary shared
 session at the route, the Channel bridge/SDK response validator performs the
 same client detach before it rejects the missing attestation.
 
-For Channel-owned restores with a Part 4A sidecar, or with sidecar state whose
-ownership cannot be classified safely, the daemon route sets an internal ACP
-metadata flag that suppresses the generic best-effort worktree restore
-performed by the ACP agent. That best-effort path clears sidecars it deems
-invalid, so suppressing it is what keeps Channel restore failure
-non-destructive. The route then owns the strict sidecar, marker, containment,
-and relocation checks. A persisted ask-user prompt is deferred until those
-checks and any required relocation succeed, then fired exactly once; this
-prevents the prompt from blocking relocation while preserving it on a valid
-restore. A structurally valid legacy sidecar without the Part 4A `workspaceCwd`
-attestation keeps the pre-existing generic best-effort restore behavior and may
-return worktree metadata without `worktreeState`. It is never upgraded to
-Part 4A isolation. The suppression and deferral are not applied to other load
-and resume callers.
+For restores of sessions whose persisted creation source is Channel-owned, a
+Part 4A sidecar or sidecar state whose ownership cannot be classified safely
+causes the daemon route to set an internal ACP metadata flag that suppresses
+the generic best-effort worktree restore performed by the ACP agent. Persisted
+source metadata takes precedence over the current load/resume caller. The
+best-effort path clears sidecars it deems invalid, so suppressing it is what
+keeps these Channel-sourced restore failures non-destructive. The route then
+owns the strict sidecar, marker, containment, and relocation checks. A
+persisted ask-user prompt is deferred until those checks and any required
+relocation succeed, then fired exactly once; this prevents the prompt from
+blocking relocation while preserving it on a valid restore. A structurally
+valid legacy sidecar without the Part 4A `workspaceCwd` attestation keeps the
+pre-existing generic best-effort restore behavior and may return worktree
+metadata without `worktreeState`. It is never upgraded to Part 4A isolation.
+Sessions without a persisted Channel source also retain the generic behavior.
+
+Missing or invalid marker ownership intentionally fails closed and preserves
+the uncertain checkout evidence, even though a task-local `git clean -fdx` can
+remove the ignored marker and make that task unavailable. Repair and
+re-attestation of such retained worktrees is explicit follow-up scope; Part 4A
+does not recreate a missing marker or silently downgrade the task to the shared
+workspace.
 
 Shared loads otherwise retain current behavior. Part 4A does not reinterpret a
 shared task if some independent in-session mechanism later changes its cwd.

@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { NamedSessionManager } from './named-session-manager.js';
+import { canonicalizeWorkspacePath } from './paths.js';
 import { SessionRouter } from './SessionRouter.js';
 
 function createBridge(): ChannelAgentBridge {
@@ -711,9 +712,10 @@ describe('NamedSessionManager', () => {
       isolation: 'worktree',
       active: true,
     });
-    expect(router.getSessionCwd(created.sessionId)).toBe(
+    const worktreeCwd = canonicalizeWorkspacePath(
       `/worktrees/${created.sessionId}`,
     );
+    expect(router.getSessionCwd(created.sessionId)).toBe(worktreeCwd);
     await named.close(alice, 'feature');
     await expect(named.use(alice, 'feature')).resolves.toMatchObject({
       sessionId: created.sessionId,
@@ -732,9 +734,11 @@ describe('NamedSessionManager', () => {
       workspaceCwd: string;
       owners: Array<{ tasks: Array<{ cwd: string; isolation: string }> }>;
     };
-    expect(persisted.workspaceCwd).toBe('/workspace');
+    expect(persisted.workspaceCwd).toBe(
+      canonicalizeWorkspacePath('/workspace'),
+    );
     expect(persisted.owners[0]?.tasks[0]).toMatchObject({
-      cwd: `/worktrees/${created.sessionId}`,
+      cwd: worktreeCwd,
       isolation: 'worktree',
     });
   });
@@ -771,7 +775,9 @@ describe('NamedSessionManager', () => {
     const normalized = JSON.parse(readFileSync(filePath, 'utf8')) as {
       workspaceCwd?: string;
     };
-    expect(normalized.workspaceCwd).toBe('/workspace');
+    expect(normalized.workspaceCwd).toBe(
+      canonicalizeWorkspacePath('/workspace'),
+    );
   });
 
   it('restores the open presentation when close detachment rolls back', async () => {

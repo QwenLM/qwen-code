@@ -3427,6 +3427,16 @@ export function registerSessionRoutes(
             await new GitWorktreeService(workspaceCwd)
               .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
               .catch(() => {});
+          } else {
+            daemonLog?.warn(
+              'worktree preserved after persistence cleanup was inconclusive',
+              {
+                sessionId: session.sessionId,
+                slug: worktreeMeta.slug,
+                worktreePath: worktreeMeta.path,
+                branch: worktreeMeta.branch,
+              },
+            );
           }
           res.status(500).json({
             error: 'Failed to persist worktree session ownership',
@@ -3973,6 +3983,7 @@ export function registerSessionRoutes(
             const sidecar = sidecarResult.session;
             let realTarget: string | undefined;
             let candidateRoots: string[] = [];
+            let validationError: unknown;
             try {
               const workspaceRoots = [fs.realpathSync(workspaceCwd)];
               let repoTop: string | null = null;
@@ -4002,22 +4013,29 @@ export function registerSessionRoutes(
                   const realRoot = fs.realpathSync(root);
                   const relative = path.relative(realRoot, realTarget!);
                   return (
-                    !relative.startsWith('..') && !path.isAbsolute(relative)
+                    relative.length > 0 &&
+                    !relative.startsWith('..') &&
+                    !path.isAbsolute(relative)
                   );
                 } catch {
                   return false;
                 }
               });
               if (!contained) {
-                realTarget = undefined;
+                throw new Error('worktree sidecar path failed containment');
               }
-            } catch {
+            } catch (error) {
+              validationError = error;
               realTarget = undefined;
             }
             if (!realTarget) {
               daemonLog?.warn('worktree sidecar path failed containment', {
                 sessionId,
                 path: sidecar.worktreePath,
+                error:
+                  validationError instanceof Error
+                    ? validationError.message
+                    : String(validationError),
               });
             } else {
               const worktree = {

@@ -530,10 +530,7 @@ export async function restoreWorktreeContext(
   // (PR #4174 review #3256839787.)
   const expectedParent = path.join(session.originalCwd, '.qwen', 'worktrees');
   const resolvedWorktree = path.resolve(session.worktreePath);
-  if (
-    !resolvedWorktree.startsWith(expectedParent + path.sep) &&
-    resolvedWorktree !== expectedParent
-  ) {
+  if (!resolvedWorktree.startsWith(expectedParent + path.sep)) {
     onWarn?.(
       new Error(
         `worktreePath ${session.worktreePath} is outside ${expectedParent}; ` +
