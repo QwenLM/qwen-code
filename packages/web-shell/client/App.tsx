@@ -15714,7 +15714,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
                           }
