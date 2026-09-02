@@ -576,7 +576,7 @@ describe('release workflow', () => {
       const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
       try {
         const stub = join(dir, 'npm');
-        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
         chmodSync(stub, 0o755);
 
         const result = spawnSync(
@@ -593,7 +593,8 @@ describe('release workflow', () => {
         );
 
         expect(result.status, result.stderr).toBe(0);
-        const args = result.stdout.trim().split('\n');
+        const args = result.stdout.split('\0');
+        expect(args.pop()).toBe('');
         expect(args, retry).toContain('--passWithNoTests');
         // An empty positional would reach vitest as a test-name filter.
         expect(args, retry).not.toContain('');
