@@ -376,7 +376,14 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish --access public --provenance --tag "$NPM_TAG"
+          # Check if the package exists at all — provenance requires an
+          # existing package, so the first publish omits it.
+          if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
+            npm publish --access public --provenance --tag "$NPM_TAG"
+          else
+            echo "::notice::First publish of ${PACKAGE_NAME}; omitting --provenance"
+            npm publish --access public --tag "$NPM_TAG"
+          fi
 
       - name: 'Publish release summary'
         env:
