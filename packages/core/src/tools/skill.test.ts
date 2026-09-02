@@ -2099,6 +2099,111 @@ describe('SkillTool', () => {
     });
   });
 
+  // An extension skill's registry identity carries its owner (`rust:pdf`) while
+  // `skills.*` entries may still name the authored spelling (`pdf`). Both
+  // model-facing guards keep refusing under either spelling because they do not
+  // compare the model's string against a settings list themselves — they consult
+  // `Config.isSkillEnabled`, which resolves both spellings. What these pins own
+  // is the *consult*; the spelling rule inside the predicate is
+  // `config.test.ts`'s, so the predicate is mocked by return value only.
+  describe('qualified extension skill names in the model-facing guards', () => {
+    const qualifiedSkill: SkillConfig = {
+      name: 'rust:pdf',
+      authoredName: 'pdf',
+      description: 'Export the note as a PDF',
+      level: 'extension',
+      extensionName: 'rust',
+      filePath: '/extensions/rust/skills/pdf/SKILL.md',
+      body: 'QUALIFIED_RUST_PDF_BODY',
+    };
+
+    /** A SkillTool whose whole registry is the qualified extension skill. */
+    async function toolWithQualifiedSkill(): Promise<SkillTool> {
+      // `skills.disabled` stays empty on purpose: nothing but the predicate's
+      // verdict can refuse the skill, so a refusal proves the consult happened
+      // rather than a name happening to appear in a settings list.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(new Set());
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        qualifiedSkill,
+      ]);
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+        qualifiedSkill,
+      ]);
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+      // The snapshot collected during construction consults the predicate too;
+      // drop those calls so the assertions below see only the guard's consult.
+      vi.mocked(config.isSkillEnabled).mockClear();
+      return tool;
+    }
+
+    it('validateToolParams: refuses a qualified skill the predicate rejects', async () => {
+      const tool = await toolWithQualifiedSkill();
+      vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+
+      const result = tool.validateToolParams({ skill: 'rust:pdf' });
+
+      expect(result).toContain('is disabled');
+      // The refusal must be the disabled branch, not the tool simply failing
+      // to find a name with a colon in it.
+      expect(result).not.toContain('not found');
+      expect(config.isSkillEnabled).toHaveBeenCalledWith(qualifiedSkill);
+    });
+
+    it('validateToolParams: passes a qualified skill the predicate accepts', async () => {
+      const tool = await toolWithQualifiedSkill();
+      vi.mocked(config.isSkillEnabled).mockReturnValue(true);
+
+      expect(tool.validateToolParams({ skill: 'rust:pdf' })).toBeNull();
+      expect(config.isSkillEnabled).toHaveBeenCalledWith(qualifiedSkill);
+    });
+
+    it('execute: refuses to run a qualified skill the predicate rejects', async () => {
+      const tool = await toolWithQualifiedSkill();
+      vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+      // `loadSkillForRuntime` resolves by name and ignores `skills.disabled`,
+      // so it happily hands back the body. The post-load predicate is the only
+      // thing standing between the model's qualified name and that body: the
+      // pre-load `getDisabledSkillNames().has()` check cannot catch an entry
+      // written under either spelling.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        qualifiedSkill,
+      );
+
+      const invocation = (
+        tool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'rust:pdf' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('is disabled');
+      expect(llmText).not.toContain('QUALIFIED_RUST_PDF_BODY');
+      expect(mockSkillManager.loadSkillForRuntime).toHaveBeenCalledWith(
+        'rust:pdf',
+      );
+      expect(config.isSkillEnabled).toHaveBeenCalledWith(qualifiedSkill);
+    });
+
+    it('execute: runs the qualified skill the predicate accepts', async () => {
+      const tool = await toolWithQualifiedSkill();
+      vi.mocked(config.isSkillEnabled).mockReturnValue(true);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        qualifiedSkill,
+      );
+
+      const invocation = (
+        tool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'rust:pdf' });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toContain(
+        'QUALIFIED_RUST_PDF_BODY',
+      );
+      expect(result.returnDisplay).toBe(qualifiedSkill.description);
+      expect(config.isSkillEnabled).toHaveBeenCalledWith(qualifiedSkill);
+    });
+  });
+
   describe('disabled-skill refreshSkills filter', () => {
     it('drops disabled skills from <available_skills>', async () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(

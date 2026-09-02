@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CommandSource, SlashCommand } from '../ui/commands/types.js';
+import type { SlashCommand } from '../ui/commands/types.js';
+import { t } from '../i18n/index.js';
 import { getEffectiveSupportedModes } from './commandUtils.js';
 
 export type CommandSourceGroup = {
@@ -13,8 +14,68 @@ export type CommandSourceGroup = {
   order: number;
 };
 
+/**
+ * The two fields that identify which extension owns something: the canonical
+ * name (the id) and the localized display name.
+ *
+ * A `SkillConfig` spells these `extensionName` / `extensionDisplayName` and an
+ * `Extension` spells them `name` / `displayName`, so callers adapt rather than
+ * rename — this stays the only place that knows which of the two wins.
+ */
+export type ExtensionOwner = {
+  name?: string;
+  displayName?: string;
+};
+
+/**
+ * Names the extension that owns a command or skill, for display: `Extension:
+ * Rust`.
+ *
+ * Every surface that attributes something to an extension prints this and
+ * nothing else, so "the same owner on every surface" is structural rather than
+ * a property each surface has to reproduce correctly. The display name wins
+ * because it is what the extension author chose to be seen as; the id is the
+ * fallback for an extension that declared none.
+ *
+ * Never recovered by parsing a name: `:` is legal inside a skill name, so a
+ * prefix split can attribute a skill to the wrong owner. Use the stored
+ * fields.
+ *
+ * Lives in `services/` because both a service (this file, for command badges)
+ * and a ui util (skill level labels) need it, and ui importing services is
+ * this codebase's direction.
+ */
+export function extensionOwnerLabel(owner: ExtensionOwner): string {
+  // `||`, not `??`: an extension whose manifest declares `"displayName": ""`
+  // reaches here with an empty string (`resolveLocalizableString` passes a
+  // plain string through untouched and nothing validates the field), which
+  // would print a label with no owner in it.
+  return `${t('Extension:')} ${owner.displayName || owner.name || 'unknown'}`;
+}
+
+/**
+ * Caps the owner text a surface prints, so an unbounded display name cannot
+ * widen the layout it sits in.
+ *
+ * The completion popup sizes its label column to the longest
+ * `label + argumentHint + sourceBadge` row and caps that column at half the
+ * content width (`SuggestionsDisplay.tsx`), while the badge renders in a
+ * `flexShrink: 0` box — so a long display name squeezes the description column
+ * instead of truncating. The help overlay's meta column has the same shape.
+ * 35 leaves the display name the 24 columns every fixed text column here
+ * already uses (`NAME_COLUMN` in the skills dialog) on top of the
+ * `Extension: ` prefix, and keeps the bracketed badge inside the popup's
+ * half-width cap at 80 columns.
+ */
+export const MAX_EXTENSION_OWNER_LABEL_WIDTH = 35;
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
 export function getCommandSourceBadge(
-  command: Pick<SlashCommand, 'source' | 'sourceDetail'>,
+  command: Pick<SlashCommand, 'source' | 'sourceLabel' | 'sourceDetail'>,
 ): string | null {
   switch (command.source) {
     case 'bundled-skill':
@@ -28,7 +89,16 @@ export function getCommandSourceBadge(
       }
       return '[Custom]';
     case 'plugin-command':
-      return command.sourceDetail === 'extension' ? '[Extension]' : '[Plugin]';
+      if (command.sourceDetail !== 'extension') {
+        return '[Plugin]';
+      }
+      // The loader already named the owner; a generic `[Extension]` would
+      // throw away the one piece of provenance the reader needs when several
+      // extensions are installed. `sourceLabel` is display text and may be
+      // localized — that is correct here, this is a display surface.
+      return command.sourceLabel
+        ? `[${truncate(command.sourceLabel, MAX_EXTENSION_OWNER_LABEL_WIDTH)}]`
+        : '[Extension]';
     case 'mcp-prompt':
       return '[MCP]';
     case 'builtin-command':
@@ -123,23 +193,4 @@ export function getCommandSubcommandNames(command: SlashCommand): string[] {
       ?.filter((subCommand) => !subCommand.hidden)
       .map((subCommand) => subCommand.name) ?? []
   );
-}
-
-export function formatCommandSourceLabel(
-  command: Pick<SlashCommand, 'source' | 'sourceLabel'>,
-): string {
-  if (command.sourceLabel) {
-    return command.sourceLabel;
-  }
-
-  const fallbackLabels: Record<CommandSource, string> = {
-    'builtin-command': 'Built-in',
-    'bundled-skill': 'Skill',
-    'skill-dir-command': 'Custom',
-    'plugin-command': 'Plugin',
-    'mcp-prompt': 'MCP',
-    'workflow-command': 'Workflow',
-  };
-
-  return command.source ? fallbackLabels[command.source] : 'Unknown';
 }

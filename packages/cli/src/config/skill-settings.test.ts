@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
   computeWorkspaceSkillListUpdates,
+  lookupSkillDisablement,
   resolveSkillSettings,
+  type SkillDisablement,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
 
@@ -210,5 +212,90 @@ describe('computeWorkspaceSkillListUpdates', () => {
 
     expect(result.enabled).toEqual(['Review']);
     expect(result.enabledChanged).toBe(true);
+  });
+
+  it('writes the registry name and clears only that entry', () => {
+    const updates = computeWorkspaceSkillListUpdates(
+      ['pdf', 'other'],
+      [],
+      [{ name: 'rust:pdf', wasEnabled: false, isEnabled: true }],
+    );
+    // `pdf` is a different skill's legacy entry and must survive untouched:
+    // enabling one skill can never clear a broader disablement.
+    expect(updates.disabled).toEqual(['pdf', 'other']);
+    expect(updates.enabled).toEqual(['rust:pdf']);
+  });
+
+  it('disabling writes the registry name, not the authored one', () => {
+    const updates = computeWorkspaceSkillListUpdates(
+      [],
+      ['rust:pdf'],
+      [{ name: 'rust:pdf', wasEnabled: true, isEnabled: false }],
+    );
+
+    expect(updates.disabled).toEqual(['rust:pdf']);
+    expect(updates.enabled).toEqual([]);
+  });
+});
+
+describe('lookupSkillDisablement', () => {
+  const hard: SkillDisablement = { reason: 'hard', lockedScope: 'user' };
+  const byAuthored = new Map<string, SkillDisablement>([['pdf', hard]]);
+  const byRegistry = new Map<string, SkillDisablement>([['rust:pdf', hard]]);
+  const prefixed = { name: 'rust:pdf', authoredName: 'pdf' };
+
+  it('finds the entry written under the registry name', () => {
+    expect(lookupSkillDisablement(byRegistry, prefixed)).toBe(hard);
+  });
+
+  it('finds the legacy entry written under the authored name', () => {
+    expect(lookupSkillDisablement(byAuthored, prefixed)).toBe(hard);
+  });
+
+  it('prefers the registry-name entry when both spellings are present', () => {
+    const entries = new Map<string, SkillDisablement>([
+      ['pdf', { reason: 'default' }],
+      ['rust:pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
+  it('normalizes the skill name it is given', () => {
+    expect(
+      lookupSkillDisablement(byRegistry, {
+        name: ' RUST:Pdf ',
+        authoredName: ' PDF ',
+      }),
+    ).toBe(hard);
+  });
+
+  it('finds the registry-name entry for a skill with no authored spelling', () => {
+    // Registration omits `authoredName` whenever the two spellings coincide, so
+    // the registry name is the only key this lookup can be handed.
+    expect(lookupSkillDisablement(byRegistry, { name: 'rust:pdf' })).toBe(hard);
+  });
+
+  it('does not match another extension skill that shares the authored name', () => {
+    // A restriction on `other:pdf` says nothing about `rust:pdf`: the authored
+    // spelling is shared across extensions, the registry identity is not.
+    expect(
+      lookupSkillDisablement(
+        new Map<string, SkillDisablement>([['other:pdf', hard]]),
+        { name: 'rust:pdf', authoredName: 'pdf' },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('still matches a skill that has one spelling', () => {
+    expect(
+      lookupSkillDisablement(
+        new Map<string, SkillDisablement>([['review', hard]]),
+        { name: 'review' },
+      ),
+    ).toBe(hard);
+    expect(
+      lookupSkillDisablement(byAuthored, { name: 'review', authoredName: '' }),
+    ).toBeUndefined();
   });
 });

@@ -105,7 +105,11 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import type { SkillLevel } from '../skills/types.js';
+import {
+  authoredSkillName,
+  skillRestrictionNames,
+  type SkillLevel,
+} from '../skills/types.js';
 import {
   PermissionManager,
   type ToolRegistrationStatus,
@@ -1540,6 +1544,78 @@ function normalizeModelFallbacks(raw: string[] | undefined): string[] {
     if (result.length >= MAX_MODEL_FALLBACKS) break;
   }
   return result;
+}
+
+/**
+ * Startup warnings for `skills.enabled` entries written before extension
+ * skills carried their owner: a bare entry that matches an extension skill's
+ * authored name — but no registry identity — enables nothing, and the user
+ * editing settings.json has no other surface that names the qualified
+ * replacement.
+ */
+export function bareEnabledGrantWarnings(
+  enabled: ReadonlySet<string>,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+): string[] {
+  if (enabled.size === 0) return [];
+  const registry = new Set(
+    skills.map((skill) => skill.name.trim().toLowerCase()),
+  );
+  const warnings: string[] = [];
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    // A bare entry that IS some registry identity enables that skill; the
+    // shadowing is a separate, pre-existing concern, not a stale grant.
+    if (registry.has(authored)) continue;
+    if (!enabled.has(authored)) continue;
+    warnings.push(
+      `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
+        `longer enables the extension skill '${skill.name}'. Replace it ` +
+        `with '${skill.name}'.`,
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Startup warnings for the mirror trap: a qualified opt-in that a bare
+ * disable entry still blocks. Disable entries match a skill under either
+ * spelling, so `skills.enabled: ['rust:pdf']` does not get past a bare `pdf`
+ * in `skills.disabled` or `skills.defaultDisabled`; a defaultDisabled entry
+ * is cancelled only by the identical spelling, a disabled entry never. Left
+ * unwarned, the pair reads as if the enable wins.
+ */
+export function bareDisablementBlocksQualifiedGrantWarnings(
+  enabled: ReadonlySet<string>,
+  disabledNames: ReadonlySet<string>,
+  skills: ReadonlyArray<{ name: string; authoredName?: string }>,
+): string[] {
+  if (enabled.size === 0 || disabledNames.size === 0) return [];
+  const registry = new Set(
+    skills.map((skill) => skill.name.trim().toLowerCase()),
+  );
+  const warnings: string[] = [];
+  for (const skill of skills) {
+    const authored = authoredSkillName(skill).trim().toLowerCase();
+    const registryName = skill.name.trim().toLowerCase();
+    if (authored === registryName) continue;
+    if (registry.has(authored)) continue;
+    if (!enabled.has(registryName)) continue;
+    // An identical-spelling enabled entry already cancels a defaultDisabled
+    // one at resolution, and the stale-grant warning owns bare enables.
+    if (enabled.has(authored)) continue;
+    if (!disabledNames.has(authored)) continue;
+    warnings.push(
+      `Warning: skills.enabled opts in '${registryName}' but a bare ` +
+        `'${authored}' entry still blocks it — disable entries match under ` +
+        `either spelling; a skills.defaultDisabled entry is cancelled only ` +
+        `by the identical spelling, and skills.disabled never is. Write ` +
+        `'${registryName}' in both lists, or remove '${authored}'.`,
+    );
+  }
+  return warnings;
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
@@ -3417,6 +3493,24 @@ export class Config {
         await this.skillManager.startWatching();
       }
       this.debugLogger.debug('Skill manager initialized');
+      if (this.enabledSkillNamesProvider) {
+        try {
+          const enabledNames = this.enabledSkillNamesProvider();
+          const skills = await this.skillManager.listSkills();
+          this.warnings.push(
+            ...bareEnabledGrantWarnings(enabledNames, skills),
+            ...bareDisablementBlocksQualifiedGrantWarnings(
+              enabledNames,
+              this.getDisabledSkillNames(),
+              skills,
+            ),
+          );
+        } catch (error) {
+          this.debugLogger.warn(
+            `Skill settings migration warning skipped: ${getErrorMessage(error)}`,
+          );
+        }
+      }
     } else {
       this.skillManager = null;
       this.debugLogger.debug('Skill manager skipped');
@@ -6189,11 +6283,18 @@ export class Config {
 
   isSkillEnabled(skill: {
     name: string;
+    authoredName?: string;
     level?: string;
     filePath?: string;
     extensionName?: string;
   }): boolean {
-    const name = skill.name.trim().toLowerCase();
+    // Two spellings of one skill: `name` is the registry identity, which for
+    // an extension skill carries its owner (`rust:pdf`). The manifest and the
+    // workspace extension-skill store both key on the authored spelling, so
+    // that is what the ownership lookup and the stored state are asked for.
+    // `authoredName` is absent whenever the two spellings are the same.
+    const registryName = skill.name.trim().toLowerCase();
+    const authoredName = authoredSkillName(skill).trim().toLowerCase();
     const extension =
       skill.level === 'extension'
         ? this.getExtensions().find(
@@ -6201,17 +6302,28 @@ export class Config {
               candidate.name === skill.extensionName &&
               candidate.skills?.some(
                 (owned) =>
-                  owned.name.trim().toLowerCase() === name &&
+                  owned.name.trim().toLowerCase() === authoredName &&
                   owned.filePath === skill.filePath,
               ),
           )
         : undefined;
     if (skill.level === 'extension' && !extension?.isActive) return false;
-    if (this.getDisabledSkillNames().has(name)) return false;
-    if (!extension || this.enabledSkillNamesProvider?.().has(name)) return true;
+    // A restriction blocks under either spelling, so renaming a skill cannot
+    // un-block it. `skills.enabled` is a grant and matches the registry
+    // identity only: a bare `enabled: ['pdf']` opens nothing once `pdf` is
+    // registered as `rust:pdf`.
+    const disabledNames = this.getDisabledSkillNames();
+    if (
+      skillRestrictionNames(skill).some((entry) => disabledNames.has(entry))
+    ) {
+      return false;
+    }
+    if (!extension || this.enabledSkillNamesProvider?.().has(registryName)) {
+      return true;
+    }
     const state = this.extensionManager.getExtensionSkillState(
       extension.id,
-      skill.name,
+      authoredSkillName(skill),
     );
     return state.workspaceEnabled ?? state.defaultEnabled;
   }

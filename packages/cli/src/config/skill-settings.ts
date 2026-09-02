@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { skillRestrictionNames } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from './settings.js';
 
 export interface SkillDisablement {
@@ -91,6 +92,37 @@ export function resolveSkillSettings(
     enabledNames: enabled,
     disablements,
   };
+}
+
+/**
+ * Finds the settings entry a surface should blame for a skill, in a map keyed
+ * by settings-entry name.
+ *
+ * A restriction blocks a skill under either spelling — `name` is the registry
+ * identity and carries the extension prefix, `authoredName` is what an existing
+ * entry may hold from before that prefix existed — so a lookup that keys on one
+ * of them silently reports "nothing blocks this". The wrong reason, or no
+ * reason, on a row the config has already gated: the picker then offers a
+ * toggle that appears to do nothing. `skillRestrictionNames` already returns
+ * both spellings normalized and registry-first, so there is nothing to
+ * re-normalize here and the registry-name entry wins a tie.
+ */
+export function lookupSkillSetting<T>(
+  entries: ReadonlyMap<string, T>,
+  skill: { name: string; authoredName?: string },
+): T | undefined {
+  for (const name of skillRestrictionNames(skill)) {
+    const found = entries.get(name);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+export function lookupSkillDisablement(
+  disablements: ReadonlyMap<string, SkillDisablement>,
+  skill: { name: string; authoredName?: string },
+): SkillDisablement | undefined {
+  return lookupSkillSetting(disablements, skill);
 }
 
 function updateTarget(

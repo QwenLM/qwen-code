@@ -256,8 +256,12 @@ export function SuggestionsDisplay({
                 ? { width: labelColumnWidth, flexShrink: 0 as const }
                 : { flexShrink: 1 as const })}
             >
-              <Box>
-                <Box flexShrink={0}>{labelElement}</Box>
+              {/* One truncating line: a flexShrink-0 label plus a wrappable
+                  badge let a qualified name + owner badge overflow the
+                  half-width column and wrap the badge one character per
+                  line. */}
+              <Text wrap="truncate-end">
+                {labelElement}
                 {suggestion.argumentHint && (
                   <Text color={theme.text.secondary}>
                     {' '}
@@ -267,7 +271,7 @@ export function SuggestionsDisplay({
                 {suggestion.sourceBadge && (
                   <Text color={textColor}> {suggestion.sourceBadge}</Text>
                 )}
-              </Box>
+              </Text>
             </Box>
 
             {suggestion.description && (

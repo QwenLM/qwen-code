@@ -85,6 +85,34 @@ describe('extension skill activity helpers', () => {
     );
   });
 
+  it('matches a registry-qualified skill through its authored name', () => {
+    // The registry names an extension skill `ext:audit` while the manifest —
+    // what `inactiveExtensionSkillRefs` reads — keeps `audit`. Without the
+    // authored-name fallback the lookup misses, which reads as "not inactive"
+    // and would expose an inactive extension's skill.
+    const refs = inactiveExtensionSkillRefs(
+      configWithExtensions([
+        extension({
+          name: 'ext',
+          isActive: false,
+          skills: [extensionSkill('audit')],
+        }),
+      ]),
+    );
+
+    expect(
+      isInactiveExtensionSkill(
+        {
+          name: 'ext:audit',
+          authoredName: 'audit',
+          level: 'extension',
+          extensionName: 'ext',
+        },
+        refs,
+      ),
+    ).toBe(true);
+  });
+
   it('ignores skills from active extensions', () => {
     const refs = inactiveExtensionSkillRefs(
       configWithExtensions([

@@ -25,6 +25,8 @@ If you want to invoke a Skill explicitly, type it as a slash command using the S
 
 Start typing `/` to autocomplete and browse available Skills alongside their descriptions. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively.
 
+`<skill-name>` is always the Skill's registered name. For a Skill from an installed extension that name carries its owner — `rust:pdf`, not `pdf` — so you type `/rust:pdf`. See [How extension Skills are named](#how-extension-skills-are-named).
+
 > **Note:** If you previously ran a Skill with `/skills <skill-name>`, that syntax now just opens the Skills panel and ignores the trailing argument. Use `/<skill-name>` to run a Skill directly.
 
 ### Benefits
@@ -133,7 +135,7 @@ Show concrete examples of using this Skill.
 
 Qwen Code currently validates that:
 
-- `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time.
+- `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time. The admitted `:` is what lets a Skill registered by an extension (`rust:pdf`) and an author who chooses a colon themselves (`rust:chat`, written inside the `rust` extension) share one pattern, so a colon in a registered name is not proof of an owner — see [How extension Skills are named](#how-extension-skills-are-named).
 - `description` is a non-empty string
 - `priority` is optional. When present, it must be a finite number. Higher values sort earlier in the `/skills` listing only — slash-command completion (typing `/`) and the `/help` custom commands view stay alphabetical, so a high-priority Skill never reorders built-in commands. Omitted or invalid values are treated as unset, which behaves like `0`.
 
@@ -233,6 +235,33 @@ Extensions can provide custom skills that become available when the extension is
 Extension skills are automatically discovered and loaded when the extension is installed and enabled.
 
 To see which extensions provide skills, check the extension's `qwen-extension.json` file for a `skills` field.
+
+#### How extension Skills are named
+
+Qwen Code registers a Skill from an installed extension as `<extensionName>:<name>`, where `<extensionName>` is the `name` field of that extension's `qwen-extension.json` and `<name>` is the Skill's own frontmatter `name`. A Skill named `pdf` in the `rust` extension is registered as `rust:pdf`.
+
+The prefix is added while the Skill is loaded, not written into the file: your `SKILL.md` keeps the name you authored, and Qwen Code never recovers the authored name by splitting the registered one apart (an author may legitimately write `rust:chat` inside `rust`). Only extension Skills are prefixed — personal, project, and bundled Skills keep the single spelling you authored.
+
+Use the registered name everywhere you refer to the Skill:
+
+- Invoke it as `/rust:pdf`. The bare `/pdf` is not an alias — the extension's Skill is reachable only under its registered name.
+- The model calls it as `Skill { skill: "rust:pdf" }`, the same name it reads in `<available_skills>`.
+- Two extensions that each ship a Skill named `pdf` give you two Skills (`rust:pdf` and `docs-suite:pdf`) rather than one winning and one disappearing.
+
+The surfaces where you read and choose Skills also name the owner: the Skills panel (including the rows a setting has locked), the read-only listing a bare `/skills` prints outside the interactive UI (ACP and other non-interactive modes — interactively the command opens the panel), and the badge in the `/` command palette, which reads `[Extension: Rust]` rather than a bare `[Extension]`. Those labels prefer the extension's `displayName` and fall back to its `name` when it declares none.
+
+#### Extension Skills and the `skills.*` settings
+
+`skills.disabled`, `skills.defaultDisabled`, and `slashCommands.disabled` match an extension Skill under **either** spelling, so a `skills.disabled: ["pdf"]` you wrote before the prefix existed still hides `rust:pdf`. A restriction can only remove capability, so renaming a Skill is not allowed to lift one.
+
+`skills.enabled` is the exception, and the one visible change for an existing settings file: it grants capability, so it matches the registered name only. `skills.enabled: ["pdf"]` no longer opts an extension's `pdf` in — write `skills.enabled: ["rust:pdf"]`.
+
+Toggling a Skill in the Skills panel writes the registered name and removes only that entry, so enabling `rust:pdf` leaves a legacy `disabled: ["pdf"]` untouched. When that legacy entry sits in a higher scope — system defaults, user, or system settings — the panel says so and locks the row, naming the scope to edit rather than offering a toggle that cannot move it. A legacy entry in this workspace's own settings is not detected that way: the row stays toggleable, and switching it on writes `skills.enabled: ["rust:pdf"]`, which cannot beat a hard `skills.disabled`. Remove or rename the `pdf` entry in the workspace `skills.disabled` list yourself.
+
+Two limits worth knowing:
+
+- Cross-level precedence is unchanged and still compares registered names exactly (`project` > `user` > `extension` > `bundled`), so a personal or project Skill you author as `rust:pdf` outranks the extension's `pdf`. Bare-name collisions between a personal or project Skill and a bundled Skill are likewise still settled by that precedence, not by the prefix. A Skill that collides with a custom command is not — on the slash surface the last loader wins, and custom commands load after Skills, so `/pdf` runs the custom command while the Skill stays available to the model.
+- Skill names are also used as filenames: the file a Skill reads its invocation arguments from replaces every character outside `[A-Za-z0-9._-]` with `_`, so an extension Skill registered as `rust:pdf` and a personal or project Skill authored `rust_pdf` both resolve to `qwen-skill-args-rust_pdf.txt` and share one arguments file. (The prefix does not collide with itself: `rust:rust_pdf` becomes `rust_rust_pdf`.) Non-ASCII letters fold the same way, so an authored `café` and an authored `caf_` land on `caf_` too — a limitation that predates the prefix, which only makes it easier to hit. Avoid a Skill name that is another name with `:` turned into `_`.
 
 To view available Skills, ask Qwen Code directly:
 

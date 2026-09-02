@@ -69,6 +69,53 @@ describe('mapSkillConfigToStatus', () => {
     expect(status.lockedScope).toBe('user');
   });
 
+  it('reports a legacy bare disable entry as the one blocking a prefixed skill', () => {
+    // The disablement map is keyed by settings-entry name, so the row for a
+    // skill registered as `acme:pdf` has to be found under either spelling.
+    // A miss reads as "nothing blocks this", and the row offers a toggle
+    // that appears to do nothing.
+    const disablements = new Map([
+      ['pdf', { reason: 'hard', lockedScope: 'user' } as const],
+    ]);
+
+    expect(
+      mapSkillConfigToStatus(
+        makeSkill({
+          name: 'acme:pdf',
+          authoredName: 'pdf',
+          level: 'extension',
+          extensionName: 'acme',
+        }),
+        disablements,
+      ),
+    ).toMatchObject({
+      status: 'disabled',
+      name: 'acme:pdf',
+      disabledReason: 'hard',
+      lockedScope: 'user',
+    });
+  });
+
+  it('does not blame a prefixed disable entry on a different skill of the same authored name', () => {
+    // `other:pdf` is a restriction on another extension's skill. Matching the
+    // authored part alone would disable this row for a rule that is not about
+    // it — and the same mistake in the reverse direction is a privilege
+    // escalation, so the pair is checked both ways.
+    const disablements = new Map([['other:pdf', { reason: 'hard' } as const]]);
+
+    expect(
+      mapSkillConfigToStatus(
+        makeSkill({
+          name: 'acme:pdf',
+          authoredName: 'pdf',
+          level: 'extension',
+          extensionName: 'acme',
+        }),
+        disablements,
+      ),
+    ).not.toHaveProperty('disabledReason');
+  });
+
   it('marks a forced-disabled skill as disabled', () => {
     const status = mapSkillConfigToStatus(
       makeSkill(),

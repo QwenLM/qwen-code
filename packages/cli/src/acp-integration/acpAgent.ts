@@ -142,6 +142,7 @@ import {
   listSavedWorkflows,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
+  qualifySkillName,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -7118,7 +7119,15 @@ class QwenAgent implements Agent {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
           const extensionName = extension.name;
-          const key = `extension:${extensionName}:${skill.name}`;
+          // The registry rows above key on the qualified name; the manifest
+          // still holds the authored spelling. Qualify it here or the two keys
+          // never meet, and a stale registry row plus its manifest entry emit
+          // the same skill twice under two names. What the manifest-only rows
+          // display is unchanged.
+          const key = `extension:${extensionName}:${qualifySkillName(
+            extensionName,
+            skill.name,
+          )}`;
           if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
