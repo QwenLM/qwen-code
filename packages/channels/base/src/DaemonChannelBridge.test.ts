@@ -1034,9 +1034,9 @@ describe('DaemonChannelBridge', () => {
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
     });
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
+    const backgroundResponses: unknown[][] = [];
+    bridge.on('backgroundResponse', (sessionId, text, context) => {
+      backgroundResponses.push([sessionId, text, context]);
     });
 
     await bridge.start();
@@ -1057,6 +1057,36 @@ describe('DaemonChannelBridge', () => {
           _meta: {
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              label: 'dependency check',
+              turnComplete: false,
+            },
+          },
+        },
+      },
+    });
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              label: 'dependency check',
+              turnComplete: true,
+            },
           },
         },
       },
@@ -1064,7 +1094,28 @@ describe('DaemonChannelBridge', () => {
 
     await vi.waitFor(() => {
       expect(backgroundResponses).toEqual([
-        ['session-1', 'Background final answer.'],
+        [
+          'session-1',
+          'Background final answer.',
+          {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: false,
+          },
+        ],
+        [
+          'session-1',
+          '',
+          {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: true,
+          },
+        ],
       ]);
     });
 

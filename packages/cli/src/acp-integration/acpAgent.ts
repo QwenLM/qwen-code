@@ -10072,6 +10072,7 @@ class QwenAgent implements Agent {
         const status = params['status'];
         const kind = params['kind'];
         const toolUseId = params['toolUseId'];
+        const label = params['label'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -10135,6 +10136,17 @@ class QwenAgent implements Agent {
             'Invalid background notification toolUseId',
           );
         }
+        if (
+          label !== undefined &&
+          (typeof label !== 'string' ||
+            label.trim().length === 0 ||
+            label.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification label',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
@@ -10143,6 +10155,7 @@ class QwenAgent implements Agent {
           status,
           kind,
           ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+          ...(typeof label === 'string' ? { label } : {}),
         });
         return { sessionId, accepted: result.accepted };
       }

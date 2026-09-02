@@ -10229,14 +10229,27 @@ describe('ChannelBase', () => {
         registerBridgeEvents: true,
       } as unknown as ChannelBaseOptions);
       ch.proactiveSupported = true;
+      const dispatch = vi.spyOn(ch, 'dispatchBackgroundResponse');
+      const context = {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent' as const,
+        turnComplete: true,
+      };
 
       (bridge as unknown as EventEmitter).emit(
         'backgroundResponse',
         's-1',
         'Background final answer.',
+        context,
       );
 
       await vi.waitFor(() => {
+        expect(dispatch).toHaveBeenCalledWith(
+          's-1',
+          'Background final answer.',
+          context,
+        );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'Background final answer.' },
         ]);

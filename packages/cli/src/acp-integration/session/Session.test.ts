@@ -9674,7 +9674,13 @@ describe('Session', () => {
         .calls[0][0] as (
         displayText: string,
         modelText: string,
-        meta: { agentId: string; status: string; toolUseId?: string },
+        meta: {
+          agentId: string;
+          status: string;
+          toolUseId?: string;
+          todoWorkChainId?: string;
+          label?: string;
+        },
       ) => void;
 
       callback(
@@ -9684,6 +9690,8 @@ describe('Session', () => {
           agentId: 'agent-1',
           status: 'completed',
           toolUseId: 'tool-1',
+          todoWorkChainId: 'work-chain-1',
+          label: 'worker',
         },
       );
 
@@ -9751,6 +9759,8 @@ describe('Session', () => {
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
+              label: 'worker',
+              turnComplete: true,
             },
           },
         },
@@ -9765,10 +9775,292 @@ describe('Session', () => {
       );
     });
 
-    it('attaches structured agent metadata built from the canonical entry label', async () => {
+    it('marks only the final response segment of a background notification turn complete', async () => {
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'I will inspect first.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'The final finding.' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              source: 'background_notification_response',
+              backgroundTask: expect.objectContaining({ turnComplete: true }),
+            }),
+          }),
+        });
+      });
+      const responses = (
+        mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+      ).mock.calls
+        .map(([params]) => params as SessionNotification)
+        .filter(
+          (params) =>
+            params.update._meta?.['source'] ===
+            'background_notification_response',
+        );
+      expect(responses).toEqual([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'I will inspect first.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: false,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'The final finding.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: true,
+              }),
+            }),
+          }),
+        }),
+      ]);
+    });
+
+    it('marks a buffered background response complete when a later model iteration fails', async () => {
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'Partial finding.' }] } },
+                ],
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockRejectedValueOnce(new Error('model failed'));
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; label?: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+        label: 'worker',
+      });
+
+      const sessionUpdate = mockClient.sessionUpdate as ReturnType<
+        typeof vi.fn
+      >;
+      await vi.waitFor(() => {
+        expect(
+          sessionUpdate.mock.calls.filter(
+            ([params]) =>
+              (params as SessionNotification).update._meta?.['source'] ===
+              'background_notification_response',
+          ),
+        ).toHaveLength(2);
+      });
+      const responseCallIndexes = sessionUpdate.mock.calls
+        .map(([params], index) => ({
+          index,
+          params: params as SessionNotification,
+        }))
+        .filter(
+          ({ params }) =>
+            params.update._meta?.['source'] ===
+            'background_notification_response',
+        );
+      const responses = responseCallIndexes.map(({ params }) => params);
+      expect(responses).toEqual([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'Partial finding.' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: false,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: '' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: true,
+              }),
+            }),
+          }),
+        }),
+      ]);
+      const endTurnCallIndex = (
+        mockClient.extNotification as ReturnType<typeof vi.fn>
+      ).mock.calls.findIndex(
+        ([method, params]) =>
+          method === '_qwencode/end_turn' &&
+          (params as { source?: string }).source === 'background_notification',
+      );
+      expect(endTurnCallIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        sessionUpdate.mock.invocationCallOrder[
+          responseCallIndexes.at(-1)!.index
+        ],
+      ).toBeLessThan(
+        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[endTurnCallIndex]!,
+      );
+    });
+
+    it('does not emit an empty completion marker without buffered response text', async () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          expect.objectContaining({ source: 'background_notification' }),
+        );
+      });
+      expect(
+        (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([params]) =>
+            (params as SessionNotification).update._meta?.['source'] ===
+            'background_notification_response',
+        ),
+      ).toBe(false);
+    });
+
+    it('attaches structured agent metadata built from the canonical entry label', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'done' }] } }],
+              },
+            },
+          ]),
+        );
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'agent-1',
@@ -9829,6 +10121,21 @@ describe('Session', () => {
           description: 'Explore: worker task',
         }),
       );
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'done' },
+            _meta: expect.objectContaining({
+              source: 'background_notification_response',
+              backgroundTask: expect.objectContaining({
+                label: 'worker task',
+                turnComplete: true,
+              }),
+            }),
+          }),
+        });
+      });
     });
 
     it('attaches structured monitor metadata with event and dropped-line counts', async () => {
@@ -11300,6 +11607,7 @@ describe('Session', () => {
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
+              turnComplete: true,
             },
           },
         },

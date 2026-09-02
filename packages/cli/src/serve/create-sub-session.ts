@@ -282,6 +282,7 @@ function buildSentCompletionNotification(
     taskId: sessionId,
     status,
     kind: 'agent' as const,
+    label: modelLabel,
   };
 }
 
@@ -1001,7 +1002,7 @@ export function createSubSessionLauncher(
               if (notifySentCompletion) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  subSessionName(info.name ?? info.prompt),
+                  subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
                 );
@@ -1012,7 +1013,7 @@ export function createSubSessionLauncher(
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
-                subSessionName(info.name ?? info.prompt),
+                subSessionName(info.name ?? info.prompt, false),
                 message,
                 'error',
               );

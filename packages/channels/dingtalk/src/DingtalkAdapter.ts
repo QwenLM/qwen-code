@@ -57,6 +57,7 @@ import { StatusCardController } from './status-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
+  BackgroundResponseContext,
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
@@ -584,6 +585,7 @@ function formatChatRecord(
 
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS = 10 * 60 * 1000;
 
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
@@ -796,6 +798,14 @@ type DingtalkChannelConfig = ChannelConfig & {
   interactiveCards?: unknown;
 };
 
+interface BackgroundResponseAggregation {
+  sessionId: string;
+  status: string;
+  label?: string;
+  parts: string[];
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
@@ -851,6 +861,10 @@ export class DingtalkChannel extends ChannelBase {
   // must be dropped, because recreating state would post the tail of a
   // force-split [FILE: ...] marker verbatim.
   private readonly blockProjectionArmed = new Set<string>();
+  private readonly backgroundResponseAggregations = new Map<
+    string,
+    BackgroundResponseAggregation
+  >();
 
   constructor(
     name: string,
@@ -1690,6 +1704,10 @@ export class DingtalkChannel extends ChannelBase {
       clearInterval(this.dedupTimer);
     }
     this.statusCardController?.dispose();
+    for (const aggregation of this.backgroundResponseAggregations.values()) {
+      if (aggregation.timer) clearTimeout(aggregation.timer);
+    }
+    this.backgroundResponseAggregations.clear();
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     if (this.connectionManager) {
@@ -1795,6 +1813,12 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
+    for (const [key, aggregation] of this.backgroundResponseAggregations) {
+      if (aggregation.sessionId === sessionId) {
+        if (aggregation.timer) clearTimeout(aggregation.timer);
+        this.backgroundResponseAggregations.delete(key);
+      }
+    }
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -2029,6 +2053,105 @@ export class DingtalkChannel extends ChannelBase {
         `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     });
+  }
+
+  /**
+   * Buffer each background Agent's model segments until its notification turn
+   * ends, then deliver them as one ordinary Markdown message.
+   */
+  override async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+    context?: BackgroundResponseContext,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      context?.kind !== 'agent' ||
+      typeof context.turnComplete !== 'boolean'
+    ) {
+      return super.dispatchBackgroundResponse(sessionId, text, context);
+    }
+
+    const key = JSON.stringify([sessionId, context.taskId]);
+    const aggregation = this.backgroundResponseAggregations.get(key);
+    if (!aggregation && text.trim().length === 0) {
+      return super.dispatchBackgroundResponse(sessionId, text, context);
+    }
+
+    const current =
+      aggregation ??
+      this.createBackgroundResponseAggregation(key, sessionId, context);
+    current.status = context.status;
+    current.label = context.label ?? current.label;
+    if (text.trim().length > 0) current.parts.push(text);
+
+    if (!context.turnComplete) {
+      this.scheduleBackgroundResponseAggregationFlush(key, current);
+      return;
+    }
+
+    if (current.timer) clearTimeout(current.timer);
+    this.backgroundResponseAggregations.delete(key);
+    await super.dispatchBackgroundResponse(
+      sessionId,
+      this.formatBackgroundResponseAggregation(current, false),
+      context,
+    );
+  }
+
+  private createBackgroundResponseAggregation(
+    key: string,
+    sessionId: string,
+    context: BackgroundResponseContext,
+  ): BackgroundResponseAggregation {
+    const aggregation: BackgroundResponseAggregation = {
+      sessionId,
+      status: context.status,
+      label: context.label,
+      parts: [],
+    };
+    this.backgroundResponseAggregations.set(key, aggregation);
+    return aggregation;
+  }
+
+  private scheduleBackgroundResponseAggregationFlush(
+    key: string,
+    aggregation: BackgroundResponseAggregation,
+  ): void {
+    if (aggregation.timer) clearTimeout(aggregation.timer);
+    aggregation.timer = setTimeout(() => {
+      if (this.backgroundResponseAggregations.get(key) !== aggregation) return;
+      this.backgroundResponseAggregations.delete(key);
+      void super
+        .dispatchBackgroundResponse(
+          aggregation.sessionId,
+          this.formatBackgroundResponseAggregation(aggregation, true),
+        )
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `[DingTalk:${this.name}] partial background response delivery failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        });
+    }, BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS);
+    aggregation.timer.unref?.();
+  }
+
+  private formatBackgroundResponseAggregation(
+    aggregation: BackgroundResponseAggregation,
+    partial: boolean,
+  ): string {
+    const icon =
+      aggregation.status === 'completed'
+        ? '✅'
+        : aggregation.status === 'failed'
+          ? '❌'
+          : '⏹️';
+    const label = escapeDingTalkMarkdown(
+      aggregation.label?.trim() || '后台任务',
+    );
+    return `## ${icon} ${label}${partial ? '（部分）' : ''}\n\n${aggregation.parts.join('\n\n')}`;
   }
 
   /**

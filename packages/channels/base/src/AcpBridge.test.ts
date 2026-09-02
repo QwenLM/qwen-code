@@ -821,9 +821,9 @@ describe('AcpBridge', () => {
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     }) as unknown as TestableAcpBridge;
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
+    const backgroundResponses: unknown[][] = [];
+    bridge.on('backgroundResponse', (sessionId, text, context) => {
+      backgroundResponses.push([sessionId, text, context]);
     });
     const textChunks: Array<[string, string]> = [];
     bridge.on('textChunk', (sessionId, text) => {
@@ -838,11 +838,59 @@ describe('AcpBridge', () => {
         _meta: {
           source: 'background_notification_response',
           qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: false,
+          },
+        },
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'agent-1',
+            status: 'completed',
+            kind: 'agent',
+            label: 'dependency check',
+            turnComplete: true,
+          },
         },
       },
     });
 
-    expect(backgroundResponses).toEqual([['s-1', 'Background final answer.']]);
+    expect(backgroundResponses).toEqual([
+      [
+        's-1',
+        'Background final answer.',
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          label: 'dependency check',
+          turnComplete: false,
+        },
+      ],
+      [
+        's-1',
+        '',
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          label: 'dependency check',
+          turnComplete: true,
+        },
+      ],
+    ]);
     expect(textChunks).toEqual([]);
   });
 
