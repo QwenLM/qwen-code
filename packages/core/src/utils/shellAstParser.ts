@@ -1035,7 +1035,9 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
     ['less', 'more'].includes(root) ||
     (['rg', 'ripgrep'].includes(root) &&
       beforeTerminator(args).some((arg) =>
-        /^(?:--(?:hostname-bin|pre)(?:=|$)|--search-zip$|-[^-]*z)/.test(arg),
+        /^(?:--(?:hostname-bin|pre)(?:=|$)|--no-ignore-files$|--search-zip$|-[^-]*z)/.test(
+          arg,
+        ),
       ))
   ) {
     result = 'unknown';

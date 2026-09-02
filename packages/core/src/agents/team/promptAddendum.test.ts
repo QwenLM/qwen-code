@@ -40,7 +40,7 @@ describe('buildTeammatePromptAddendum', () => {
     const prompt = buildTeammatePromptAddendum('worker', 'team', 'leader');
 
     expect(prompt).toContain('run_shell_command with `rg` / `rg --files`');
-    expect(prompt).not.toContain('grep_search, glob');
+    expect(prompt).toContain('grep_search and glob remain available');
   });
 
   it('keeps dedicated search guidance when the teammate has no Shell', () => {

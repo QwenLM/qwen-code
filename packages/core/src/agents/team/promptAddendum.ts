@@ -44,7 +44,7 @@ export function buildTeammatePromptAddendum(
     ? 'read_file, task_list, and other available read-only investigation tools'
     : 'read_file, grep_search, glob, task_list, and other read-only investigation tools';
   const workSearchTools = hasBashSearch
-    ? 'Use read_file and run_shell_command with `rg` / `rg --files` for search.'
+    ? 'Use read_file and run_shell_command with `rg` / `rg --files` for search; grep_search and glob remain available if the workspace layout changes.'
     : 'Use read_file, grep_search, glob, etc.';
   if (options.readOnly) {
     return [

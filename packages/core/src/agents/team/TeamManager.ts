@@ -546,7 +546,7 @@ export class TeamManager {
         toolConfig === undefined ||
         (toolConfig.tools.some((tool) =>
           typeof tool === 'string'
-            ? tool === ToolNames.SHELL
+            ? tool === ToolNames.SHELL || tool === '*'
             : tool.name === ToolNames.SHELL,
         ) &&
           !toolConfig.disallowedTools?.includes(ToolNames.SHELL));

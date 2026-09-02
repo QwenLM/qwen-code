@@ -312,7 +312,7 @@ function buildDefaultBasePrompt(
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
   const hasBashSearch = isBashSearchAvailable(searchConfig);
   const searchToolGuidance = hasBashSearch
-    ? `  - To search for files, use '${ToolNames.SHELL}' with \`rg --files\`, then pipe the list to another \`rg\` when you need to filter filenames. Do not use positive \`-g\`/\`--glob\` filters when ignore behavior matters because they override ignore rules. Use \`find\` only for metadata predicates where ignore behavior is not required.
+    ? `  - To search for files, use '${ToolNames.SHELL}' with \`rg --files\`, then pipe the list to another \`rg\` when you need to filter filenames. If the workspace becomes multi-root and \`rg\` is unavailable, use '${ToolNames.GREP}' or '${ToolNames.GLOB}'. Do not use positive \`-g\`/\`--glob\` filters when ignore behavior matters because they override ignore rules. Use \`find\` only for metadata predicates where ignore behavior is not required.
   - To search file contents, use '${ToolNames.SHELL}' with \`rg\`. The injected command respects configured Git and Qwen ignore files by default.`
     : `  - To search for files use '${ToolNames.GLOB}' instead of find or ls
   - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg`;

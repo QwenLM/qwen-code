@@ -61,7 +61,10 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { resolveBashSearchAvailability } from '../utils/bash-search-tools.js';
+import {
+  isBashSearchAvailable,
+  resolveBashSearchAvailability,
+} from '../utils/bash-search-tools.js';
 import {
   getSessionProjectDir,
   sessionIdContext,
@@ -177,6 +180,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
+  ToolRegistryMock.prototype.revealDeferredTool = vi.fn();
   // PR 14b fix (codex round 4): per-instance manager stub so the
   // `setMcpBudgetEventCallback → createToolRegistry → manager.setOnBudgetEvent`
   // integration test can observe each instance's callback wiring.
@@ -297,6 +301,7 @@ vi.mock('../utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn(),
 }));
 vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: vi.fn(),
   resolveBashSearchAvailability: vi.fn(),
 }));
 vi.mock('../tools/glob', () => ({
@@ -11228,6 +11233,19 @@ describe('setApprovalMode with folder trust', () => {
       expect(deferred.some((call) => call[0] === ToolNames.GLOB)).toBe(true);
       expect(resolveBashSearchAvailability).toHaveBeenCalledWith(config, true);
       expect(canUseRipgrep).not.toHaveBeenCalled();
+    });
+
+    it('reveals deferred search tools when the workspace becomes multi-root', async () => {
+      vi.mocked(resolveBashSearchAvailability).mockResolvedValue(true);
+      vi.mocked(isBashSearchAvailable).mockReturnValue(false);
+      const reveal = ToolRegistry.prototype.revealDeferredTool as Mock;
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      config.getWorkspaceContext().addDirectory('/tmp/second-root');
+
+      expect(reveal).toHaveBeenCalledWith(ToolNames.GREP);
+      expect(reveal).toHaveBeenCalledWith(ToolNames.GLOB);
     });
 
     it('honors explicitly eager dedicated search tools', async () => {

@@ -11,7 +11,7 @@ import type { Config } from '../config/config.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from './file-filtering-options.js';
 import { getQwenIgnoreFileNames } from './qwenIgnoreParser.js';
 import { resolveHealthyBuiltinRipgrep } from './ripgrepUtils.js';
-import { escapeShellArg, getShellConfiguration } from './shell-utils.js';
+import { getShellConfiguration } from './shell-utils.js';
 import {
   UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES,
   UGREP_SHORT_OPTIONS_WITH_REQUIRED_VALUES,
@@ -150,6 +150,30 @@ function getIgnoreFiles(
   ) {
     return [];
   }
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && !inSingleQuote) {
+      escaped = true;
+      continue;
+    }
+    if (character === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (character === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (!inSingleQuote && (character === '$' || character === '`')) {
+      return [];
+    }
+  }
   try {
     const referencesOutsideWorkspace = parse(command).some((token) => {
       let tokenValue: string;
@@ -163,7 +187,7 @@ function getIgnoreFiles(
       const value = tokenValue.includes('=')
         ? tokenValue.slice(tokenValue.indexOf('=') + 1)
         : tokenValue;
-      if (value === '~' || value.startsWith(`~${path.sep}`)) {
+      if (value.startsWith('~')) {
         return true;
       }
       const resolved = path.resolve(cwd, value);
@@ -196,12 +220,32 @@ function shellFunction(name: string, command: string, args: string[]): string {
   return `${name}() { ${command}${defaults} "$@"; }`;
 }
 
+function quoteBashLiteral(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function ripgrepFunction(command: string, args: string[]): string {
+  const defaults = args.length > 0 ? ` ${args.join(' ')}` : '';
+  return `rg() {
+  local qwen_rg_arg
+  for qwen_rg_arg in "$@"; do
+    if [[ "$qwen_rg_arg" == '--no-ignore-files' ]]; then
+      printf '%s\\n' 'rg: this option is disabled by Qwen Code' >&2
+      return 2
+    fi
+  done
+  ${command}${defaults} "$@"
+}`;
+}
+
 function grepFunction(command: string, args: string[]): string {
   const defaults = args.length > 0 ? ` ${args.join(' ')}` : '';
   const valueOptions = UGREP_SHORT_OPTIONS_WITH_REQUIRED_VALUES.map((option) =>
     option === '?' ? "'?'" : option,
   ).join('|');
-  const longValueOptions = UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES.join('|');
+  const longValueOptions = UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES.flatMap(
+    (option) => [option, `${option}=`],
+  ).join('|');
   return `grep() {
   local qwen_grep_arg qwen_grep_option qwen_grep_short qwen_grep_consume_next=0
   for qwen_grep_arg in "$@"; do
@@ -211,7 +255,7 @@ function grepFunction(command: string, args: string[]): string {
     fi
     case "$qwen_grep_arg" in
       --) break ;;
-      --config|--config=*|---*|--filter|--filter=*|--pager|--pager=*|--save-config|--save-config=*|--view|--view=*|--query|--query=*)
+      --all|--config|--config=*|---*|--filter|--filter=*|--no-ignore-files|--pager|--pager=*|--save-config|--save-config=*|--view|--view=*|--query|--query=*)
         printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
         return 2
         ;;
@@ -221,13 +265,14 @@ function grepFunction(command: string, args: string[]): string {
         ;;
     esac
     case "$qwen_grep_arg" in
+      --*) continue ;;
       -?*)
         qwen_grep_short=\${qwen_grep_arg#-}
         while [[ -n "$qwen_grep_short" ]]; do
           qwen_grep_option=\${qwen_grep_short:0:1}
           qwen_grep_short=\${qwen_grep_short:1}
           case "$qwen_grep_option" in
-            Q)
+            Q|'@')
               printf '%s\\n' 'grep: this option is disabled by Qwen Code' >&2
               return 2
               ;;
@@ -281,7 +326,7 @@ export function wrapWithBashSearchTools(
   const rgArgs = [
     '--hidden',
     '--glob',
-    escapeShellArg('!.git', 'bash'),
+    quoteBashLiteral('!.git'),
     ...(filtering.respectGitIgnore
       ? ['--no-require-git']
       : ['--no-ignore-vcs']),
@@ -292,7 +337,7 @@ export function wrapWithBashSearchTools(
   }
   const escapedIgnoreFiles: string[] = [];
   for (const ignoreFile of ignoreFiles) {
-    const escaped = escapeShellArg(ignoreFile, 'bash');
+    const escaped = quoteBashLiteral(ignoreFile);
     rgArgs.push('--ignore-file', escaped);
     escapedIgnoreFiles.push(escaped);
   }
@@ -304,9 +349,9 @@ export function wrapWithBashSearchTools(
   }
 
   const functions = [
-    shellFunction('rg', escapeShellArg(binaries.ripgrep, 'bash'), rgArgs),
-    grepFunction(escapeShellArg(binaries.ugrep, 'bash'), grepArgs),
-    shellFunction('find', escapeShellArg(binaries.bfs, 'bash'), ['-S', 'dfs']),
+    ripgrepFunction(quoteBashLiteral(binaries.ripgrep), rgArgs),
+    grepFunction(quoteBashLiteral(binaries.ugrep), grepArgs),
+    shellFunction('find', quoteBashLiteral(binaries.bfs), ['-S', 'dfs']),
   ];
 
   return `${functions.join('\n')}\n${command}`;

@@ -33,7 +33,9 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
   let config: Config;
 
   beforeEach(async () => {
-    projectRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-bash-search-'));
+    projectRoot = await mkdtemp(
+      path.join(os.tmpdir(), "qwen-bash-it's a bang! project-"),
+    );
     outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'qwen-bash-outside-'));
     config = {
       getUseRipgrep: () => true,
@@ -104,16 +106,20 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
       execute("rg --files | rg '([.]txt|[.]env|[.]yml)$'"),
     ]);
 
-    for (const output of [rgOutput, grepOutput, fileOutput]) {
-      expect(output).toContain('visible.txt');
-      expect(output).toContain('allowed.env');
-      expect(output).toContain('.hidden.txt');
-      expect(output).toContain('.github/ci.yml');
-      expect(output).not.toContain('.git/config');
-      expect(output).not.toContain('git-secret.txt');
-      expect(output).not.toContain('nested-secret.txt');
-      expect(output).not.toContain('blocked.env');
-      expect(output).not.toContain('qwen-secret.txt');
+    for (const [label, output] of [
+      ['rg', rgOutput],
+      ['grep', grepOutput],
+      ['files', fileOutput],
+    ] as const) {
+      expect(output, label).toContain('visible.txt');
+      expect(output, label).toContain('allowed.env');
+      expect(output, label).toContain('.hidden.txt');
+      expect(output, label).toContain('.github/ci.yml');
+      expect(output, label).not.toContain('.git/config');
+      expect(output, label).not.toContain('git-secret.txt');
+      expect(output, label).not.toContain('nested-secret.txt');
+      expect(output, label).not.toContain('blocked.env');
+      expect(output, label).not.toContain('qwen-secret.txt');
     }
   });
 
@@ -159,6 +165,10 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
     expect(await execute('grep -eQ visible.txt')).toContain('Q');
   });
 
+  it('does not scan attached values of unmodeled long options', async () => {
+    expect(await execute('grep --colors=Q Q visible.txt')).toContain('Q');
+  });
+
   it.each([
     'grep --save-config=/tmp/qwen-ugrep.conf needle visible.txt',
     'grep --config=/tmp/qwen-ugrep.conf needle visible.txt',
@@ -174,6 +184,11 @@ describe.skipIf(!bashSearchAvailable)('bundled Bash search tools', () => {
     'grep -e -- --filter=cat visible.txt',
     'grep --regexp -- --filter=cat visible.txt',
     'grep --colors --filter=cat visible.txt',
+    'grep --exclude-dir -- --filter=cat needle visible.txt',
+    'grep --exclude-dir= -- --save-config=/tmp/qwen-ugrep.conf needle visible.txt',
+    'grep --no-ignore-files needle visible.txt',
+    'grep -@ needle visible.txt',
+    'rg --no-ignore-files needle visible.txt',
   ])('blocks effectful ugrep option in %j', async (command) => {
     await expect(execute(command)).rejects.toMatchObject({
       stderr: expect.stringContaining('this option is disabled by Qwen Code'),

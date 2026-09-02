@@ -176,6 +176,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('`rg --files`');
     expect(prompt).toContain('rg --files | rg');
     expect(prompt).toContain('Qwen ignore files');
+    expect(prompt).toContain("use 'grep_search' or 'glob'");
     expect(prompt).not.toContain("use 'glob' instead of find");
     expect(prompt).not.toContain("Reserve using the 'run_shell_command'");
   });

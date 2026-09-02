@@ -12,7 +12,7 @@ import type { Config } from '../config/config.js';
 import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { resolveHealthyBuiltinRipgrep } from './ripgrepUtils.js';
-import { escapeShellArg, getShellConfiguration } from './shell-utils.js';
+import { getShellConfiguration } from './shell-utils.js';
 import {
   _resetBashSearchToolsForTest,
   isBashSearchAvailable,
@@ -126,12 +126,12 @@ describe('Bash search tools', () => {
     expect(command).toContain(path.join('ugrep', PLATFORM_DIRECTORY, 'ugrep'));
     expect(command).toContain(path.join('bfs', PLATFORM_DIRECTORY, 'bfs'));
     expect(command).toContain('--hidden');
-    expect(command).toContain('--glob \\!.git');
+    expect(command).toContain("--glob '!.git'");
     expect(command).toContain('--no-require-git');
     expect(command).toContain('--exclude-dir=.git');
     expect(command).toContain('--ignore-files');
     expect(command).toContain(
-      `--ignore-file ${escapeShellArg(path.join(projectRoot, '.agentignore'), 'bash')}`,
+      `--ignore-file '${path.join(projectRoot, '.agentignore')}'`,
     );
     expect(command).toContain('this option is disabled by Qwen Code');
     expect(command.indexOf('.agentignore')).toBeLessThan(
@@ -354,7 +354,12 @@ describe('Bash search tools', () => {
     const config = createConfig();
 
     expect(await resolveBashSearchAvailability(config)).toBe(true);
-    for (const searchPath of ['~/other', '$(pwd)/other']) {
+    for (const searchPath of [
+      '~/other',
+      '~alice/other',
+      '$(pwd)/other',
+      '`pwd`/other',
+    ]) {
       const command = wrapWithBashSearchTools(
         `rg needle ${searchPath}`,
         config,

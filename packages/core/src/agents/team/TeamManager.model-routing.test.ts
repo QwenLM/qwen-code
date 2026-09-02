@@ -353,6 +353,30 @@ describe('TeamManager teammate model routing (#10071)', () => {
     expect(systemPrompt).not.toContain('run_shell_command with `rg`');
   });
 
+  it('uses Bash search guidance for a wildcard teammate tool surface', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    await writeAgentDefinition(projectDir, 'wildcard-worker.md', {
+      name: 'wildcard-worker',
+      description: 'A worker that inherits tools except writes',
+      disallowedTools: '[write_file]',
+    });
+
+    await teamManager.spawnTeammate({
+      name: 'searcher',
+      agentType: 'wildcard-worker',
+      cwd: projectDir,
+    });
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { promptConfig, toolConfig } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    expect((toolConfig as { tools: string[] }).tools).toContain('*');
+    expect((promptConfig as { systemPrompt: string }).systemPrompt).toContain(
+      'run_shell_command with `rg`',
+    );
+  });
+
   it('threads the leader Config into teammate search guidance', async () => {
     mockIsBashSearchAvailable.mockImplementation(
       (searchConfig) => searchConfig === leaderConfig,

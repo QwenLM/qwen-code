@@ -32,11 +32,15 @@ export const UGREP_LONG_OPTIONS_WITH_REQUIRED_VALUES = [
   '--directories',
   '--depth',
   '--regexp',
+  '--exclude-dir',
+  '--exclude',
   '--exclude-from',
   '--file',
   '--from',
+  '--include',
   '--include-dir',
   '--include-from',
+  '--label',
 ] as const;
 
 const SHORT_OPTIONS_WITH_REQUIRED_VALUES = new Set<string>(
@@ -73,10 +77,18 @@ export function scanUgrepOptions(args: readonly string[]): UgrepOptionScan {
         ? { safety: 'write', saveConfigTarget: target }
         : { safety: 'write' };
     }
-    if (/^(?:---|--(?:config|filter|pager|query|view)(?:=|$))/.test(arg)) {
+    if (
+      /^(?:---|--(?:all|config|filter|no-ignore-files|pager|query|view)(?:=|$))/.test(
+        arg,
+      )
+    ) {
       return { safety: 'unknown' };
     }
-    if (LONG_OPTIONS_WITH_REQUIRED_VALUES.has(arg)) {
+    if (
+      LONG_OPTIONS_WITH_REQUIRED_VALUES.has(arg) ||
+      (arg.endsWith('=') &&
+        LONG_OPTIONS_WITH_REQUIRED_VALUES.has(arg.slice(0, -1)))
+    ) {
       consumeNext = true;
       continue;
     }
@@ -87,7 +99,7 @@ export function scanUgrepOptions(args: readonly string[]): UgrepOptionScan {
     const options = arg.slice(1);
     for (let optionIndex = 0; optionIndex < options.length; optionIndex++) {
       const option = options[optionIndex]!;
-      if (option === 'Q') {
+      if (option === 'Q' || option === '@') {
         return { safety: 'unknown' };
       }
       if (SHORT_OPTIONS_WITH_REQUIRED_VALUES.has(option)) {

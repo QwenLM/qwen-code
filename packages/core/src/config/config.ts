@@ -82,7 +82,10 @@ import {
 } from '../tools/mcp-client.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { resolveBashSearchAvailability } from '../utils/bash-search-tools.js';
+import {
+  isBashSearchAvailable,
+  resolveBashSearchAvailability,
+} from '../utils/bash-search-tools.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
@@ -9355,6 +9358,12 @@ export class Config {
       await registerDeferredSearch(ToolNames.GLOB, async () => {
         const { GlobTool } = await import('../tools/glob.js');
         return new GlobTool(this);
+      });
+      this.getWorkspaceContext().onDirectoriesChanged(() => {
+        if (!isBashSearchAvailable(this)) {
+          registry.revealDeferredTool(ToolNames.GREP);
+          registry.revealDeferredTool(ToolNames.GLOB);
+        }
       });
     } else {
       // --- Grep / RipGrep (conditional) ---

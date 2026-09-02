@@ -88,6 +88,14 @@ Within one ignore file, negation follows normal gitignore semantics. Across
 separate custom/Qwen ignore files, all search surfaces use last-match
 precedence, with `.qwenignore` passed last.
 
+Workspace ignore files are attached only when every parsed path is statically
+inside the workspace. Commands containing outside paths, shell expansions, or
+subshell/process-substitution operators run without the workspace ignore files.
+Because the prelude is applied once per command rather than once per search
+path, a mixed command that searches both inside and outside the workspace also
+takes this fail-open path; split such searches when workspace ignore coverage
+matters.
+
 Positive ripgrep glob filters explicitly override ignore rules. The
 prompt therefore uses `rg --files | rg PATTERN` for filename filtering instead
 of `rg --files -g PATTERN` when ignore behavior matters.
