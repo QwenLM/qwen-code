@@ -3106,6 +3106,12 @@ export class CoreToolScheduler {
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
                   );
+                } else if (outcome.reason === 'external_write') {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  autoModeFallbackMessage = outcome.message;
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                  );
                 }
                 break;
               default: {
@@ -4110,6 +4116,17 @@ export class CoreToolScheduler {
     );
     if (!still) return;
 
+    // Guard: a PreToolUse-'ask' bounce re-enters awaiting_approval, so the
+    // guard above alone would let this stale round-1 resolution answer the
+    // BOUNCED confirmation. The accept path would flow resolution.content
+    // through _applyInlineModify (bounced edit details are type 'edit', and
+    // that path does not check hideModify) and execute IDE-panel content
+    // the hook never reviewed on the hook-skipping re-execution; the
+    // reject path would cancel a prompt the user never answered. Only the
+    // bounce's own confirmation may resolve a bounced call — the round-1
+    // diff is closed by resolveDiffFromCli regardless.
+    if (this.bouncedAwaitingApproval.has(callId)) return;
+
     if (resolution.status === 'accepted') {
       // When content is unchanged, skip the inline modify path so that
       // the original tool params (e.g. partial old_string for edit tool)
@@ -4397,39 +4414,74 @@ export class CoreToolScheduler {
   /**
    * Bounce a tool from the EXECUTION phase back to awaiting_approval so the
    * user can confirm a PreToolUse 'ask' decision in the TUI. Reuses the
-   * standard confirmation machinery: a synthetic 'info' confirmation whose
-   * onConfirm routes through handleConfirmationResponse (ProceedOnce →
-   * re-execute, Cancel → cancelled). `hideAlwaysAllow` is set because the
-   * hook re-evaluates on every call, so an "always allow" rule is
-   * meaningless. The callId is added to `bouncedAwaitingApproval` BEFORE
-   * the status change so executeSingleToolCall's finally keeps the tool
-   * span open across the bounce and the re-execution skips the hook +
-   * prelude (see `_executeToolCallBody`).
+   * standard confirmation machinery, including the existing diff view for
+   * edit tools. `hideAlwaysAllow` is set because the hook re-evaluates on
+   * every call, so an "always allow" rule is meaningless. The callId is
+   * added to `bouncedAwaitingApproval` BEFORE the status change so
+   * executeSingleToolCall's finally keeps the tool span open across the
+   * bounce and the re-execution skips the hook + prelude (see
+   * `_executeToolCallBody`).
    */
-  private bounceToAwaitingApprovalForAsk(
+  private async bounceToAwaitingApprovalForAsk(
     scheduledCall: ScheduledToolCall,
     reason: string | undefined,
     toolSpan: Span,
     signal: AbortSignal,
-  ): void {
+  ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
+    const hookReason =
+      reason ||
+      `A PreToolUse hook requested confirmation before running ${toolName}.`;
+
+    let confirmationDetails: ToolCallConfirmationDetails | undefined;
+    if (scheduledCall.tool.kind === Kind.Edit) {
+      try {
+        const editDetails =
+          await scheduledCall.invocation.getConfirmationDetails(signal);
+        if (editDetails.type === 'edit') {
+          confirmationDetails = {
+            ...editDetails,
+            hideAlwaysAllow: true,
+            hideModify: true,
+            warnings: [hookReason, ...(editDetails.warnings ?? [])],
+            onConfirm: (outcome, payload) =>
+              this.handleConfirmationResponse(
+                callId,
+                editDetails.onConfirm,
+                outcome,
+                signal,
+                // Forward the host's denial reason (the stream-json
+                // permissionController sends { cancelMessage } on deny) but
+                // keep the modify channel closed: hideModify is set above,
+                // so a payload's newContent must not rewrite the
+                // hook-reviewed content on a bounce.
+                payload?.cancelMessage
+                  ? { cancelMessage: payload.cancelMessage }
+                  : undefined,
+              ),
+          };
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to prepare edit confirmation for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (this.cancelPreExecutionIfAborted(callId, signal, toolSpan)) return;
 
     this.bouncedAwaitingApproval.add(callId);
 
-    const confirmationDetails: ToolCallConfirmationDetails = {
+    confirmationDetails ??= {
       type: 'info',
       title: `Hook requested confirmation to run ${toolName}`,
-      prompt:
-        reason ||
-        `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      prompt: hookReason,
       renderPromptAsPlainText: true,
       hideAlwaysAllow: true,
       onConfirm: (outcome, payload) =>
         this.handleConfirmationResponse(
           callId,
-          // No real tool onConfirm — for this synthetic prompt all of the
-          // approve/deny handling lives in handleConfirmationResponse.
           async () => {},
           outcome,
           signal,
@@ -4616,7 +4668,7 @@ export class CoreToolScheduler {
           // Preserve the tool_use_id so the post-approval re-execution
           // reuses it (see the toolUseId comment above).
           this.bouncedToolUseId.set(callId, toolUseId);
-          this.bounceToAwaitingApprovalForAsk(
+          await this.bounceToAwaitingApprovalForAsk(
             scheduledCall,
             preHookResult.blockReason,
             span,
@@ -6477,18 +6529,23 @@ export class CoreToolScheduler {
                 outcome.reason === 'classifier_unavailable'
               ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
-                if (outcome.message) {
-                  this.setStatusInternal(
-                    pendingTool.request.callId,
-                    'awaiting_approval',
-                    decorateClassifierUnavailableConfirmation(
-                      pendingTool.confirmationDetails,
-                      outcome.message,
-                    ),
-                  );
-                }
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              } else if (outcome.reason === 'external_write') {
+                debugLogger.warn(
+                  `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                );
+              }
+
+              if (outcome.message) {
+                this.setStatusInternal(
+                  pendingTool.request.callId,
+                  'awaiting_approval',
+                  decorateClassifierUnavailableConfirmation(
+                    pendingTool.confirmationDetails,
+                    outcome.message,
+                  ),
                 );
               }
               break;

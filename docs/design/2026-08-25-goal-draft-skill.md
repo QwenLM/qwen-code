@@ -33,9 +33,17 @@ The objective is handed over on one line because `parseGoalCommand` splits on wh
 - `docs/users/features/goals.md` (commands, how a Goal is judged, writing a good objective, `/goal-draft`), rows in `commands.md`, a pointer from `headless.md`.
 - The web-shell Goals dialog placeholder now shows an objective with a check, a guardrail, and a budget in both locales.
 
+## Phase 2: `propose_goal`
+
+A core tool, registered beside `get_goal` / `update_goal` (so never for subagents), only in interactive sessions (`resolveInteractionMode === 'interactive'`) and when `goals.modelProposed` is not `disabled`; ACP and stream-json remain excluded until they have an equivalent turn-boundary settlement path. It reuses the generic `info` confirmation: the objective is in both the invocation description (the one field every host forwards — the Web Shell drops an `info` prompt) and the plain-text prompt, and `requiresUserInteraction()` is `true` so no allow rule, YOLO, or AUTO_EDIT (which auto-approves `info` confirmations) can skip the dialog. Preconditions are checked before the dialog and again in `execute()`, because `/goal` can change the session while the dialog is open: plan mode, untrusted folder, no Goal persistence, and an active Goal all refuse with guidance (an active Goal is never replaced from the tool; the model hands over a `/goal edit` / `/goal set` line instead). A stopped Goal is replaced through `replace` with its expected version; no Goal creates. The tool does not dispatch at all: setting a Goal mid-turn would leave the rest of the proposing turn without a Goal permit (`client.ts` rejects a permit-less continuation while a Goal is active — the first end-to-end run showed exactly that error card). Instead the approval is parked on `Config` (`setPendingGoalProposal`), bound to the proposing turn's `prompt_id`, and the client applies it when the proposing turn truly ends, after queued steer, Stop-hook, and next-speaker continuations finish (`settlePendingGoalProposal` → `applyPendingGoalProposal`); only that turn's own terminal boundary may apply it, and any other frame that finds it parked drops it instead. The runtime's broadcast then renders the Goal card and starts the first Goal turn. An approval still parked when the next real user query starts belongs to a cancelled turn and is discarded; the tool result tells the model to acknowledge in one sentence and stop.
+
+`goals.modelProposed` (`alwaysAsk` | `disabled`, default `alwaysAsk`) sits in `WORKSPACE_RESTRICTED_SETTINGS`, so a repository cannot switch the tool on. An `auto` mode that lets the model skip the dialog (Claude Code's `ask_user: false`) is deliberately not offered.
+
+The skill's hand-off now prefers the tool when it is available and no Goal is active, and keeps the printed `/goal set` line for headless runs, the disabled setting, and the active-Goal case.
+
 ## Later phases (not in this change)
 
-- A `propose_goal` core tool with an approval dialog, mirroring Claude Code's `ProposeGoal` + `modelProposedGoals` (read from user/policy settings only), so the skill can offer "Set this goal" instead of a line to paste. `parseGoalCommand` keeps newlines for `set`/`edit`.
+- `parseGoalCommand` keeps newlines for `set`/`edit`.
 - A deterministic lint on `/goal set` (rules 1–6 above) that warns and points at `/goal-draft`, and a "refine" entry in the web-shell Goals dialog.
 
 ## Verification
