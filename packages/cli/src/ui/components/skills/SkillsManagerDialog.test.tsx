@@ -49,7 +49,10 @@ function createConfig(skills: SkillConfig[]): Config {
     suppressNextSlashReload: vi.fn(),
     notifyConfigChanged: vi.fn(async () => undefined),
   };
-  return { getSkillManager: () => skillManager } as unknown as Config;
+  return {
+    getSkillManager: () => skillManager,
+    isSkillEnabled: vi.fn().mockReturnValue(true),
+  } as unknown as Config;
 }
 
 function createSettings(
