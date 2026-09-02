@@ -500,7 +500,7 @@ jobs:
       - *unpack_release_build
 
       - name: 'Run Workspace Tests'
-        env:
+        env: &vitest_worker_bound
           # Match the tunable per-process bound used by the main CI gate.
           VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
@@ -531,12 +531,7 @@ jobs:
       - *unpack_release_build
 
       - name: 'Run Script Tests'
-        env:
-          # Match the tunable per-process bound used by the main CI gate.
-          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
-          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
-          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+        env: *vitest_worker_bound
         run: 'npm run test:scripts'
 
   quality:

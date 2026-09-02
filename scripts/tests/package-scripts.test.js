@@ -464,18 +464,20 @@ describe('package scripts', () => {
     // Both test lanes share the bound: the scripts suite's ESLint instances
     // and bash replays spawn heavy subprocesses, and the unbounded default
     // worker count timed them out on the shared ECS pool (release #10755).
-    for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
-      for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
-        expect(cappedStep).toContain(
-          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
-        );
-      }
-      for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
-        expect(cappedStep).toContain(
-          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
-        );
-      }
+    // The block is anchored at its first occurrence and aliased into the
+    // scripts lane, so tuning it cannot drift between the two lanes.
+    expect(workspaceTestStep).toContain('env: &vitest_worker_bound');
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
     }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(workspaceTestStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
+    expect(scriptsTestStep).toContain('env: *vitest_worker_bound');
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {
