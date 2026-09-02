@@ -484,6 +484,23 @@ describe('StandaloneSessionService', () => {
     });
   });
 
+  it('fails closed when the runtime is quarantined during the read', async () => {
+    const harness = createHarness();
+    harness.getWorkspaceProvidersStatus.mockImplementationOnce(async () => {
+      await harness.quarantineRuntime(harness.runtime);
+      return {
+        v: 1,
+        workspaceCwd: root.canonicalRoot,
+        initialized: true,
+        providers: [],
+      };
+    });
+
+    await expect(harness.service.getOptions()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
+  });
+
   it('creates a durable standalone session without admitting a prompt', async () => {
     mockDurableStandalone();
     const harness = createHarness();
