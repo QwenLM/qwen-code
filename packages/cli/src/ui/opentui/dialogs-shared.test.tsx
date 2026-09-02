@@ -155,4 +155,83 @@ describe('useDialogSelect resyncKey', () => {
     rerender({ resyncKey: 'scope-select', initialIndex: 1 });
     expect(result.current.activeIndex).toBe(2);
   });
+
+  it('disarms an armed numeric flush on view swap (R4-3)', () => {
+    vi.useFakeTimers();
+    try {
+      const onSelect = vi.fn();
+      const { rerender } = renderHook(
+        (props: { resyncKey: string }) =>
+          useDialogSelect({ items, numbers: true, onSelect, ...props }),
+        { initialProps: { resyncKey: 'mount' } },
+      );
+      // Arm a digit flush in the first view.
+      press({ name: '1', sequence: '1' });
+      // Tab to another view before the flush timeout fires.
+      rerender({ resyncKey: 'scope-select' });
+      act(() => {
+        vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+      });
+      // The stale flush must not commit a selection in the new view.
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('useDialogSelect items re-sync (ink INITIALIZE parity)', () => {
+  beforeEach(() => {
+    handlers.length = 0;
+  });
+
+  it('clamps the cursor when the list shrinks below activeIndex', () => {
+    const onSelect = vi.fn();
+    const shrinking = items.slice(0, 3);
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: shrinking } },
+    );
+    press({ name: 'down' });
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(2);
+
+    // Uninstalling the last row: the cursor's item key is gone, ink falls
+    // back to the initial index instead of stranding it past the end.
+    rerender({ items: items.slice(0, 2) });
+    expect(result.current.activeIndex).toBe(0);
+    // Enter on the clamped cursor still selects a real row.
+    press({ name: 'return' });
+    expect(onSelect).toHaveBeenCalledWith('item-0');
+  });
+
+  it('follows the active item by key when the list is reordered', () => {
+    const onSelect = vi.fn();
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: items.slice(0, 3) } },
+    );
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(1);
+
+    // item-1 moves to the front; the cursor follows the item, not the slot.
+    rerender({ items: [items[1]!, items[0]!, items[2]!] });
+    expect(result.current.activeIndex).toBe(0);
+  });
+
+  it('keeps the slot when a new array has the same key at the same index', () => {
+    const onSelect = vi.fn();
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: items.slice(0, 3) } },
+    );
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(1);
+
+    rerender({ items: [...items.slice(0, 3)] });
+    expect(result.current.activeIndex).toBe(1);
+  });
 });

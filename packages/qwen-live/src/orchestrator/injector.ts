@@ -94,7 +94,9 @@ export class Injector {
 
   // -- window state signals (fed by the orchestrator) ----------------------
 
-  noteSpeechStarted(): void {
+  noteSpeechStarted(): boolean {
+    const outputWasPlaying = this.playbackDeadline > this.now();
+    this.playbackDeadline = 0;
     this.speechInProgress = true;
     // Barge-in semantics: pending progress is stale the moment the user
     // speaks; conclusions and permission asks stay queued. A dropped item
@@ -109,9 +111,10 @@ export class Injector {
       }
     }
     this.queue = kept;
+    return outputWasPlaying;
   }
 
-  noteSpeechStopped(): void {
+  noteInputCommitted(): void {
     this.speechInProgress = false;
     this.poke();
   }
@@ -139,6 +142,16 @@ export class Injector {
 
   enqueue(item: InjectorItem): void {
     if (this.disposed) return;
+    if (
+      item.kind === 'permission' &&
+      item.requestId !== undefined &&
+      this.queue.some(
+        (queued) =>
+          queued.kind === 'permission' && queued.requestId === item.requestId,
+      )
+    ) {
+      return;
+    }
     if (item.kind === 'progress') {
       // Throttle per job; jobless progress is keyed on its full context so
       // distinct notices (which may share a long common prefix) never

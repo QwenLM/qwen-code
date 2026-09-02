@@ -90,7 +90,7 @@ describe('HandleRegistry jobs', () => {
     });
 
     expect('jobRef' in job).toBe(false);
-    expect(registry.jobByRef('prompt-x')).toBeUndefined();
+    expect(registry.jobByRef(backend('abc'), 'prompt-x')).toBeUndefined();
   });
 
   it('returns the existing record instead of minting a duplicate for a known jobRef', () => {
@@ -121,6 +121,32 @@ describe('HandleRegistry jobs', () => {
     expect(registry.activeJobForSession('session_1')).toBeUndefined();
   });
 
+  it('scopes jobRefs by owning adaptor — identical refs never collide across backends', () => {
+    // jobRefs are adaptor-local (serve mints prompt UUIDs, an ACP adaptor
+    // counts turn-1, turn-2): the owning adaptor must scope the lookup key.
+    const registry = new HandleRegistry();
+    const serveJob = registry.createJob({
+      sessionHandle: 'session_1',
+      backend: backend('abc'),
+      jobRef: 'turn-1',
+      task: 'serve task',
+    });
+    const acpJob = registry.createJob({
+      sessionHandle: 'session_2',
+      backend: backend('x', 'acp'),
+      jobRef: 'turn-1',
+      task: 'acp task',
+    });
+
+    expect(acpJob).not.toBe(serveJob);
+    expect(acpJob.jobHandle).toBe('job_2');
+    // Each backend's lookup resolves to its own record…
+    expect(registry.jobByRef(backend('abc'), 'turn-1')).toBe(serveJob);
+    expect(registry.jobByRef(backend('x', 'acp'), 'turn-1')).toBe(acpJob);
+    // …and the same jobRef under an unknown backend is simply unknown.
+    expect(registry.jobByRef(backend('x', 'other'), 'turn-1')).toBeUndefined();
+  });
+
   it('resolves jobs by trimmed handle and by backend jobRef', () => {
     const registry = new HandleRegistry();
     const job = registry.createJob({
@@ -132,8 +158,8 @@ describe('HandleRegistry jobs', () => {
 
     expect(registry.resolveJob(` ${job.jobHandle} `)).toBe(job);
     expect(registry.resolveJob('job_99')).toBeUndefined();
-    expect(registry.jobByRef('prompt-7')).toBe(job);
-    expect(registry.jobByRef('prompt-8')).toBeUndefined();
+    expect(registry.jobByRef(backend('abc'), 'prompt-7')).toBe(job);
+    expect(registry.jobByRef(backend('abc'), 'prompt-8')).toBeUndefined();
   });
 
   it('picks the newest non-terminal job as the active job for a session', () => {

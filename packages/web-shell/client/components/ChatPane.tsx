@@ -28,6 +28,7 @@ import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
   type DaemonWorkspaceCapability,
+  type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
@@ -902,11 +903,13 @@ export function ChatPane({
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      actions
+      return actions
         .submitPermission(id, selectedOption, answers)
-        .catch((error: unknown) =>
-          reportError(error, 'Failed to submit permission choice'),
-        );
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to submit permission choice');
+          throw error;
+        });
     },
     [actions, reportError],
   );
@@ -1136,13 +1139,15 @@ export function ChatPane({
     [actions, reportError],
   );
   const handleSelectReasoningEffort = useCallback(
-    (value: string) =>
+    (value: ReasoningSelection) =>
       actions
-        .setReasoningEffort(value)
+        .setReasoningEffort(value, {
+          persist: connection.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         ),
-    [actions, reportError, t],
+    [actions, connection.sessionContext?.kind, reportError, t],
   );
 
   const headerLabel =

@@ -51,6 +51,17 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -1684,6 +1695,92 @@ describe('bundled review skill', () => {
     // The anti-drift clause that makes the examples non-authoritative.
     expect(section).toContain(
       'The examples are the set as written, not the gate',
+    );
+  });
+});
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
+});
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
     );
   });
 });

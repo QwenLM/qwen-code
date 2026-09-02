@@ -24,6 +24,7 @@ import {
   GOAL_TOKEN_BUDGET_CAP,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
+  installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
@@ -1144,6 +1145,177 @@ describe('Server Config (config.ts)', () => {
       expect(config.getAutoSkillEnabled()).toBe(false);
       config.setAutoSkillEnabled(true);
       expect(config.getAutoSkillEnabled()).toBe(true);
+    });
+  });
+
+  describe('session workflow gate and plan revision', () => {
+    it('defaults off and clears the revision when disabled', () => {
+      const config = new Config({ ...baseParams });
+      expect(config.isSessionWorkflowEnabled()).toBe(false);
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toBeUndefined();
+    });
+
+    it('hot-reloads the gate through its provider and clears context on disable', () => {
+      let enabled = true;
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+      });
+      config.setSessionWorkflowEnabledProvider(() => enabled);
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1', 'todo-2'],
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1', 'todo-2'],
+      });
+
+      enabled = false;
+      expect(config.isSessionWorkflowEnabled()).toBe(false);
+      expect(config.getSessionWorkflowPlanRevision()).toBeUndefined();
+    });
+
+    it('keeps gate reads pure so prototype wrappers never shadow the base revision', () => {
+      let enabled = false;
+      const config = new Config({ ...baseParams });
+      config.setSessionWorkflowEnabledProvider(() => enabled);
+      // Subagent/teammate runtimes wrap the session Config in
+      // Object.create(base) prototypes.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapper = Object.create(config) as any;
+
+      // A gate-off read through the wrapper must not materialize an OWN
+      // sessionWorkflowPlanRevision on it — that would permanently shadow
+      // the session-global base value once the gate flips on and a revision
+      // is approved.
+      expect(wrapper.isSessionWorkflowEnabled()).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          wrapper,
+          'sessionWorkflowPlanRevision',
+        ),
+      ).toBe(false);
+
+      enabled = true;
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(wrapper.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      expect(wrapper.isSessionWorkflowTodoContextActive()).toBe(true);
+    });
+
+    it('accepts planning mode as workflow context before approval', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      expect(config.isSessionWorkflowTodoContextActive()).toBe(true);
+    });
+
+    it('stamps the bound revision approved on an approved plan exit', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      // A revision bound while drafting carries no approval stamp.
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+      expect(config.getSessionWorkflowPlanRevision()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+        approved: true,
+      });
+    });
+
+    it('does not stamp the revision on a manual PLAN exit', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+    });
+
+    it('does not let a derived config approve the session revision', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      const wrapper = Object.create(config) as Config;
+      Object.defineProperties(wrapper, {
+        approvalMode: { value: ApprovalMode.PLAN, writable: true },
+        setApprovalMode: { value: Config.prototype.setApprovalMode },
+      });
+      installSessionWorkflowRevisionWriteThrough(wrapper, config);
+
+      wrapper.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.getSessionWorkflowPlanRevision()?.approved).toBeUndefined();
+    });
+
+    it('reads an approved revision as approved through a PLAN-mode wrapper', () => {
+      // Per-agent Config wrappers carry their OWN approvalMode (e.g. an
+      // `approvalMode: plan` subagent) while the revision is session-global.
+      // Approval must come from the revision's stamp, not the wrapper's mode.
+      const config = new Config({
+        ...baseParams,
+        sessionWorkflowEnabled: true,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      config.setSessionWorkflowPlanRevision({
+        planId: 'plan-1',
+        sourceCallId: 'call-1',
+        todoIds: ['todo-1'],
+      });
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wrapper = Object.create(config) as any;
+      wrapper.approvalMode = ApprovalMode.PLAN;
+      expect(wrapper.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      // The wrapper reads the session-global revision through the prototype
+      // and sees the approval stamp despite its own PLAN mode.
+      expect(wrapper.getSessionWorkflowPlanRevision()?.approved).toBe(true);
     });
   });
 
@@ -3132,6 +3304,56 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('parks one approved proposal and hands it to the client once', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'first',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(true);
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'second',
+          turnKey: 'turn-1',
+        }),
+      ).toBe(false);
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-2')).toBeUndefined();
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      expect(config.takePendingGoalProposal('turn-1')).toEqual({
+        objective: 'first',
+        turnKey: 'turn-1',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+
+      expect(
+        config.setPendingGoalProposal({
+          objective: 'explicitly cleared',
+          turnKey: 'turn-3',
+        }),
+      ).toBe(true);
+      expect(config.takePendingGoalProposal()).toEqual({
+        objective: 'explicitly cleared',
+        turnKey: 'turn-3',
+      });
+      expect(config.hasPendingGoalProposal()).toBe(false);
+    });
+
+    it('clears a parked proposal when the session Goal runtime is replaced', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      config.setPendingGoalProposal({
+        objective: 'stale approval',
+        turnKey: 'turn-1',
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -5071,6 +5293,68 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
+    it('registers propose_goal beside the Goal worker tools in interactive sessions', async () => {
+      const config = new Config({ ...baseParams, interactive: true });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+      expect(registeredNames).toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it.each([
+      ['ACP', { experimentalZedIntegration: true, interactive: true }],
+      [
+        'stream-json',
+        { inputFormat: InputFormat.STREAM_JSON, interactive: true },
+      ],
+    ] as const)(
+      'does not register propose_goal without a turn-boundary settlement path in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.GET_GOAL);
+        expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
+        expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+      },
+    );
+    it('does not register propose_goal when goals.modelProposed is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        modelProposedGoals: 'disabled',
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('disabled');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
+    it('does not register propose_goal in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+    });
     it('does not register user-interaction tools in plain headless sessions', async () => {
       const config = new Config({
         ...baseParams,
@@ -7441,6 +7725,28 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('relocateWorkingDirectory should carry the session pr-bound callback to the fresh SessionService', async () => {
+    // The callback is registered once at session init; relocation resets
+    // sessionService, so a later `gh pr create` must still reach it.
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const seen: Array<{ sessionId: string; number: number }> = [];
+    config.getSessionService().setSessionPrBoundCallback((sessionId, pr) => {
+      seen.push({ sessionId, number: pr.number });
+    });
+
+    await config.relocateWorkingDirectory(newDir, newDir, {
+      skipProcessChdir: true,
+      skipArtifactMigration: true,
+    });
+
+    config
+      .getSessionService()
+      .emitSessionPrBound('s1', { number: 2, url: 'https://x.y/o/r/pull/2' });
+
+    expect(seen).toEqual([{ sessionId: 's1', number: 2 }]);
+  });
+
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
@@ -7967,6 +8273,30 @@ describe('Server Config (config.ts)', () => {
     expect(sessionPatches[1]?.[0]).toMatchObject({
       sessionId: config.getSessionId(),
     });
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('carries the inbox token into the record, on the first patch and the retry', async () => {
+    // `toMatchObject`/`toEqual` treat { ipcPath } and { ipcPath, ipcToken:
+    // undefined } as equal, so the existing one-arg call sites pass whether
+    // or not the token is forwarded. Dropping ipcToken from either patch
+    // would publish an address peers cannot authenticate to — sends read as
+    // 'sent' and are silently dropped — with the whole suite still green.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      // The first patch is skipped, so the retry path carries the token too.
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    await config.updateSessionRegistryIpcPath('/tmp/peer.sock', 'tok-xyz');
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
+    for (const [patch] of patchSessionRecordSpy.mock.calls) {
+      expect(patch).toEqual({ ipcPath: '/tmp/peer.sock', ipcToken: 'tok-xyz' });
+    }
     patchSessionRecordSpy.mockRestore();
   });
 

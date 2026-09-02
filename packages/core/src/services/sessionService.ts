@@ -20,6 +20,7 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
   FileHistorySnapshotRecordPayload,
@@ -53,11 +54,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import {
-  mergeSessionPrLists,
-  readSessionPrs,
-  writeSessionPrs,
-} from './session-pr-service.js';
+import { moveSessionPrSidecar } from './session-pr-service.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -426,6 +423,112 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+
+export interface SessionContentSearchOptions {
+  /** Most recent session files to scan, default 200. */
+  maxFiles?: number;
+  /** Maximum matching sessions to return, default 20. */
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
+export interface SessionContentSearchHit {
+  sessionId: string;
+  /** Short excerpt of the first matching message, ellipsized around the match. */
+  snippet: string;
+}
+
+/** Characters of context kept before/after the match in a search snippet. */
+const SEARCH_SNIPPET_CONTEXT = 40;
+
+const HAS_LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Unicode case folding maps Σ/σ/ς to σ, but only whole-string lowercasing
+ * applies the context-sensitive word-final Σ → ς mapping — a per-code-point
+ * fold produces σ instead, so the two forms disagree on Greek text ending
+ * in sigma. Unify ς → σ on both sides before matching; it is
+ * length-preserving, so the UTF-16 index mapping below stays valid.
+ */
+function normalizeSigma(text: string): string {
+  return text.replace(/ς/g, 'σ');
+}
+
+/**
+ * Case-insensitive indexOf returning the match position in the ORIGINAL
+ * string's UTF-16 index space. Lowercasing can change string length (e.g.
+ * U+0130 folds to two code units), so an index found in the lowercased
+ * string cannot be used to slice the original directly. The per-code-point
+ * fold keeps supplementary-plane case pairs (Deseret, Adlam, ...) matching.
+ * A native whole-string pre-filter keeps the common no-match path off the
+ * JS-level fold; the lone-surrogate skip is required because a per-unit /
+ * whole-string fold disagree on those inputs.
+ */
+function indexOfCaseInsensitive(text: string, lowerQuery: string): number {
+  if (
+    !HAS_LONE_SURROGATE.test(lowerQuery) &&
+    !normalizeSigma(text.toLowerCase()).includes(lowerQuery)
+  ) {
+    return -1;
+  }
+  let folded = '';
+  const indexMap: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const char = String.fromCodePoint(text.codePointAt(i)!);
+    const foldedChar = normalizeSigma(char.toLowerCase());
+    folded += foldedChar;
+    for (let j = 0; j < foldedChar.length; j++) indexMap.push(i);
+    i += char.length;
+  }
+  const index = folded.indexOf(lowerQuery);
+  return index === -1 ? -1 : (indexMap[index] ?? -1);
+}
+
+/**
+ * Builds a single-line excerpt around the first occurrence of `lowerQuery`.
+ * `collapsed` must already be whitespace-collapsed; `matchIndex` must come
+ * from {@link indexOfCaseInsensitive}. Window boundaries are clamped off
+ * surrogate-pair splits so no lone surrogate lands at a snippet edge.
+ */
+function buildSearchSnippet(
+  collapsed: string,
+  lowerQuery: string,
+  matchIndex: number,
+): string {
+  let start = Math.max(0, matchIndex - SEARCH_SNIPPET_CONTEXT);
+  let end = Math.min(
+    collapsed.length,
+    matchIndex + lowerQuery.length + SEARCH_SNIPPET_CONTEXT * 2,
+  );
+  if (start > 0) {
+    const code = collapsed.charCodeAt(start);
+    if (code >= 0xdc00 && code <= 0xdfff) start -= 1;
+  }
+  if (end > start && end < collapsed.length) {
+    const code = collapsed.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  }
+  let snippet = collapsed.slice(start, end);
+  if (start > 0) snippet = `...${snippet}`;
+  if (end < collapsed.length) snippet = `${snippet}...`;
+  return snippet;
+}
+function joinTextParts(parts: readonly unknown[]): string {
+  const texts: string[] = [];
+  for (const part of parts) {
+    if (
+      typeof part === 'object' &&
+      part !== null &&
+      'text' in part &&
+      typeof (part as { text: unknown }).text === 'string'
+    ) {
+      texts.push((part as { text: string }).text);
+    }
+  }
+  return texts.join('\n');
+}
+
 /**
  * Maximum bytes to read from head/tail of a session file.
  * Used by readLastRecordUuid which still does its own tail read.
@@ -720,6 +823,10 @@ export class SessionService {
   private readonly projectRoot: string;
   private readonly onWarning: ((message: string) => void) | undefined;
   private readonly transcriptReader: SessionTranscriptReader;
+  private sessionPrBoundCallback?: (
+    sessionId: string,
+    pr: { number: number; url: string },
+  ) => void;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
@@ -922,6 +1029,36 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Fires when the shell tool persists a `gh pr create` binding for a
+   * session (agent process). The serve host wires this to mark the session
+   * catalog so clients refetch the binding; unwired it is a no-op.
+   */
+  setSessionPrBoundCallback(
+    callback:
+      | ((sessionId: string, pr: { number: number; url: string }) => void)
+      | undefined,
+  ): void {
+    this.sessionPrBoundCallback = callback;
+  }
+
+  /**
+   * Exposes the registered callback so `Config.relocateWorkingDirectory`
+   * can carry it onto the replacement service when it resets this one.
+   */
+  getSessionPrBoundCallback():
+    | ((sessionId: string, pr: { number: number; url: string }) => void)
+    | undefined {
+    return this.sessionPrBoundCallback;
+  }
+
+  emitSessionPrBound(
+    sessionId: string,
+    pr: { number: number; url: string },
+  ): void {
+    this.sessionPrBoundCallback?.(sessionId, pr);
   }
 
   /**
@@ -1675,46 +1812,6 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
-  /**
-   * Move a PR sidecar across archive states. Same policy as
-   * {@link moveLedgerSidecar}: the sidecar is the append-only binding
-   * history, so when both halves of a split pair exist (a crash between
-   * the transcript rename and the sidecar move, or an orphaned write)
-   * they are merged by PR number instead of wedging the pair forever —
-   * no transition would ever reunite them otherwise. Throws propagate to
-   * the caller, which owns the warn-only policy.
-   */
-  private async movePrSidecar(
-    sourcePath: string,
-    destinationPath: string,
-    assertCanMutate?: () => void,
-  ): Promise<void> {
-    if (!fs.existsSync(sourcePath)) {
-      return;
-    }
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    if (!fs.existsSync(destinationPath)) {
-      assertCanMutate?.();
-      fs.renameSync(sourcePath, destinationPath);
-      return;
-    }
-    const merged = mergeSessionPrLists(
-      (await readSessionPrs(destinationPath)) ?? [],
-      (await readSessionPrs(sourcePath)) ?? [],
-    );
-    if (merged.length > 0) {
-      if (assertCanMutate) {
-        await writeSessionPrs(destinationPath, merged, {
-          assertCanCommit: assertCanMutate,
-        });
-      } else {
-        await writeSessionPrs(destinationPath, merged);
-      }
-    }
-    assertCanMutate?.();
-    fs.unlinkSync(sourcePath);
-  }
-
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -1739,7 +1836,12 @@ export class SessionService {
       );
     }
     try {
-      await this.movePrSidecar(
+      // The move runs under the sidecar lock covering both endpoints: the
+      // session child's shell binder may hold a pending write on either
+      // half, and an unlocked move would clobber and unlink it. The
+      // ownership fence runs inside the lock at each mutation, and a
+      // split pair is merged there (see moveSessionPrSidecar).
+      await moveSessionPrSidecar(
         this.getPrSessionPathForState(sessionId, sourceState),
         this.getPrSessionPathForState(sessionId, destinationState),
         assertCleanupOwned,
@@ -2227,6 +2329,155 @@ export class SessionService {
     return this.countSessionMessagesFromPath(filePath);
   }
 
+  /**
+   * Searches the text of user/assistant messages across the project's active
+   * sessions, most recently modified first. Streams each transcript
+   * line-by-line and stops reading a file at its first match, returning one
+   * snippet per matching session. Bounded by `maxFiles`/`maxResults` so a
+   * debounced UI search stays responsive without a full-text index.
+   */
+  async searchSessionContent(
+    query: string,
+    options: SessionContentSearchOptions = {},
+  ): Promise<SessionContentSearchHit[]> {
+    const { maxFiles = 200, maxResults = 20, signal } = options;
+    // Normalize whitespace the same way snippets collapse it, so matching
+    // and excerpting see the same text (`a  b` matches "a b" and the query
+    // `a  b` matches both). normalizeSigma keeps the query's fold aligned
+    // with the per-code-point text fold (Greek final sigma).
+    const lowerQuery = normalizeSigma(
+      query.trim().replace(/\s+/g, ' ').toLowerCase(),
+    );
+    if (!lowerQuery) return [];
+    signal?.throwIfAborted();
+
+    const chatsDir = this.getChatsDirForState('active');
+    let files: Array<{ name: string; mtime: number }> = [];
+    try {
+      const fileNames = fs.readdirSync(chatsDir);
+      for (const [index, name] of fileNames.entries()) {
+        if (SESSION_FILE_PATTERN.test(name)) {
+          try {
+            files.push({
+              name,
+              mtime: fs.statSync(path.join(chatsDir, name)).mtimeMs,
+            });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+        // Mirror listSessions: the chats dir can hold thousands of sessions
+        // shared across projects, so yield and honor aborts mid-loop.
+        if (signal && (index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+          signal.throwIfAborted();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
+        }
+      }
+    } catch (error) {
+      signal?.throwIfAborted();
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    files = files.slice(0, Math.max(1, maxFiles));
+    signal?.throwIfAborted();
+
+    const hits: SessionContentSearchHit[] = [];
+    for (const [index, file] of files.entries()) {
+      signal?.throwIfAborted();
+      if (hits.length >= maxResults) break;
+      if ((index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        signal?.throwIfAborted();
+      }
+      const hit = await this.searchSessionFileForQuery(
+        path.join(chatsDir, file.name),
+        lowerQuery,
+        signal,
+      );
+      if (hit) hits.push(hit);
+    }
+    return hits;
+  }
+
+  private async searchSessionFileForQuery(
+    filePath: string,
+    lowerQuery: string,
+    signal?: AbortSignal,
+  ): Promise<SessionContentSearchHit | undefined> {
+    let fileStream: fs.ReadStream | undefined;
+    let rl: readline.Interface | undefined;
+    try {
+      fileStream = fs.createReadStream(filePath);
+      rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity,
+      });
+      let checkedProject = false;
+      let lineCount = 0;
+      for await (const line of rl) {
+        if ((++lineCount & 1023) === 0) signal?.throwIfAborted();
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          trimmed,
+          filePath,
+        )) {
+          if (!checkedProject) {
+            checkedProject = true;
+            if (
+              !(await this.sessionBelongsToCurrentProject(
+                record.sessionId,
+                record.cwd,
+                signal,
+              ))
+            ) {
+              return undefined;
+            }
+          }
+          const collapsed = this.extractRecordSearchText(record)
+            .replace(/\s+/g, ' ')
+            .trim();
+          const matchIndex = collapsed
+            ? indexOfCaseInsensitive(collapsed, lowerQuery)
+            : -1;
+          if (matchIndex === -1) continue;
+          return {
+            sessionId: record.sessionId,
+            snippet: buildSearchSnippet(collapsed, lowerQuery, matchIndex),
+          };
+        }
+      }
+      return undefined;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return undefined;
+    } finally {
+      rl?.close();
+      fileStream?.destroy();
+    }
+  }
+
+  /**
+   * Text a session-content search matches against for one record, mirroring
+   * the user-visible display projection: the authoritative prompt display
+   * text when present (an empty string is meaningful), otherwise the text
+   * parts with any trailing hook-submit-context part stripped. Subtype
+   * records (slash commands, telemetry, ...) are skipped like they are for
+   * first-prompt extraction.
+   */
+  private extractRecordSearchText(record: ChatRecord): string {
+    if (record.type !== 'user' && record.type !== 'assistant') return '';
+    if (record.subtype !== undefined) return '';
+    if (record.type === 'user') {
+      const projection = projectUserTranscriptForDisplay(record);
+      if (projection.displayText !== undefined) return projection.displayText;
+      return joinTextParts(projection.parts);
+    }
+    return joinTextParts(record.message?.parts ?? []);
+  }
+
   private async countSessionMessagesFromPath(
     filePath: string,
   ): Promise<number> {
@@ -2570,12 +2821,12 @@ export class SessionService {
 
   /**
    * Enumerates every persisted session id of this project for one archive
-   * state by reading the chats dir directly. Unlike {@link listSessions}
-   * there is no mtime cursor and no page size: an exhaustive sweep paged
-   * by the strict `mtime < cursor` filter would silently skip sessions
-   * that share an mtime with a page's last entry, on every run. Same
-   * disk-walk shape as {@link countSessionsInState} — first-record read
-   * for project membership only, no title/prompt hydration.
+   * state by reading the chats dir directly, in deterministic filename
+   * order. Unlike {@link listSessions} there is no mtime cursor and no
+   * page size: an exhaustive sweep paged by the strict `mtime < cursor`
+   * filter would silently skip sessions that share an mtime with a page's
+   * last entry, on every run. Membership is checked the same way as
+   * {@link listSessions}.
    */
   async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
@@ -2588,9 +2839,13 @@ export class SessionService {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
+    fileNames.sort();
     const sessionIds: string[] = [];
+    let filesProcessed = 0;
     for (const name of fileNames) {
       if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed += 1;
       const filePath = path.join(chatsDir, name);
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
@@ -3120,7 +3375,7 @@ export class SessionService {
           this.removeFileIfExists(active.filePath);
           try {
             options.assertCleanupOwned?.();
-            await this.movePrSidecar(
+            await moveSessionPrSidecar(
               this.getPrSessionPathForState(sessionId, 'active'),
               this.getPrSessionPathForState(sessionId, 'archived'),
               options.assertCleanupOwned,
@@ -3258,7 +3513,7 @@ export class SessionService {
           this.removeFileIfExists(archived.filePath);
           try {
             options.assertCleanupOwned?.();
-            await this.movePrSidecar(
+            await moveSessionPrSidecar(
               this.getPrSessionPathForState(sessionId, 'archived'),
               this.getPrSessionPathForState(sessionId, 'active'),
               options.assertCleanupOwned,
