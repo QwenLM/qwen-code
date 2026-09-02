@@ -15462,7 +15462,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('flushes and reads sparse turn-index pages without replay configuration', async () => {
+  it('flushes latest but not frozen turn-index pages', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();
     const readTurnIndexPage = vi.fn().mockResolvedValue({
@@ -15502,6 +15502,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       snapshot: 'snapshot-1',
       totalTurns: 1,
     });
+
+    const frozenResult = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+      {
+        sessionId: VALID_SESSION_ID,
+        snapshot: 'snapshot-1',
+        start: 0,
+        limit: 2,
+      },
+    );
+
+    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(readTurnIndexPage).toHaveBeenNthCalledWith(2, VALID_SESSION_ID, {
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+    expect(frozenResult).toMatchObject({ snapshot: 'snapshot-1' });
 
     mockConnectionState.resolve();
     await agentPromise;

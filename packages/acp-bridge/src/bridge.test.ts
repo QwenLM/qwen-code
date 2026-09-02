@@ -3643,7 +3643,21 @@ describe('createAcpSessionBridge', () => {
       limit: 2,
     });
 
-    expect(result.totalTurns).toBe(1);
+    expect(result).toEqual({
+      v: 1,
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'record-1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
     expect(handles[0]?.agent.extMethodCalls).toEqual([
       {
         method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
@@ -3658,6 +3672,8 @@ describe('createAcpSessionBridge', () => {
     ]);
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
 
     await bridge.shutdown();

@@ -4122,6 +4122,14 @@ describe('SessionTranscriptReader', () => {
       };
     }
 
+    function scheduledTurn(): ChatRecord {
+      return {
+        ...record('uc1', 'a1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+    }
+
     it('builds stable sparse pages and projects only public previews', async () => {
       const attachmentToken = '@attachment:///file-1';
       const user = {
@@ -4362,16 +4370,41 @@ describe('SessionTranscriptReader', () => {
       ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
     });
 
+    it('rejects snapshots minted for another session', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const otherSessionId = '550e8400-e29b-41d4-a716-446655440001';
+      await writeRecords(
+        [
+          record('other-u1', null, 'other first'),
+          record('other-a1', 'other-u1', 'other answer'),
+        ],
+        otherSessionId,
+      );
+
+      await expect(
+        reader.readTurnIndexPage(otherSessionId, {
+          snapshot: index.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(otherSessionId, {
+          atRecordId: 'other-u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
     it('expands an anchored scheduled turn to a safe replay boundary', async () => {
-      const scheduled = {
-        ...record('uc1', 'a1', 'model schedule payload'),
-        subtype: 'cron',
-        systemPayload: { displayText: 'Scheduled review' },
-      } as ChatRecord;
       await writeRecords([
         record('u1', null, 'first prompt'),
         toolCallRecord('a1', 'u1', 'call-1'),
-        scheduled,
+        scheduledTurn(),
         toolResultRecord('r1', 'uc1', 'call-1'),
       ]);
       const reader = new SessionTranscriptReader(workspaceDir);
@@ -4393,15 +4426,10 @@ describe('SessionTranscriptReader', () => {
     });
 
     it('keeps an anchored page bounded when safe expansion exceeds its budget', async () => {
-      const scheduled = {
-        ...record('uc1', 'a1', 'model schedule payload'),
-        subtype: 'cron',
-        systemPayload: { displayText: 'Scheduled review' },
-      } as ChatRecord;
       await writeRecords([
         record('u1', null, 'first prompt'),
         toolCallRecord('a1', 'u1', 'call-1'),
-        scheduled,
+        scheduledTurn(),
         toolResultRecord('r1', 'uc1', 'call-1'),
       ]);
       setSessionTranscriptExpandedPageBytesForTest(1);
@@ -4421,14 +4449,9 @@ describe('SessionTranscriptReader', () => {
     });
 
     it('reports no older records when boundary expansion reaches file head', async () => {
-      const scheduled = {
-        ...record('uc1', 'a1', 'model schedule payload'),
-        subtype: 'cron',
-        systemPayload: { displayText: 'Scheduled review' },
-      } as ChatRecord;
       await writeRecords([
         toolCallRecord('a1', 'u0', 'call-1'),
-        scheduled,
+        scheduledTurn(),
         toolResultRecord('r1', 'uc1', 'call-1'),
       ]);
       const reader = new SessionTranscriptReader(workspaceDir);
