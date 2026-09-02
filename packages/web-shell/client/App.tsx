@@ -6156,6 +6156,14 @@ export function App({
   // window is narrower than the large-screen breakpoint. Growing back past the
   // breakpoint restores it, so a transient resize doesn't drop the user's panes.
   const splitFoldedByShrinkRef = useRef(false);
+  // The manual title an armed `/clear` carries into the next created session
+  // (consumed by the deferred creation in ensureSessionForPrompt). Session
+  // binding outside the carry flow — sidebar navigation, workspace switches,
+  // the shrink-fold landing, workspace-resolver creation — must discard it,
+  // or a cleared title resurfaces on an unrelated session's successor.
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   useEffect(() => {
     if (isLargeScreen) {
       // Grew back above the breakpoint: restore a split that a shrink folded
@@ -6189,6 +6197,10 @@ export function App({
         // pane the single connection can't own) just leaves the empty chat.
         const firstPane = splitSessionIdsRef.current[0];
         if (firstPane && !currentSessionIdRef.current) {
+          // Landing on a pane is session navigation: discard an armed
+          // `/clear` carry so the pane session's lineage never inherits the
+          // cleared session's title.
+          pendingManualTitleRef.current = undefined;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -6645,9 +6657,6 @@ export function App({
   }, [logicalSessionKey]);
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
     null,
-  );
-  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
-    undefined,
   );
   const preparingSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -7259,7 +7268,10 @@ export function App({
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
-        // No session exists or forced: create one.
+        // No session exists or forced: create one. Creating binds the chat
+        // connection — session navigation that must discard an armed
+        // `/clear` carry, mirroring loadSidebarSession.
+        pendingManualTitleRef.current = undefined;
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({ workspaceCwd: cwd });

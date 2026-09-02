@@ -14502,6 +14502,100 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
+  it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.sessionId = 'session-1';
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'Bug hunt';
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Split view with the chat on session-1; /clear arms the carry and
+    // leaves the chat as a sessionless draft.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      mockConnection.titleSource = undefined;
+      rerender();
+    });
+
+    // Re-enter the split (the draft chat stays sessionless), then shrink:
+    // the fold lands the first pane on the chat connection while the carry
+    // is still armed.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      // Mirrors the real loadSession(): the pane session binds the chat
+      // connection; an automatic title carries no provenance.
+      mockConnection.sessionId = 'session-1';
+      mockConnection.displayName = 'Pane task';
+    });
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    });
+    rerender();
+
+    // The pane session has no manual provenance and no manual summary; a
+    // second /clear must not read the stale armed carry from the first
+    // session and rename the pane session's successor with it.
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
   it('focuses a cleared new session without waiting for detach', async () => {
     const clear = deferred<void>();
     mockSessionActions.clearSession.mockReturnValueOnce(clear.promise);
