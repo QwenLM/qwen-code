@@ -66,6 +66,22 @@ const realIdPath = (() => {
   }
 })();
 
+// The truthful path of a utility production captures before the $proxy_bin
+// prepend — realIdPath's portability rationale, for the rest of the sweep.
+function realUtilityPath(name) {
+  try {
+    return execFileSync('bash', ['-c', `command -v "${name}"`], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+// The CEDE kill-scope replay signals real processes, so it needs a real
+// pkill(1). Capability probe, not a platform check (R11-7's rationale).
+const realPkillPath = realUtilityPath('pkill');
+
 describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the agent pool', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
@@ -103,15 +119,21 @@ function retryLoopSource() {
 }
 
 // A forged-date shim for $proxy_bin plants: answers `date -d <ts> +%s` with
-// a future epoch and passes every other call through — the hijacked agent's
-// lift of server-side timestamps past the supersede window bound (R16-3).
-// /bin/date keeps the pass-through lane-independent.
+// a FUTURE epoch — the hijacked agent's lift of server-side timestamps past
+// the supersede window bound (R16-3) — and the bare `+%s` the run's own
+// timeline baseline reads with a PAST one, which drops both window bounds and
+// admits every event in the timeline (R23-3). Every other call passes
+// through; /bin/date keeps that lane-independent.
 function forgedDateShim() {
   return (
     [
       '#!/bin/bash',
       'if [ "${1:-}" = "-d" ] && [ "$#" -eq 3 ] && [ "${3:-}" = "+%s" ]; then',
       '  echo $(( $(/bin/date +%s) + 1000 ))',
+      '  exit 0',
+      'fi',
+      'if [ "${1:-}" = "+%s" ]; then',
+      '  echo $(( $(/bin/date +%s) - 100000 ))',
       '  exit 0',
       'fi',
       'exec /bin/date "$@"',
@@ -4527,7 +4549,9 @@ describe('review supersede salvage (#10110)', () => {
     // The revert cede's kill-record dir is minted at arming and NEVER
     // exported — an exported path would be agent-derivable like every
     // SALVAGE_DIR signal (R4-1).
-    expect(run).toContain('SUPERSEDE_KILL_DIR="$(mktemp -d');
+    expect(run).toContain(
+      'SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d',
+    );
     expect(run).not.toContain('export SUPERSEDE_KILL_DIR');
     // Defined and armed before the retry loop starts.
     expect(run.indexOf('supersede_watcher()')).toBeLessThan(
@@ -4653,6 +4677,12 @@ describe('review supersede salvage (#10110)', () => {
     sleepFailAfter = null,
     forgeDateOffset = null,
     proxyPlants = {},
+    // Utilities whose pre-prepend capture this replay pins, so proxyPlants
+    // shadow bare-command resolution only (R23-1).
+    pinReal = [],
+    // Signal real processes through a real pkill to measure the CEDE kill's
+    // scope (R23-2) instead of logging its arguments to a stub.
+    realCedeKill = false,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
@@ -4807,6 +4837,43 @@ describe('review supersede salvage (#10110)', () => {
       }
       const eligible =
         run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+      // The kill-scope replay (R23-2) spawns two decoys whose argv carries
+      // the same REVIEW_URL: one a direct child of this shell — the shape
+      // the attempt's timeout has — and one under a different parent,
+      // standing in for a concurrent run of the same PR. The URL reaches the
+      // second through the environment, never its parent's argv, or the
+      // parent would match the sweep too and orphaning would read as
+      // survival.
+      const decoy = join(side, 'decoy');
+      const decoyBPid = join(side, 'decoy-b-pid');
+      const cedeKill = realCedeKill
+        ? {
+            prelude: [
+              `printf '#!/bin/bash\\n/bin/sleep 8\\n' > "${decoy}"`,
+              `chmod +x "${decoy}"`,
+              // stdout/stderr off the harness's pipes: a backgrounded decoy
+              // holding the write end would make execFileSync wait for its
+              // sleep instead of for this shell.
+              `"${decoy}" --prompt "$REVIEW_URL" >/dev/null 2>&1 &`,
+              'DECOY_A=$!',
+              `DECOY_B_URL="$REVIEW_URL" bash -c '"$1" --prompt "$DECOY_B_URL" & echo $! > "$2"; /bin/sleep 8' bash "${decoy}" "${decoyBPid}" >/dev/null 2>&1 &`,
+              'DECOY_B_PARENT=$!',
+              // Bounded wait on B's pid, not a fixed sleep: the epilogue
+              // reads B's state, and an unloaded-host guess is a loaded-host
+              // flake.
+              `i=0; while [ ! -s "${decoyBPid}" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done`,
+            ].join('\n'),
+            // A signalled decoy is a zombie until its parent reaps it, so
+            // ps state Z reads as dead, not alive.
+            epilogue: [
+              `DECOY_B="$(cat "${decoyBPid}" 2>/dev/null || true)"`,
+              `sa="$(ps -o state= -p "$DECOY_A" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              `sb="$(ps -o state= -p "\${DECOY_B:-}" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              'echo "CEDEKILL own=${sa:-gone} concurrent=${sb:-gone}"',
+              'kill -KILL "$DECOY_A" "${DECOY_B:-}" "$DECOY_B_PARENT" 2>/dev/null || true',
+            ].join('\n'),
+          }
+        : { prelude: '', epilogue: '' };
       const harness = [
         'set -euo pipefail',
         eligible,
@@ -4814,13 +4881,22 @@ describe('review supersede salvage (#10110)', () => {
         watcherSource(),
         `START_TS=${now - runElapsed}; BUDGET_SECONDS=${budget}; SALVAGE_ELAPSED_PERCENT=${pct}`,
         `EXPECTED_HEAD_SHA=${expectedHead}; DOCS_ONLY_MEDIUM=${docsOnly ? 'true' : 'false'}`,
-        'PR_NUMBER=1; REPO=o/r; REVIEW_URL=https://example.test/pr/1; SALVAGE_POLL_SECONDS=0',
+        'PR_NUMBER=1; REPO=o/r; SALVAGE_POLL_SECONDS=0',
+        // Built, not spelled: this script travels in the harness bash's own
+        // argv, and a literal URL there would put the harness itself inside
+        // the sweep the kill-scope replay measures.
+        'REVIEW_URL="https://example.test/pr/${PR_NUMBER}"',
         `SALVAGE_DIR="${dir}"; SUPERSEDE_FILE="${dir}/superseded"`,
         `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${dir}/salvage-ok"; COMPOSED_ARTIFACT="${dir}/composed.json"`,
+        cedeKill.prelude,
         'supersede_watcher',
-      ].join('\n');
+        cedeKill.epilogue,
+      ]
+        .filter((part) => part !== '')
+        .join('\n');
+      let stdout = '';
       try {
-        execFileSync('bash', ['-c', harness], {
+        stdout = execFileSync('bash', ['-c', harness], {
           encoding: 'utf8',
           timeout: 30_000,
           env: {
@@ -4838,27 +4914,45 @@ describe('review supersede salvage (#10110)', () => {
             QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
             QWEN_CI_REAL_PKILL: join(bin, 'pkill'),
             QWEN_CI_REAL_ID: realIdPath,
+            // The R23-1 pins this arm measures: the harness stub where one
+            // exists (the bounded-read semantics must survive), else the
+            // truthful system utility production would have captured.
+            ...Object.fromEntries(
+              pinReal.map((name) => {
+                const stub = join(bin, name);
+                return [
+                  `QWEN_CI_REAL_${name.toUpperCase()}`,
+                  existsSync(stub) ? stub : realUtilityPath(name),
+                ];
+              }),
+            ),
             PATH: `${proxyBin}:${bin}:${process.env.PATH}`,
             ...(realGhPath !== null ? { QWEN_CI_REAL_GH: realGhPath } : {}),
             ...(realDatePath !== null
               ? { QWEN_CI_REAL_DATE: realDatePath }
               : {}),
+            ...(realCedeKill ? { QWEN_CI_REAL_PKILL: realPkillPath } : {}),
           },
         });
-      } catch {
+      } catch (e) {
         // A watcher that dies before its one-shot decision (errexit on a
         // failed poll, a wedged read) leaves absent signals — read what
         // is there and let the assertions name the gap.
+        stdout = `${e?.stdout ?? ''}`;
       }
       const readOr = (name) =>
         existsSync(join(dir, name))
           ? readFileSync(join(dir, name), 'utf8')
           : null;
+      const killed = /CEDEKILL own=(\S+) concurrent=(\S+)/.exec(stdout);
+      const dead = (state) => state === 'gone' || state === 'Z';
       return {
         marker: readOr('salvage-ok'),
         movedTo: readOr('moved-to'),
         superseded: readOr('superseded'),
         pkilled: existsSync(pkillLog),
+        ownAttemptKilled: killed ? dead(killed[1]) : null,
+        concurrentRunAlive: killed ? !dead(killed[2]) : null,
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -5213,6 +5307,105 @@ describe('review supersede salvage (#10110)', () => {
     expect(killPlant.marker).toBeNull();
     expect(killPlant.pkilled).toBe(true);
   });
+
+  it('keeps the watcher deciding through proxy-bin timeout/node/mktemp/mv plants (replayed watcher)', () => {
+    // R23-1: the sweep stopped six commands short. These fork from the
+    // watcher subshell, not the qwen invocation, so the invocation-scoped
+    // decoys never cover them — a plant inherits the REAL $GITHUB_OUTPUT,
+    // $GITHUB_ENV, $GITHUB_PATH and GH_TOKEN. Each arm plants one utility
+    // and pins it; reverting that pin to the bare command must turn its own
+    // arm red.
+    //
+    // A timeout plant exiting 1 un-fires the compose latch, so an already
+    // composed review is CEDE-killed minutes from posting.
+    const timeoutPlant = runWatcher({
+      composedArtifact: '{"event":"COMMENT"}',
+      runElapsed: 6000,
+      pinReal: ['timeout'],
+      proxyPlants: { timeout: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(timeoutPlant.marker).toBe('head-a');
+    expect(timeoutPlant.superseded).toBeNull();
+
+    // A node plant exiting 0 latches compose-seen on a ZERO-BYTE artifact —
+    // the forgery the parseable-JSON requirement exists to refuse.
+    const nodePlant = runWatcher({
+      composedArtifact: '',
+      runElapsed: 6000,
+      pinReal: ['node'],
+      proxyPlants: { node: '#!/bin/bash\nexit 0\n' },
+    });
+    expect(nodePlant.marker).toBeNull();
+    expect(nodePlant.superseded).toBe('head-b');
+
+    // A no-op mv reports success and lands nothing, so every signal the cede
+    // consumers re-read is silently lost.
+    const mvPlant = runWatcher({
+      pinReal: ['mv'],
+      proxyPlants: { mv: '#!/bin/bash\nexit 0\n' },
+    });
+    expect(mvPlant.superseded).toBe('head-b');
+
+    // A failing mktemp aborts write_signal before it writes anything.
+    const mktempPlant = runWatcher({
+      pinReal: ['mktemp'],
+      proxyPlants: { mktemp: '#!/bin/bash\nexit 1\n' },
+    });
+    expect(mktempPlant.superseded).toBe('head-b');
+
+    // A head plant answering the attempt-start read with "now" resets the
+    // attempt clock, so a KEEP-eligible run is CEDE-killed minutes from
+    // posting.
+    const headPlant = runWatcher({
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+      pinReal: ['head'],
+      proxyPlants: { head: '#!/bin/bash\n/bin/date +%s\n' },
+    });
+    expect(headPlant.marker).toBe('head-a');
+    expect(headPlant.superseded).toBeNull();
+  });
+
+  it('cleans a failed signal write through the captured rm pin (replayed watcher)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-rm-pin-'));
+    try {
+      const canary = join(dir, 'rm-ran');
+      // R23-1: write_signal's cleanup was the one rm the diff left bare —
+      // 26 lines below the comment stating the rule. A failing mv is what
+      // reaches it, and the plant forks from the watcher subshell with the
+      // real $GITHUB_* and GH_TOKEN.
+      const r = runWatcher({
+        pinReal: ['rm'],
+        proxyPlants: {
+          mv: '#!/bin/bash\nexit 1\n',
+          rm: `#!/bin/bash\necho x > "${canary}"\nexit 0\n`,
+        },
+      });
+      expect(existsSync(canary)).toBe(false);
+      expect(r.superseded).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!realPkillPath)(
+    "cedes this run's own attempt without touching a concurrent run of the same PR (replayed watcher)",
+    () => {
+      // R23-2: the URL is not this run's identity. An explicit run gets a
+      // unique per-run concurrency group, so it reviews the SAME URL
+      // concurrently with the automatic run whose watcher cedes — and a
+      // URL-only sweep killed it too. Its attempt then dies with 143: not
+      // 124/137 and not 0, so no retry and no cede branch, and a
+      // human-requested review goes red over a push it has nothing to do
+      // with. -P scopes the sweep to this step shell's own children; GNU
+      // timeout signals its whole monitored group, so this run's attempt
+      // tree still dies with the timeout that is its direct child.
+      const r = runWatcher({ realCedeKill: true });
+      expect(r.ownAttemptKilled).toBe(true);
+      expect(r.concurrentRunAlive).toBe(true);
+      expect(r.superseded).toBe('head-b');
+    },
+  );
 
   it('stops acting past the budget plus grace (replayed watcher)', () => {
     // The self-bound is the only protection against a watcher leaked
@@ -6224,16 +6417,49 @@ describe('review supersede salvage (#10110)', () => {
     expect(cli).toContain('`qwen-review-pr-${cls.number}-composed.json`');
   });
 
+  it('captures every pinned utility before the agent-writable prepend', () => {
+    // R18-4, R21-2 and R23-1 each pinned the commands that round's finding
+    // named, so the sweep kept stopping short. The property is one line: a
+    // capture taken after the prepend resolves through the prepend it exists
+    // to escape, and a capture the block drops silently re-opens the
+    // bare-command path that every consumer's :- fallback then takes. The
+    // replayed arms pin the harness env themselves, so they witness the
+    // consumption sites and can see neither gap.
+    const prepend = run.indexOf('export PATH="$proxy_bin:$PATH"');
+    expect(prepend).toBeGreaterThan(-1);
+    for (const name of [
+      'GH',
+      'GIT',
+      'DATE',
+      'RM',
+      'TEE',
+      'SLEEP',
+      'PKILL',
+      'ID',
+      'TIMEOUT',
+      'HEAD',
+      'NODE',
+      'MKTEMP',
+      'MV',
+    ]) {
+      const at = run.indexOf(`export QWEN_CI_REAL_${name}=`);
+      expect(at, `QWEN_CI_REAL_${name}`).toBeGreaterThan(-1);
+      expect(at, `QWEN_CI_REAL_${name}`).toBeLessThan(prepend);
+    }
+  });
+
   it('bounds and scopes the watcher kill', () => {
-    // -U scopes to the runner user; the trailing ($|[^0-9]) keeps PR 123
-    // from matching PR 1234's URL; TERM first, KILL after a grace period.
-    // Both resolve through the pre-prepend captures (R21-2); the replayed
-    // proxy-bin plant arms witness the pins.
+    // -U scopes to the runner user and -P to this step shell's own children
+    // (R23-2: a URL-only sweep also killed a concurrent explicit run of the
+    // same PR); the trailing ($|[^0-9]) keeps PR 123 from matching PR
+    // 1234's URL; TERM first, KILL after a grace period. Both resolve
+    // through the pre-prepend captures (R21-2); the replayed proxy-bin
+    // plant arms witness the pins.
     expect(run).toContain(
-      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -TERM -f "${REVIEW_URL}($|[^0-9])"',
+      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])"',
     );
     expect(run).toContain(
-      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -KILL -f "${REVIEW_URL}($|[^0-9])"',
+      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -KILL -f "${REVIEW_URL}($|[^0-9])"',
     );
     // Self-bounded past the budget, and reaped on every exit path — a
     // watcher outliving the step on a reused self-hosted runner could kill

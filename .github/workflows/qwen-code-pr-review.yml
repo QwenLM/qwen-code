@@ -1203,7 +1203,7 @@ jobs:
               # forever; a wedged, stale or missing pin fails closed to the
               # block below.
               local salvage_pin
-              salvage_pin="$(timeout 5 head -c 128 "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" 2>/dev/null || true)"
+              salvage_pin="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 128 "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" 2>/dev/null || true)"
               if [ "$salvage_pin" = "$expected_head" ]; then
                 echo "PR write allowed (salvage): PR #${pr_number} moved from ${expected_head} to ${current_head} past the salvage threshold; posting against the reviewed head." >&2
               else
@@ -1325,6 +1325,28 @@ jobs:
             local real_id
             real_id="$(command -v id || echo id)"
             export QWEN_CI_REAL_ID="$real_id"
+
+            # The salvage signal writes and the watcher's bounded reads
+            # resolve the rest of their utilities through the same prepend
+            # (R23-1). These fork from the step shell or the watcher
+            # subshell, not from the qwen invocation, so the decoys below
+            # never cover them: a plant inherits the REAL $GITHUB_OUTPUT,
+            # $GITHUB_ENV, $GITHUB_PATH, $GITHUB_STEP_SUMMARY and GH_TOKEN.
+            local real_timeout
+            real_timeout="$(command -v timeout || echo timeout)"
+            export QWEN_CI_REAL_TIMEOUT="$real_timeout"
+            local real_head
+            real_head="$(command -v head || echo head)"
+            export QWEN_CI_REAL_HEAD="$real_head"
+            local real_node
+            real_node="$(command -v node || echo node)"
+            export QWEN_CI_REAL_NODE="$real_node"
+            local real_mktemp
+            real_mktemp="$(command -v mktemp || echo mktemp)"
+            export QWEN_CI_REAL_MKTEMP="$real_mktemp"
+            local real_mv
+            real_mv="$(command -v mv || echo mv)"
+            export QWEN_CI_REAL_MV="$real_mv"
 
             export PATH="$proxy_bin:$PATH"
             unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
@@ -1502,7 +1524,7 @@ jobs:
           # PROXY_BIN above: RUNNER_TEMP survives across jobs on the shared
           # self-hosted runner, so a fixed path could be pre-seeded or left
           # over. The watcher writes; guard_pr_write and the paths below read.
-          SALVAGE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-salvage.XXXXXX")"
+          SALVAGE_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-salvage.XXXXXX")"
           export QWEN_CI_REVIEW_SALVAGE_OK_FILE="${SALVAGE_DIR}/salvage-ok"
           SUPERSEDE_FILE="${SALVAGE_DIR}/superseded"
           # The composed-verdict artifact the review skill writes when its
@@ -1823,7 +1845,7 @@ jobs:
           RETRY_BACKOFF_SECONDS=60
           RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
-          START_TS="$(date +%s)"
+          START_TS="$("${QWEN_CI_REAL_DATE:-date}" +%s)"
           # Signal files sit at fixed, workflow-public names inside
           # SALVAGE_DIR — a path the reviewed agent derives from its own
           # exported environment — so a write-open of one can hit a planted
@@ -1835,9 +1857,9 @@ jobs:
           # planted huge file.
           write_signal() {
             local tmp
-            tmp="$(mktemp "${SALVAGE_DIR}/.sig.XXXXXX")" || return 1
-            printf '%s' "$2" > "$tmp" && mv -f "$tmp" "$1" && return 0
-            rm -f "$tmp"
+            tmp="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" "${SALVAGE_DIR}/.sig.XXXXXX")" || return 1
+            printf '%s' "$2" > "$tmp" && "${QWEN_CI_REAL_MV:-mv}" -f "$tmp" "$1" && return 0
+            "${QWEN_CI_REAL_RM:-rm}" -f "$tmp"
             return 1
           }
           # Salvage state is per ATTEMPT — a retry re-runs the review from
@@ -1879,11 +1901,15 @@ jobs:
           # reviewed) or writes SUPERSEDE_FILE and kills the review tree so
           # the replacement run queued in the concurrency group starts within
           # a poll interval instead of after the full budget. The kill matches
-          # this PR's review URL in the command line: the step shell and this
-          # watcher run the runner's script file (the URL is not in their
-          # argv), the runner executes one job at a time, and -U scopes to the
-          # runner user — so the pattern reaches exactly the qwen tree (the
-          # CLI relaunch wrapper included, which a recorded PID would miss).
+          # this PR's review URL in the command line AND this step shell's own
+          # children: the URL alone is not this run's identity — an explicit
+          # run gets a unique per-run concurrency group, so it reviews the
+          # same URL concurrently, and a URL-only sweep killed it too (R23-2).
+          # -P scopes to the step shell ($$ keeps that pid inside this
+          # subshell), -U to the runner user. The attempt's timeout is that
+          # direct child, and GNU timeout signals its whole monitored group,
+          # so the qwen tree dies with it — the CLI relaunch wrapper
+          # included, which a recorded qwen PID would miss.
           # Explicit runs (/review, review_requested, dispatch) keep today's
           # behavior: a human asked for this head's review, and no synchronize
           # ever cancelled them. Self-bounded past the budget so a watcher
@@ -1924,7 +1950,7 @@ jobs:
               # into node's heap on every poll — a legit verdict is bounded
               # by the compose budget, far under the cap.
               if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -f "$COMPOSED_ARTIFACT" ] \
-                && timeout 5 node -e 'const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");if(fs.fstatSync(fd).size>2097152)process.exit(1);const v=JSON.parse(fs.readFileSync(fd,"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
+                && "${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_NODE:-node}" -e 'const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");if(fs.fstatSync(fd).size>2097152)process.exit(1);const v=JSON.parse(fs.readFileSync(fd,"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
                 write_signal "${SALVAGE_DIR}/compose-seen" '' || true
               fi
               # QWEN_CI_REAL_GH pin (full rationale at live_head_moved):
@@ -1946,7 +1972,7 @@ jobs:
               # leading-zero plant: bash arithmetic reads a leading 0 as
               # octal, so a forged `08` would abort the poll and silently
               # kill the watcher (epoch seconds start with 0 only past 2286).
-              attempt_start="$(timeout 5 head -c 64 "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
+              attempt_start="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 64 "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
               case "$attempt_start" in
                 ''|0*|*[!0-9]*) attempt_start="$START_TS" ;;
               esac
@@ -1987,9 +2013,9 @@ jobs:
                 write_signal "${SUPERSEDE_KILL_DIR}/killed" "$live_head" || true
               fi
               echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
-              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
               "${QWEN_CI_REAL_SLEEP:-sleep}" 15
-              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -KILL -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -KILL -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
               return 0
             done
           }
@@ -2001,7 +2027,7 @@ jobs:
             # agent cannot derive its path the way it derives every
             # SALVAGE_DIR signal — only the watcher can record its kill
             # there. mktemp failure degrades to the timeline witness alone.
-            SUPERSEDE_KILL_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX" 2>/dev/null || true)"
+            SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX" 2>/dev/null || true)"
             supersede_watcher &
             WATCHER_PID=$!
           fi
@@ -2035,7 +2061,7 @@ jobs:
           # and land as forged workflow commands or output lines.
           read_head_signal() {
             local content
-            content="$(timeout 5 head -c 64 "${1:-}" 2>/dev/null || echo unknown)"
+            content="$("${QWEN_CI_REAL_TIMEOUT:-timeout}" 5 "${QWEN_CI_REAL_HEAD:-head}" -c 64 "${1:-}" 2>/dev/null || echo unknown)"
             case "$content" in
               ''|*[!0-9a-f]*) content='unknown' ;;
               *) [ "${#content}" -eq 40 ] || content='unknown' ;;
