@@ -53,17 +53,18 @@ repair, timer, or settlement state is added.
 
 ### Host delivery
 
-A small hook observes the hydrated snapshot and complete turn projection. It
-keeps a pending reason, delivered signature, per-session sequence, last
-Artifact ids, and observed `artifactsVersion`.
+A small hook observes the hydrated snapshot and current turn projection. It
+keeps a pending reason, delivered signature, per-session sequence, and
+observed `artifactsVersion`.
 
 Delivery waits until connected and transcript load/catch-up has ended. The
 signature canonically includes every enumerable Artifact field and turn
 assignment, including future fields and projection changes.
 
-Live Artifacts wait for a missing tool projection without advancing baseline.
-Reconnect/catch-up reconciliation delivers the authoritative snapshot even
-when the retained transcript lacks that projection.
+Live Artifacts are delivered as soon as their hydrated snapshot is ready. If
+their turn projection arrives later, the updated full snapshot is delivered
+again. This avoids hiding subagent Artifacts whose nested tool event is not
+retained in the summary transcript.
 
 Identical snapshots are suppressed. Listener exceptions are reported without
 changing built-in Artifact UI state.
@@ -84,7 +85,8 @@ compatibility wrappers for the unpublished settlement callback.
 
 - **TC-01:** Initial empty and historical sessions deliver `restore`.
 - **TC-02:** An initially empty session's first Artifact delivers `change`.
-- **TC-03:** An Artifact waits for its tool-block projection before delivery.
+- **TC-03:** An Artifact is delivered before a missing tool-block projection,
+  then delivered again when that projection appears.
 - **TC-04:** Metadata, projection, and consecutive changes deliver complete
   snapshots; canonical duplicates do not.
 - **TC-05:** Reconnect/catch-up finds missed changes without a second restore.

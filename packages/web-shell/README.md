@@ -277,10 +277,11 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 `restore` 表示进入新 Session 后的首次恢复，可携带空快照；`change` 表示实时
 Artifact 变化、同 Session 重连对账发现的差异，或 transcript 补齐后的 turn
-归属变化。每次都返回完整 `artifacts` 和 `artifactsByTurn`，不提供增量。回调会等待
-transcript load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账，因此宿主
-应接受重复交付，但不需要从 SSE 时序推断遗漏。`sequence` 在每个新 Session 从 1
-开始。宿主回调抛错不会影响 WebShell 内置 Artifact 面板与轮末渲染。
+归属变化。每次都返回完整 `artifacts` 和 `artifactsByTurn`，不提供增量。新 Artifact
+可能先于 turn 归属交付，归属稍后补齐时会再交付一份完整快照。回调会等待 transcript
+load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账，因此宿主应接受重复
+交付，但不需要从 SSE 时序推断遗漏。`sequence` 在每个新 Session 从 1 开始。宿主回调
+抛错不会影响 WebShell 内置 Artifact 面板与轮末渲染。
 
 嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
 

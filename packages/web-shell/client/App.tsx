@@ -3349,10 +3349,6 @@ export function App({
   );
   useSessionArtifactsChange({
     sessionId: connection.sessionId,
-    reconciling:
-      connection.status !== 'connected' ||
-      connection.loadingTranscript === true ||
-      connection.catchingUp === true,
     ready:
       connection.status === 'connected' &&
       !connection.loadingTranscript &&

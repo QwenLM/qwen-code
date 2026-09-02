@@ -8,7 +8,6 @@ import type {
 
 interface SessionArtifactsChangeOptions {
   sessionId?: string;
-  reconciling: boolean;
   ready: boolean;
   hydrated: boolean;
   artifacts: readonly DaemonSessionArtifact[];
@@ -55,7 +54,6 @@ function cloneProjection(
 
 export function useSessionArtifactsChange({
   sessionId,
-  reconciling,
   ready,
   hydrated,
   artifacts,
@@ -67,15 +65,11 @@ export function useSessionArtifactsChange({
     sessionId?: string;
     artifactsVersion?: number;
     pendingReason?: WebShellSessionArtifactsChangeReason;
-    reconciliationArtifacts?: readonly DaemonSessionArtifact[];
-    reconciliationRefreshStarted?: boolean;
     lastSignature?: string;
-    lastArtifactIds: ReadonlySet<string>;
     sequence: number;
   }>({
     sessionId,
     artifactsVersion,
-    lastArtifactIds: new Set(),
     sequence: 0,
   });
 
@@ -85,7 +79,6 @@ export function useSessionArtifactsChange({
       state = {
         sessionId,
         artifactsVersion,
-        lastArtifactIds: new Set(),
         sequence: 0,
       };
       stateRef.current = state;
@@ -99,12 +92,6 @@ export function useSessionArtifactsChange({
       ) {
         state.pendingReason = 'change';
       }
-    }
-    if (reconciling && state.lastSignature !== undefined) {
-      state.reconciliationArtifacts ??= artifacts;
-    }
-    if (state.reconciliationArtifacts && !reconciling && !ready) {
-      state.reconciliationRefreshStarted = true;
     }
     if (!sessionId || !onChange || !ready || !hydrated) return;
 
@@ -124,31 +111,9 @@ export function useSessionArtifactsChange({
     }
     if (state.lastSignature === signature) {
       state.pendingReason = undefined;
-      if (
-        state.reconciliationArtifacts !== artifacts ||
-        state.reconciliationRefreshStarted
-      ) {
-        state.reconciliationArtifacts = undefined;
-        state.reconciliationRefreshStarted = false;
-      }
       return;
     }
     if (!state.pendingReason) return;
-
-    if (state.pendingReason === 'change' && !state.reconciliationArtifacts) {
-      const projectedArtifactIds = new Set(
-        Array.from(artifactsByTurn.values()).flatMap((items) =>
-          items.map((artifact) => artifact.id),
-        ),
-      );
-      const hasNewUnprojectedArtifact = artifacts.some(
-        (artifact) =>
-          artifact.toolCallId &&
-          !state.lastArtifactIds.has(artifact.id) &&
-          !projectedArtifactIds.has(artifact.id),
-      );
-      if (hasNewUnprojectedArtifact) return;
-    }
 
     const change: WebShellSessionArtifactsChange = {
       reason: state.pendingReason,
@@ -159,10 +124,7 @@ export function useSessionArtifactsChange({
     };
     state.sequence = change.sequence;
     state.lastSignature = signature;
-    state.lastArtifactIds = new Set(artifacts.map((artifact) => artifact.id));
     state.pendingReason = undefined;
-    state.reconciliationArtifacts = undefined;
-    state.reconciliationRefreshStarted = false;
     try {
       onChange(change);
     } catch (error) {
@@ -178,7 +140,6 @@ export function useSessionArtifactsChange({
     hydrated,
     onChange,
     ready,
-    reconciling,
     sessionId,
   ]);
 }
