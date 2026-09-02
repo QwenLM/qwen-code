@@ -135,7 +135,7 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
 | IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
 
-## SWE-bench Verified
+## Qwen Code Evaluation
 
 ### Evaluation Configuration
 
@@ -143,7 +143,6 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | ------------- | ----- |
 | Dataset | `princeton-nlp/SWE-bench_Verified`, 500 cases |
 | Runs | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions |
-| Harness / Scaffold | `Qwen Code` |
 | Model | `Qwen 3.8 Max` |
 | Sampling | `temperature=1`, `top_p=0.95` |
 | Thinking / Reasoning | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high` |
