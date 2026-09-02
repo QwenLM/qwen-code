@@ -921,6 +921,38 @@ describe('gitPull with a dirty working tree', () => {
     );
   });
 
+  it('rejects combining fetchOnly with stash or force instead of dropping them', async () => {
+    const dir = makeRepo();
+    await expect(
+      gitPull(dir, { fetchOnly: true, stash: true }),
+    ).rejects.toThrow(/cannot be combined/);
+    await expect(
+      gitPull(dir, { fetchOnly: true, force: true }),
+    ).rejects.toThrow(/cannot be combined/);
+  });
+
+  it('types the refusal on a detached HEAD without touching anything', async () => {
+    const { dir, clone } = makeUpstream();
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    git(dir, 'checkout', '-q', '--detach', 'HEAD');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    const headBefore = headSha(dir);
+
+    const stash = await expectPullFailure(
+      gitPull(dir, { stash: true }, hermeticEnv()),
+      'pull_failed',
+    );
+    await expectPullFailure(
+      gitPull(dir, { force: true }, hermeticEnv()),
+      'pull_failed',
+    );
+
+    expect(stash.message).toContain('HEAD is detached');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
   it('refuses stash and force pulls while a merge is in progress, keeping it', async () => {
     const { dir, clone } = makeUpstream();
     remoteCommit(clone, 'a.txt', 'remote\n');
