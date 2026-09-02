@@ -35,10 +35,22 @@ function inspectTodoRequests(requests: Array<Record<string, unknown>>) {
       content?: unknown;
     }>
   ).find(({ role }) => role === 'system');
+  const toolResult = requests
+    .flatMap(
+      (request) =>
+        ((request?.['messages'] ?? []) as Array<{
+          role?: string;
+          content?: unknown;
+        }>) ?? [],
+    )
+    .filter(({ role }) => role === 'tool')
+    .map(({ content }) => JSON.stringify(content))
+    .join('\n');
   return {
     tools,
     baseSystemPrompt: String(systemMessage?.content).split('\n\n---\n\n', 1)[0],
     toolResultRequest: JSON.stringify(requests[1]),
+    toolResult,
   };
 }
 
@@ -75,12 +87,13 @@ describe('todo_write', () => {
     });
 
     const requests = await runForcedTodoCall(rig);
-    const { tools, baseSystemPrompt, toolResultRequest } =
+    const { tools, baseSystemPrompt, toolResult } =
       inspectTodoRequests(requests);
 
     expect(tools.map((tool) => tool.function?.name)).toContain('todo_write');
     expect(baseSystemPrompt).toContain('# Task Management');
-    expect(toolResultRequest).toContain('Verify Todo');
+    expect(toolResult).toContain('Verify Todo');
+    expect(toolResult).not.toContain('disabled by default');
   });
 
   it('should be able to create and manage a todo list', async () => {
