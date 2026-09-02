@@ -616,16 +616,19 @@ export const MAX_SCREEN_CANDIDATES = 256;
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
  * planted by reviewing a malicious PR, measured live. The candidate config
- * files are read with `--file … --includes` rather than merged config: filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run, so global config stays out
- * of scope — but `--includes` follows the `include.path` / `includeIf` chain a
- * screened file itself names, because the checkout does, and a filter hidden
- * one include-hop behind a screened candidate would otherwise be invisible to
- * the screen and executed by the checkout. Screening repo-local-only is a
- * deliberate TRADE, not a claim that repo-local files are all a probe can reach: probe
- * code runs as the user, so `git config --global` is open to it, and a filter
- * planted there is read by every checkout here and never seen by this screen.
+ * files are read with `--file`, one file at a time, rather than merged config:
+ * filters in the user's global config (git-lfs is the common one) are the
+ * user's own contract, exactly like any git command they run, so global config
+ * stays out of scope.
+ *
+ * TWO limits, both declared rather than discovered. Screening repo-local-only
+ * is a deliberate TRADE, not a claim that repo-local files are all a probe can
+ * reach: probe code runs as the user, so `git config --global` is open to it,
+ * and a filter planted there is read by every checkout here and never seen by
+ * this screen. And a filter reached only through an `include.path` /
+ * `includeIf` directive is not seen either — see the spawn below for why
+ * neither `--includes` nor a hand-walk is the answer, and #10441 for the
+ * design that is.
  * Refusing on merged config is not the answer — `git lfs install` writes
  * `filter.lfs.clean` globally, and refusing on that is permanent refusal for
  * every contributor who has git-lfs. The state cannot be told apart from a
@@ -757,72 +760,6 @@ export function carriesReplacementChar(value: string): boolean {
   return value.includes('\uFFFD');
 }
 
-/**
- * How many include hops the screen will follow before refusing.
- *
- * The graph is attacker-written and may be cyclic or merely deep; visited
- * targets are tracked, so this bounds work rather than correctness.
- */
-const MAX_INCLUDE_HOPS = 32;
-
-/**
- * The `include.path` / `includeIf.*.path` targets a candidate names, resolved.
- *
- * Read WITHOUT `--includes`, so git reports the directives this file literally
- * carries and evaluates no condition. Whether a conditional include would fire
- * is not a question this screen can answer — the condition is evaluated
- * against whichever tree git runs in, and the checkout runs in a different one
- * — so every target is followed regardless of its condition, and the decision
- * about which ones matter is made by LOCATION below, not by git.
- */
-function includeTargetsOf(
-  worktree: string,
-  file: string,
-): { targets: string[]; unreadable: boolean } {
-  const r = spawnSync(
-    'git',
-    ['config', '--file', file, '--get-regexp', '^include(If\\..*)?\\.path$'],
-    {
-      cwd: worktree,
-      encoding: 'utf8',
-      timeout: SCREEN_SPAWN_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
-    },
-  );
-  if (r.error || (r.status !== 0 && r.status !== 1)) {
-    return { targets: [], unreadable: true };
-  }
-  if (r.status === 1 || typeof r.stdout !== 'string') {
-    return { targets: [], unreadable: false };
-  }
-  const targets: string[] = [];
-  for (const line of r.stdout.split('\n')) {
-    if (line.length === 0) continue;
-    // `key value`, and only the FIRST space separates them — a path may hold
-    // the rest, including further spaces.
-    const sp = line.indexOf(' ');
-    if (sp < 0) continue;
-    const raw = line.slice(sp + 1);
-    if (raw.length === 0) continue;
-    // git expands a leading `~` against HOME and resolves anything else
-    // against the including file's directory. Expand it the same way rather
-    // than skipping: a repository commonly lives under HOME, so `~/...` can
-    // name a target INSIDE it, and the location test below is what decides.
-    if (raw === '~' || raw.startsWith('~/')) {
-      const home = process.env['HOME'];
-      if (home === undefined || home.length === 0) continue;
-      targets.push(resolve(home, raw.slice(raw === '~' ? 1 : 2)));
-      continue;
-    }
-    // `~user/` is not expanded here — resolving another account's home is not
-    // this screen's business, and an unexpanded path simply is not followed.
-    if (raw.startsWith('~')) continue;
-    targets.push(resolve(dirname(file), raw));
-  }
-  return { targets, unreadable: false };
-}
-
 export function localFilterCommands(worktree: string): LocalFilterScreen {
   const commonDir = revParsePath(worktree, '--git-common-dir');
   const gitDir = revParsePath(worktree, '--git-dir');
@@ -854,8 +791,19 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     };
   }
   const common = resolve(worktree, commonDir);
+  // `<common>/config` is read LAST, and the order is load-bearing. The
+  // checkout this screen authorises reads merged config at its own start, so
+  // everything between the screen's read of a file and that checkout is a
+  // window in which a plant can land in it. The admin-dir set below is
+  // attacker-AMPLIFIABLE — up to MAX_SCREEN_CANDIDATES one-byte filler
+  // entries, each costing spawns — so reading the common config first put the
+  // most likely plant target at the START of a walk the plant itself can
+  // stretch to seconds. Measured: 256 fillers stretched the walk to ~9 s, and
+  // a blind planter won. Reading it last leaves only the walk's own tail
+  // between it and the checkout. This does not close the window — nothing
+  // here can, since a checkout either reads merged config or does not run —
+  // it removes the amplification.
   const candidates = [
-    join(common, 'config'),
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
@@ -903,42 +851,11 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   for (const entry of worktreeEntries ?? []) {
     candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
   }
-  // Anything under these is the repository's own state, which a probe can
-  // write and cleanup never wipes. Anything outside them is the user's — their
-  // global config is their contract exactly as it is for any git command they
-  // run, and `git lfs install` puts `filter.lfs.clean` there. So an include
-  // whose target lands inside is followed and screened; one pointing out is
-  // left alone. That is the whole rule, and it is a rule about LOCATION, which
-  // is the same in every tree — unlike an `includeIf` condition, which is not.
-  const repoRoots = [common, resolve(worktree, gitDir), resolve(worktree)].map(
-    (d) => {
-      try {
-        return realpathSync(d);
-      } catch {
-        return d;
-      }
-    },
-  );
-  const insideRepo = (p: string): boolean => {
-    let real = p;
-    try {
-      real = realpathSync(dirname(p)) + sep + basename(p);
-    } catch {
-      // Not yet resolvable: judge the literal path rather than skipping it.
-    }
-    return repoRoots.some(
-      (root) => real === root || real.startsWith(root + sep),
-    );
-  };
-
+  // Last, per the note above the list.
+  candidates.push(join(common, 'config'));
   const found = new Set<string>();
   let unreadable: string | null = null;
-  // Seeded with the candidates themselves, so an include pointing back at
-  // one of them is not walked twice.
-  const seen = new Set<string>(candidates);
-  const queue = [...candidates];
-  let hops = 0;
-  for (const file of queue) {
+  for (const file of candidates) {
     if (!existsSync(file)) continue;
     // Existence is not readability, and git does not distinguish them for us:
     // an unreadable `--file` exits 1 with a warning on stderr — byte-identical
@@ -964,14 +881,26 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         'config',
         '--file',
         file,
-        // NO `--includes`. It looks like the honest read — the checkout does
-        // expand includes — but it makes git EVALUATE `includeIf` conditions
-        // in this process's context, and the checkout this authorises runs in
-        // a different tree. A condition false here and true there hides a
-        // filter from the screen that the checkout then executes, and
-        // `includeIf.hasconfig:remote.*.url:` never fires under `--file` at
-        // all. There is no context that matches a cross-tree checkout, so the
-        // include graph is walked explicitly below instead of delegated.
+        // NO `--includes`, and no hand-walk of the include graph either —
+        // this screen does not follow includes at all, and that is a declared
+        // limit rather than an oversight. Both alternatives were tried and
+        // both were worse. `--includes` makes git EVALUATE `includeIf` in
+        // THIS process's context while the checkout runs in another tree, so a
+        // condition false here and true there hides a filter the checkout then
+        // executes; it also follows an edge out of the repository, dragging
+        // the user's own `filter.lfs.*` into a repo-local screen and refusing
+        // every later review. Walking the graph by hand instead means
+        // re-implementing git's own path resolution — `%(prefix)`, `~//`,
+        // `~user`, symlinked components, non-UTF-8 targets — and eleven
+        // divergences from git were measured across five review rounds, each
+        // one a silent skip. The condition problem survives both: no single
+        // context matches a cross-tree checkout.
+        //
+        // So a filter reached only through an include is NOT screened here.
+        // Issue #9558 scopes it out in as many words ("`include.path` /
+        // `includeIf` ... are each handled separately today"), and #10441
+        // carries the design that closes it — resolving each hit's origin the
+        // way git resolves it, which is a different change with its own tests.
         // BEFORE the pattern: `--name-only` after it silently prints nothing
         // and exits 1 even with live keys. With it, each line is the whole key
         // and nothing has to be parsed out of a `key value` pair — a config
@@ -1011,24 +940,6 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     if (r.error || (r.status !== 0 && r.status !== 1)) {
       unreadable ??= file;
       continue;
-    }
-    // Follow this file's includes, but only where they land inside the
-    // repository. git expands them for the checkout regardless; the screen
-    // declines to chase one into the user's own configuration, which it must
-    // not refuse on.
-    if (hops < MAX_INCLUDE_HOPS) {
-      const inc = includeTargetsOf(worktree, file);
-      if (inc.unreadable) unreadable ??= file;
-      for (const target of inc.targets) {
-        if (!insideRepo(target) || seen.has(target)) continue;
-        seen.add(target);
-        hops += 1;
-        if (hops > MAX_INCLUDE_HOPS) {
-          unreadable ??= file;
-          break;
-        }
-        queue.push(target);
-      }
     }
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {

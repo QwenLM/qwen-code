@@ -3029,10 +3029,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // measured in seconds between the last read and the checkout, and the
         // probe's own test code can spawn a detached process that plants the
         // filter inside it. Moving the screen below the loop leaves only the
-        // checkout spawn in the gap. The residual window is sub-millisecond
-        // and cannot be closed from here: there is no `-c` kill switch for
+        // checkout spawn in the gap. A residual window remains and cannot be
+        // closed from here — there is no `-c` kill switch for
         // attribute-selected filters, so a checkout either reads merged config
-        // or does not run.
+        // or does not run. It is NOT sub-millisecond: the screen is a walk of
+        // several spawns, measured at 56-100 ms on a repository with no linked
+        // worktrees, and a plant can stretch it with filler admin entries. The
+        // screen reads `<common>/config` last for that reason (see
+        // `localFilterCommands`), which removes the amplification but not the
+        // window.
         const revertFilters = localFilterCommands(probeTree);
         // Gate on `stopped`, matching the restore and scratch-tree — a screen
         // that stopped for any reason did not finish, so the checkout must not

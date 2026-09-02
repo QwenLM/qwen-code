@@ -1927,13 +1927,13 @@ describe('localFilterCommands', () => {
     expect(screen.unreadable).toBeNull();
   });
 
-  it('does NOT follow an include that points OUT of the repository', () => {
-    // The include graph is walked by LOCATION. A repo-local `include.path`
-    // naming the user's own global config is their contract, exactly as merged
-    // config is for any git command they run — and `git lfs install` writes
-    // `filter.lfs.clean` there, so following it would put every contributor
-    // with git-lfs into permanent refusal. That is the failure this whole
-    // screen is scoped to avoid.
+  it('never reports the user\'s global keys through an include', () => {
+    // The screen does not follow includes at all — a declared limit, see the
+    // spawn's comment. This pins the half of it that MUST hold: an
+    // `include.path` naming the user's own global config never drags their
+    // `filter.lfs.*` into a repo-local refusal. `git lfs install` writes that
+    // key, so following the edge would put every contributor with git-lfs into
+    // permanent refusal — the failure this screen is scoped to avoid.
     const outside = mkdtempSync(join(tmpdir(), 'qwen-userconf-'));
     try {
       const userConfig = join(outside, 'gitconfig');
@@ -1955,13 +1955,11 @@ describe('localFilterCommands', () => {
     }
   });
 
-  it('does not report the user\'s global keys through a `~` include', () => {
-    // The one-line write a probe can make: `[include] path = ~/.gitconfig` in
-    // the never-wiped common config. `sanitizedGitEnv()` keeps HOME, so the
-    // tilde expands to the reviewing user's real config — and for anyone with
-    // git-lfs installed that holds `filter.lfs.clean`. Reporting it would
-    // refuse every later review of the repo, naming a key the local config
-    // does not define and whose removal breaks git-lfs everywhere else.
+  it('never reports global keys through a `~` include either', () => {
+    // Same rule through the tilde form: `[include] path = ~/.gitconfig` is the
+    // one-line write a probe can make into the never-wiped common config, and
+    // `sanitizedGitEnv()` keeps HOME so it would expand to the reviewing
+    // user's real config.
     const home = process.env['HOME'];
     expect(home).toBeTruthy();
     writeFileSync(
@@ -1977,27 +1975,6 @@ describe('localFilterCommands', () => {
 
     expect(screen.keys).toEqual([]);
     expect(screen.stopped).toBeNull();
-  });
-
-  it('follows a conditional include whose condition is false HERE', () => {
-    // `includeIf` conditions are evaluated against whichever tree git runs in,
-    // and the checkout this screen authorises runs in a DIFFERENT tree — so a
-    // condition false for the screen and true for the checkout would hide a
-    // filter that then executes. Asking git to evaluate (`--includes`) cannot
-    // be right for a cross-tree checkout; the walk follows every in-repo
-    // target regardless of its condition.
-    writeFileSync(
-      join(dir, '.git', 'evil.inc'),
-      '[filter "evil"]\n\tsmudge = cat\n',
-    );
-    appendFileSync(
-      join(dir, '.git', 'config'),
-      '[includeIf "gitdir:/nowhere/that/matches/"]\n\tpath = evil.inc\n',
-    );
-
-    const screen = localFilterCommands(dir);
-
-    expect(screen.keys).toEqual(['filter.evil.smudge']);
   });
 
   it('matches a filter key whose subsection carries an invalid UTF-8 byte', () => {
@@ -2205,13 +2182,15 @@ describe('localFilterCommands', () => {
     expect(screen.unreadable).toBe(join(dir, '.git', 'config.worktree'));
   });
 
-  it('follows an include directive the checkout would follow', () => {
-    // `git config --file` does NOT expand `include.path` / `includeIf` on its
-    // own — git's documented default for a single-file read — while every
-    // checkout this screen authorises reads MERGED config, which does. A filter
-    // one include-hop behind a screened candidate would be invisible. The
-    // screen walks the include graph itself rather than passing `--includes`;
-    // the sibling cases below pin why.
+  it('does NOT see a filter one include-hop away — a declared limit', () => {
+    // `git config --file` does not expand includes and this screen does not
+    // walk them either, so a filter behind an include is invisible here while
+    // the checkout, reading merged config, would run it. That gap is real and
+    // deliberate: both ways of closing it were tried and both were worse (the
+    // spawn's comment records why), and #10441 carries the design that closes
+    // it properly. This test exists so the limit is visible rather than
+    // assumed — if a later change starts following includes, it goes red and
+    // whoever wrote it has to decide deliberately.
     writeFileSync(
       join(dir, '.git', 'evil.inc'),
       '[filter "evil"]\n\tsmudge = cat\n',
@@ -2223,10 +2202,10 @@ describe('localFilterCommands', () => {
 
     const screen = localFilterCommands(dir);
 
-    expect(screen.keys).toEqual(['filter.evil.smudge']);
-    expect(screen.total).toBe(1);
-    expect(screen.unreadable).toBeNull();
+    expect(screen.keys).toEqual([]);
+    expect(screen.stopped).toBeNull();
   });
+
 });
 
 describe('screenStopDetail', () => {
