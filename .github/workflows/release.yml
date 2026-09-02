@@ -43,9 +43,9 @@ on:
         default: false
 
 concurrency:
-  # A delayed preview must not overlap the nightly validation on the same
-  # reserved host. Manual runs keep independent groups.
-  group: "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}"
+  # Only one release validation may use the reserved host at a time, including
+  # delayed schedules and manually dispatched dry runs or releases.
+  group: 'release-validation'
   cancel-in-progress: false
 
 jobs:
@@ -523,7 +523,7 @@ jobs:
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           # Nightly and preview releases may absorb a transient timing failure;
-          # stable/manual releases remain strict and never retry a failed test.
+          # stable releases remain strict and never retry a failed test.
           VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}"
         run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
 

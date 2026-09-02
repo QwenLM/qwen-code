@@ -1594,10 +1594,9 @@ describe('release lane runner routing', () => {
     }
   });
 
-  it('serializes scheduled release validation without coupling manual runs', () => {
+  it('serializes every release validation on the reserved host', () => {
     expect(releaseYaml.concurrency).toEqual({
-      group:
-        "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}",
+      group: 'release-validation',
       'cancel-in-progress': false,
     });
   });
