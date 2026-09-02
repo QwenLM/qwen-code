@@ -5541,16 +5541,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `applyModelServiceId` for rationale (race against
       // transportClosedReject, publish model_switched on success,
       // model_switch_failed on failure, don't tear down the session).
+      // The outcome is reported to the caller via `modelApplied` so a
+      // create carrying a selection can tell a confirmed switch from a
+      // silent fallback to the agent default model.
+      let modelApplied: boolean | undefined;
       if (modelServiceId) {
-        await applyModelServiceId(
+        modelApplied = await applyModelServiceId(
           entry,
           modelServiceId,
           initTimeoutMs,
           clientId,
-        ).catch(() => {
-          // Already published `model_switch_failed`; session stays
-          // operational on the agent's default model.
-        });
+        ).then(
+          () => true,
+          () => false,
+        );
       }
 
       if (approvalMode) {
@@ -5601,6 +5605,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.parentSessionId
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
+        ...(modelApplied !== undefined ? { modelApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
       };

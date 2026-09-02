@@ -2441,6 +2441,8 @@ const EN: Messages = {
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
+  'model.unavailable':
+    'Models are unavailable; the daemon default will be used.',
   'model.none': 'No models available',
   'model.select': 'Select Model',
   'model.section': 'Model',
@@ -5698,6 +5700,7 @@ const ZH: Messages = {
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
+  'model.unavailable': '模型列表暂不可用，将使用守护进程默认模型。',
   'model.none': '没有可用模型',
   'model.select': '选择模型',
   'model.section': '模型',
