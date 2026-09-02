@@ -463,15 +463,42 @@ describe('createSpawnChannelFactory env policy', () => {
     ).not.toThrow();
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(third),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
 
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
+      budget: 'prepared_response',
     });
     await vi.waitFor(() =>
       expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
     );
     writer.releaseLock();
+  });
+
+  it('attributes outbound operation budget failures', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 1,
+        maxQueuedBytes: 4096,
+      },
+    })('/tmp/project');
+
+    const release = channel.transportGuard?.reserveOutboundOperation([
+      'first',
+      {},
+    ]);
+    expect(() =>
+      channel.transportGuard?.reserveOutboundOperation(['second', {}]),
+    ).toThrow('NDJSON outbound_operation queue limit exceeded');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+      budget: 'outbound_operation',
+      maxQueuedMessages: 1,
+    });
+    release?.();
   });
 
   it('stops estimating a large response once its byte budget is exceeded', async () => {
@@ -505,7 +532,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     expect(elementReads).toBeLessThan(1_000);
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -528,7 +555,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
