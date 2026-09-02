@@ -455,6 +455,23 @@ jobs:
           if-no-files-found: 'error'
           overwrite: true
 
+      # prepare:package's guards (unpacked size budget, forbidden literals,
+      # missing bundle artifacts) had no gate before the publish job, so the
+      # first thing that tripped one was the Dockerfile's builder stage in
+      # integration_docker — a ~20 minute wait for a one-line error, and
+      # before the build_sandbox.js output fix, one that printed nothing.
+      # Running the same steps here reports it in minutes instead. Kept after
+      # the upload so the packed artifact stays exactly what the build steps
+      # above produced.
+      - name: 'Verify Prepared Package'
+        run: |-
+          npm run bundle
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
+          npm run prepare:package
+
   quality_typecheck:
     name: 'Quality Checks (Typecheck)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
