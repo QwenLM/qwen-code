@@ -25,6 +25,13 @@ import {
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
+// @-command expansion is stubbed: the tests assert the wiring (expanded
+// prompt to the model, raw text as submittedPrompt), not the resolver.
+const handleAtCommandMock = vi.hoisted(() => vi.fn());
+vi.mock('../hooks/atCommandProcessor.js', () => ({
+  handleAtCommand: handleAtCommandMock,
+}));
+
 // The steering test drives one full tool round-trip; replace the scheduler
 // with a stub that completes the pending calls immediately.
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -261,6 +268,79 @@ describe('livePromptEvents', () => {
       type: SendMessageType.UserQuery,
       modelOverride: 'fast-x',
     });
+  });
+
+  it('carries submittedPrompt on the first UserQuery and omits it on tool continuation', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'go', undefined, {
+        submittedPrompt: 'raw composer text',
+      }),
+    );
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    const [, , , firstOptions] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(firstOptions).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: 'raw composer text',
+    });
+    const [, , , secondOptions] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it('expands @-commands in the model prompt while submittedPrompt stays raw', async () => {
+    const expanded = [{ text: 'expanded @file.txt content' }];
+    handleAtCommandMock.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: expanded,
+    });
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, '@file.txt do it', undefined, {
+        submittedPrompt: '@file.txt do it',
+      }),
+    );
+
+    expect(handleAtCommandMock).toHaveBeenCalledWith(
+      expect.objectContaining({ query: '@file.txt do it', config }),
+    );
+    const [prompt, , , options] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toBe(expanded);
+    expect(options).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: '@file.txt do it',
+    });
+  });
+
+  it('skips the LLM call when @-command handling aborts the turn', async () => {
+    handleAtCommandMock.mockResolvedValue({
+      shouldProceed: false,
+      processedQuery: null,
+    });
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(livePromptEvents(config, '@missing.txt try', undefined));
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('appends drained steering texts after tool responses at the boundary', async () => {

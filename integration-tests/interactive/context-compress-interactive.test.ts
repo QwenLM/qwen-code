@@ -51,6 +51,17 @@ describe('Interactive Mode', () => {
 
       await rig.waitForText('einstein', 25000);
 
+      // The marker text can render mid-turn (OpenTUI streams reasoning
+      // content before the final answer). Typing `/compress` while the turn
+      // is still in flight queues the text as a follow-up prompt instead of
+      // executing it as a slash command — wait for the turn's api_response
+      // telemetry so the command reaches an idle composer.
+      const sawTurnEnd = await rig.waitForTelemetryEvent('api_response', 90000);
+      expect(
+        sawTurnEnd,
+        'turn did not complete (no api_response telemetry)',
+      ).toBe(true);
+
       await type(ptyProcess, '/compress');
       // A small delay to allow React to re-render the command list.
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -138,6 +149,13 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, '\r');
 
       await rig.waitForText('einstein', 25000);
+
+      // Same mid-turn race as the first case: wait for the turn's
+      // api_response telemetry so /compress is not queued as model input.
+      expect(
+        await rig.waitForTelemetryEvent('api_response', 90000),
+        'turn did not complete (no api_response telemetry)',
+      ).toBe(true);
 
       // Fire /compress with a trailing instruction. We are not asserting on
       // summary CONTENT (model behaviour) — only that the wiring runs

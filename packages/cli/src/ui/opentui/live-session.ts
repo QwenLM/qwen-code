@@ -45,6 +45,8 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
+import { isAtCommand } from '../utils/commandUtils.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -93,6 +95,13 @@ export interface LivePromptOptions {
    * is minted here (first turn of a session, …).
    */
   promptId?: string;
+  /**
+   * Raw composer text for this turn (ink SendMessageOptions.submittedPrompt
+   * parity): forwarded on the first UserQuery so UserPromptSubmit hooks and
+   * the agent-input recording see the text projection, never the
+   * @-expanded model-bound prompt. ToolResult continuations never carry it.
+   */
+  submittedPrompt?: string;
 }
 
 /**
@@ -254,20 +263,45 @@ export async function* livePromptEvents(
   const abort = signal ?? new AbortController().signal;
   const dbg = process.env['QWEN_OPENTUI_DEBUG'];
 
+  // ink useGeminiStream parity: expand `@<path>` / `@server:uri` commands in
+  // the first model-bound prompt. The composer/turn driver still echoes the
+  // raw text and forwards it as `submittedPrompt`, so the expansion must
+  // happen here, after provenance has been captured — otherwise the model
+  // never sees the file/resource contents (provenance + auto-recall E2E).
+  let modelPrompt: PartListUnion = prompt;
+  if (typeof modelPrompt === 'string' && isAtCommand(modelPrompt)) {
+    const atCommandResult = await handleAtCommand({
+      query: modelPrompt,
+      config,
+      onDebugMessage: () => {},
+      messageId: Date.now(),
+      signal: abort,
+    });
+    if (!atCommandResult.shouldProceed || !atCommandResult.processedQuery) {
+      return;
+    }
+    modelPrompt = atCommandResult.processedQuery;
+  }
+
   // The ink app drives tool EXECUTION via useReactToolScheduler: the client
   // only yields `tool_call_request` and ends the turn, then the UI schedules
   // the tool and submits the functionResponses to continue. Replicate that
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
-  let nextPrompt: PartListUnion = prompt;
+  let nextPrompt: PartListUnion = modelPrompt;
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
-      ? options?.modelOverride
+      ? options?.modelOverride || options?.submittedPrompt
         ? {
             type: SendMessageType.UserQuery,
-            modelOverride: options.modelOverride,
+            ...(options.modelOverride
+              ? { modelOverride: options.modelOverride }
+              : {}),
+            ...(options.submittedPrompt
+              ? { submittedPrompt: options.submittedPrompt }
+              : {}),
           }
         : undefined
       : {

@@ -95,11 +95,11 @@ describe('Interactive protocol tag retry guard', () => {
       );
 
       try {
-        const isReady = await rig.poll(
-          () => /YOLO (模式|mode)/i.test(stripAnsi(rig._interactiveOutput)),
-          30000,
-          200,
-        );
+        // Renderer-agnostic readiness: the ink footer carries the
+        // approval-mode label (e.g. "YOLO mode"), the OpenTUI prompt chrome
+        // only shows its prefix glyph — the placeholder is the only text
+        // both renderers put on screen once the composer is up.
+        const isReady = await rig.waitForText('Type your message', 30000);
         expect(isReady, 'CLI did not start up in interactive mode').toBe(true);
 
         await type(ptyProcess, 'Return the deterministic retry response.');

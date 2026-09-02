@@ -90,6 +90,11 @@ export interface OpenTuiSubmitOptions {
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
+  /**
+   * Raw composer text (ink submittedPrompt provenance parity): forwarded to
+   * the UserPromptSubmit hook, never the @-expanded model-bound prompt.
+   */
+  submittedPrompt?: string;
 }
 
 export interface OpenTuiLiveTurn {
@@ -188,6 +193,7 @@ export function useOpenTuiLiveTurn(
           promptId,
           modelOverride: turnOptions?.modelOverride,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
+          submittedPrompt: turnOptions?.submittedPrompt,
           drainSteering: drainQueue,
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
@@ -228,7 +234,9 @@ export function useOpenTuiLiveTurn(
             const text = drainQueue().join('\n');
             if (text.trim()) {
               apply({ type: 'user', text });
-              void runTurn(text, nextLivePromptId(config));
+              void runTurn(text, nextLivePromptId(config), {
+                submittedPrompt: text,
+              });
             }
           }
         }
@@ -266,7 +274,9 @@ export function useOpenTuiLiveTurn(
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
       apply({ type: 'user', text, promptId, sentToModel: true });
-      void runTurn(prompt, promptId, options);
+      const submittedPrompt =
+        options?.submittedPrompt ?? (text.trim().length > 0 ? text : undefined);
+      void runTurn(prompt, promptId, { ...options, submittedPrompt });
     },
     [config, apply, pushQueue, runTurn],
   );
