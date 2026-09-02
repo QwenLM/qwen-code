@@ -4963,11 +4963,29 @@ function composeReviewBody(
   // relaunched verification instead of the auditor whose scope read
   // nothing (R22-4). A compliant relay of a floor entry always carries its
   // reason, so the full-sentence arms still dedup it exactly as before.
+  //
+  // "Contains the sentence" is necessary, not sufficient. An entry is an echo
+  // only when removing the structural sentence leaves NOTHING substantive: a
+  // relay prefix (`step 5 — `, `第 5 步——`) and punctuation are not a claim,
+  // a clause of the orchestrator's own is. A whiff report that QUOTES the
+  // floor sentence inside its own reason — `reverse audit — the floor already
+  // said '…' and round 2's auditor returned nothing substantive twice` —
+  // matched the bare `includes` and was swallowed: the whiff clause never
+  // reached the body, `dimensionGapsAreDepthOnly` went vacuously true, and
+  // the cap routed to the verification axis for a run whose auditor read
+  // nothing (R30-1). The remainder test keeps every compliant relay an echo
+  // — verbatim, prefix-reshaped, zh — and hands anything carrying more to
+  // the coverage axis, where a distinct claim belongs.
+  const RELAY_RESIDUE_RE =
+    /^[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*(?:step\s*\d+|\u7b2c\s*\d+\s*\u6b65)?[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*$/i;
+  const echoesSentence = (entry: string, sentence: string): boolean =>
+    entry.includes(sentence) &&
+    RELAY_RESIDUE_RE.test(entry.replace(sentence, ''));
   const echoesCoverageEntry = (entry: string): boolean =>
     coverageEntries.some(
       (e) =>
         e !== budgetEntry &&
-        (entry.includes(`${e.subject} — ${e.reason}`) ||
+        (echoesSentence(entry, `${e.subject} — ${e.reason}`) ||
           // The Chinese twin of the same match: the stderr instruction
           // relays the structural entries in BOTH languages, and a zh relay
           // (the `subjectZh——reasonZh` shape deadline.ts coins) that
@@ -4975,7 +4993,7 @@ function composeReviewBody(
           // withholds the anchor from a run its English relay clears.
           (e.subjectZh !== undefined &&
             e.reasonZh !== undefined &&
-            entry.includes(`${e.subjectZh}——${e.reasonZh}`)) ||
+            echoesSentence(entry, `${e.subjectZh}——${e.reasonZh}`)) ||
           (!verificationFloorEntries.has(e) &&
             (entry === e.subject || entry === e.subjectZh))),
     );

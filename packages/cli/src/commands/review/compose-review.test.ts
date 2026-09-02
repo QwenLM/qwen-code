@@ -16426,6 +16426,40 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     );
   });
 
+  it('does not swallow a distinct report that quotes the floor sentence inside its own reason', () => {
+    // The full-sentence arm read "contains the structural sentence" as "is
+    // its relay". A whiff report that QUOTES the floor sentence inside its
+    // own reason contains it and is not a relay — it carries a claim of its
+    // own — yet it was filtered as an echo: the whiff clause never reached
+    // the body, `dimensionGapsAreDepthOnly` went vacuously true, and the
+    // cap routed to the verification axis for a run whose auditor read
+    // nothing (R30-1). An echo is what is left when nothing substantive
+    // remains after the sentence is removed; a remainder is a distinct
+    // claim and belongs on the coverage axis, rendered.
+    const floor =
+      'reverse audit — no auditor was launched with a prompt this skill ' +
+      'builds — the pass that hunts what the rest of the review missed ' +
+      'ran, if at all, without the method its brief carries';
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        `reverse audit — the floor already said '${floor}' and round 2's ` +
+          'auditor returned nothing substantive twice',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).toEqual([]);
+    expect(r.body).toContain(
+      "round 2's auditor returned nothing substantive twice",
+    );
+  });
+
   it('puts the medium tier by-design reverse-audit skip on the posture axis', () => {
     // A clean balanced-medium review caps on the tier's own by-design
     // omission: no verification can clear it and no repair lifts it — the

@@ -36,6 +36,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
@@ -73,6 +74,23 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `ERROR: ${(err as Error).message}\n` +
           'This is an environment problem, not a finding about the agents. ' +
           'Coverage cannot be shown, so the review must not certify the diff.',
+      );
+      process.exitCode = 3;
+      return;
+    }
+    if (err instanceof ChunkPartitionError) {
+      // A defect in coverage.ts, not a fact about the agents or the
+      // environment — `compose-review` renders this arm on its own so an
+      // operator is not sent to re-capture a diff that was never the
+      // problem, and this command owes the same reader the same
+      // distinction: a raw stack trace with no ERROR line and no exit code
+      // is the one shape the orchestrator cannot act on.
+      writeStderrLine(
+        `ERROR: ${err.message}\n` +
+          'This is a defect in the coverage ledger, not a finding about the ' +
+          'agents and not an environment problem: the ledger contradicted ' +
+          'the plan it was built from. Coverage cannot be shown, so the ' +
+          'review must not certify the diff.',
       );
       process.exitCode = 3;
       return;

@@ -47,6 +47,7 @@ import { buildWholeDiffBlock } from './agent-prompt.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import * as coverageModule from './lib/coverage.js';
 
 // Only the stderr test below drives the command handler; the rest of this file
 // exercises the pure function, which prints nothing.
@@ -1256,6 +1257,44 @@ describe('the roster — who should have been here', () => {
       else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
       if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
       else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  });
+
+  it('refuses a ledger contradiction with its own ERROR line and exit 3, not a stack trace', () => {
+    // `compose-review` renders a `ChunkPartitionError` on its own arm so the
+    // operator is not sent to re-capture a diff that was never the problem;
+    // this command let the same error escape as an uncaught throw — exit 1,
+    // no ERROR line, no report — the one shape the orchestrator cannot act
+    // on. Same posture as the transcripts arm: refuse, for the right reason.
+    const p = planPr();
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'probe — uncoverable disagrees with the ledger',
+        );
+      });
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      expect(() =>
+        (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+          plan: p,
+          out: join(dir, 'cov.json'),
+        }),
+      ).not.toThrow();
+      const err = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.startsWith('ERROR: '));
+      expect(err).toContain('uncoverable disagrees with the ledger');
+      expect(err).toContain('defect in the coverage ledger');
+      expect(err).not.toContain('This is an environment problem');
+      expect(process.exitCode).toBe(3);
+      expect(existsSync(join(dir, 'cov.json'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+      process.exitCode = prevExit;
     }
   });
 
@@ -3011,6 +3050,80 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.coveredChunks).toEqual([1]);
     expect(r.missingChunks).toEqual([2]);
     expect(r.ok).toBe(false);
+  });
+
+  it('a no-reads quoter of a truncatable chunk keeps its credit for the chunks it spanned', () => {
+    // The refused no-reads declarer used to be DROPPED as a record, so a
+    // whole-diff quoter of chunk 2's declaration lost its spanning credit
+    // for chunk 1 too — the identical record over a non-truncatable chunk 2
+    // kept both, opposite treatment purely from the quoted chunk's
+    // metadata (R28-1). The exclusion is per CHUNK: the declared truncatable
+    // chunk is withheld from this record's credit (the premise the test
+    // above pins), the rest of its reads keep theirs.
+    const p = plan(2, { longLineChunk: 2 });
+    transcript(
+      'w1',
+      'Security review of the whole diff.\n' + `read_file(file_path="${DIFF}")`,
+      {
+        ranges: [
+          [0, 100],
+          [100, 100],
+        ],
+        text:
+          'The chunk-2 agent returned:\n' +
+          '  Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.uncoverableChunks).toEqual([]);
+  });
+
+  it('a declarer whose spelled reads overshoot a truncatable chunk does not certify it', () => {
+    // The containment gate refuses a declarer pointed past its chunk's
+    // window — a genuine declarer is pointed at its chunk alone — and the
+    // refusal fell through to the credit gate, where the same reads
+    // certified the declared chunk covered: a chunk the plan's own
+    // measurement says no read can return, wearing `covered` (R27-1). The
+    // declaration is still not admitted (the shape is a quoter's), but the
+    // chunk lands in `missingChunks`, the relaunch that yields a declaration
+    // about this plan's lines.
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'd2',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${chunkBrief(2)}")\n` +
+        `read_file(file_path="${DIFF}", offset=100, limit=150)`,
+      {
+        calls: 1,
+        range: [100, 150],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    // Same record over a chunk the plan can span: a quoter shape, and its
+    // reads keep their credit — the exclusion rides the plan's measurement.
+    const q = plan(2, { maxLineChars: 42 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'd2',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${chunkBrief(2)}")\n` +
+        `read_file(file_path="${DIFF}", offset=100, limit=150)`,
+      {
+        calls: 1,
+        range: [100, 150],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+    expect(coverageFromTranscripts(q, ENV).coveredChunks).toEqual([1, 2]);
   });
 
   it('does not count a prior agent that declared ITS OWN chunk unreachable', () => {
@@ -5282,6 +5395,62 @@ describe('the chunk ledger', () => {
       outcome: 'missing',
       classification: 'rewritten-prompt',
     });
+  });
+
+  it('classifies a zero-call record on a rewritten launch as rewritten-prompt, not idle', () => {
+    // The idle guard `continue`s before the rewritten-prompt arm, so a record
+    // launched on a prompt the CLI did not build that then made no tool call
+    // was classified `idle` — repair: relaunch the same prompt — when the
+    // repair that works is a rebuild. Both causes are recorded and
+    // `classify()` ranks the rebuild above the relaunch (R23-1). The prose
+    // channel still names it idle: the ledger adds a key, it does not move a
+    // record out of the array that names what it did.
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('the territory agent', 'the chunk agent'),
+      { calls: 0 },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'rewritten-prompt',
+    });
+    expect(r.idleAgents).toEqual(['chunk 2']);
+    // The verbatim-launched idler keeps `idle` — `names an idle agent as the
+    // reason its chunk went unread`, above, is the control.
+  });
+
+  it('names owners, not spanning readers: a whole-diff-only run covers with empty agents', () => {
+    // The ledger's `agents` contract, settled on #9768 (R8-4 / R19-2): the
+    // field names who was SENT for the chunk — its assigned owners and an
+    // admitted paraphrased declarer — not every reader whose range spanned
+    // it. A whole-diff agent spans every chunk by construction; naming it on
+    // each entry would put the same label everywhere and distinguish
+    // nothing. So coverage earned by a whole-diff read alone is recorded by
+    // the `covered` outcome, beside `agents: []`.
+    transcript('w1', wholeDiff(), {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+    });
+
+    const r = coverageFromTranscripts(plan(2, { record: false }), ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(entryFor(r, 1)).toMatchObject({ outcome: 'covered', agents: [] });
+    expect(entryFor(r, 2)).toMatchObject({ outcome: 'covered', agents: [] });
+    // Mixed run: the owner that failed is named on its chunk, the whole-diff
+    // reader that covered it is not — the entry says who was sent, and the
+    // outcome says the lines were read anyway.
+    transcript('a2', good(2), { calls: 0 });
+    const m = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(m, 2)).toMatchObject({
+      outcome: 'covered',
+      agents: ['chunk 2'],
+    });
+    expect(entryFor(m, 1)).toMatchObject({ outcome: 'covered', agents: [] });
   });
 
   it('pins the unconditional rewritten-prompt note on a refused declarer', () => {

@@ -166,9 +166,21 @@ export interface ChunkCoverageItem {
   /** Set only on `missing` and `uncoverable`; absent on covered scope. */
   classification?: ChunkFailureClass;
   /**
-   * The agent labels this run recorded against the chunk, in walk order.
-   * Present on every outcome — on a covered chunk it says who read it, on a
-   * missing one it says who was supposed to.
+   * The agent labels this run recorded as the chunk's OWNERS, in walk order:
+   * every record whose `chunk N of M` launch assigned it the chunk, plus a
+   * paraphrased launch whose declaration of the chunk was admitted. Present on
+   * every outcome — on a missing chunk it says who was sent for these lines
+   * and did not read them.
+   *
+   * Deliberately NOT every reader whose range spanned the chunk. A whole-diff
+   * agent spans every chunk by construction, and naming it on each would make
+   * the field say "who happened to contain these lines" instead of "who was
+   * sent for them" — the same label on every entry, distinguishing nothing.
+   * So a covered chunk whose only reader was a whole-diff agent carries `[]`:
+   * the coverage came from a spanning read, not from an owner, and the
+   * `covered` outcome is what records the read. Settled as the ledger's
+   * contract on #9768 (R8-4 / R19-2, owner-only) and pinned by
+   * `names owners, not spanning readers` in `check-coverage.test.ts`.
    */
   agents: string[];
 }
@@ -1040,7 +1052,15 @@ export function coverageFromTranscripts(
     // Exact, not containment: a re-plan that shrinks a chunk's tail leaves
     // the old window a strict SUPERSET of the new one, and containment
     // would pass membership, count and territory alike for a declaration
-    // written against the old lines.
+    // written against the old lines. Held on purpose against R27-2, which
+    // asked for the shrinking direction to be admitted: the declaration's
+    // evidence — the over-cap line — was found somewhere in the OLD window,
+    // and nothing in the record says whether that line survived the trim.
+    // The plan's own measurement of the NEW window (`maxLineChars`) is the
+    // authority on whether it is spannable, and a relaunch against the new
+    // window is the one repair that yields a declaration about THIS plan's
+    // lines. Admitting supersets would reopen the stale-`chunk 2 of 2`
+    // shape (R13-2, R18-1) whenever a re-plan happens to shrink.
     if (merge([...told]).some(([s, e]) => s === c.startLine && e === c.endLine))
       return true;
     // Against contiguous RUNS of the spelled reads, not only the merge: a
@@ -1277,6 +1297,21 @@ export function coverageFromTranscripts(
       if (!superseded(rec, chunk)) {
         idleAgents.push(name);
         noteChunkCause(rec, chunk, 'idle');
+        // The launch it idled on. The rewritten-prompt arm below never sees
+        // this record — the `continue` here is load-bearing for the
+        // declaration check, not for the classification — so without this
+        // a zero-call record launched on a prompt the CLI did not build was
+        // classified `idle` (repair: relaunch the same prompt) when the
+        // repair that works is a rebuild. Both causes are recorded;
+        // `classify()` ranks the rebuild above the relaunch, the same
+        // precedence the unopened arm applies (R23-1). The prose channel
+        // still names it idle: this adds a key, it does not move a record.
+        if (chunk !== null) {
+          const b = builtOf(`chunk-${chunk}`);
+          if (b === undefined || !wasDeliveredVerbatim(rec.launchPrompt, b)) {
+            noteChunkCause(rec, chunk, 'rewritten-prompt');
+          }
+        }
       }
       continue;
     }
@@ -1437,6 +1472,32 @@ export function coverageFromTranscripts(
     const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
+    // The declared chunks THIS record's reads may not certify, whatever the
+    // declarer arms below decide about the declaration itself. A record
+    // carrying `Uncoverable: chunk N` — its own line or a quotation — for a
+    // chunk the plan's own measurement proves unspannable holds a read of
+    // that chunk that is a truncated view by construction (the refutation
+    // guard's `> CAP` arm): the read certifies nothing about N. Excluding
+    // the CHUNK rather than dropping the RECORD keeps the reads' credit for
+    // every other chunk they demonstrably spanned — the no-reads quoter that
+    // lost its whole-diff credit (R28-1) and the overshooting declarer that
+    // fell through to the credit gate and certified the chunk it declared
+    // (R27-1) are the two shapes this one exclusion closes. A chunk whose
+    // metadata is absent or hand-zeroed is not excluded: there the plan
+    // cannot say the read was truncated, and the declaration rides the
+    // untrusted-metadata arms instead. Identity-less records only — the
+    // paraphrased chunk launch the branch below exists for. A record still
+    // carrying an identity line is an assigned agent (its own declaration is
+    // ruled on by the assigned arm) or a role agent, and a role agent
+    // quoting a declaration keeps the live coverage its read earned: that
+    // is the R20-4 posture, pinned by `a role agent quoting the declaration
+    // is not an unassigned declarer`, and this exclusion does not move it.
+    const creditExcluded = new Set(
+      labelFromLaunchPrompt(rec.launchPrompt) === null
+        ? declaredUncoverableChunkIds(rec).filter(chunkTruncatableByPlan)
+        : [],
+    );
+
     if (chunk !== null && declaresOwnUncoverable(rec, chunk)) {
       // The same supersession guard the sibling flags carry. Without it a
       // stale declaration — a prior attempt's agent on a resumed run, or a
@@ -1455,7 +1516,14 @@ export function coverageFromTranscripts(
       // admitting the quote over a chunk the same run demonstrably read;
       // when the plan cannot prove unspannability, two honest declarers
       // annihilate into `missingChunks`, whose relaunch is the correct
-      // repair (R20-3).
+      // repair (R20-3). Held on purpose against R28-2, which asked for a
+      // declarer exclusion keyed on non-indented lines: an indentation
+      // heuristic cannot tell a code-fenced quote at column 0 from a
+      // declaration, and the shape is reachable only on a plan whose
+      // metadata is absent or hand-zeroed — every plan the planner writes
+      // measures its lines, and there a truncatable chunk is admitted ahead
+      // of suppression. The cost is one relaunch on a hand-edited plan; the
+      // alternative is a quotation capping a verdict again.
       //
       // Refuted outright by a returned spanning read — see
       // `refutedByReturnedSpanningRead`. Without the conjunct, a relaunch
@@ -1603,17 +1671,13 @@ export function coverageFromTranscripts(
             declarerRouted = true;
             break;
           }
-          // A refused declarer whose launch spells no reads keeps the
-          // declarer posture when the plan's own measurement proves the
-          // chunk unspannable: its spanning reads are truncated by
-          // construction (the refutation guard's `> CAP` arm exists for
-          // exactly them), and falling through to the credit gate would
-          // certify the declared chunk covered off those very reads — the
-          // R17-4 drop surviving in the fall-through shape (R20-4).
-          if (told.length === 0 && chunkTruncatableByPlan(declared)) {
-            declarerRouted = true;
-            break;
-          }
+          // A refused declarer — no spelled reads, or reads overshooting
+          // the declared window — falls through to the credit gate on
+          // purpose: `creditExcluded` above already withholds the declared
+          // truncatable chunk from this record's credit, so the fall-through
+          // certifies nothing the declaration names (R20-4's drop, R27-1's
+          // overshoot) while the record's other reads keep their credit
+          // (R28-1). Dropping the record here was the R28-1 defect.
         }
         if (declarerRouted) continue;
       }
@@ -1647,6 +1711,7 @@ export function coverageFromTranscripts(
           declarationStillOnTerritory([...told, ...rec.diffReads], chunk)
     ) {
       for (const c of plan.chunks) {
+        if (creditExcluded.has(c.id)) continue;
         if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
           covered.add(c.id);
           // A whole-diff agent spans every chunk, so this credits chunks it was
