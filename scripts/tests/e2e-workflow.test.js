@@ -100,6 +100,125 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('sandbox:none shard retry', () => {
+    // Runs 33293739505, 33302550436 and 33317457036 each failed the
+    // sandbox:none leg at the 'Run E2E tests' step with zero vitest FAIL
+    // lines — an all-green shard exiting red under shared-host pressure,
+    // with sibling shards of the same runs green and the shard green on
+    // re-run. The bounded retry absorbs one such transient death; a
+    // deterministic test failure fails both attempts and keeps the job red.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const runStep = steps.find((step) => step.name === 'Run E2E tests');
+    const epochStep = steps.find(
+      (step) => step.name === 'Record job start epoch',
+    );
+
+    it('records the job start epoch before the expensive setup steps', () => {
+      // The retry gate budgets against the whole 60-minute job; an epoch
+      // recorded at the test step would hide ~30 minutes of setup spend.
+      expect(epochStep.run).toContain(
+        'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"',
+      );
+      expect(steps.indexOf(epochStep)).toBeLessThan(
+        steps.indexOf(
+          steps.find((step) => step.name === 'Install dependencies'),
+        ),
+      );
+      // An `if:` here would skip the record on one leg, where the gate's
+      // ${E2E_JOB_START_EPOCH:-0} fallback then always takes the ::error::
+      // branch and the retry never fires on the leg it exists for.
+      expect(epochStep.if).toBeUndefined();
+    });
+
+    it('wraps the sandbox:none shard command in a retryable function', () => {
+      expect(runStep.run).toContain('run_shard() {');
+    });
+
+    it('retries the full shard command, shard and excludes included', () => {
+      // Everything after `--` is forwarded to vitest by the npm script, so
+      // shard and exclude coverage lives only in this argument list. The
+      // excludes are shared verbatim with the docker leg above.
+      expect(runStep.run).toContain(
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'",
+      );
+    });
+
+    it('retries the sandbox:none shard exactly once', () => {
+      expect(runStep.run).toContain('run_shard || {');
+      // Definition + first attempt + one retry: the second attempt's exit
+      // status is the step's, and a third attempt would burn pool time for
+      // nothing.
+      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      // End-anchored scope: the retry is the group's last command and the
+      // group is the script's last statement. A retry moved outside the
+      // `|| { ... }` would run unconditionally, re-running green shards too.
+      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
+    });
+
+    it('gates the retry on the remaining job budget', () => {
+      // The retried run_shard is reachable only behind an elapsed-time check
+      // that exits the step when the job cannot fit another shard. Shape
+      // only — bash itself witnesses the execution semantics in
+      // e2e-shard-retry.test.js.
+      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
+    });
+
+    it('pins the job timeout the budget-gate arithmetic is built on', () => {
+      // The 2100s threshold is 3600s minus a 25-minute reserve; the 3600s
+      // comes from this timeout. Editing one without the other mis-budgets
+      // the retry in both directions with every other witness green.
+      expect(yml.jobs['e2e-test-linux']['timeout-minutes']).toBe(60);
+    });
+
+    it('keeps the run step red when the shard stays red', () => {
+      // continue-on-error sits above the script exit code that every other
+      // witness observes: with it, two failing attempts still report green.
+      // Pin both levels — a job-level key computes the job conclusion green
+      // whatever the run step exits. The sandbox-image build step's
+      // deliberate step-level key and isolated-nightly's deliberate job-level
+      // key stay untouched — this pins the run step and e2e-test-linux only.
+      expect(runStep['continue-on-error']).toBeUndefined();
+      expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
+    });
+
+    it('keeps the default step shell the execution harness assumes', () => {
+      // e2e-shard-retry.test.js executes this step's script under `bash -e`,
+      // GitHub's default Linux step shell only while the step carries no
+      // `shell:` override and neither the workflow nor the job a `defaults:`
+      // block. Any of those switches the lane's shell semantics — explicit
+      // `bash` expands to `bash --noprofile --norc -e -o pipefail {0}` —
+      // while the harness keeps executing the old shell, so every execution
+      // witness stays green for a contract the lane no longer runs. Absence
+      // only: this pins e2e.yml, not workflows that deliberately set a shell.
+      expect(runStep.shell).toBeUndefined();
+      expect(yml.defaults).toBeUndefined();
+      expect(yml.jobs['e2e-test-linux'].defaults).toBeUndefined();
+    });
+
+    it('does not retry the docker leg', () => {
+      // Two ~30min docker attempts would outrun the job's timeout-minutes.
+      expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
+        1,
+      );
+      // Structure, not just count: wrapping the docker command in a
+      // function and calling it twice keeps the literal count at one. The
+      // docker leg defines its own helper functions, so match by brace
+      // depth rather than any earlier definition: every `${...}` brace in
+      // the script is balanced, leaving the command at depth zero unless
+      // something wraps it.
+      const commandIndex = runStep.run.indexOf(
+        'QWEN_SANDBOX=docker vitest run',
+      );
+      let depth = 0;
+      for (const ch of runStep.run.slice(0, commandIndex)) {
+        if (ch === '{') depth += 1;
+        if (ch === '}') depth -= 1;
+      }
+      expect(depth).toBe(0);
+    });
+  });
+
   it('routes Linux E2E scratch files away from /tmp', () => {
     const runStep = yml.jobs['e2e-test-linux'].steps.find(
       (step) => step.name === 'Run E2E tests',

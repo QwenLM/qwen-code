@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
@@ -63,6 +63,31 @@ describe('SettingsSchema', () => {
       expectedSettings.forEach((setting) => {
         expect(getSettingsSchema()[setting as keyof Settings]).toBeDefined();
       });
+    });
+
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
     });
 
     it('should have correct structure for each setting', () => {
@@ -222,9 +247,6 @@ describe('SettingsSchema', () => {
       expect(outputStyle.type).toBe('string');
       expect(outputStyle.category).toBe('General');
       expect(outputStyle.default).toBe(undefined);
-      // Read once at startup and frozen into `Config` — nothing applies a
-      // mid-session change, so the restart hint has to fire. Same reasoning
-      // as `general.outputLanguage` above.
       expect(outputStyle.requiresRestart).toBe(true);
     });
 
