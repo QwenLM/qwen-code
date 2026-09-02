@@ -20,6 +20,7 @@ import type {
   BridgeEvent,
   SessionReplaySnapshot,
 } from '@qwen-code/acp-bridge/eventBus';
+import type { ServeSessionSupportedCommandsStatus } from '@qwen-code/acp-bridge/status';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -417,7 +418,9 @@ class FakeBridge {
       },
     };
   }
-  async getSessionSupportedCommandsStatus(sessionId: string) {
+  async getSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus> {
     return { v: 1, sessionId, availableCommands: [], availableSkills: [] };
   }
   /** Per-session in-memory pr bindings, mirroring the real bridge's
@@ -431,10 +434,14 @@ class FakeBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }> = [];
+  setSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }> = [];
   /** Shared seed/update call sequence — pins that hydration runs BEFORE the
    * mutation (a seed-after-mutation order would let the bridge publish an
    * event carrying only this-daemon-lifetime bindings). */
-  metadataCallLog: Array<'seed' | 'update'> = [];
+  metadataCallLog: Array<'seed' | 'update' | 'set'> = [];
 
   seedSessionPrs(
     sessionId: string,
@@ -444,6 +451,18 @@ class FakeBridge {
     this.seedSessionPrsCalls.push({ sessionId, prs });
     const existing = this.metadataPrsBySession.get(sessionId) ?? [];
     if (existing.length > 0) return;
+    this.metadataPrsBySession.set(
+      sessionId,
+      prs.map(({ number, url }) => ({ number, url })),
+    );
+  }
+
+  setSessionPrs(
+    sessionId: string,
+    prs: Array<{ number: number; url: string }>,
+  ) {
+    this.metadataCallLog.push('set');
+    this.setSessionPrsCalls.push({ sessionId, prs });
     this.metadataPrsBySession.set(
       sessionId,
       prs.map(({ number, url }) => ({ number, url })),
@@ -549,8 +568,47 @@ class FakeBridge {
   async getSessionContextUsageStatus(sessionId: string) {
     return { sessionId, used: 100, total: 1000 };
   }
-  async getSessionTasksStatus(sessionId: string) {
+  lastSessionTasksOptions: { includeWorkflows?: boolean } | undefined;
+  async getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ) {
+    this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
+  }
+  lastCancelledTask:
+    | {
+        sessionId: string;
+        taskId: string;
+        kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2];
+        context: Parameters<HttpAcpBridge['cancelSessionTask']>[3];
+      }
+    | undefined;
+  async cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2],
+    context: Parameters<HttpAcpBridge['cancelSessionTask']>[3],
+  ) {
+    this.lastCancelledTask = { sessionId, taskId, kind, context };
+    return { cancelled: true };
+  }
+  lastWorkflowAction:
+    | {
+        sessionId: string;
+        taskId: string;
+        action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2];
+        context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
+      }
+    | undefined;
+  async controlSessionWorkflowTask(
+    sessionId: string,
+    taskId: string,
+    action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2],
+    context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3],
+  ) {
+    this.lastWorkflowAction = { sessionId, taskId, action, context };
+    return { changed: true, status: 'running' as const };
   }
   async getSessionLspStatus(sessionId: string) {
     return {
@@ -5680,12 +5738,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
-      expect(bridge.metadataCallLog).toEqual(['seed', 'update']);
+      expect(bridge.metadataCallLog).toEqual(['seed', 'update', 'set']);
       expect(bridge.seedSessionPrsCalls).toHaveLength(1);
       expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
       expect(
         bridge.seedSessionPrsCalls[0]?.prs.map((entry) => entry.number),
       ).toEqual([9100]);
+      // After the upsert, dispatch reconciles the live entry to the
+      // authoritative persisted list — the bridge merge caps positionally
+      // while the sidecar caps by provenance authority, and the two
+      // diverge past the list limit.
+      expect(bridge.setSessionPrsCalls).toHaveLength(1);
+      expect(bridge.setSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+      expect(
+        bridge.setSessionPrsCalls[0]?.prs.map((entry) => entry.number),
+      ).toEqual([9100, 9101]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
       expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
@@ -7844,7 +7911,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         sessionId: 'sess-1',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: [{ name: 'help', description: 'Help' }],
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
           _meta: {
             availableSkills: ['bugfix'],
             availableSkillDetails: skillDetails,
@@ -7865,7 +7935,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         sessionId: 'sess-1',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: [{ name: 'help', description: 'Help' }],
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
           _meta: {
             availableSkills: ['bugfix'],
             availableSkillDetails: skillDetails,
@@ -7919,35 +7992,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // own spawnOrAttach would block on bridge.gate and never grant ownership.
     bridge.gate = new Promise<void>((r) => (releaseLoad = r));
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 3); // session/new + close reject + load success
-    await new Promise((r) => setTimeout(r, 50));
-    // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 340,
-      method: 'session/load',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    // Close starts DURING the load → marks sess-1 closing (awaits closeGate).
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 341,
-      method: 'session/close',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    releaseLoad(); // loadSession resolves after close has been rejected.
-    const frames = (await got) as Array<{
-      id: number;
-      result?: { replayed?: boolean };
-      error?: { code: number; message: string; data?: { errorKind?: string } };
-    }>;
-    const closeReply = frames.find((f) => f.id === 341);
-    expect(closeReply?.error?.code).toBe(-32603);
-    expect(closeReply?.error?.data?.errorKind).toBe('session_archiving');
-    const loadReply = frames.find((f) => f.id === 340);
-    expect(loadReply?.result?.replayed).toBe(true);
+    const reader = frameReader(connStream);
+    const frameTimeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 2_000;
+    let loadReply: { id: number; result?: { replayed?: boolean } } | undefined;
+    try {
+      // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 340,
+        method: 'session/load',
+        params: { sessionId: 'sess-1' },
+      });
+      await waitUntil(
+        () =>
+          bridge.loadRequests.some((request) => request.sessionId === 'sess-1'),
+        frameTimeoutMs,
+      );
+      // Close starts DURING the load and is rejected by the archive gate.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 341,
+        method: 'session/close',
+        params: { sessionId: 'sess-1' },
+      });
+      const closeReply = (await reader.next(frameTimeoutMs)) as {
+        id: number;
+        error?: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      };
+      expect(closeReply).toMatchObject({
+        id: 341,
+        error: { code: -32603, data: { errorKind: 'session_archiving' } },
+      });
+      releaseLoad();
+      loadReply = (await reader.next(frameTimeoutMs)) as typeof loadReply;
+    } finally {
+      releaseLoad();
+      reader.close();
+    }
+    expect(loadReply).toMatchObject({ id: 340, result: { replayed: true } });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
 
@@ -8538,12 +8626,198 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 57,
         method: '_qwen/session/tasks',
-        params: { sessionId: 'sess-1' },
+        params: { sessionId: 'sess-1', includeWorkflows: true },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
       });
+      expect(bridge.lastSessionTasksOptions).toEqual({
+        includeWorkflows: true,
+      });
+    });
+
+    it('_qwen/session/tasks/cancel forwards the task and trusted client context', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'workflow-1',
+          kind: 'workflow',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+      expect(bridge.lastCancelledTask).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'workflow-1',
+        kind: 'workflow',
+        context: { clientId: 'client-1', fromLoopback: true },
+      });
+    });
+
+    it('_qwen/session/tasks/workflow_action forwards the action result and trusted client context', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'workflow-1',
+          action: 'retry',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { changed: true, status: 'running' },
+      });
+      expect(bridge.lastWorkflowAction).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'workflow-1',
+        action: 'retry',
+        context: { clientId: 'client-1', fromLoopback: true },
+      });
+    });
+
+    it('fails the Workflow surfaces closed for an untrusted workspace', async () => {
+      await restartServer({ primaryTrusted: false });
+      bridge.getSessionSupportedCommandsStatus = async (
+        sessionId: string,
+      ): Promise<ServeSessionSupportedCommandsStatus> => ({
+        v: 1,
+        sessionId,
+        availableCommands: [
+          { name: 'init', description: 'Initialize', input: null },
+          { name: 'workflows', description: 'Manage workflows', input: null },
+        ],
+        availableSkills: [],
+        workflowsEnabled: true,
+        savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      const sessionStream = await openStream(connId, 'sess-1');
+      const sessionFrame = takeFrames(sessionStream, 1);
+      await new Promise((r) => setTimeout(r, 30));
+      bridge.queues.get('sess-1')?.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'init', description: 'Initialize' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
+          },
+        },
+      });
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/supported_commands',
+        params: { sessionId: 'sess-1' },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/tasks/cancel',
+        params: { sessionId: 'sess-1', taskId: 'wf-1', kind: 'workflow' },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 62,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'slow-phases',
+          action: 'run-saved',
+        },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/session/tasks',
+        params: { sessionId: 'sess-1', includeWorkflows: true },
+      });
+      const frames = await takeFrames(await streamRes, 7);
+      const byId = new Map(
+        frames
+          .filter(
+            (frame): frame is { id: number; result?: unknown } =>
+              typeof frame === 'object' &&
+              frame !== null &&
+              'id' in frame &&
+              typeof frame.id === 'number',
+          )
+          .map((frame) => [frame.id, frame]),
+      );
+      expect(byId.get(60)).toMatchObject({
+        result: {
+          workflowsEnabled: false,
+          savedWorkflows: [],
+          availableCommands: [{ name: 'init', description: 'Initialize' }],
+        },
+      });
+      expect(byId.get(61)).toMatchObject({
+        result: { cancelled: false, reason: 'disabled' },
+      });
+      expect(byId.get(62)).toMatchObject({ result: { changed: false } });
+      expect(byId.get(63)).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+      await expect(sessionFrame).resolves.toEqual([
+        expect.objectContaining({
+          method: 'session/update',
+          params: expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'init', description: 'Initialize' }],
+            }),
+          }),
+        }),
+      ]);
+      // The untrusted-workspace gate fail-closes the read path too: the
+      // includeWorkflows opt-in must not reach the child.
+      expect(bridge.lastSessionTasksOptions).toEqual({
+        includeWorkflows: false,
+      });
+      expect(bridge.lastCancelledTask).toBeUndefined();
+      expect(bridge.lastWorkflowAction).toBeUndefined();
     });
 
     it('_qwen/session/lsp returns status', async () => {

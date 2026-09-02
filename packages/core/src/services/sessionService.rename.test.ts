@@ -86,9 +86,41 @@ describe('SessionService - rename and custom title', () => {
     vi.spyOn(fs, 'openSync').mockReturnValue(42);
     readSyncSpy = vi.spyOn(fs, 'readSync').mockReturnValue(0);
     vi.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
+    // Platforms without O_NOFOLLOW (Windows) open session files through an
+    // lstat -> open -> fstat identity check (openSyncNoFollow). Spy both
+    // stats so that fallback accepts the fabricated paths above: a regular
+    // (non-symlink) file whose identity trivially matches itself. On
+    // platforms with the flag the spies stay inert.
+    vi.spyOn(fs, 'lstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
+    vi.spyOn(fs, 'fstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          // size 0 keeps readLatestTailIfGrown's grown-tail pass inert,
+          // matching the pre-rerouting behavior where it never ran.
+          size: 0,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
 
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+      async (filePath, count, options) => ({
+        records: await jsonl.readLines(filePath, count, options),
+        complete: true,
+      }),
+    );
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
     vi.mocked(readRuntimeStatusClaims).mockImplementation(
