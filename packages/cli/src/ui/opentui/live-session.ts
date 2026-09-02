@@ -252,11 +252,12 @@ function atMentionCardEvents(
 }
 
 /**
- * ink parity (use-llm-stream `processQuery` for a fresh turn,
- * `resolveSteeredMessages` for text drained mid-turn): `@path` mentions are
- * expanded where the prompt enters the stream, never at the composer, so the
- * transcript keeps what the user typed and text queued during a turn is
- * expanded by the time it reaches the model.
+ * ink parity (use-llm-stream `processQuery` for a fresh turn): `@path`
+ * mentions are expanded where the prompt enters the stream, never at the
+ * composer, so the transcript keeps what the user typed and queued text that
+ * survives to become the next turn is expanded by the time it reaches the
+ * model. Text drained mid-turn as steering rides raw — ink expands that hop
+ * too (`resolveSteeredMessages`); replicating it is tracked in #8662.
  *
  * `events` carries the read cards even when the expansion declines — the one
  * decline is a failed read, and ink reports it instead of sending the
@@ -333,7 +334,15 @@ export async function* livePromptEvents(
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
   let nextPrompt: PartListUnion = prompt;
-  if (typeof prompt === 'string' && isAtCommand(prompt)) {
+  // Provenance marks user-typed text: the composer submit and the follow-on
+  // turn built from the mid-turn queue both carry it. A slash command's
+  // generated `submit_prompt` payload does not, and ink never expands that
+  // one (processQuery returns it before its own isAtCommand check).
+  if (
+    typeof prompt === 'string' &&
+    options?.submittedPrompt !== undefined &&
+    isAtCommand(prompt)
+  ) {
     const expanded = await expandAtMentions(config, prompt, abort);
     for (const ev of expanded.events) yield ev;
     // A failed read reports itself on the card above; ink drops the

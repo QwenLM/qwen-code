@@ -102,10 +102,30 @@ describe('foldBatch', () => {
   });
 });
 
-describe('useOpenTuiLiveTurn mid-turn queue', () => {
+describe('useOpenTuiLiveTurn submit paths', () => {
   beforeEach(() => {
     live.turns.length = 0;
     live.waiters.length = 0;
+  });
+
+  it('forwards per-turn options through the idle submit hop (R1-4)', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt', undefined, {
+        submittedPrompt: 'first prompt',
+        modelOverride: 'qwen3-max',
+      });
+    });
+
+    // The idle path is the dominant one for submitted_prompt provenance; a
+    // dropped `options` argument on the forwarding hop would silently lose it.
+    expect(live.turns[0]?.options).toMatchObject({
+      submittedPrompt: 'first prompt',
+      modelOverride: 'qwen3-max',
+    });
   });
 
   it('replays queued mid-turn text as the next turn, raw and with provenance', async () => {

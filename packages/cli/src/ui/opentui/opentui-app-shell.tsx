@@ -294,6 +294,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // Slash submissions held back while a model turn streams (ink's message
   // queue, restricted to commands: a queued prompt is the live turn's job).
   const deferredCommandsRef = useRef<string[]>([]);
+  // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
+  // ref so re-queueing behind a turn or a dialog does not re-trigger the
+  // effect, but a push has to: the mid-turn gate awaits the registry, and a
+  // verdict that lands after the idle edge would otherwise strand the command
+  // until some future streaming transition.
+  const [deferredRevision, setDeferredRevision] = useState(0);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -352,6 +358,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return;
         case 'quit':
+          // Nothing queued may run behind an exit: the interrupt below creates
+          // the idle edge that wakes the drain, and the same abort promotes
+          // the live turn's steering queue into a fresh model turn. Both are
+          // discarded first, or the session spends another turn after the user
+          // asked to leave.
+          deferredCommandsRef.current = [];
+          onPopQueue?.();
           // ink's quit action cancels the ongoing request before the exit
           // drains, so a mid-turn /quit stops the stream instead of racing the
           // cleanup chain (recording flush, config.shutdown) against a turn
@@ -365,7 +378,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, onInterrupt, notify],
+    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify],
   );
 
   const onSubmit = useCallback(
@@ -377,6 +390,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       if (streaming && (await gateway.mustDeferDuringStreaming(text))) {
         const command = text.trim();
         deferredCommandsRef.current.push(command);
+        setDeferredRevision((revision) => revision + 1);
         notify(
           `Queued ${command} — it will run when the current response ends.`,
         );
@@ -407,9 +421,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
-  // the turn ends (ink re-processes its queue on the same idle transition).
+  // the turn ends and no dialog owns the UI (ink's shouldDrainMessageQueue
+  // gates the drain on both).
   useEffect(() => {
-    if (streaming || deferredCommandsRef.current.length === 0) return;
+    if (streaming || dialog || deferredCommandsRef.current.length === 0) {
+      return;
+    }
     const pending = deferredCommandsRef.current;
     deferredCommandsRef.current = [];
     void (async () => {
@@ -420,20 +437,30 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           continue;
         }
         if (settlement.outcome === false) continue;
-        applyOutcome(settlement.outcome);
-        // A submit_prompt outcome starts a turn, so the commands behind it
-        // wait for the next idle transition rather than racing that stream.
-        if (
-          settlement.outcome.kind === 'submit_prompt' &&
-          onSubmitPrompt &&
-          i + 1 < pending.length
-        ) {
+        const outcome = settlement.outcome;
+        applyOutcome(outcome);
+        // A submit_prompt outcome starts a turn and an open_dialog outcome
+        // takes the UI over, so the commands behind either wait for that turn
+        // to end or that dialog to close rather than racing the stream or
+        // overwriting the dialog with a second setDialog().
+        const holdsUi =
+          outcome.kind === 'open_dialog' ||
+          (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
+        if (holdsUi && i + 1 < pending.length) {
           deferredCommandsRef.current.unshift(...pending.slice(i + 1));
           return;
         }
       }
     })();
-  }, [streaming, gateway, notify, applyOutcome, onSubmitPrompt]);
+  }, [
+    streaming,
+    dialog,
+    deferredRevision,
+    gateway,
+    notify,
+    applyOutcome,
+    onSubmitPrompt,
+  ]);
 
   const userMessages = useMemo(
     () =>

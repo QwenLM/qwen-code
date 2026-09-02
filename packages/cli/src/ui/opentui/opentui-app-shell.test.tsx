@@ -49,8 +49,10 @@ import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
+    handleResults: [] as unknown[],
     loadRejects: false,
     deferDuringStreaming: false,
+    deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
     host: null as unknown,
     inputProps: null as Record<string, unknown> | null,
@@ -104,8 +106,9 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-// Slash dispatcher: every submission resolves to the current handleResult; the
-// constructor captures the host so history can be driven from a test.
+// Slash dispatcher: a submission resolves to the next queued handleResults
+// entry, or to handleResult when that queue is empty; the constructor captures
+// the host so history can be driven from a test.
 vi.mock('./commands-dispatch.js', () => ({
   OpenTuiSlashDispatcher: class {
     constructor(
@@ -123,14 +126,16 @@ vi.mock('./commands-dispatch.js', () => ({
     async loadCommands() {
       if (mocks.state.loadRejects) throw new Error('registry exploded');
     }
-    async mustDeferDuringStreaming() {
-      return mocks.state.deferDuringStreaming;
+    async mustDeferDuringStreaming(text: string) {
+      const gate = mocks.state.deferGate;
+      return gate ? gate(text) : mocks.state.deferDuringStreaming;
     }
     cancel() {}
     dispose() {}
     async handle(text: string) {
       mocks.state.handledTexts.push(text);
-      return mocks.state.handleResult;
+      const queued = mocks.state.handleResults;
+      return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
     }
   },
 }));
@@ -202,8 +207,10 @@ async function submit(text: string, imagePaths?: string[]): Promise<void> {
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
     mocks.state.handleResult = { kind: 'handled' };
+    mocks.state.handleResults.length = 0;
     mocks.state.loadRejects = false;
     mocks.state.deferDuringStreaming = false;
+    mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
     mocks.state.host = null;
     mocks.state.inputProps = null;
@@ -553,6 +560,228 @@ describe('OpenTuiApp shell wiring', () => {
     // Cancel before exiting: the drain must not race a stream still writing.
     expect(onInterrupt.mock.invocationCallOrder[0]).toBeLessThan(
       onQuit.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('drains a held command whose defer verdict lands after the idle edge', async () => {
+    // The gate awaits the command registry, so its verdict can land after the
+    // turn it was asked about has already ended (R1-1).
+    const gate: { release: (defer: boolean) => void } = {
+      release: () => {
+        throw new Error('the mid-turn gate never asked for a verdict');
+      },
+    };
+    mocks.state.deferGate = () =>
+      new Promise<boolean>((resolve) => {
+        gate.release = resolve;
+      });
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
+      t: string,
+    ) => void;
+    await act(async () => {
+      onSubmit('/compress');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    // The turn ends while the verdict is still outstanding.
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    // The verdict queues the command onto an already-idle session; it must run
+    // without waiting for another streaming transition. The macrotask flush
+    // lets the resumed submission's queue push re-render and re-run the drain.
+    await act(async () => {
+      gate.release(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.handledTexts).toEqual(['/compress']);
+  });
+
+  it('replays held commands in submission order, pausing behind a submit_prompt', async () => {
+    const onSubmitPrompt = vi.fn();
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults = [
+      { kind: 'submit_prompt', content: 'generated' },
+      { kind: 'handled' },
+    ] satisfies OpenTuiDispatchOutcome[];
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onSubmitPrompt,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/first');
+    await submit('/second');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/first']);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+
+    // The first outcome started a turn, so the command behind it waits for
+    // that turn rather than racing the stream it just opened (R1-5).
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={true} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/first']);
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/first', '/second']);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the queue behind a dialog the drain opened, resuming on close', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults = [
+      { kind: 'open_dialog', request: { dialog: 'theme' } },
+      { kind: 'open_dialog', request: { dialog: 'resume' } },
+    ] satisfies OpenTuiDispatchOutcome[];
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/theme');
+    await submit('/resume');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    // The first dialog owns the UI; the second must not overwrite it (R1-7).
+    expect(mocks.state.handledTexts).toEqual(['/theme']);
+    expect(screen.getByText('dialog:theme')).toBeTruthy();
+    expect(screen.queryByText('dialog:resume')).toBeNull();
+
+    const onClose = mocks.state.dialogProps?.['onClose'] as () => void;
+    await act(async () => {
+      onClose();
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/theme', '/resume']);
+    expect(screen.getByText('dialog:resume')).toBeTruthy();
+  });
+
+  it('does not replay a held command over a dialog the user is in', async () => {
+    // `/settings` opts into mid-turn streaming, so its dialog opens while the
+    // turn still streams; the held `/model` must wait for it to close (R1-12).
+    mocks.state.deferGate = (text) => text === '/model';
+    mocks.state.handleResults = [
+      { kind: 'open_dialog', request: { dialog: 'settings' } },
+      { kind: 'handled' },
+    ] satisfies OpenTuiDispatchOutcome[];
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/model');
+    expect(mocks.state.handledTexts).toEqual([]);
+    // The composer unmounts once a dialog opens, so this is the reachable
+    // order: held first, dialog second.
+    await submit('/settings');
+    expect(mocks.state.handledTexts).toEqual(['/settings']);
+    expect(screen.getByText('dialog:settings')).toBeTruthy();
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/settings']);
+    expect(screen.getByText('dialog:settings')).toBeTruthy();
+
+    const onClose = mocks.state.dialogProps?.['onClose'] as () => void;
+    await act(async () => {
+      onClose();
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/settings', '/model']);
+  });
+
+  it('drops both mid-turn queues when a quit exits during the turn', async () => {
+    const onQuit = vi.fn();
+    const onInterrupt = vi.fn();
+    const onPopQueue = vi.fn(() => 'queued prompt');
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      onQuit,
+      onInterrupt,
+      onPopQueue,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/compress');
+    expect(screen.getByText(/Queued \/compress/)).toBeTruthy();
+
+    // Quit is exempt from the gate, so it reaches the exit while streaming.
+    mocks.state.deferDuringStreaming = false;
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages: [],
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/quit');
+    expect(onQuit).toHaveBeenCalledWith([]);
+
+    // The interrupt ends the turn, which is the idle edge that wakes the drain:
+    // the held command must not replay into the exit cleanup (R1-8), and the
+    // steering queue must not be promoted into a fresh turn by the same abort
+    // (R1-10) — so it is discarded before the interrupt fires.
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/quit']);
+    expect(onPopQueue.mock.invocationCallOrder[0]).toBeLessThan(
+      onInterrupt.mock.invocationCallOrder[0],
     );
   });
 

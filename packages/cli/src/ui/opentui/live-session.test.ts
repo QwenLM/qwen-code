@@ -401,7 +401,11 @@ describe('livePromptEvents', () => {
       ],
     };
 
-    const events = await drain(livePromptEvents(config, 'read @missing.ts'));
+    const events = await drain(
+      livePromptEvents(config, 'read @missing.ts', undefined, {
+        submittedPrompt: 'read @missing.ts',
+      }),
+    );
 
     expect(sendMessageStream).not.toHaveBeenCalled();
     expect(events).toEqual(
@@ -419,6 +423,21 @@ describe('livePromptEvents', () => {
         },
       ]),
     );
+  });
+
+  it('leaves a generated prompt carrying an @-mention unexpanded (R1-6)', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    // Decline-shaped: were the gate keyed on the prompt's shape alone, a
+    // `/remember my friend @alice …` payload would drop the turn here.
+    atMocks.result = { processedQuery: null, shouldProceed: false };
+
+    await drain(livePromptEvents(config, 'remember that @alice reviews PRs'));
+
+    expect(atMocks.calls).toEqual([]);
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toBe('remember that @alice reviews PRs');
   });
 
   it('appends drained steering texts after tool responses at the boundary', async () => {
