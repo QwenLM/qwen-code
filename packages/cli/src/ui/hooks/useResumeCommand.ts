@@ -41,6 +41,14 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  /**
+   * Seeds the prompt counter after the UI swap, mirroring the startup
+   * --resume seeding in AppContainer: startNewSession resets the counter
+   * to 0, and without seeding the first post-resume prompt would mint
+   * `sessionId########0`, colliding with the resumed first turn's
+   * persisted promptId.
+   */
+  seedPromptCount?: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -91,6 +99,7 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -235,6 +244,21 @@ export function useResumeCommand(
         startNewSession(sessionId);
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
+        // Seed the prompt counter from the resumed conversation, mirroring
+        // the startup --resume path in AppContainer: the startNewSession
+        // above reset it to 0, and without seeding the first post-resume
+        // prompt would mint `sessionId########0`, colliding with the
+        // resumed first turn's persisted promptId and tripping the rewind
+        // fail-closed branch for duplicated identities.
+        const userTurnCount = sessionData.conversation.messages.filter(
+          (m) =>
+            m.type === 'user' &&
+            m.subtype !== 'mid_turn_user_message' &&
+            m.subtype !== 'realtime_message',
+        ).length;
+        if (userTurnCount > 0) {
+          seedPromptCount?.(userTurnCount);
+        }
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
@@ -345,6 +369,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

@@ -385,6 +385,186 @@ describe('useResumeCommand', () => {
     expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
+  it('handleResume seeds the prompt counter from the resumed conversation', async () => {
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
+    const llmClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getLlmClient: () => llmClient,
+      startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-2');
+    });
+
+    const conversation = resumeMocks.makeConversation([
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'model', parts: [{ text: 'reply-1' }] },
+      { role: 'user', parts: [{ text: 'second' }] },
+      { role: 'model', parts: [{ text: 'reply-2' }] },
+    ]);
+    // Subtyped user records are not rewindable prompt turns and must not
+    // count toward the seed.
+    const baseRecord = conversation.messages[0]!;
+    conversation.messages.push(
+      {
+        ...baseRecord,
+        uuid: 'm-mid-turn',
+        subtype: 'mid_turn_user_message',
+      } as (typeof conversation.messages)[number],
+      {
+        ...baseRecord,
+        uuid: 'm-realtime',
+        subtype: 'realtime_message',
+      } as (typeof conversation.messages)[number],
+    );
+    resumeMocks.resolvePendingLoadSession({ conversation });
+    await act(async () => {
+      await resumePromise;
+    });
+
+    // Without this seed the first post-resume prompt mints
+    // `session-2########0`, colliding with the resumed first turn's
+    // persisted promptId and tripping the rewind fail-closed branch.
+    expect(seedPromptCount).toHaveBeenCalledTimes(1);
+    expect(seedPromptCount).toHaveBeenCalledWith(2);
+    // The seed must land after startNewSession, whose stats reset zeroes
+    // the counter; seeding before it would be wiped.
+    expect(seedPromptCount.mock.invocationCallOrder[0]).toBeGreaterThan(
+      startNewSession.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('handleResume skips prompt-counter seeding for a session without user turns', async () => {
+    resumeMocks.reset();
+    resumeMocks.createPendingLoadSession();
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
+    const llmClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getLlmClient: () => llmClient,
+      startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
+        listStartingRunIds: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+        abortAll: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-empty');
+    });
+
+    resumeMocks.resolvePendingLoadSession({
+      conversation: resumeMocks.makeConversation([
+        { role: 'model', parts: [{ text: 'model-only history' }] },
+      ]),
+    });
+    await act(async () => {
+      await resumePromise;
+    });
+
+    expect(seedPromptCount).not.toHaveBeenCalled();
+  });
+
   it('handleResume routes history replacement through the loadHistory override', async () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
