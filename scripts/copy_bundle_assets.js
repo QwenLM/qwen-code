@@ -35,6 +35,7 @@ import {
   extname,
 } from 'node:path';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
@@ -290,6 +291,146 @@ function stampReviewSourceDigest(root, distDir) {
   console.log(`Stamped the review source digest over ${count} files.`);
 }
 
+/**
+ * OpenTUI renderer runtime assets (tree-sitter grammars, the parser worker,
+ * `web-tree-sitter` runtime and the native render library) relocated next to
+ * the bundle.
+ *
+ * In the esbuild single-file bundle @opentui/core's package-relative asset
+ * fallback (`new URL('./assets/…', import.meta.url)`) points into `dist/`
+ * and misses, so code-block syntax highlighting degrades to single color.
+ * The runtime (`packages/cli/src/ui/opentui/opentui-assets.ts`) therefore
+ * points `OTUI_ASSET_ROOT` at `dist/opentui-assets/` — but only when the tree
+ * there is complete, because @opentui/core throws on any missing key under a
+ * configured root (including the native library). This copier writes the
+ * assets under exactly the keys that module checks:
+ *
+ *   opentui-assets/@opentui/core/parser.worker.js
+ *   opentui-assets/@opentui/core/assets/<lang>/<file>
+ *   opentui-assets/@opentui/core-<platform>-<arch>[ -musl]/libopentui.*
+ *   opentui-assets/web-tree-sitter/tree-sitter.wasm
+ *
+ * Returns the list of destination-relative keys copied (empty on skip) so
+ * callers/tests can assert on it. Never fails the bundle: a missing
+ * @opentui/core (e.g. an install without the renderer) only warns.
+ */
+export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
+  distDir ??= join(root, 'dist');
+  const destRoot = join(distDir, 'opentui-assets');
+
+  // @opentui/core may sit in the root node_modules or be hoisted into
+  // packages/cli/node_modules (it is a cli dependency); try both anchors.
+  const anchors = [
+    join(root, 'package.json'),
+    join(root, 'packages', 'cli', 'package.json'),
+  ];
+  let coreEntry;
+  for (const anchor of anchors) {
+    if (!existsSync(anchor)) continue;
+    try {
+      coreEntry = createRequire(anchor).resolve('@opentui/core');
+      break;
+    } catch {
+      // try the next anchor
+    }
+  }
+  if (!coreEntry) {
+    console.warn(
+      'Warning: @opentui/core is not resolvable; skipped OpenTUI assets',
+    );
+    return [];
+  }
+  const coreDir = dirname(coreEntry);
+  const coreRequire = createRequire(join(coreDir, 'package.json'));
+
+  const copied = [];
+  const copyToKey = (source, key) => {
+    if (!existsSync(source) || !statSync(source).isFile()) {
+      console.warn(`Warning: OpenTUI asset missing at ${source}; skipped`);
+      return;
+    }
+    const destPath = join(destRoot, key);
+    mkdirSync(dirname(destPath), { recursive: true });
+    copyFileSync(source, destPath);
+    copied.push(key);
+  };
+
+  // 1. The tree-sitter parser worker (self-contained bundle).
+  copyToKey(
+    join(coreDir, 'parser.worker.js'),
+    '@opentui/core/parser.worker.js',
+  );
+
+  // 2. Grammar assets: assets/<lang>/{highlights.scm,injections.scm,*.wasm}.
+  const assetsDir = join(coreDir, 'assets');
+  if (existsSync(assetsDir)) {
+    for (const lang of fs.readdirSync(assetsDir)) {
+      const langDir = join(assetsDir, lang);
+      if (!statSync(langDir).isDirectory()) continue;
+      for (const file of fs.readdirSync(langDir)) {
+        copyToKey(join(langDir, file), `@opentui/core/assets/${lang}/${file}`);
+      }
+    }
+  } else {
+    console.warn(`Warning: OpenTUI grammar assets not found at ${assetsDir}`);
+  }
+
+  // 3. The web-tree-sitter runtime wasm (peer dependency of @opentui/core).
+  let wasmSource;
+  try {
+    wasmSource = coreRequire.resolve('web-tree-sitter/tree-sitter.wasm');
+  } catch {
+    try {
+      wasmSource = join(
+        dirname(coreRequire.resolve('web-tree-sitter')),
+        'tree-sitter.wasm',
+      );
+    } catch {
+      wasmSource = undefined;
+    }
+  }
+  if (wasmSource) {
+    copyToKey(wasmSource, 'web-tree-sitter/tree-sitter.wasm');
+  } else {
+    console.warn(
+      'Warning: web-tree-sitter is not resolvable; skipped its wasm asset',
+    );
+  }
+
+  // 4. Native render libraries for every installed @opentui platform package
+  //    (core-darwin-arm64, core-linux-x64-musl, …). The runtime only needs
+  //    the current platform's, but shipping the installed set keeps the
+  //    completeness check satisfiable wherever the bundle runs next. The
+  //    platform packages live beside @opentui/core or hoisted at the repo
+  //    root; scan both scope directories.
+  const scopeDirs = [dirname(coreDir), join(root, 'node_modules', '@opentui')];
+  const seenPackages = new Set();
+  for (const scopeDir of scopeDirs) {
+    if (!existsSync(scopeDir)) continue;
+    for (const entry of fs.readdirSync(scopeDir)) {
+      if (!entry.startsWith('core-') || seenPackages.has(entry)) continue;
+      const packageDir = join(scopeDir, entry);
+      if (!statSync(packageDir).isDirectory()) continue;
+      let copiedFromPackage = false;
+      for (const file of fs.readdirSync(packageDir)) {
+        if (!/\.(dylib|so|dll)$/.test(file)) continue;
+        copyToKey(join(packageDir, file), `@opentui/${entry}/${file}`);
+        copiedFromPackage = true;
+      }
+      if (copiedFromPackage) seenPackages.add(entry);
+    }
+  }
+
+  if (copied.length > 0) {
+    console.log(
+      `Copied ${copied.length} OpenTUI runtime assets to dist/opentui-assets/`,
+    );
+  } else {
+    console.warn('Warning: no OpenTUI runtime assets were copied');
+  }
+  return copied;
+}
+
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
   const coreVendorDir = join(root, 'packages', 'core', 'vendor');
@@ -368,6 +509,12 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   } else {
     console.warn(`Warning: Locales directory not found at ${localesDir}`);
   }
+
+  // Copy the OpenTUI renderer's runtime assets (tree-sitter grammars, parser
+  // worker, web-tree-sitter wasm, native render library) so the bundled
+  // renderer can point OTUI_ASSET_ROOT at dist/opentui-assets/ and keep
+  // code-block syntax highlighting. Warn-and-skip when unavailable.
+  copyOpenTuiAssets({ root, distDir });
 
   // Copy extension templates so bundled dist/cli.js can scaffold
   // `/extensions new` from the runtime examples directory.

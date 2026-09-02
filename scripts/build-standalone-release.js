@@ -28,25 +28,58 @@ const RELEASE_TARGETS = [
     qwenTarget: 'darwin-arm64',
     nodeTarget: 'darwin-arm64',
     nodeArchiveExtension: 'tar.gz',
+    bunAsset: 'bun-darwin-aarch64',
   },
   {
     qwenTarget: 'darwin-x64',
     nodeTarget: 'darwin-x64',
     nodeArchiveExtension: 'tar.gz',
+    bunAsset: 'bun-darwin-x64',
   },
   {
     qwenTarget: 'linux-arm64',
     nodeTarget: 'linux-arm64',
     nodeArchiveExtension: 'tar.xz',
+    bunAsset: 'bun-linux-aarch64',
   },
   {
     qwenTarget: 'linux-x64',
     nodeTarget: 'linux-x64',
     nodeArchiveExtension: 'tar.xz',
+    bunAsset: 'bun-linux-x64',
   },
-  { qwenTarget: 'win-x64', nodeTarget: 'win-x64', nodeArchiveExtension: 'zip' },
+  {
+    qwenTarget: 'win-x64',
+    nodeTarget: 'win-x64',
+    nodeArchiveExtension: 'zip',
+    bunAsset: 'bun-windows-x64',
+  },
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
+
+// Temporary OpenTUI preview: standalone archives ship the Bun runtime by
+// default because the OpenTUI renderer needs bun:ffi (Node without FFI falls
+// back to ink). Pass --runtime=node to restore classic Node.js packaging.
+const DEFAULT_RUNTIME = 'bun';
+const DEFAULT_BUN_VERSION = '1.3.14';
+const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
+
+// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
+// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
+// so each standalone archive must ship the matching platform package(s).
+// Stage every platform variant (like the clipboard addons) because release
+// packaging cross-builds all targets from a single host. Declared before the
+// top-level `main()` call below (ESM const TDZ).
+const OPENTUI_PLATFORM_PACKAGES = [
+  '@opentui/core-darwin-arm64',
+  '@opentui/core-darwin-x64',
+  '@opentui/core-linux-arm64',
+  '@opentui/core-linux-arm64-musl',
+  '@opentui/core-linux-x64',
+  '@opentui/core-linux-x64-musl',
+  '@opentui/core-win32-arm64',
+  '@opentui/core-win32-x64',
+];
 
 if (isMainModule()) {
   try {
@@ -64,7 +97,13 @@ async function main() {
     return;
   }
 
+  const runtime = args.runtime || DEFAULT_RUNTIME;
+  if (runtime !== 'node' && runtime !== 'bun') {
+    fail('--runtime must be either "node" or "bun"');
+  }
+
   const nodeVersion = args.nodeVersion || process.versions.node;
+  const bunVersion = args.bunVersion || DEFAULT_BUN_VERSION;
   const outDir = path.resolve(
     args.outDir || path.join(rootDir, 'dist', 'standalone'),
   );
@@ -73,20 +112,25 @@ async function main() {
   );
   fs.mkdirSync(runtimeParent, { recursive: true });
   const runtimeDir = fs.mkdtempSync(
-    path.join(runtimeParent, 'qwen-node-runtime-'),
+    path.join(runtimeParent, `qwen-${runtime}-runtime-`),
   );
   const nodeDistUrl = `https://nodejs.org/dist/v${nodeVersion}`;
+  const bunDistUrl = `${BUN_RELEASE_BASE_URL}/bun-v${bunVersion}`;
+  const runtimeDistUrl = runtime === 'bun' ? bunDistUrl : nodeDistUrl;
 
   try {
     fs.mkdirSync(outDir, { recursive: true });
     const checksumsPath = path.join(runtimeDir, 'SHASUMS256.txt');
-    await downloadFile(`${nodeDistUrl}/SHASUMS256.txt`, checksumsPath);
+    await downloadFile(`${runtimeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
     const nativeModulesDir = stageClipboardPackages(runtimeDir);
+    const opentuiModulesDir = stageOpenTuiPackages(runtimeDir);
 
     for (const target of RELEASE_TARGETS) {
       await packageTarget({
         ...target,
+        runtime,
+        bunDistUrl,
         nodeDistUrl,
         nodeVersion,
         outDir,
@@ -94,6 +138,7 @@ async function main() {
         runtimeDir,
         checksums,
         nativeModulesDir,
+        opentuiModulesDir,
       });
     }
 
@@ -112,6 +157,9 @@ async function packageTarget({
   qwenTarget,
   nodeTarget,
   nodeArchiveExtension,
+  bunAsset,
+  runtime,
+  bunDistUrl,
   nodeDistUrl,
   nodeVersion,
   outDir,
@@ -119,12 +167,26 @@ async function packageTarget({
   runtimeDir,
   checksums,
   nativeModulesDir,
+  opentuiModulesDir,
 }) {
-  const archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
+  let archiveName;
+  let archiveUrlBase;
+  if (runtime === 'bun') {
+    archiveName = `${bunAsset}.zip`;
+    archiveUrlBase = bunDistUrl;
+  } else {
+    archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
+    archiveUrlBase = nodeDistUrl;
+  }
   const archivePath = path.join(runtimeDir, archiveName);
 
-  await downloadFile(`${nodeDistUrl}/${archiveName}`, archivePath);
-  await verifyNodeArchive(archivePath, archiveName, checksums);
+  await downloadFile(`${archiveUrlBase}/${archiveName}`, archivePath);
+  await verifyNodeArchive(
+    archivePath,
+    archiveName,
+    checksums,
+    runtime === 'bun' ? 'Bun' : 'Node.js',
+  );
 
   const args = [
     'scripts/create-standalone-package.js',
@@ -138,6 +200,10 @@ async function packageTarget({
     outDir,
     '--skip-checksums',
   ];
+  if (runtime === 'bun') {
+    args.push('--runtime', 'bun');
+    args.push('--opentui-modules-dir', opentuiModulesDir);
+  }
   if (releaseVersion) {
     args.push('--version', releaseVersion);
   }
@@ -205,6 +271,55 @@ function stageClipboardPackages(runtimeDir) {
   return path.join(installDir, 'node_modules');
 }
 
+// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
+// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
+// so each standalone archive must ship the matching platform package(s).
+function readOpenTuiPackageSpecs() {
+  const packageLock = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
+  );
+
+  return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
+    const version =
+      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    if (!version) {
+      fail(`OpenTUI platform package version is not locked for ${packageName}`);
+    }
+    return `${packageName}@${version}`;
+  });
+}
+
+function stageOpenTuiPackages(runtimeDir) {
+  const installDir = path.join(runtimeDir, 'opentui-modules');
+  fs.mkdirSync(installDir, { recursive: true });
+  console.log('Staging standalone OpenTUI native packages');
+  const npmExecPath = process.env.npm_execpath;
+  if (!npmExecPath) {
+    fail('npm_execpath is unavailable; run package:standalone:release via npm');
+  }
+  execFileSync(
+    process.execPath,
+    [
+      npmExecPath,
+      'install',
+      '--prefix',
+      installDir,
+      '--package-lock=false',
+      '--no-save',
+      '--ignore-scripts',
+      '--force',
+      '--no-audit',
+      '--no-fund',
+      ...readOpenTuiPackageSpecs(),
+    ],
+    {
+      cwd: rootDir,
+      stdio: 'inherit',
+    },
+  );
+  return path.join(installDir, 'node_modules');
+}
+
 async function downloadFile(url, destination) {
   console.log(`Downloading ${url}`);
   const response = await fetch(url);
@@ -233,10 +348,11 @@ function parseChecksums(content) {
   return checksums;
 }
 
-async function verifyNodeArchive(archivePath, archiveName, checksums) {
+async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
+  const runtimeLabel = label || 'Node.js';
   const expected = checksums.get(archiveName);
   if (!expected) {
-    fail(`Node.js SHASUMS256.txt does not list ${archiveName}`);
+    fail(`${runtimeLabel} SHASUMS256.txt does not list ${archiveName}`);
   }
 
   const actual = await sha256File(archivePath);
@@ -244,7 +360,7 @@ async function verifyNodeArchive(archivePath, archiveName, checksums) {
     fail(`Checksum verification failed for ${archiveName}`);
   }
 
-  console.log(`Verified Node.js runtime checksum for ${archiveName}`);
+  console.log(`Verified ${runtimeLabel} runtime checksum for ${archiveName}`);
 }
 
 async function sha256File(filePath) {
@@ -301,6 +417,8 @@ function parseArgs(argv) {
   const args = {
     help: false,
     nodeVersion: undefined,
+    bunVersion: undefined,
+    runtime: undefined,
     outDir: undefined,
     runtimeDir: undefined,
     version: undefined,
@@ -315,6 +433,14 @@ function parseArgs(argv) {
         break;
       case '--node-version':
         args.nodeVersion = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--bun-version':
+        args.bunVersion = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--runtime':
+        args.runtime = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--out-dir':
@@ -355,6 +481,9 @@ Options:
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
+  --runtime RUNTIME      Runtime to bundle: "bun" (default, temporary OpenTUI
+                         preview) or "node" (classic packaging).
+  --bun-version VERSION  Bun version to download. Defaults to ${DEFAULT_BUN_VERSION}.
 `);
 }
 

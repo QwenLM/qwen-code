@@ -10,6 +10,7 @@ import {
   isOpenTuiRuntimeSupported,
   parseVersion,
   selectTuiRenderer,
+  TUI_RENDERER_STRICT_ENV_VAR,
 } from './renderer-selection.js';
 
 describe('parseVersion', () => {
@@ -107,6 +108,41 @@ describe('selectTuiRenderer', () => {
     const selection = selectTuiRenderer('opentui', unsupported);
     expect(selection.renderer).toBe('ink');
     expect(selection.reason).toContain('native FFI');
+  });
+
+  it('strict mode throws instead of falling back', () => {
+    expect(() =>
+      selectTuiRenderer('opentui', unsupported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: '1',
+      }),
+    ).toThrow(TUI_RENDERER_STRICT_ENV_VAR);
+    expect(() =>
+      selectTuiRenderer('opentui', unsupported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: 'true',
+      }),
+    ).toThrow('native FFI');
+  });
+
+  it('strict mode only affects an explicit opentui request', () => {
+    // Unset/ink requests must keep the silent ink selection even under
+    // strict — the matrix leg that pins ink must not start failing.
+    expect(
+      selectTuiRenderer(undefined, unsupported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: '1',
+      }).renderer,
+    ).toBe('ink');
+    expect(
+      selectTuiRenderer('ink', unsupported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: '1',
+      }).renderer,
+    ).toBe('ink');
+    // Strict off (or any other value) keeps the silent fallback.
+    expect(
+      selectTuiRenderer('opentui', unsupported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: '0',
+      }).renderer,
+    ).toBe('ink');
+    expect(selectTuiRenderer('opentui', unsupported, {}).renderer).toBe('ink');
   });
 
   it('keeps ink when the flag explicitly asks for ink', () => {

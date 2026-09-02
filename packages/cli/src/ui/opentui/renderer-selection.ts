@@ -23,6 +23,15 @@
 /** The environment variable that selects the TUI renderer. */
 export const TUI_RENDERER_ENV_VAR = 'QWEN_TUI_RENDERER';
 
+/**
+ * Turns the unsupported-runtime ink fallback into a hard failure. The silent
+ * fallback is the right user-facing behavior, but the renderer-matrix E2E
+ * legs need "green run really exercised opentui": with this set, an explicit
+ * opentui request on a runtime that cannot load the native renderer throws
+ * instead of serving ink. Never set it in product defaults.
+ */
+export const TUI_RENDERER_STRICT_ENV_VAR = 'QWEN_TUI_RENDERER_STRICT';
+
 /** The only non-default renderer value this gate recognizes. */
 export const OPEN_TUI_RENDERER_VALUE = 'opentui';
 
@@ -108,10 +117,17 @@ export function isOpenTuiRuntimeSupported(
  * the flag explicitly requests it AND the runtime can support it. Any other
  * combination — unset flag, an unrecognized value, or an unsupported runtime —
  * keeps ink, which remains the default renderer throughout the migration.
+ *
+ * The one exception is {@link TUI_RENDERER_STRICT_ENV_VAR}: set by the E2E
+ * renderer matrix, it turns the unsupported-runtime ink fallback into a throw
+ * so a matrix leg cannot pass while a fallback secretly served ink. This
+ * function is called before the dispatcher's own try/catch, so the throw
+ * surfaces as a loud startup failure.
  */
 export function selectTuiRenderer(
   envValue: string | undefined = process.env[TUI_RENDERER_ENV_VAR],
   probe?: RuntimeVersionProbe,
+  env: NodeJS.ProcessEnv = process.env,
 ): RendererSelection {
   const requested = envValue?.trim().toLowerCase();
   if (requested !== OPEN_TUI_RENDERER_VALUE) {
@@ -123,6 +139,14 @@ export function selectTuiRenderer(
     };
   }
   if (!isOpenTuiRuntimeSupported(probe)) {
+    const strict = env[TUI_RENDERER_STRICT_ENV_VAR]?.trim().toLowerCase();
+    if (strict === '1' || strict === 'true') {
+      throw new Error(
+        `${TUI_RENDERER_ENV_VAR}=${OPEN_TUI_RENDERER_VALUE} was requested, but this runtime cannot initialize the OpenTUI native FFI ` +
+          `(needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION}) and ` +
+          `${TUI_RENDERER_STRICT_ENV_VAR} forbids the silent ink fallback`,
+      );
+    }
     return {
       renderer: 'ink',
       reason: `OpenTUI requested but the runtime cannot initialize its native FFI (needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION})`,
