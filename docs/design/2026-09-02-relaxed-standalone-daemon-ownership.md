@@ -10,14 +10,25 @@ other isolation, persistence, and lifecycle requirements remain in force. The
 current implementation still enforces process-global Conversations ownership
 until the source changes in this design are delivered.
 
+This decision adopts Issue #10810's identity-qualified stale-writer recovery
+and legacy-owner migration guard. It intentionally narrows the issue's Web
+Shell packaging: inline conflict presentation remains an independent follow-up
+because it changes no storage or wire-safety guarantee.
+
 ## Decision
 
-Allow every `qwen serve` process to lazily create its own Conversations runtime
-for the shared Conversations root. The daemon no longer acquires a user-global
-process owner before serving standalone APIs. Every standalone session instead
-acquires the existing cross-process session writer lease before it can write.
-The lease is forced for every writer hosted by the Conversations runtime so
-Live and scheduled-task sessions cannot bypass the same-session fence.
+Allow every updated `qwen serve` process to lazily create its own Conversations
+runtime for the shared Conversations root after the legacy compatibility check
+passes. The daemon no longer acquires a user-global process owner before serving
+standalone APIs. Every standalone session instead acquires the existing
+cross-process session writer lease before it can write. The lease is forced for
+every writer hosted by the Conversations runtime so Live and scheduled-task
+sessions cannot bypass the same-session fence.
+Conversations writers and standalone lifecycle operations use a hardened local
+reclaim policy that recovers only an active record proven to come from a dead
+or PID-reused process in the same local identity domain: the same hostname and,
+on Linux, the same boot and PID namespace. A matching live process, including a
+stalled process, remains fenced.
 
 This intentionally aligns standalone startup with ordinary workspace startup:
 multiple daemons may point at the same persistent workspace, while each daemon
@@ -44,10 +55,11 @@ accept the same cross-process usage constraints for standalone.
 ## Behavioral contract
 
 - `GET /standalone/session-options` and every `/standalone/sessions` route may
-  initialize the local daemon's Conversations runtime even when another daemon
-  process is alive.
-- An active foreign daemon no longer causes
-  `conversation_runtime_in_use`.
+  initialize the local daemon's Conversations runtime even when another updated
+  daemon process is alive.
+- Another updated daemon no longer causes `conversation_runtime_in_use`. During
+  migration, a live legacy runtime-owner record still returns that error until
+  the old daemon exits.
 - A client remains attached to the daemon on which it created or restored an
   active session. Prompt, cancel, permission, status, heartbeat, detach, and
   SSE event routes are not forwarded to another daemon.
@@ -59,11 +71,20 @@ accept the same cross-process usage constraints for standalone.
   scheduled-task sessions, uses the same mandatory lease. This prevents
   background keepalive or task rehydration from silently restoring an already
   active transcript through a non-standalone source.
-- Switching a persisted session to another daemon requires a cooperative
-  writer handoff. An explicit per-session close or normal idle reap releases
-  the lease; graceful managed-daemon shutdown seals it so the replacement can
-  use the existing certified-takeover protocol. This is cold restore, not hot
-  migration.
+- An unsealed active lock left by a non-cooperative process exit is reclaimed
+  only when the new daemon can prove that the record belongs to the same local
+  identity domain and that the recorded process has exited or its PID has been
+  reused. Foreign or incomplete identity remains fenced. A process with a
+  matching live identity is never reclaimed based on age or inactivity.
+- The lease owner is the ACP writer process, not merely its daemon parent. If a
+  daemon parent dies but its child remains alive with the matching identity,
+  other daemons remain fenced until that writer exits or is terminated.
+- Normal switching of a persisted session to another daemon requires a
+  cooperative writer handoff. An explicit per-session close or normal idle reap
+  releases the lease; graceful managed-daemon shutdown seals it so the
+  replacement can use the existing certified-takeover protocol. A
+  non-cooperative exit is the narrow identity-qualified recovery exception.
+  Both paths perform a cold restore, not hot migration.
 - Daemons share persisted standalone sessions only when they resolve the same
   Conversations root and runtime base. Custom runtime bases retain the same
   storage separation they have for ordinary workspaces.
@@ -75,6 +96,11 @@ accept the same cross-process usage constraints for standalone.
 - Source isolation remains unchanged. Standalone listing, restore, and lifecycle
   routes accept only top-level standalone records and continue to fail closed
   for Live-owned or otherwise foreign records.
+- Concurrent background reconciliation of one deletion-journal entry is
+  serialized by that session's lifecycle writer lease. A sweep that encounters
+  `session_writer_conflict` treats the entry as being handled by another daemon,
+  skips that UUID, and continues without converting contention into a
+  compromised-record result.
 - Concurrent use by multiple daemons, including concurrent standalone and Live
   use of the same Conversations root, is outside the supported contract.
 
@@ -94,26 +120,43 @@ ordinary user-selected workspace. The implementation retains:
 - durable standalone deletion journals and recovery checks;
 - existing writer leases for lifecycle mutations;
 - mandatory active-session writer leases throughout the Conversations runtime;
+- identity-qualified recovery of provably stale same-domain active locks;
+- the legacy runtime-owner compatibility check during migration;
 - Live discovery's own single-publisher record and validation.
 
 These mechanisms can reject some accidental overlap, but they do not make the
 new contract safe for general concurrent use. In particular, create admission,
 live owner indexes, lifecycle coordinators, directory state, reconciliation
-singleflight, and cache invalidation remain process-local.
+singleflight, and cache invalidation remain process-local. Only the
+per-journal-entry writer lease crosses the process boundary during deletion
+reconciliation.
 
 ## Implementation
 
-### Remove the outer owner gate
+### Replace the outer owner with a legacy compatibility check
 
-`ConversationRuntimeManager` no longer accepts a
+`ConversationRuntimeManager` no longer accepts a long-lived
 `ConversationRuntimeOwnership` dependency and no longer calls `acquire()` in
-`ensure()`. Runtime creation continues to revalidate the exact root before
+`ensure()`. Before creating its first local Conversations runtime, it instead
+invokes an inspect-only compatibility check for the legacy runtime-owner
+record. Runtime creation continues to revalidate the exact root before
 publishing the daemon-local managed runtime.
 
-`createServeApp` no longer creates a file-backed Conversations owner, attaches
-it to `ServeAppLifecycleController`, or passes it to the runtime manager.
-`ServeAppLifecycleController` no longer releases Conversations ownership after
-shutdown; its listener, app, host, and runtime drains remain unchanged.
+The compatibility check reuses the existing owner-directory identity checks,
+directory lock, strict version-1 record parser, PID liveness rule, exact-record
+cleanup, durability sync, and handoff grace. A valid record whose PID is still
+live returns `conversation_runtime_in_use`. A valid stale record is removed
+under the directory lock and rechecked before the daemon proceeds. Malformed,
+unsafe, or uncertain state preserves the current compromised or unavailable
+failure. The check never writes a new owner record and does not participate in
+Live discovery handoff.
+
+`createServeApp` constructs only that compatibility checker; it does not attach
+a Conversations owner to `ServeAppLifecycleController`. The lifecycle
+controller therefore has no Conversations ownership to release after shutdown;
+its listener, app, host, and runtime drains remain unchanged. Once legacy
+versions that write the record are outside the supported upgrade window, the
+inspect-only check and owner artifacts may be removed in a follow-up.
 
 ### Require the writer lease for the Conversations runtime
 
@@ -137,6 +180,13 @@ snapshot. The effective value is true when either the trusted runtime marker
 was accepted or the user's startup setting enabled the lease. Per-request
 settings reloads continue to use that frozen value, so one ACP process never
 mixes leased and legacy writers.
+
+For a trusted managed child carrying the Conversations marker, `runAcpAgent`
+sets `reclaimPolicy: 'local'` and keeps `takeoverPolicy: 'certified'`. Other
+trusted managed workspace children keep `reclaimPolicy: 'never'`; the marker
+does not relax their container-safety contract. Before the Conversations path
+selects `local`, Core hardens that policy with the host, boot, and PID-namespace
+checks below.
 
 The ACP bootstrap `Config` remains recording-disabled and is not a transcript
 writer. The frozen value is merged into settings before each real session's
@@ -172,6 +222,12 @@ shutdown and uses the existing `session_writer_conflict`,
 `session_writer_lost`, `session_transcript_changed`, and
 `session_writer_unavailable` mappings.
 
+`StandaloneSessionService` selects the same hardened `local` policy for its
+parent-side lifecycle and maintenance acquisitions, including deletion-journal
+reconciliation. This lets archive, unarchive, delete, repair, and recovery make
+the same stale-owner decision as the ACP writer they fence. Generic workspace
+lifecycle routes and other managed runtimes keep their existing `never` policy.
+
 The lease protects one transcript. It does not coordinate session-list reads,
 random-ID creation admission, managed-directory state, deletion-journal scans,
 SSE routing, or Live discovery. Those remain governed by the serialized-use
@@ -182,40 +238,69 @@ Conversations runtime. A legacy daemon or another process that writes the same
 transcript without acquiring the protocol lease can still bypass it. The lease
 is an integrity protocol, not an operating-system access-control boundary.
 
-### Keep abnormal-exit recovery fail closed
+### Reclaim only provably stale local active writers
 
-Do not change the managed writer's existing `reclaimPolicy: 'never'` or its
-`takeoverPolicy: 'certified'`. A normal per-session close removes its exact
-active record. Graceful managed shutdown durably seals the record, and another
-managed daemon can take it over only after verifying the transcript proof.
+Strengthen the existing `local` reclaim policy before selecting it for a
+managed Conversations writer. On Linux, an active schema-version-2 record adds
+an optional `pid_namespace_id` beside the existing hostname and
+`process_start_identity`; the latter already contains the boot ID and process
+start ticks. Writers record both identities when the platform exposes them. A
+reader treats an older or newly written record without either identity as live
+and never automatically reclaims it.
 
-A process crash, SIGKILL, event-loop stall, or storage failure before sealing
-can leave an unsealed active record. A replacement then continues to return
-`409 session_writer_conflict`; it does not infer death from PID visibility,
-hostname, age, or inactivity. Recovery requires an authoritative external
-writer fence and explicit operator cleanup after confirming that the previous
-writer cannot still append.
+Reuse Core's `readPidNamespaceId()`, `readLocalBootId()`, and conservative PID
+liveness behavior while preserving the writer lease's existing persisted
+`process_start_identity` format. `EPERM` or `EACCES` remains live; only a PID
+proved absent, a validated zombie, or a readable start-identity mismatch can
+support the stale verdict after the identity-domain checks pass.
 
-This availability tradeoff is intentional. Automatically reclaiming a stale
-record would turn the small ownership change into a new failure-detection and
-split-brain protocol. It is unnecessary for the requested normal serialized
-use and would weaken the transcript-integrity guarantee supplied by the lease.
+An active Linux record is eligible for stale recovery only when its hostname,
+boot ID, and PID namespace exactly match the contender and one of these
+conditions is proven inside that namespace: the PID no longer exists, or the
+PID exists with a different process-start identity. The implementation reuses
+the existing reclaim guard, exact-record reread, atomic stale-record move, and
+transcript verification after that verdict. It never decides from lock age,
+acquisition time, heartbeat absence, or daemon responsiveness.
+
+Darwin and Windows keep their existing platform process-start probes and
+require an exact hostname and a recorded start identity for managed local
+recovery. A definitely absent PID with that recorded identity is stale; a live
+PID is stale only when its current start identity is readable and differs. If
+an identity needed for either verdict is unavailable, and on platforms without
+a supported identity probe, the record remains live for reclaim purposes. PID
+reuse may therefore cause a safe false conflict but never permits an unproven
+takeover.
+
+A PID with a matching live start identity remains `session_writer_conflict`,
+including when its event loop is stalled. Foreign-host, foreign-boot,
+foreign-namespace, identity-less, malformed, non-regular, and uncertain records
+remain fail closed. The `local` policy applies only to unsealed active records;
+sealed records still require certified transcript takeover. Any transition
+claim, including a residual one, is never reclaimed based on process liveness.
+
+A normal per-session close removes its exact active record. Graceful managed
+shutdown durably seals the record, and another managed daemon can take it over
+only after verifying the transcript proof. A non-cooperative exit from a
+steady active state becomes recoverable on the next qualified local
+acquisition. Ambiguous transition and storage failures still require an
+authoritative external writer fence before manual cleanup.
 
 Forcing the lease also makes graceful managed shutdown seal and hash every
 active Conversations transcript. The implementation does not silently lengthen
 the existing child-termination deadline. Delivery therefore requires proving
 that representative maximum active-session and transcript sizes finish within
-that budget; a timeout remains an unclean shutdown with retained locks, not an
-automatic release.
+that budget. If the timeout ends in process death while the primary record is
+still a well-formed active record, the qualified successor can recover it; a
+residual claim or uncertain transition continues to fail closed.
 
-### Detach ownership storage without removing state-directory safety
+### Retire owner writes without removing migration or state-directory safety
 
-The behavior change stops constructing, acquiring, releasing, or otherwise
-depending on the file-owner implementation, but does not delete that
-implementation and its focused tests in the same change. Keeping dormant code
-for the first patch avoids mixing the ownership-policy change with a large
-cleanup. A follow-up may remove it after the new behavior has shipped and been
-validated.
+The behavior change stops constructing, acquiring, and releasing a long-lived
+file owner, but retains the minimal inspect-and-retire path needed for old
+versions. It does not delete the remaining owner implementation and focused
+tests in the same change. Keeping that code for the first patch avoids mixing
+the ownership-policy change with a large cleanup. A follow-up may remove it
+after the migration window has closed and the new behavior has been validated.
 
 Move the small subset of path creation and validation logic needed by
 `StandaloneDeletionJournal` into that class. Do not add a replacement
@@ -233,15 +318,24 @@ This preserves the trust and bootstrap responsibilities that the old ownership
 `acquire()` performed implicitly instead of accidentally making deletion
 depend on Live discovery having run first.
 
-New daemons ignore existing `conversations/runtime-owner.json` and
-`conversations/.runtime-owner.lock` artifacts. They do not delete, rewrite, or
-acquire them: the record or lock may still belong to a running older daemon,
-and touching it would falsify that daemon's safety contract. Once all older
-daemons have exited, the artifacts are harmless legacy state.
+The existing reconciliation singleflight remains daemon-local. Each journal
+UUID still enters its session lifecycle lease before reading or mutating the
+transcript. If a background sweep loses that acquisition to another daemon, it
+skips the UUID and continues the triggering operation; it does not classify
+ordinary lease contention as journal compromise. A direct lifecycle request
+for that same session keeps the normal structured conflict response.
 
-The server no longer emits `conversation_runtime_in_use`. The wire value may be
-retained temporarily in compatibility types, but it has no new-daemon emission
-path. `conversation_runtime_unavailable`, `conversation_root_compromised`, and
+New daemons never create or replace
+`conversations/runtime-owner.json`. They inspect it under the existing
+`conversations/.runtime-owner.lock`: a live old-version owner keeps the current
+`conversation_runtime_in_use` response, while an exactly revalidated stale
+record is durably removed. The lock remains a transient guard for this
+compatibility operation and is not held for the runtime lifetime.
+
+The server retains `conversation_runtime_in_use` only for this old-version
+migration case and for existing Live-specific mappings. Updated daemons do not
+emit it merely because another updated daemon has mounted Conversations.
+`conversation_runtime_unavailable`, `conversation_root_compromised`, and
 daemon-local runtime-invariant failures remain unchanged.
 
 ### Keep Live discovery separate
@@ -301,6 +395,19 @@ No new setting or command-line flag is introduced. Supporting both exclusive
 and relaxed ownership modes would retain the full old subsystem and create a
 mixed-mode compatibility problem without serving the requested default.
 
+## Error contract
+
+| Condition                                                                        | Result                                                                                               |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Another updated daemon has the session loaded                                    | `409 session_writer_conflict` for that session                                                       |
+| A well-formed active owner is provably dead in the same local identity domain    | Reclaim, authoritative transcript reload, then continue                                              |
+| The active owner is live, stalled, foreign, or missing required reclaim identity | `409 session_writer_conflict` for that session                                                       |
+| The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                    |
+| A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                              |
+| A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                    |
+| A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                        |
+| Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response |
+
 ## Compatibility and rollout
 
 The REST and SDK shapes are unchanged. `standalone_sessions_v1` and
@@ -310,13 +417,31 @@ is added for a weaker concurrency guarantee.
 Rollout is a drain-and-cutover, not a rolling mixed-version upgrade. Stop every
 daemon version that can host standalone sessions without the mandatory lease,
 confirm its sessions have closed, and only then start daemons with this change.
-Mixed old/new versions are unsupported: an old daemon still believes its owner
-record is exclusive and may write without a lease, while a new daemon
-intentionally ignores that owner record. Rollback must explicitly close or
-drain all new Conversations writers and confirm that no active, sealed, or
-claim record from the writer protocol remains before an older non-participating
-daemon starts; graceful process exit alone may intentionally leave sealed
-handoff records.
+If this order is violated in the old-to-new direction, the new daemon honors a
+live legacy runtime-owner record and returns
+`503 conversation_runtime_in_use`; after the old daemon exits, the next runtime
+initialization removes the stale exact record and proceeds without a restart.
+This compatibility guard reduces the failure mode but does not make a rolling
+mixed-version deployment supported.
+
+The reverse direction remains unsafe: an old daemon started after updated
+daemons have mounted Conversations finds no owner record, writes one, and may
+run an unleased ACP writer beside leased writers. All daemons sharing one
+Conversations root must therefore be upgraded together. The owner-record format
+is not extended with a lease-aware marker because older strict readers would
+reject the new shape as compromised.
+
+The writer-lock schema-version-2 owner record accepts the optional
+`pid_namespace_id`; updated Linux writers populate it when available and
+updated reclaimers require it together with the existing start identity. A
+pre-existing or new active record without the complete identity is compatible
+for conflict detection but cannot be reclaimed automatically. The upgrade
+preflight must drain those writers or, after an authoritative external writer
+fence, clear residual records explicitly. Rollback must close or drain all
+updated Conversations writers and confirm that no active, sealed, claim, or
+identity-extended record remains before an older non-participating daemon
+starts; graceful process exit alone may intentionally leave sealed handoff
+records.
 
 Release notes must state that:
 
@@ -326,27 +451,48 @@ Release notes must state that:
 - standalone sessions always use the writer lease, even when the experimental
   setting is absent or false;
 - Live and scheduled-task writers in the Conversations runtime use it as well;
+- a provably dead same-domain active writer is recovered automatically; on
+  Linux that requires the same hostname, boot, and PID namespace, while a live
+  or unverifiable writer stays fenced;
+- a live old-version runtime owner still causes a transitional 503 and all
+  daemons sharing a root must be upgraded together;
 - the lease provides a same-session conflict fence, not multi-master support.
 
 ## Verification
 
-Unit tests cover server bootstrap without constructing or acquiring the legacy
-owner, runtime initialization without an ownership dependency, shutdown without
-owner release, retained root/generation/quarantine failures, deletion-journal
-state-parent creation and compromise detection, journal bootstrap without an
-owner acquisition, parent revalidation on journal read/recovery/write paths,
-and runtime-provenance writer-lease selection. The writer matrix covers the
-user setting off for a Conversations runtime, off for an ordinary runtime, and
-on for all runtimes, plus marker rejection without a private parent capability,
-capture before environment-file loading, user-level and project-level
-environment scrubbing, sandbox propagation, and isolation between primary,
-secondary, and Conversations bridge child environments.
+Unit tests cover server bootstrap without a long-lived legacy owner, live and
+stale legacy-owner compatibility checks, strict malformed-owner failures,
+runtime initialization without lifetime ownership, shutdown without owner
+release, retained root/generation/quarantine failures, deletion-journal
+state-parent creation and compromise detection, journal bootstrap without owner
+acquisition, parent revalidation on journal read/recovery/write paths,
+contention-as-skip during background reconciliation, and runtime-provenance
+writer-lease selection.
+
+The writer matrix covers the user setting off for a Conversations runtime, off
+for an ordinary runtime, and on for all runtimes; Conversations selects
+`local` while ordinary managed children retain `never`. It also covers marker
+rejection without a private parent capability, capture before environment-file
+loading, user-level and project-level environment scrubbing, sandbox
+propagation, and isolation between primary, secondary, and Conversations bridge
+child environments. Standalone parent lifecycle and maintenance acquisitions
+must select the same `local` policy.
+
+Core lease coverage records and validates the Linux PID namespace, treats a
+missing reclaim identity as live, reclaims dead and PID-reused owners only in
+the same hostname, boot, and namespace, and rejects matching live, stalled,
+foreign-host, foreign-boot, foreign-namespace, legacy identity-less, malformed,
+sealed, and residual-claim states. Darwin and Windows cover their corresponding
+hostname and process-start rules. Existing concurrent-reclaimer, exact-record,
+transcript-proof, and crashed-reclaimer tests remain in force.
 
 Managed-shutdown coverage uses representative high active-session counts and
 large transcripts to verify that parallel sealing finishes before the existing
 termination deadline. It also verifies that a forced timeout retains the exact
-active lock and preserves the existing observable unclean-shutdown outcome
-rather than releasing ownership ambiguously.
+active lock while the writer process is still live and preserves the existing
+observable unclean-shutdown outcome rather than releasing ownership ambiguously.
+After that exact process exits, only a same-identity-domain contender may
+recover a well-formed active record; an uncertain transition remains fenced.
 
 A two-process daemon integration test uses the same home, runtime base, and
 Conversations root and verifies:
@@ -355,20 +501,30 @@ Conversations root and verifies:
    `GET /standalone/session-options` and `GET /standalone/sessions`;
 2. neither daemon returns `conversation_runtime_in_use` merely because the
    other process is alive;
-3. stale legacy owner and owner-lock artifacts do not block either new daemon;
+3. a live legacy runtime-owner record returns
+   `503 conversation_runtime_in_use`, and after its process exits the next
+   request retires the stale record and returns `200` without restarting;
 4. while daemon A keeps a standalone session active, daemon B receives
    `409 session_writer_conflict` when it tries to restore that session;
 5. after an explicit close releases A's lease, B restores that session through
    ordinary acquisition; independently, after graceful shutdown seals another
    session owned by A, B restores it through certified takeover;
-6. shutting down either daemon does not remove or invalidate the other's local
+6. after A's lock-owning ACP writer is killed in a steady active state, B in the
+   same local identity domain reclaims the lock, authoritatively reloads the
+   transcript, and continues it without manual cleanup; killing only A's parent
+   while that writer remains live still returns a conflict;
+7. a matching live or stalled A, and records from a foreign host, boot, or PID
+   namespace, remain `409 session_writer_conflict`; identity-less and residual
+   claim states remain fail closed;
+8. shutting down either daemon does not remove or invalidate the other's local
    runtime;
-7. killing A without a cooperative writer terminal leaves the session fenced,
-   and B receives `409 session_writer_conflict` rather than reclaiming it;
-8. a scheduled-task session active in A cannot be rehydrated in B, and only A's
+9. a scheduled-task session active in A cannot be rehydrated in B, and only A's
    scheduler fires its bound task;
-9. root compromise and unavailable generations still fail closed without
-   falling back to the primary workspace.
+10. two daemons reconciling the same prepared deletion elect one lease holder;
+    the contender skips that UUID without failing the unrelated triggering
+    operation or reporting journal compromise;
+11. root compromise and unavailable generations still fail closed without
+    falling back to the primary workspace.
 
 Live regression coverage verifies that Live discovery still has at most one
 publisher, that the publication path performs the existing validated handoff
@@ -403,6 +559,13 @@ concurrent-use contract.
 - **Cross-process multi-master coordination:** would require durable create,
   lifecycle, recovery, owner-routing, and cache protocols. That is a different
   reliability contract and is unnecessary for serialized use.
-- **Automatic stale-writer reclaim:** PID, hostname, age, or inactivity cannot
-  prove that a managed writer on shared storage is dead. Keep explicit recovery
-  rather than introduce a partial failure detector.
+- **Unqualified stale-writer reclaim:** PID, hostname, age, or inactivity alone
+  cannot prove that a managed writer on shared storage is dead. Automatic
+  recovery is limited to a matching local identity domain and stable process
+  identity; every uncertain state remains fenced.
+- **Keeping managed `never` plus manual unlock:** makes an ordinary
+  non-cooperative writer death leave every loaded session unavailable until an
+  operator discovers and removes internal lock files. Identity-qualified local
+  recovery handles the common safe case automatically; manual recovery remains
+  only for ambiguous transition or storage state after an external writer
+  fence.

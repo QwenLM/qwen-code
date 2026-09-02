@@ -5,7 +5,10 @@
 > for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) proposes
 > enabling this protocol for every writer hosted by the Conversations runtime,
 > which would supersede this document's exclusion of standalone ACP writers. Its
-> certified handoff and fail-closed abnormal-exit semantics remain unchanged.
+> certified handoff remains unchanged. A hardened local policy would additionally
+> reclaim only a provably dead writer in the same local identity domain, including
+> the same boot and PID namespace on Linux; sealed, foreign, identity-less, and
+> ambiguous states remain fail closed.
 
 ## Problem
 
