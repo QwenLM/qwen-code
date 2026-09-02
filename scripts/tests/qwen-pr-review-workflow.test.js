@@ -2687,6 +2687,133 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
   });
 });
 
+describe('review worktree prebuild (issue #10108)', () => {
+  // `fetch-pr` installs and builds the review worktree through Agent 7's own
+  // `build-test` before any agent starts, but only when this variable is set
+  // — a local review must not pay the blocking prefix. The switch is one
+  // literal on two sides: the CLI constant and this step's env. Read the
+  // constant out of the source rather than hardcoding it here, so a rename
+  // on either side reds this test instead of silently turning the prebuild
+  // off in CI.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/prebuild.ts',
+    'utf8',
+  );
+  const envName = source.match(
+    /export const PREBUILD_ENV = '([A-Z0-9_]+)'/,
+  )?.[1];
+  const budgetS = Number(
+    source.match(/export const PREBUILD_BUDGET_S = (\d+)/)?.[1],
+  );
+  const headroomS = Number(
+    source.match(/export const PREBUILD_COVER_HEADROOM_S = (\d+)/)?.[1],
+  );
+  const marginS = Number(
+    source.match(/export const PREBUILD_ATTEMPT_MARGIN_S = (\d+)/)?.[1],
+  );
+
+  it('sets the variable the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_PREBUILD');
+    expect(review.env[envName]).toBe('1');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+
+  it('covers the prebuild call with a session shell timeout carrying the budget', () => {
+    // The prebuild runs INSIDE fetch-pr, which the skill executes through
+    // the agent's shell tool: 120s built-in foreground default, 600s
+    // per-call ceiling (shell.ts) — neither holds the budget, so the step
+    // raises the session default in the per-run agent home's settings,
+    // gated on the same variable as the opt-in. A rename or a value below
+    // the budget reds this test instead of silently killing fetch-pr
+    // mid-`npm ci` on every CI review. Parse the JSON literal the loader
+    // reads instead of regexing the number: a mutation that keeps the
+    // number visible but drops the `tools` wrapper leaves the loader's
+    // read path (`settings.tools?.shell?.defaultTimeoutMs`, cli config.ts)
+    // undefined, and this assertion must catch it.
+    expect(budgetS).toBeGreaterThan(600);
+    // The cover clock starts at the fetch-pr spawn, the budget clock only
+    // inside runBuildTest: a cover exactly AT the budget expires first in
+    // the hang case it exists for, so the headroom must exist and be
+    // carried — removing either constant reds this test.
+    expect(headroomS).toBeGreaterThan(0);
+    const coverJson = review.run.match(
+      /'(\{[^']*"defaultTimeoutMs"[^']*})'/,
+    )?.[1];
+    expect(coverJson).toBeDefined();
+    const coverMs = JSON.parse(coverJson)?.tools?.shell?.defaultTimeoutMs;
+    expect(coverMs).toBeGreaterThanOrEqual((budgetS + headroomS) * 1000);
+    expect(review.run).toContain('"$QWEN_HOME/settings.json"');
+  });
+
+  it('gates the budget reconciliation and the cover on the literal the CLI accepts', () => {
+    // prebuildRequested accepts exactly '1' — the grammar both bash gates
+    // must compare, so a value the cover gate welds for can never run the
+    // prebuild without its cover (and vice versa). Two gates: the budget
+    // reconciliation and the cover write. Flipping either comparison reds
+    // this test instead of silently skipping the block it guards.
+    const gates =
+      review.run.match(new RegExp(`"\\$\\{${envName}:-\\}" = '1'`, 'g')) ?? [];
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('refuses the opt-in under an attempt budget that cannot carry it', () => {
+    // Worst case the prebuild consumes its whole budget, so an attempt
+    // that cannot carry the budget plus the deadline reserve plus the
+    // margin for the fetch prefix and the review itself unsets the
+    // variable — degrading to the pre-prebuild flow instead of dying
+    // mid-`npm ci` (GNU timeout, no retry). Removing the gate reds this
+    // test; so does any literal that drifts from lib/prebuild.ts.
+    const gate = review.run.match(
+      /\$\(\( attempt_s - reserve_s \)\) -lt \$\(\( (\d+) \+ (\d+) \)\)/,
+    );
+    expect(gate).not.toBeNull();
+    expect(Number(gate[1])).toBe(budgetS);
+    expect(Number(gate[2])).toBe(marginS);
+    // The reserve is subtracted from the attempt, never counted as
+    // available, and computed with the same shape run_review_once uses.
+    expect(review.run).toMatch(/reserve_s=\$\(\( attempt_s \/ 3 \)\)/);
+    expect(review.run).toContain(`unset ${envName}`);
+    // The gate sits after the budget is final (size-aware default and
+    // both halvings above), keyed here off the QWEN_TIMEOUT assignment
+    // that follows them.
+    const finalized = review.run.indexOf(
+      'QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"',
+    );
+    const gateIdx = review.run.indexOf(
+      'attempt_s=$(( EFFECTIVE_TIMEOUT_MINUTES * 60 ))',
+    );
+    expect(finalized).toBeGreaterThan(-1);
+    expect(gateIdx).toBeGreaterThan(finalized);
+  });
+
+  it('writes the cover before the agent starts', () => {
+    // The value enters the session once, at config load, so a write after
+    // the qwen process starts never reaches that session: the 120s
+    // built-in reasserts and fetch-pr dies mid-`npm ci` with no test red.
+    // Mirrors the toBeLessThan ordering pins this file already applies to
+    // the other writes whose position is load-bearing.
+    const coverWrite = review.run.indexOf('"$QWEN_HOME/settings.json"');
+    const agent = review.run.indexOf('timeout --kill-after=10s');
+    expect(coverWrite).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(coverWrite).toBeLessThan(agent);
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
