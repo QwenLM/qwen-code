@@ -154,7 +154,14 @@ function formatApprovalModeError(value: string): Error {
   );
 }
 
-function parseApprovalModeValue(value: string): ApprovalMode {
+/**
+ * Normalizes an approval-mode spelling exactly the way boot accepts it:
+ * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
+ * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
+ * daemon's reload convergence so a settings file reload agrees with boot for
+ * every accepted spelling.
+ */
+export function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
   const canonical =
     normalized === 'auto_edit' || normalized === 'autoedit'
@@ -2388,6 +2395,7 @@ export async function loadCliConfig(
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,

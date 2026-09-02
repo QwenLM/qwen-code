@@ -715,6 +715,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/open\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -726,6 +727,8 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
@@ -808,6 +811,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -827,6 +833,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
   ) {
     return true;
   }
@@ -1193,6 +1206,17 @@ async function handleDaemonRoute(
   }
   if (
     method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
+  ) {
+    // Content search scans transcript bodies server-side; scenarios don't
+    // model those, so answer with no hits and let the client fall back to
+    // its local title/id/git filter.
+    await json(route, { results: [] });
+    return;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
@@ -1390,6 +1414,10 @@ async function handleDaemonRoute(
         branch: null,
       },
     );
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    await json(route, { kind: 'workspace-local-open', opened: true });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {

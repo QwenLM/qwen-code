@@ -182,6 +182,7 @@ function detectRollbackAndGetBaseline(npmDistTag) {
  */
 export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
+  '@qwen-code/external-context-mem0',
   '@qwen-code/audio-capture',
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',

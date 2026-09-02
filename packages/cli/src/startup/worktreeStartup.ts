@@ -169,7 +169,14 @@ export async function setupStartupWorktree(
   } else if (trimmed.length === 0) {
     slug = GitWorktreeService.generateAutoSlug();
   } else {
-    const validation = GitWorktreeService.validateUserWorktreeSlug(trimmed);
+    // The reserved `pr-<N>` shape is tolerated HERE so an existing
+    // PR-backed worktree can be re-attached by its literal slug (`qwen
+    // --worktree pr-42` after `--worktree=#42` created it); the re-attach
+    // probe below re-applies the reservation when no such worktree exists,
+    // so a literal `pr-<N>` never creates one.
+    const validation = GitWorktreeService.validateUserWorktreeSlug(trimmed, {
+      allowPrBackedShape: true,
+    });
     if (validation) {
       return { ok: false, error: `--worktree: ${validation}` };
     }
@@ -217,6 +224,18 @@ export async function setupStartupWorktree(
       await service.getRegisteredWorktreeBranch(expectedWorktreePath);
   } catch {
     registered = null;
+  }
+  if (registered === null && !isPullRequest) {
+    // Nothing to re-attach: a user-typed `pr-<N>` would CREATE a worktree
+    // in the reserved shape (binding the session to PR N it never touched)
+    // — the exact case the reservation exists for. Point at the PR form.
+    const reserved = GitWorktreeService.validateUserWorktreeSlug(slug);
+    if (reserved) {
+      return {
+        ok: false,
+        error: `--worktree: ${reserved} Use \`--worktree=#${slug.slice('pr-'.length)}\` to create the worktree for that PR.`,
+      };
+    }
   }
   if (registered !== null) {
     if (registered.branch !== expectedBranch) {
@@ -299,6 +318,7 @@ export async function setupStartupWorktree(
   const baseRef = isPullRequest ? pullRequestHeadSha! : originalBranch;
   const result = await service.createUserWorktree(slug, baseRef, {
     symlinkDirectories: options?.symlinkDirectories,
+    prBacked: isPullRequest,
   });
   if (!result.success || !result.worktree) {
     return {
