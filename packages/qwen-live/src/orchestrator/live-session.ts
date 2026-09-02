@@ -376,6 +376,20 @@ export class LiveSession {
     });
   }
 
+  /** LiveCallHandlers.onPlaybackStarted */
+  notePlaybackStarted(call: { epoch: number }): void {
+    const context = this.active;
+    if (!context || context.epoch !== call.epoch) return;
+    context.injector.notePlaybackStarted();
+  }
+
+  /** LiveCallHandlers.onPlaybackCompleted */
+  notePlaybackCompleted(call: { epoch: number }): void {
+    const context = this.active;
+    if (!context || context.epoch !== call.epoch) return;
+    context.injector.notePlaybackCompleted();
+  }
+
   /** LiveCallHandlers.onInputAudio */
   pushAudio(call: { epoch: number; callId: string; pcm16: Buffer }): boolean {
     const context = this.active;
@@ -466,7 +480,6 @@ export class LiveSession {
       onOutputAudioDelta: (event: { audio: Uint8Array }) => {
         if (!current()) return;
         this.host.sendOutputAudio(context.epoch, event.audio);
-        context.injector.noteOutputAudio(event.audio.byteLength);
       },
       onResponseCreated: (event: { responseId: string; authority: string }) => {
         if (!current()) return;

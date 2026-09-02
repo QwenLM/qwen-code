@@ -12,7 +12,11 @@ import {
   UI_COMPACT_CLEARED_IMAGE_MESSAGE,
 } from './useHistoryManager.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
+import type {
+  HistoryItem,
+  HistoryItemWithoutId,
+  HistoryItemToolGroup,
+} from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 
@@ -1167,6 +1171,46 @@ describe('useHistoryManager', () => {
         expect(tools[0].resultDisplay).toBe(`content-${i}`);
         expect(tools[1].resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
+    });
+  });
+
+  describe('loadHistory message-ID reconciliation', () => {
+    it('keeps addItem IDs out of the restored ID window', () => {
+      // buildResumedHistoryItems stamps restored items with Date.now() + i
+      // (i = 1..N) at load time. On --resume the scheduled-tasks startup
+      // banner is the first unconditional addItem(Date.now()) after the
+      // restore, so without reconciliation its ID (Date.now() + ++counter,
+      // counter never advanced by loadHistory) lands inside the restored
+      // range whenever the banner renders within N-1 ms — two <Static>
+      // children then share one React key.
+      const { result } = renderHook(() => useHistory());
+      const restoreBase = Date.now();
+      const restoredCount = 50;
+      const restoredItems: HistoryItem[] = Array.from(
+        { length: restoredCount },
+        (_, i) => ({
+          type: 'user' as const,
+          text: `restored-${i}`,
+          id: restoreBase + i + 1,
+        }),
+      );
+
+      act(() => {
+        result.current.loadHistory(restoredItems);
+      });
+
+      let bannerId = -1;
+      act(() => {
+        bannerId = result.current.addItem(
+          { type: 'warning', text: '1 active scheduled task.' },
+          Date.now(),
+        );
+      });
+
+      // The banner ID must clear the whole restored window, not just the
+      // current timestamp, so no restored item shares its React key.
+      expect(bannerId).toBeGreaterThan(restoreBase + restoredCount);
+      expect(restoredItems.some((item) => item.id === bannerId)).toBe(false);
     });
   });
 });

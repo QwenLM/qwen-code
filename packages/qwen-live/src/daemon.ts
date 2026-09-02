@@ -155,6 +155,8 @@ export class LiveDaemon {
       onStart: (call) => session.start(call),
       onStop: (call) => session.stop(call),
       onInputAudio: (call) => session.pushAudio(call),
+      onPlaybackStarted: (call) => session.notePlaybackStarted(call),
+      onPlaybackCompleted: (call) => session.notePlaybackCompleted(call),
     });
 
     const port = await this.listen();
