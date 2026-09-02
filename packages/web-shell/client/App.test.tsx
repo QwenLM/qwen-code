@@ -3245,6 +3245,16 @@ describe('task activity key', () => {
       },
     ]);
 
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
     mockConnection.capabilities.features = [
       'web_terminal',
       'session_agent_trace',
@@ -3254,9 +3264,12 @@ describe('task activity key', () => {
     await flush();
 
     expect(
-      container.querySelector('[data-terminal-id="terminal:stored"]'),
+      document.querySelector('[data-terminal-id="terminal:stored"]'),
     ).not.toBeNull();
-    expect(container.querySelector('button[title="Workflow"]')).not.toBeNull();
+    expect(document.querySelector('button[title="Workflow"]')).not.toBeNull();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
   });
 
   it('continues cross-session transcript restoration past 20 pages', async () => {
@@ -7131,6 +7144,59 @@ describe('artifact panel fullscreen', () => {
       expect(contextShell?.getAttribute('aria-hidden')).toBeNull();
     });
     await flush();
+  });
+
+  it('composes tab open and close updates in the same commit', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [task],
+    });
+    mockConnection.capabilities.features = [
+      'session_monitor_tool_correlation',
+      'session_side_task',
+    ];
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ shellRef });
+    await flush();
+    await act(async () => {
+      await testState.latestMonitorDetailsOnOpen?.({
+        callId: 'monitor-call',
+        toolName: 'monitor',
+        status: 'completed',
+      });
+    });
+    await flush();
+
+    act(() => {
+      shellRef.current?.createSideTask();
+      document
+        .querySelector<HTMLButtonElement>(
+          'aside button[aria-label="Close watch server log"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).toBeNull();
   });
 
   it('keeps the floating drawer Escape-to-close intact while not fullscreen', async () => {
@@ -25340,7 +25406,8 @@ describe('App session callbacks', () => {
       creation.promise,
     );
     const shellRef = createRef<WebShellApi>();
-    const { container, rerender } = renderApp({ shellRef });
+    const rightPanel = { items: ['sideTask', 'terminal'] as const };
+    const { container, rerender } = renderApp({ shellRef, rightPanel });
     await flush();
 
     act(() => {
@@ -25385,6 +25452,72 @@ describe('App session callbacks', () => {
 
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
     expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Close Side task"]',
+        )
+        ?.click();
+    });
+    await flush();
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'web_terminal',
+    ];
+    rerender({ shellRef, rightPanel });
+    await flush();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(container.querySelector('button[title="Side task"]')).toBeNull();
+    expect(
+      container.querySelector('[data-terminal-id="terminal:stored"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps an in-flight side task across a disconnect', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    const creation = deferred<{
+      sessionId: string;
+      clientId: string;
+      displayName?: string;
+    }>();
+    mockWorkspace.client.createSideTaskSession.mockReturnValueOnce(
+      creation.promise,
+    );
+    const shellRef = createRef<WebShellApi>();
+    const { container, rerender } = renderApp({ shellRef });
+    await flush();
+
+    act(() => {
+      shellRef.current?.createSideTask();
+    });
+    await flush();
+    mockConnection.status = 'disconnected';
+    rerender();
+    await flush();
+
+    await act(async () => {
+      creation.resolve({
+        sessionId: 'side-session-1',
+        clientId: 'side-client-1',
+      });
+      await creation.promise;
+    });
+    mockConnection.status = 'connected';
+    rerender();
+    await flush();
+    await flush();
+
+    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
 
   it('opens the Session Overview from the external shell ref like the sidebar button', async () => {

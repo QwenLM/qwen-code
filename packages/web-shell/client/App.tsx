@@ -5583,17 +5583,15 @@ export function App({
     ) {
       return;
     }
+    const saveCurrentState = () => {
+      if (artifactPanelRestoredSessionKeyRef.current !== nextSessionId) return;
+      const currentState = artifactPanelSessionStateRef.current;
+      if (!currentState) return;
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
+      artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
+    };
     if (connection.loadingTranscript) {
-      if (artifactPanelRestoredSessionKeyRef.current === nextSessionId) {
-        const currentState = artifactPanelSessionStateRef.current;
-        if (currentState) {
-          artifactPanelStateBySessionRef.current.delete(nextSessionId);
-          artifactPanelStateBySessionRef.current.set(
-            nextSessionId,
-            currentState,
-          );
-        }
-      }
+      saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
         artifactPanelStateBySessionRef.current.get(nextSessionId) ??
@@ -5607,6 +5605,7 @@ export function App({
       return;
     }
     if (connection.status !== 'connected') {
+      saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
         artifactPanelStateBySessionRef.current.get(nextSessionId) ??
@@ -5620,16 +5619,7 @@ export function App({
       return;
     }
     if (artifactsLoading) {
-      if (artifactPanelRestoredSessionKeyRef.current === nextSessionId) {
-        const currentState = artifactPanelSessionStateRef.current;
-        if (currentState) {
-          artifactPanelStateBySessionRef.current.delete(nextSessionId);
-          artifactPanelStateBySessionRef.current.set(
-            nextSessionId,
-            currentState,
-          );
-        }
-      }
+      saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
         artifactPanelStateBySessionRef.current.get(nextSessionId) ??
@@ -5654,6 +5644,7 @@ export function App({
       artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
     if (!persisted && savedRuntimeTabs.length === 0) {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       setArtifactPanelRestoring(false);
       if (previousSessionId !== nextSessionId) {
@@ -5894,6 +5885,7 @@ export function App({
         ...savedRuntimeTabs,
       ];
       if (cancelled) return;
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       setArtifactPanelRestoring(false);
       const desiredActiveTabId =
@@ -5922,12 +5914,16 @@ export function App({
       setArtifactPanelOpen(artifactPanelOpenRef.current);
       setArtifactPanelTabs(activatedTabs);
       setActiveArtifactPanelTabId(activeTabId);
-      setReviewChanges(restoreInputs.latestReviewChanges);
-      setSelectedReviewPath(null);
-      setArtifactPanelExtraArtifacts([]);
-      setPaneArtifactSnapshots(new Map());
-      setArtifactPanelWidth(savedState?.width ?? getDefaultReviewPanelWidth());
-      setArtifactPanelFullscreen(false);
+      if (previousSessionId !== nextSessionId) {
+        setReviewChanges(restoreInputs.latestReviewChanges);
+        setSelectedReviewPath(null);
+        setArtifactPanelExtraArtifacts([]);
+        setPaneArtifactSnapshots(new Map());
+        setArtifactPanelWidth(
+          savedState?.width ?? getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelFullscreen(false);
+      }
       void hydrateRestoredAttachmentTab(
         activatedTabs.find((tab) => tab.id === activeTabId),
       );
@@ -6288,48 +6284,49 @@ export function App({
   const closeArtifactPanelTabs = useCallback(
     (tabIds: ReadonlySet<string>) => {
       if (tabIds.size === 0) return;
-      const tabs = artifactPanelTabsRef.current;
-      const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
-      if (nextTabs.length === tabs.length) return;
-      for (const tab of tabs) {
+      for (const tab of artifactPanelTabsRef.current) {
         if (tabIds.has(tab.id) && tab.kind === 'terminal') {
           releaseWebTerminal(tab.id);
         }
       }
-      if (nextTabs.length === 0) {
-        setArtifactPanelOpen(false);
-        setArtifactPanelFullscreen(false);
-        setSuppressArtifactDockOpenAnimation(false);
-        setActiveArtifactPanelTabId(null);
-        setReviewChanges([]);
-        setSelectedReviewPath(null);
-        setArtifactPanelExtraArtifacts([]);
-        setPaneArtifactSnapshots(new Map());
-        setArtifactPanelTabs(nextTabs);
-        return;
-      }
-      if (
-        activeArtifactPanelTabIdRef.current &&
-        tabIds.has(activeArtifactPanelTabIdRef.current)
-      ) {
-        const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
-        const nextActive =
-          nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
-        setActiveArtifactPanelTabId(nextActive.id);
-        setArtifactPanelTabs(
-          nextActive.kind === 'terminal' && !nextActive.initialized
-            ? nextTabs.map((tab) =>
-                tab.id === nextActive.id ? { ...tab, initialized: true } : tab,
-              )
-            : nextTabs,
-        );
-        void hydrateRestoredAttachmentTab(nextActive);
-        void hydratePendingArtifactPanelTab(
-          nextActive.kind === 'pending' ? nextActive : undefined,
-        );
-        return;
-      }
-      setArtifactPanelTabs(nextTabs);
+      setArtifactPanelTabs((tabs) => {
+        const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
+        if (nextTabs.length === tabs.length) return tabs;
+        if (nextTabs.length === 0) {
+          setArtifactPanelOpen(false);
+          setArtifactPanelFullscreen(false);
+          setSuppressArtifactDockOpenAnimation(false);
+          setActiveArtifactPanelTabId(null);
+          setReviewChanges([]);
+          setSelectedReviewPath(null);
+          setArtifactPanelExtraArtifacts([]);
+          setPaneArtifactSnapshots(new Map());
+          return nextTabs;
+        }
+        if (
+          activeArtifactPanelTabIdRef.current &&
+          tabIds.has(activeArtifactPanelTabIdRef.current)
+        ) {
+          const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
+          const nextActive =
+            nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
+          setActiveArtifactPanelTabId(nextActive.id);
+          const activatedTabs =
+            nextActive.kind === 'terminal' && !nextActive.initialized
+              ? nextTabs.map((tab) =>
+                  tab.id === nextActive.id
+                    ? { ...tab, initialized: true }
+                    : tab,
+                )
+              : nextTabs;
+          void hydrateRestoredAttachmentTab(nextActive);
+          void hydratePendingArtifactPanelTab(
+            nextActive.kind === 'pending' ? nextActive : undefined,
+          );
+          return activatedTabs;
+        }
+        return nextTabs;
+      });
     },
     [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
   );
