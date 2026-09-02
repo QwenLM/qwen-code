@@ -213,25 +213,25 @@ describe('verify-capture helper', () => {
     const { data, info } = await sharp(png)
       .raw()
       .toBuffer({ resolveWithObject: true });
-    // FG_DEFAULT is #d4d4d4. Text is anti-aliased, and how many pixels land
-    // exactly on it depends on the host's font rasterisation: hosts without
-    // fontconfig fonts render almost entirely blended pixels, so the exact
+    // FG_DEFAULT is #d4d4d4. Text is anti-aliased, so how many pixels land
+    // exactly on it depends on the host's font rasterisation, and the exact
     // scan flaked. Count bright near-neutral pixels instead — both ends of
     // the blend axis (#d4d4d4 over #1e1e1e) are neutral, so every blend of
-    // them is at any coverage, while a tinted FG_DEFAULT or the hardcoded
-    // #9cdcfe title fill is not and cannot satisfy the count in the
-    // fallback's place. The spread tolerance absorbs subpixel antialiasing.
-    // Deleting the guard ships fill="undefined", which librsvg paints black,
-    // and black on #1e1e1e never reaches this bright.
+    // them is neutral at any coverage, while a grossly tinted FG_DEFAULT or
+    // the hardcoded #9cdcfe title fill is not and cannot satisfy the count
+    // in the fallback's place. The spread tolerance absorbs subpixel
+    // antialiasing, and the floor is strict to keep a mid-grey FG_DEFAULT
+    // (#808080) out. Deleting the guard ships fill="undefined", which
+    // librsvg paints black, and black on #1e1e1e never reaches this bright.
     let fallbackPixels = 0;
     for (let i = 0; i + 2 < data.length; i += info.channels) {
       const spread =
         Math.max(data[i], data[i + 1], data[i + 2]) -
         Math.min(data[i], data[i + 1], data[i + 2]);
       if (
-        data[i] >= 0x80 &&
-        data[i + 1] >= 0x80 &&
-        data[i + 2] >= 0x80 &&
+        data[i] > 0x80 &&
+        data[i + 1] > 0x80 &&
+        data[i + 2] > 0x80 &&
         spread <= 12
       ) {
         fallbackPixels += 1;
