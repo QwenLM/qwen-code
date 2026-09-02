@@ -97,6 +97,7 @@ import {
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
+const SESSION_PERMISSION_VOTE_FEATURE = 'session_permission_vote';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -526,6 +527,9 @@ export async function runChannelDaemonWorker(
     }),
     sessionAttachments: capabilities.features.includes(
       SESSION_ATTACHMENTS_FEATURE,
+    ),
+    sessionPermissionVote: capabilities.features.includes(
+      SESSION_PERMISSION_VOTE_FEATURE,
     ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }

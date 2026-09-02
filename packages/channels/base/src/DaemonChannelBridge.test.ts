@@ -86,6 +86,7 @@ interface FakeSession extends DaemonChannelSessionClient {
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   respondToPermission: ReturnType<typeof vi.fn>;
+  respondToSessionPermission: ReturnType<typeof vi.fn>;
 }
 
 function createFakeSession(
@@ -108,6 +109,7 @@ function createFakeSession(
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
+    respondToSessionPermission: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -1882,12 +1884,43 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('routes permission responses back through the owning daemon session', async () => {
+  it.each([
+    {
+      name: 'uses session-scoped permission voting when supported',
+      sessionPermissionVote: true,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older daemons',
+      sessionPermissionVote: false,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older clients',
+      sessionPermissionVote: true,
+      sessionMethod: false,
+    },
+  ])('$name', async ({ sessionPermissionVote, sessionMethod }) => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    const scopedVote = session.respondToSessionPermission;
+    if (!sessionMethod) {
+      delete (session as { respondToSessionPermission?: unknown })
+        .respondToSessionPermission;
+    }
+    if (sessionPermissionVote && sessionMethod) {
+      session.respondToPermission.mockResolvedValue(false);
+    }
+    const expectedVote =
+      sessionPermissionVote && sessionMethod
+        ? scopedVote
+        : session.respondToPermission;
+    const unexpectedVote =
+      expectedVote === scopedVote ? session.respondToPermission : scopedVote;
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote,
     });
     const permissionRequest = vi.fn();
     bridge.on('permissionRequest', permissionRequest);
@@ -1929,7 +1962,8 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       true,
     );
-    expect(session.respondToPermission).toHaveBeenCalledWith('req-1', response);
+    expect(expectedVote).toHaveBeenCalledWith('req-1', response);
+    expect(unexpectedVote).not.toHaveBeenCalled();
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       false,
     );
