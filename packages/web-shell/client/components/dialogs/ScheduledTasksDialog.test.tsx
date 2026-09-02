@@ -67,10 +67,11 @@ let root: Root | null = null;
 async function mount(
   tasks: MockTask[],
   opts: {
-    onOpenSession?: (sessionId: string) => void;
+    onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     onRunPrompt?: (
       prompt: string,
       sessionId: string | null,
+      workspaceCwd?: string,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
     currentSession?: {
@@ -83,6 +84,12 @@ async function mount(
       pendingInteractionCount?: number;
     };
     currentSessionSchedulingAvailable?: boolean;
+    workspaces?: Array<{
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+    }>;
     lockedWorkspace?: {
       id: string;
       cwd: string;
@@ -124,6 +131,7 @@ async function mount(
               currentSessionSchedulingAvailable={
                 nextOpts.currentSessionSchedulingAvailable
               }
+              workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
               onError={nextOpts.onError ?? vi.fn()}
             />
@@ -1001,12 +1009,20 @@ describe('ScheduledTasksDialog run now', () => {
     const onRunPrompt = vi.fn();
     await mount([baseTask({ sessionId: 'sess-9', prompt: 'do it' })], {
       onRunPrompt,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/repo/main',
+          primary: true,
+          trusted: true,
+        },
+      ],
     });
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
     expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
-    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9', '/repo/main');
   });
 
   it('passes a null sessionId through for an unbound task', async () => {
@@ -1199,13 +1215,22 @@ describe('ScheduledTasksDialog view-history (bound session)', () => {
           ],
         }),
       ],
-      { onOpenSession },
+      {
+        onOpenSession,
+        lockedWorkspace: {
+          id: 'locked',
+          cwd: '/repo/locked',
+          primary: false,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      },
     );
 
     expect(findButton('View conversation (1)')).toBeUndefined();
     click(findButton('Run history (1)'));
     click(document.querySelector('[title="Open this run session"]'));
-    expect(onOpenSession).toHaveBeenCalledWith('child-1');
+    expect(onOpenSession).toHaveBeenCalledWith('child-1', '/repo/locked');
   });
 
   it('opens the bound session when its history control is clicked', async () => {

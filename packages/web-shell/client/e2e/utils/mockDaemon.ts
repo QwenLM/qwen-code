@@ -712,6 +712,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    path === '/scheduled-tasks' ||
+    /^\/workspaces\/[^/]+\/scheduled-tasks\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
@@ -790,6 +792,13 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    method === 'GET' &&
+    (path === '/scheduled-tasks' ||
+      /^\/workspaces\/[^/]+\/scheduled-tasks\/?$/.test(path))
+  ) {
+    return true;
+  }
   if (
     (method === 'GET' || method === 'POST') &&
     /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
@@ -1127,6 +1136,14 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/workspace/voice') {
     await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (
+    method === 'GET' &&
+    (path === '/scheduled-tasks' ||
+      /^\/workspaces\/[^/]+\/scheduled-tasks\/?$/.test(path))
+  ) {
+    await json(route, { tasks: [] });
     return;
   }
   if (method === 'GET' && /^\/file\/?$/.test(path)) {

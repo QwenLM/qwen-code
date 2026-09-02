@@ -71,6 +71,50 @@ describe('WorkspaceSelector', () => {
     expect(element.querySelector('button')).toBeNull();
   });
 
+  it('offers and selects No workspace when standalone is supported', async () => {
+    const onSelectNoWorkspace = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      noWorkspaceSupported: true,
+      onSelectNoWorkspace,
+    });
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const noWorkspace = [
+      ...document.querySelectorAll('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('No workspace'));
+    expect(noWorkspace).toBeDefined();
+    await act(async () => {
+      noWorkspace?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSelectNoWorkspace).toHaveBeenCalledOnce();
+  });
+
+  it('shows No workspace as the selected scope', () => {
+    const element = renderSelector({
+      noWorkspaceSupported: true,
+      noWorkspaceSelected: true,
+    });
+    expect(
+      element.querySelector('[data-slot="select-value"]')?.textContent,
+    ).toBe('No workspace');
+  });
+
   it('gates creation actions and disables untrusted workspaces', async () => {
     const onCreateScratch = vi.fn();
     const element = renderSelector({ onCreateScratch });

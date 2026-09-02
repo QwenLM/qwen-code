@@ -17,7 +17,7 @@ const standaloneFeatures = [
   'standalone_sessions_v1',
 ];
 
-test('global New task creates an exact standalone session @smoke', async ({
+test('global New task defaults to the primary workspace @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -26,6 +26,37 @@ test('global New task creates an exact standalone session @smoke', async ({
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoNewTask(page);
+  await fillComposer(page, 'Start a workspace conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  const create = await waitForRequest(
+    daemon,
+    (request) => request.method === 'POST' && request.path === '/session',
+  );
+  expect(requestBody(create)).toMatchObject({
+    cwd: scenario.workspaceCwd,
+  });
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        request.path.startsWith('/standalone/sessions'),
+    ),
+  ).toEqual([]);
+});
+
+test('composer workspace selector creates an exact standalone session @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoNewTask(page, 'no-workspace');
+  await expect(
+    page.getByText('Previous Session', { exact: true }),
+  ).toBeVisible();
   await fillComposer(page, 'Start a standalone conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -50,6 +81,69 @@ test('global New task creates an exact standalone session @smoke', async ({
       `/session/${sessionId.replaceAll('-', '\\-')}\\?context=standalone$`,
     ),
   );
+  await expect(
+    page.getByText('Previous Session', { exact: true }),
+  ).toBeVisible();
+});
+
+test('standalone keeps explicit workspace management without changing context @smoke', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    capabilities: {
+      features: standaloneFeatures,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: workspaceCwd,
+          primary: true,
+          trusted: true,
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoNewTask(page, 'no-workspace');
+  await expect(page).toHaveURL(/\?context=standalone$/);
+  await expect(
+    page.getByRole('button', { name: 'Plugins', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Scheduled Tasks', exact: true }),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Plugins', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Plugins' })).toBeVisible();
+  await expect(page.getByTestId('plugin-management-workspace')).toHaveText(
+    'Workspace: qwen-web-shell-e2e',
+  );
+  await expect(page).toHaveURL(/\?context=standalone$/);
+
+  await page
+    .getByRole('button', { name: 'Scheduled Tasks', exact: true })
+    .click();
+  await expect(page.getByTestId('scheduled-tasks-page')).toBeVisible();
+  await expect(
+    page.getByTestId('scheduled-tasks-management-workspace'),
+  ).toHaveText('Workspace: qwen-web-shell-e2e');
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'GET' && request.path === '/scheduled-tasks',
+  );
+  await expect(page).toHaveURL(/\?context=standalone$/);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        (request.path === '/session' ||
+          request.path === '/standalone/sessions'),
+    ),
+  ).toEqual([]);
 });
 
 test('global New task preserves the legacy primary route without the capability @smoke', async ({
@@ -86,7 +180,7 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoNewTask(page);
+  await gotoNewTask(page, 'no-workspace');
   await fillComposer(page, 'Do not duplicate this conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -205,9 +299,27 @@ async function installScenario(
   });
 }
 
-async function gotoNewTask(page: Page): Promise<void> {
+async function gotoNewTask(
+  page: Page,
+  scope: 'default' | 'no-workspace' = 'default',
+): Promise<void> {
   await page.goto('/');
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  if (scope === 'no-workspace') {
+    const workspaceMenu = page.getByRole('button', {
+      name: 'Workspace',
+      exact: true,
+    });
+    await expect(workspaceMenu).toBeEnabled();
+    await workspaceMenu.click();
+    await page
+      .getByRole('menuitemradio', { name: 'No workspace', exact: true })
+      .click();
+    await expect(
+      workspaceMenu.locator('[data-slot="select-value"]'),
+    ).toHaveText('No workspace');
+    return;
+  }
   const newTask = page
     .getByRole('button', { name: 'New task', exact: true })
     .first();

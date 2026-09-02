@@ -252,8 +252,11 @@ interface ChatEditorProps {
     trusted: boolean;
   }>;
   selectedWorkspaceCwd?: string;
+  noWorkspaceSupported?: boolean;
+  noWorkspaceSelected?: boolean;
   workspaceSelectionDisabled?: boolean;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  onSelectNoWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
   existingFolderWorkspaceSupported?: boolean;
   workspaceMutationBusy?: boolean;
@@ -1519,8 +1522,11 @@ export const ChatEditor = memo(
       onSelectReasoningEffort,
       workspaces,
       selectedWorkspaceCwd,
+      noWorkspaceSupported = false,
+      noWorkspaceSelected = false,
       workspaceSelectionDisabled = false,
       onSelectWorkspace,
+      onSelectNoWorkspace,
       scratchWorkspaceSupported = false,
       existingFolderWorkspaceSupported = false,
       workspaceMutationBusy = false,
@@ -2434,14 +2440,19 @@ export const ChatEditor = memo(
     const normalizedModelChipLabel = modelChipLabel.endsWith(' · ')
       ? modelLabel
       : modelChipLabel;
-    const selectedWorkspace = workspaces?.find((entry) =>
-      selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
-    );
+    const selectedWorkspace = noWorkspaceSelected
+      ? undefined
+      : workspaces?.find((entry) =>
+          selectedWorkspaceCwd
+            ? entry.cwd === selectedWorkspaceCwd
+            : entry.primary,
+        );
     const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
       workspaces &&
         onSelectWorkspace &&
         (workspaces.length > 1 ||
+          noWorkspaceSupported ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported),
     );
@@ -3134,6 +3145,8 @@ export const ChatEditor = memo(
                       <WorkspaceSelector
                         workspaces={workspaces}
                         selectedWorkspaceCwd={selectedWorkspaceCwd}
+                        noWorkspaceSupported={noWorkspaceSupported}
+                        noWorkspaceSelected={noWorkspaceSelected}
                         disabled={workspaceSelectionDisabled}
                         busy={workspaceMutationBusy}
                         scratchSupported={scratchWorkspaceSupported}
@@ -3146,6 +3159,7 @@ export const ChatEditor = memo(
                             : styles.workspaceSelectTriggerCompact
                         }`}
                         onSelectWorkspace={onSelectWorkspace}
+                        onSelectNoWorkspace={onSelectNoWorkspace}
                         onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
                         onOpenExistingFolder={
                           onOpenExistingWorkspace ?? (() => {})

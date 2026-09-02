@@ -97,13 +97,14 @@ interface ScheduledTasksDialogProps {
   onRunPrompt: (
     prompt: string,
     sessionId: string | null,
+    workspaceCwd?: string,
   ) => void | Promise<void>;
   /** Switch to the chat view with the composer primed to describe a task, so
    * the agent can create it conversationally via its cron_create tool. */
   onCreateViaChat: () => void;
   /** Open a task's bound session — its transcript IS the task's run history.
    * When absent, tasks fall back to the inline fire-timestamp list. */
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
   /** Registered workspaces on a multi-workspace daemon (from capabilities).
    * When more than one is present the page aggregates every trusted workspace's
    * tasks (each card tagged with its workspace) and the New-task form offers a
@@ -588,6 +589,36 @@ export function ScheduledTasksDialog({
   const lockedWorkspaceId = lockedWorkspace
     ? workspaceActionId(lockedWorkspace)
     : undefined;
+  const resolveTaskWorkspaceCwd = useCallback(
+    (task: DaemonScheduledTask): string | undefined =>
+      task.workspaceCwd ??
+      lockedWorkspace?.cwd ??
+      operableWorkspaces.find(
+        (workspace) => workspaceActionId(workspace) === task.workspaceId,
+      )?.cwd,
+    [lockedWorkspace?.cwd, operableWorkspaces, workspaceActionId],
+  );
+  const runPromptInTaskWorkspace = useCallback(
+    (prompt: string, sessionId: string | null, task: DaemonScheduledTask) => {
+      const workspaceCwd = resolveTaskWorkspaceCwd(task);
+      return workspaceCwd
+        ? onRunPrompt(prompt, sessionId, workspaceCwd)
+        : onRunPrompt(prompt, sessionId);
+    },
+    [onRunPrompt, resolveTaskWorkspaceCwd],
+  );
+  const openTaskSession = useCallback(
+    (sessionId: string, task: DaemonScheduledTask) => {
+      if (!onOpenSession) return;
+      const workspaceCwd = resolveTaskWorkspaceCwd(task);
+      if (workspaceCwd) {
+        onOpenSession(sessionId, workspaceCwd);
+      } else {
+        onOpenSession(sessionId);
+      }
+    },
+    [onOpenSession, resolveTaskWorkspaceCwd],
+  );
 
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1149,7 +1180,7 @@ export function ScheduledTasksDialog({
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
           // history still catches up on the next refresh.
-          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          await runPromptInTaskWorkspace(fresh.prompt, fresh.sessionId, task);
           try {
             await actions.runScheduledTask(fresh.id, task.workspaceId);
             await reload();
@@ -1166,7 +1197,7 @@ export function ScheduledTasksDialog({
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
-            await onRunPrompt(fresh.prompt, fresh.sessionId);
+            await runPromptInTaskWorkspace(fresh.prompt, fresh.sessionId, task);
           } catch (err) {
             onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
             return;
@@ -1178,7 +1209,7 @@ export function ScheduledTasksDialog({
         setRunningTaskId(null);
       }
     },
-    [actions, onError, onRunPrompt, reload, runningTaskId, t],
+    [actions, onError, reload, runPromptInTaskWorkspace, runningTaskId, t],
   );
 
   const handleDelete = useCallback(
@@ -1751,7 +1782,7 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.runsToggle}
-                    onClick={() => onOpenSession(task.sessionId!)}
+                    onClick={() => openTaskSession(task.sessionId!, task)}
                     title={t('scheduledTasks.viewHistoryHint')}
                   >
                     {task.runs.length > 0
@@ -1792,7 +1823,7 @@ export function ScheduledTasksDialog({
                         <button
                           type="button"
                           className={styles.runLink}
-                          onClick={() => onOpenSession(run.sessionId!)}
+                          onClick={() => openTaskSession(run.sessionId!, task)}
                           title={t('scheduledTasks.openRunSession')}
                         >
                           {describeRun(run, t)}

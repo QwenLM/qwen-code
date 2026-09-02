@@ -81,7 +81,7 @@ import styles from './SkillsManagerPage.module.css';
 
 interface SkillsManagerPageProps {
   onClose: () => void;
-  onUseSkill: (name: string) => void;
+  onUseSkill?: (name: string) => void;
   embedded?: EmbeddedManagerPage;
 }
 
@@ -389,13 +389,15 @@ export function SkillsManagerPage({
                 ) : null}
               </div>
             </div>
-            <Button
-              disabled={selectedSkill.status === 'disabled'}
-              onClick={() => onUseSkill(selectedSkill.name)}
-            >
-              <PlayIcon data-icon="inline-start" />
-              {t('skills.run')}
-            </Button>
+            {onUseSkill ? (
+              <Button
+                disabled={selectedSkill.status === 'disabled'}
+                onClick={() => onUseSkill(selectedSkill.name)}
+              >
+                <PlayIcon data-icon="inline-start" />
+                {t('skills.run')}
+              </Button>
+            ) : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

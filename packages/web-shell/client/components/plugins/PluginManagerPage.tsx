@@ -25,7 +25,8 @@ interface PluginManagerPageProps {
   mcpMessage: SerializedMcpStatusMessage | null;
   loadMcpMessage: () => Promise<void>;
   onClose: () => void;
-  onUseSkill: (name: string) => void;
+  onUseSkill?: (name: string) => void;
+  managementWorkspace?: { cwd: string; label: string };
   initialFocusRef?: Ref<HTMLButtonElement>;
 }
 
@@ -34,6 +35,7 @@ export function PluginManagerPage({
   loadMcpMessage,
   onClose,
   onUseSkill,
+  managementWorkspace,
   initialFocusRef,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
@@ -75,7 +77,7 @@ export function PluginManagerPage({
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
       {!detailOpen ? (
-        <div className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
+        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-2 border-b bg-background px-5 py-3">
           <TabsList className="h-8" aria-label={t('plugins.sections')}>
             <TabsTrigger ref={initialFocusRef} value="extensions">
               {t('plugins.extensions')}
@@ -84,6 +86,17 @@ export function PluginManagerPage({
             <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
             <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
           </TabsList>
+          {managementWorkspace ? (
+            <span
+              className="max-w-full truncate text-xs text-muted-foreground"
+              data-testid="plugin-management-workspace"
+              title={managementWorkspace.cwd}
+            >
+              {t('workspace.paneLabel', {
+                name: managementWorkspace.label,
+              })}
+            </span>
+          ) : null}
         </div>
       ) : null}
 

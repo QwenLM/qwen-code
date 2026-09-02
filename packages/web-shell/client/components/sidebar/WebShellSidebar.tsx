@@ -79,6 +79,8 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -139,6 +141,7 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
+import { workspaceLabel } from '../../utils/workspace';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -388,6 +391,8 @@ interface WebShellSidebarProps {
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  /** Trusted workspace used by the main New task action. */
+  defaultNewSessionWorkspaceCwd?: string;
   globalNewSessionUsesStandalone?: boolean;
   onLoadSession: (
     sessionId: string,
@@ -453,7 +458,15 @@ interface WebShellSidebarProps {
   onNewWorktreeSession?: (
     workspaceCwd?: string,
   ) => Promise<boolean> | boolean | void;
+  /**
+   * Whether the current session can use project-only controls. Workspace and
+   * project-session navigation are controlled separately.
+   */
   projectFeaturesEnabled?: boolean;
+  /** Whether workspace administration entries are visible. */
+  workspaceManagementEnabled?: boolean;
+  /** Whether workspace and project-session navigation is visible. */
+  projectNavigationEnabled?: boolean;
   onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
   onStandaloneNotice?: (message: string) => void;
 }
@@ -885,6 +898,7 @@ export function WebShellSidebar({
   onOpenSplitView,
   canOpenSplitView,
   onNewSession,
+  defaultNewSessionWorkspaceCwd,
   globalNewSessionUsesStandalone = false,
   onLoadSession,
   onSelectCurrentSession,
@@ -913,6 +927,8 @@ export function WebShellSidebar({
   onOpenWorkspaceManagement,
   onNewWorktreeSession,
   projectFeaturesEnabled = true,
+  workspaceManagementEnabled = projectFeaturesEnabled,
+  projectNavigationEnabled = projectFeaturesEnabled,
   onLoadStandaloneSession,
   onStandaloneNotice,
 }: WebShellSidebarProps) {
@@ -934,11 +950,11 @@ export function WebShellSidebar({
     [primaryNavOptions?.items],
   );
   const hasScrollingPrimaryNav =
-    (projectFeaturesEnabled &&
+    (workspaceManagementEnabled &&
       (primaryNavItems.has('plugins') ||
-        primaryNavItems.has('channels') ||
-        primaryNavItems.has('scheduledTasks') ||
-        primaryNavItems.has('goals'))) ||
+        primaryNavItems.has('scheduledTasks'))) ||
+    (projectFeaturesEnabled &&
+      (primaryNavItems.has('channels') || primaryNavItems.has('goals'))) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
@@ -1003,7 +1019,7 @@ export function WebShellSidebar({
     ) && typeof workspace.client.getWorkspaceSessionLiveState === 'function',
   );
   const sessionCatalogRequestsEnabled =
-    projectFeaturesEnabled && connection.capabilities !== undefined;
+    projectNavigationEnabled && connection.capabilities !== undefined;
   const workspaceSessionMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_session_metadata'),
   );
@@ -1047,6 +1063,38 @@ export function WebShellSidebar({
       ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
       : availableWorkspaces;
   }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const newSessionWorkspaces = useMemo(
+    () =>
+      displayedWorkspaces.filter(
+        (entry) =>
+          entry.kind !== 'live' &&
+          entry.trusted !== false &&
+          isAbsolutePath(entry.cwd),
+      ),
+    [displayedWorkspaces],
+  );
+  const defaultNewSessionWorkspace = useMemo(() => {
+    const preferredCwds = [
+      defaultNewSessionWorkspaceCwd,
+      selectedWorkspaceCwd,
+      connection.workspaceCwd,
+      primaryWorkspaceCwd,
+    ];
+    for (const cwd of preferredCwds) {
+      if (!cwd) continue;
+      const candidate = newSessionWorkspaces.find((entry) => entry.cwd === cwd);
+      if (candidate) return candidate;
+    }
+    return newSessionWorkspaces[0];
+  }, [
+    connection.workspaceCwd,
+    defaultNewSessionWorkspaceCwd,
+    newSessionWorkspaces,
+    primaryWorkspaceCwd,
+    selectedWorkspaceCwd,
+  ]);
+  const newSessionScopeMenuVisible =
+    newSessionWorkspaces.length + Number(globalNewSessionUsesStandalone) > 1;
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
@@ -1454,6 +1502,9 @@ export function WebShellSidebar({
     workspaceOverview === false
       ? DEFAULT_WORKSPACE_OVERVIEW_ITEMS
       : (workspaceOverview?.items ?? DEFAULT_WORKSPACE_OVERVIEW_ITEMS);
+  const projectWorkspaceOverviewEnabled =
+    projectFeaturesEnabled && workspaceOverviewEnabled;
+  const workspaceMenuVisible = projectFeaturesEnabled && !lockedWorkspaceCwd;
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const canExportWorkspaceSessions =
@@ -2010,7 +2061,9 @@ export function WebShellSidebar({
     '--web-shell-sidebar-min-width': `${SIDEBAR_MIN_WIDTH}px`,
     '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
-  const newSessionDisabled = creatingSession;
+  const newSessionDisabled =
+    creatingSession ||
+    (!defaultNewSessionWorkspace && !globalNewSessionUsesStandalone);
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -5263,19 +5316,74 @@ export function WebShellSidebar({
               bodyScrolled && styles.newTaskNavScrolled,
             )}
           >
-            <button
-              className={styles.newChatButton}
-              type="button"
-              title={t('sidebar.newTask')}
-              aria-label={t('sidebar.newTask')}
-              disabled={newSessionDisabled}
-              onClick={() => handleNewSession()}
-            >
-              <span className={styles.navIcon}>
-                <SquarePenIcon size={16} strokeWidth={1.2} />
-              </span>
-              {!collapsed && <span>{t('sidebar.newTask')}</span>}
-            </button>
+            <div className={styles.newTaskAction} role="group">
+              <button
+                className={cx(
+                  styles.newChatButton,
+                  newSessionScopeMenuVisible && styles.newChatButtonSplit,
+                )}
+                type="button"
+                title={t('sidebar.newTask')}
+                aria-label={t('sidebar.newTask')}
+                disabled={newSessionDisabled}
+                onClick={() =>
+                  handleNewSession(defaultNewSessionWorkspace?.cwd)
+                }
+              >
+                <span className={styles.navIcon}>
+                  <SquarePenIcon size={16} strokeWidth={1.2} />
+                </span>
+                {!collapsed && <span>{t('sidebar.newTask')}</span>}
+              </button>
+              {newSessionScopeMenuVisible && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      className={styles.newTaskScopeButton}
+                      type="button"
+                      title={t('sidebar.newTaskScope')}
+                      aria-label={t('sidebar.newTaskScope')}
+                      disabled={newSessionDisabled}
+                    >
+                      <ChevronDownIcon size={14} strokeWidth={1.6} />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-56">
+                    <DropdownMenuLabel>
+                      {t('sidebar.workspaceSelectLabel')}
+                    </DropdownMenuLabel>
+                    <DropdownMenuGroup>
+                      {newSessionWorkspaces.map((entry) => (
+                        <DropdownMenuItem
+                          key={entry.id}
+                          title={entry.cwd}
+                          onSelect={() => handleNewSession(entry.cwd)}
+                        >
+                          <FolderClosedIcon />
+                          <span className="min-w-0 flex-1 truncate">
+                            {workspaceLabel(entry)}
+                          </span>
+                          {entry.cwd === defaultNewSessionWorkspace?.cwd && (
+                            <span className="text-xs text-muted-foreground">
+                              {t('common.current')}
+                            </span>
+                          )}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuGroup>
+                    {globalNewSessionUsesStandalone && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => handleNewSession()}>
+                          <MessageCircleIcon />
+                          {t('sidebar.noWorkspace')}
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </div>
           </div>
         )}
         <div
@@ -5286,7 +5394,7 @@ export function WebShellSidebar({
         >
           {hasScrollingPrimaryNav && (
             <div className={styles.primaryNav}>
-              {projectFeaturesEnabled && primaryNavItems.has('plugins') && (
+              {workspaceManagementEnabled && primaryNavItems.has('plugins') && (
                 <button
                   className={styles.pluginButton}
                   type="button"
@@ -5314,7 +5422,7 @@ export function WebShellSidebar({
                   {!collapsed && <span>{t('sidebar.channels')}</span>}
                 </button>
               )}
-              {projectFeaturesEnabled &&
+              {workspaceManagementEnabled &&
                 primaryNavItems.has('scheduledTasks') && (
                   <button
                     className={styles.pluginButton}
@@ -5359,7 +5467,7 @@ export function WebShellSidebar({
               onNotice={onStandaloneNotice}
             />
           )}
-          {projectFeaturesEnabled && (
+          {projectNavigationEnabled && (
             <SidebarSessionSurface
               collapsed={collapsed}
               label={t('sidebar.project')}
@@ -5494,7 +5602,7 @@ export function WebShellSidebar({
                     }}
                   >
                     <span>{t('sidebar.project')}</span>
-                    {workspaceOverviewEnabled &&
+                    {projectWorkspaceOverviewEnabled &&
                       projectWorkspaces.length > 1 && (
                         <span
                           className={styles.projectsHeaderCount}
@@ -5526,7 +5634,7 @@ export function WebShellSidebar({
                     >
                       <SearchIcon />
                     </button>
-                    {!lockedWorkspaceCwd && onOpenAddWorkspace && (
+                    {workspaceMenuVisible && onOpenAddWorkspace && (
                       <button
                         className={styles.projectsHeaderAction}
                         type="button"
@@ -5616,8 +5724,12 @@ export function WebShellSidebar({
                             mapSession={applyOptimisticPin}
                             limitSessions={editingSessionIdentity === null}
                             isPinnedSectionMember={isPinnedSectionMember}
-                            onOpenGitDiff={onOpenGitDiff}
-                            onOpenCommit={onOpenCommit}
+                            onOpenGitDiff={
+                              projectFeaturesEnabled ? onOpenGitDiff : undefined
+                            }
+                            onOpenCommit={
+                              projectFeaturesEnabled ? onOpenCommit : undefined
+                            }
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
                             autoExpandKey={
@@ -5676,19 +5788,20 @@ export function WebShellSidebar({
                             showSessionDetails={sessionActionItems.has(
                               'details',
                             )}
-                            overviewEnabled={workspaceOverviewEnabled}
+                            overviewEnabled={projectWorkspaceOverviewEnabled}
                             overviewItems={workspaceOverviewItems}
                             onOpenPathLocally={
-                              localOpenEnabled
+                              projectFeaturesEnabled && localOpenEnabled
                                 ? openWorkspaceFolderLocally
                                 : undefined
                             }
                             onOpenTerminalLocally={
-                              localTerminalEnabled
+                              projectFeaturesEnabled && localTerminalEnabled
                                 ? openWorkspaceTerminalLocally
                                 : undefined
                             }
                             gitBranchWanted={
+                              projectFeaturesEnabled &&
                               Boolean(onNewWorktreeSession) &&
                               !lockedWorkspaceCwd
                             }
@@ -5706,6 +5819,7 @@ export function WebShellSidebar({
                                 ? undefined
                                 : (visible, { overview, gitBranch }) => {
                                     const canRemove =
+                                      projectFeaturesEnabled &&
                                       !lockedWorkspaceCwd &&
                                       workspaceRemovalEnabled &&
                                       !ws.primary &&
@@ -5814,7 +5928,7 @@ export function WebShellSidebar({
                                       (ws.trusted
                                         ? 1 +
                                           Number(canOrganizeWorkspace(ws.cwd))
-                                        : 0) + (lockedWorkspaceCwd ? 0 : 1);
+                                        : 0) + (workspaceMenuVisible ? 1 : 0);
                                     return (
                                       <div
                                         className={
@@ -5884,7 +5998,7 @@ export function WebShellSidebar({
                                         {/* A locked (embedded) sidebar keeps its
                                     action area to the session controls the
                                     host already expects. */}
-                                        {!lockedWorkspaceCwd && (
+                                        {workspaceMenuVisible && (
                                           <WorkspaceMenu
                                             workspace={ws}
                                             actions={menuActions}
@@ -5942,7 +6056,7 @@ export function WebShellSidebar({
                           ) : null}
                         </Fragment>
                       ))}
-                      {onOpenWorkspacesOverview && !lockedWorkspaceCwd && (
+                      {workspaceMenuVisible && onOpenWorkspacesOverview && (
                         <button
                           className={styles.manageWorkspacesRow}
                           type="button"

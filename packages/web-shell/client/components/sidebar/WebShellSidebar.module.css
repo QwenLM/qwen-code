@@ -45,6 +45,7 @@
 }
 
 .newChatButton,
+.newTaskScopeButton,
 .pluginButton,
 .footerButton,
 .collapseButton,
@@ -90,6 +91,34 @@
   color: var(--sidebar-accent-foreground);
 }
 
+.newTaskAction {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.newTaskAction .newChatButton {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.newChatButtonSplit {
+  border-radius: 8px 0 0 8px;
+}
+
+.newTaskScopeButton {
+  width: 28px;
+  height: 32px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 8px 8px 0;
+  color: var(--sidebar-accent-foreground);
+  cursor: pointer;
+}
+
 .pluginButton {
   flex: 0 0 auto;
 }
@@ -119,12 +148,15 @@
   );
 }
 
-.newChatButton:disabled {
+.newChatButton:disabled,
+.newTaskScopeButton:disabled {
   cursor: not-allowed;
   opacity: 0.48;
 }
 
 .newChatButton:hover,
+.newTaskScopeButton:hover,
+.newTaskScopeButton[data-state='open'],
 .pluginButton:hover,
 .footerButton:hover,
 .projectRow:hover,
@@ -145,6 +177,7 @@
 }
 
 .newChatButton:focus-visible,
+.newTaskScopeButton:focus-visible,
 .pluginButton:focus-visible,
 .footerButton:focus-visible,
 .projectRow:focus-visible,
@@ -1741,6 +1774,18 @@
   width: 32px;
   justify-content: center;
   padding: 0;
+}
+
+.collapsed .newTaskAction {
+  width: 32px;
+}
+
+.collapsed .newChatButtonSplit {
+  border-radius: 8px;
+}
+
+.collapsed .newTaskScopeButton {
+  display: none;
 }
 
 .collapsed .body {

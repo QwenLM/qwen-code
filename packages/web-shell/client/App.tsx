@@ -2522,13 +2522,14 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
-  const trustedPrimaryWorkspaceCwd = useMemo(
+  const trustedPrimaryWorkspace = useMemo(
     () =>
       ordinaryWorkspaces.find(
         (entry) => entry.primary && entry.trusted !== false,
-      )?.cwd,
+      ),
     [ordinaryWorkspaces],
   );
+  const trustedPrimaryWorkspaceCwd = trustedPrimaryWorkspace?.cwd;
   const isKnownLiveWorkspaceCwd = useCallback(
     (cwd: string | undefined) =>
       cwd !== undefined &&
@@ -2711,6 +2712,17 @@ export function App({
     [pendingSessionContext, settledSessionContext],
   );
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  const composerWorkspaceSelectionActive =
+    workspaceContextActive ||
+    (effectiveSessionContext?.kind === 'standalone' && !connection.sessionId);
+  const projectNavigationActive =
+    workspaceContextActive || effectiveSessionContext?.kind === 'standalone';
+  const standaloneManagementWorkspace =
+    effectiveSessionContext?.kind === 'standalone'
+      ? trustedPrimaryWorkspace
+      : undefined;
+  const workspaceManagementActive =
+    workspaceContextActive || standaloneManagementWorkspace !== undefined;
   const pendingNonWorkspaceNavigation =
     pendingSessionContext !== undefined &&
     pendingSessionContext.kind !== 'workspace' &&
@@ -5794,7 +5806,7 @@ export function App({
       activePanel === 'mcp' ||
       activePanel === 'skills' ||
       activePanel === 'agents' ||
-      activePanel === 'plugins' ||
+      (activePanel === 'plugins' && !workspaceManagementActive) ||
       activePanel === 'channels'
     ) {
       setActivePanel(null);
@@ -5810,14 +5822,20 @@ export function App({
     }
     setShowFallbacksDialog(false);
     if (
-      mainView === 'scheduledTasks' ||
+      (mainView === 'scheduledTasks' && !workspaceManagementActive) ||
       mainView === 'goals' ||
       mainView === 'cockpit' ||
       mainView === 'split'
     ) {
       setMainView('chat');
     }
-  }, [activePanel, mainView, modelDialogMode, workspaceContextActive]);
+  }, [
+    activePanel,
+    mainView,
+    modelDialogMode,
+    workspaceContextActive,
+    workspaceManagementActive,
+  ]);
   const handleUseSkill = useCallback(
     (name: string) => {
       closePanel();
@@ -5866,6 +5884,7 @@ export function App({
     });
   }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
+    if (!workspaceManagementActive) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     // Route through showChat so leaving the cockpit strips its ?view=cockpit
@@ -5874,7 +5893,7 @@ export function App({
     // Forward navigation instead of the view actually on screen.
     showChat();
     setMainView('scheduledTasks');
-  }, [showChat]);
+  }, [showChat, workspaceManagementActive]);
   const openGoals = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
@@ -9782,6 +9801,9 @@ export function App({
     },
     [switchWorkspace],
   );
+  const handleSelectComposerNoWorkspace = useCallback(() => {
+    void createNewSession({ kind: 'global' });
+  }, [createNewSession]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -10511,9 +10533,22 @@ export function App({
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null): Promise<void> => {
+    (
+      prompt: string,
+      sessionId: string | null,
+      workspaceCwd?: string,
+    ): Promise<void> => {
       showChat();
       if (!sessionId) {
+        if (
+          workspaceCwd &&
+          (effectiveSessionContext?.kind !== 'workspace' ||
+            effectiveSessionContext.cwd !== workspaceCwd)
+        ) {
+          return Promise.reject(
+            new Error('The scheduled task has no bound workspace session.'),
+          );
+        }
         // Unbound: runs in the current session — resolves at admission.
         return enqueueManualRun(prompt);
       }
@@ -10533,7 +10568,7 @@ export function App({
           reject,
         };
         pendingBoundRunRef.current = pending;
-        loadSidebarSession(sessionId)
+        loadSidebarSession(sessionId, workspaceCwd)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
@@ -10551,6 +10586,7 @@ export function App({
     },
     [
       enqueueManualRun,
+      effectiveSessionContext,
       loadSidebarSession,
       clearPendingBoundRun,
       showChat,
@@ -14023,6 +14059,7 @@ export function App({
                   }}
                   onOpenPlugins={() => {
                     closeMobileDrawer();
+                    if (!workspaceManagementActive) return;
                     openPanel('plugins');
                   }}
                   onOpenChannels={() => {
@@ -14066,8 +14103,11 @@ export function App({
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                      : { kind: 'global' },
                     )
+                  }
+                  defaultNewSessionWorkspaceCwd={
+                    activeWorkspaceCwd ?? trustedPrimaryWorkspaceCwd
                   }
                   globalNewSessionUsesStandalone={
                     standaloneSessionsSupported && !lockedWorkspaceCwd
@@ -14088,6 +14128,8 @@ export function App({
                     pushToast('info', message)
                   }
                   projectFeaturesEnabled={workspaceContextActive}
+                  workspaceManagementEnabled={workspaceManagementActive}
+                  projectNavigationEnabled={projectNavigationActive}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
@@ -14384,7 +14426,10 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (workspaceContextActive || activePanel === 'status') && (
+                (workspaceContextActive ||
+                  activePanel === 'status' ||
+                  (workspaceManagementActive &&
+                    activePanel === 'plugins')) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -14604,7 +14649,19 @@ export function App({
                           }
                         }}
                         onClose={closePanel}
-                        onUseSkill={handleUseSkill}
+                        onUseSkill={
+                          workspaceContextActive ? handleUseSkill : undefined
+                        }
+                        managementWorkspace={
+                          standaloneManagementWorkspace
+                            ? {
+                                cwd: standaloneManagementWorkspace.cwd,
+                                label: workspaceLabel(
+                                  standaloneManagementWorkspace,
+                                ),
+                              }
+                            : undefined
+                        }
                         initialFocusRef={pluginTabRef}
                       />
                     ) : activePanel === 'channels' ? (
@@ -14684,7 +14741,7 @@ export function App({
                   </div>
                 </section>
               )}
-              {workspaceContextActive && mainView === 'scheduledTasks' && (
+              {workspaceManagementActive && mainView === 'scheduledTasks' && (
                 <div
                   className={styles.fullPage}
                   data-testid="scheduled-tasks-page"
@@ -14714,6 +14771,17 @@ export function App({
                     <div className={styles.fullPageTitle}>
                       {t('scheduledTasks.title')}
                     </div>
+                    {standaloneManagementWorkspace ? (
+                      <div
+                        className="ml-auto max-w-[50%] truncate text-xs text-muted-foreground"
+                        data-testid="scheduled-tasks-management-workspace"
+                        title={standaloneManagementWorkspace.cwd}
+                      >
+                        {t('workspace.paneLabel', {
+                          name: workspaceLabel(standaloneManagementWorkspace),
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
@@ -14728,7 +14796,7 @@ export function App({
                       }
                       lockedWorkspace={lockedWorkspaceCapability}
                       currentSession={
-                        currentSessionSummary
+                        workspaceContextActive && currentSessionSummary
                           ? {
                               ...currentSessionSummary,
                               hasActivePrompt:
@@ -14737,9 +14805,12 @@ export function App({
                             }
                           : undefined
                       }
-                      currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
-                        'scheduled_task_session_reuse',
-                      )}
+                      currentSessionSchedulingAvailable={
+                        workspaceContextActive &&
+                        workspace.capabilities?.features?.includes(
+                          'scheduled_task_session_reuse',
+                        )
+                      }
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -14769,11 +14840,11 @@ export function App({
                           }, 0);
                         });
                       }}
-                      onOpenSession={(sessionId) => {
+                      onOpenSession={(sessionId, workspaceCwd) => {
                         // The task's bound session IS its run history — switch
                         // to the chat view and load that session's transcript.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -15705,7 +15776,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectionActive
                               ? composerWorkspaces
                               : undefined
                           }
@@ -15720,7 +15791,17 @@ export function App({
                                 : selectedWorkspaceCwd
                               : undefined
                           }
-                          workspaceSelectionDisabled={!workspaceContextActive}
+                          noWorkspaceSupported={
+                            composerWorkspaceSelectionActive &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                          }
+                          noWorkspaceSelected={
+                            effectiveSessionContext?.kind === 'standalone'
+                          }
+                          workspaceSelectionDisabled={
+                            !composerWorkspaceSelectionActive
+                          }
                           atWorkspaceCwd={
                             workspaceContextActive
                               ? (ordinaryWorkspaces.find(
@@ -15740,8 +15821,15 @@ export function App({
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
                           onSelectWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectionActive
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          onSelectNoWorkspace={
+                            composerWorkspaceSelectionActive &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                              ? handleSelectComposerNoWorkspace
                               : undefined
                           }
                           scratchWorkspaceSupported={

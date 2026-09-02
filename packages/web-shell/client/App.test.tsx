@@ -151,7 +151,10 @@ type ChatEditorTestProps = {
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
   selectedWorkspaceCwd?: string;
+  noWorkspaceSupported?: boolean;
+  noWorkspaceSelected?: boolean;
   onSelectWorkspace?: (cwd: string | undefined) => void;
+  onSelectNoWorkspace?: () => void;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
@@ -565,8 +568,10 @@ const {
         onRunPrompt?: (
           prompt: string,
           sessionId: string | null,
+          workspaceCwd?: string,
         ) => Promise<void>;
         onCreateViaChat?: () => void;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
         workspaces?: Array<{ id: string; cwd: string }>;
         lockedWorkspace?: { id: string; cwd: string; primary: boolean };
         currentSession?: {
@@ -1165,6 +1170,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       collapsed?: boolean;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
+      onOpenScheduledTasks?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -1182,6 +1188,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenAddWorkspace?: () => void;
       onThemeChange?: (theme: 'light' | 'dark') => void;
       showSessionSourceSwitch?: boolean;
+      projectFeaturesEnabled?: boolean;
+      workspaceManagementEnabled?: boolean;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1192,6 +1200,12 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           'data-collapsed': String(Boolean(props.collapsed)),
           'data-show-session-source-switch': String(
             props.showSessionSourceSwitch,
+          ),
+          'data-project-features-enabled': String(
+            Boolean(props.projectFeaturesEnabled),
+          ),
+          'data-workspace-management-enabled': String(
+            Boolean(props.workspaceManagementEnabled),
           ),
         },
         React.createElement(
@@ -1306,15 +1320,28 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           },
           'delete session',
         ),
-        React.createElement(
-          'button',
-          {
-            'data-testid': 'open-plugins',
-            type: 'button',
-            onClick: props.onOpenPlugins,
-          },
-          'plugins',
-        ),
+        props.workspaceManagementEnabled
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'open-plugins',
+                type: 'button',
+                onClick: props.onOpenPlugins,
+              },
+              'plugins',
+            )
+          : null,
+        props.workspaceManagementEnabled
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'open-scheduled-tasks',
+                type: 'button',
+                onClick: props.onOpenScheduledTasks,
+              },
+              'scheduled tasks',
+            )
+          : null,
         React.createElement(
           'button',
           {
@@ -12089,6 +12116,85 @@ describe('App session callbacks', () => {
       composerScopeKey: 'standalone',
       workspaceFeaturesEnabled: false,
     });
+  });
+
+  it('creates a standalone first prompt after the composer selects No workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/tmp/project',
+    };
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps).toMatchObject({
+      noWorkspaceSupported: true,
+      noWorkspaceSelected: false,
+      workspaceFeaturesEnabled: true,
+    });
+    expect(testState.latestChatEditorProps?.onSelectNoWorkspace).toEqual(
+      expect.any(Function),
+    );
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectNoWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps).toMatchObject({
+      composerScopeKey: 'standalone',
+      noWorkspaceSupported: true,
+      noWorkspaceSelected: true,
+      workspaceFeaturesEnabled: false,
+    });
+    expect(testState.latestChatEditorProps?.workspaces).toEqual([
+      expect.objectContaining({ id: 'primary', cwd: '/tmp/project' }),
+    ]);
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.(undefined);
+    });
+    await flush();
+    expect(testState.latestChatEditorProps).toMatchObject({
+      noWorkspaceSelected: false,
+      workspaceFeaturesEnabled: true,
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectNoWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+      });
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    const createOptions =
+      mockSessionActions.createSession.mock.calls.at(-1)?.[0];
+    expect(createOptions).toMatchObject({
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(createOptions?.workspaceCwd).toBeUndefined();
   });
 
   it('creates the first prompt in a newly selected secondary workspace', async () => {
@@ -25194,6 +25300,157 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
   });
 
+  it('keeps explicit workspace management available without changing a standalone chat', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1', 'scheduled_task_session_reuse'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          displayName: 'Primary project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-project-features-enabled')).toBe(
+      'false',
+    );
+    expect(sidebar?.getAttribute('data-workspace-management-enabled')).toBe(
+      'true',
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Plugins');
+    const pluginScope = container.querySelector(
+      '[data-testid="plugin-management-workspace"]',
+    );
+    expect(pluginScope?.textContent).toBe('Workspace: Primary project');
+    expect(pluginScope?.getAttribute('title')).toBe('/workspace');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-scheduled-tasks"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="scheduled-tasks-management-workspace"]',
+      )?.textContent,
+    ).toBe('Workspace: Primary project');
+    expect(testState.latestScheduledTasksProps?.workspaces).toEqual([
+      expect.objectContaining({ id: 'primary', cwd: '/workspace' }),
+    ]);
+    expect(testState.latestScheduledTasksProps?.currentSession).toBeUndefined();
+    expect(
+      testState.latestScheduledTasksProps?.currentSessionSchedulingAvailable,
+    ).toBe(false);
+    const runPrompt = testState.latestScheduledTasksProps?.onRunPrompt;
+    if (!runPrompt) throw new Error('onRunPrompt was not captured');
+    await act(async () => {
+      await expect(
+        runPrompt('legacy task', null, '/workspace'),
+      ).rejects.toThrow(/no bound workspace session/);
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      testState.latestScheduledTasksProps?.onOpenSession?.(
+        'task-session',
+        '/workspace',
+      );
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'task-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    );
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockConnection.sessionContext).toEqual({ kind: 'standalone' });
+  });
+
+  it('hides standalone workspace management without a trusted primary workspace', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: false,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-workspace-management-enabled')).toBe(
+      'false',
+    );
+    expect(container.querySelector('[data-testid="open-plugins"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="open-scheduled-tasks"]'),
+    ).toBeNull();
+  });
+
+  it('keeps workspace management hidden in a Live context', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-workspace-management-enabled')).toBe(
+      'false',
+    );
+    expect(container.querySelector('[data-testid="open-plugins"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="open-scheduled-tasks"]'),
+    ).toBeNull();
+  });
+
   it('does not dispatch workspace management commands in a standalone chat', async () => {
     mockConnection.sessionContext = { kind: 'standalone' };
     mockConnection.workspaceCwd = '';
@@ -25222,6 +25479,7 @@ describe('App session callbacks', () => {
       '/tools',
       '/agents',
       '/extensions manage',
+      '/schedule',
       '/goal',
       '/model --vision qwen-vl',
       '/resume',
@@ -25250,7 +25508,7 @@ describe('App session callbacks', () => {
     expect(mockWorkspaceActions.loadEnv).not.toHaveBeenCalled();
     expect(settingsSetValue).not.toHaveBeenCalled();
     expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
-    expect(onToast).toHaveBeenCalledTimes(10);
+    expect(onToast).toHaveBeenCalledTimes(11);
   });
 
   it('allows ordinary shell commands in a standalone chat', async () => {
@@ -28632,7 +28890,13 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
   // Opening the page with /schedule mounts the dialog and captures the handler.
   async function openRunHandler(
     container: HTMLElement,
-  ): Promise<(prompt: string, sessionId: string | null) => Promise<void>> {
+  ): Promise<
+    (
+      prompt: string,
+      sessionId: string | null,
+      workspaceCwd?: string,
+    ) => Promise<void>
+  > {
     mockConnection.goalState ??= {
       v: 2,
       activity: 'idle',
@@ -28772,10 +29036,13 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     // session-1 is the current, fully-loaded session, so tryFireBoundRun fires
     // right after loadSidebarSession without waiting on a dep-change effect.
     await act(async () => {
-      await expect(run('do the thing', 'session-1')).resolves.toBeUndefined();
+      await expect(
+        run('do the thing', 'session-1', '/workspace'),
+      ).resolves.toBeUndefined();
     });
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1', {
-      workspaceCwd: undefined,
+      workspaceCwd: '/workspace',
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
     });
   });
 

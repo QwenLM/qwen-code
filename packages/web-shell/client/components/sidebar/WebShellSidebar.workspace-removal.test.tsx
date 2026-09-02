@@ -396,6 +396,8 @@ function renderSidebar(
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
+    onOpenPlugins?: () => void;
+    onOpenScheduledTasks?: () => void;
     onOpenGoals?: () => void;
     onOpenWorkspaceManagement?: (
       target: WorkspaceManagementTarget,
@@ -419,6 +421,7 @@ function renderSidebar(
     onOpenWorkspacesOverview?: () => void;
     footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
+    defaultNewSessionWorkspaceCwd?: string;
     globalNewSessionUsesStandalone?: boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -428,6 +431,8 @@ function renderSidebar(
     };
     showSessionSourceSwitch?: boolean;
     projectFeaturesEnabled?: boolean;
+    workspaceManagementEnabled?: boolean;
+    projectNavigationEnabled?: boolean;
     sessionActions?: {
       items?: readonly (
         | 'pin'
@@ -449,12 +454,17 @@ function renderSidebar(
           collapsed={false}
           onCollapsedChange={() => {}}
           onOpenSettings={() => {}}
+          onOpenPlugins={overrides.onOpenPlugins ?? (() => {})}
+          onOpenChannels={() => {}}
           onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
+          onOpenScheduledTasks={overrides.onOpenScheduledTasks ?? (() => {})}
           onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={overrides.onNewSession ?? (() => false)}
+          defaultNewSessionWorkspaceCwd={
+            overrides.defaultNewSessionWorkspaceCwd
+          }
           globalNewSessionUsesStandalone={
             overrides.globalNewSessionUsesStandalone
           }
@@ -474,6 +484,8 @@ function renderSidebar(
           lockedWorkspace={overrides.lockedWorkspace}
           showSessionSourceSwitch={overrides.showSessionSourceSwitch}
           projectFeaturesEnabled={overrides.projectFeaturesEnabled}
+          workspaceManagementEnabled={overrides.workspaceManagementEnabled}
+          projectNavigationEnabled={overrides.projectNavigationEnabled}
           sessionActions={overrides.sessionActions}
         />
       </I18nProvider>,
@@ -1613,9 +1625,10 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
   });
 
-  it('does not refresh the primary workspace after a standalone global New Task', async () => {
+  it('uses the current trusted workspace for the main New Task action', async () => {
     const onNewSession = vi.fn(() => true);
     renderSidebar({
+      defaultNewSessionWorkspaceCwd: '/tmp/other',
       globalNewSessionUsesStandalone: true,
       onNewSession,
     });
@@ -1629,8 +1642,121 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('falls back to the trusted primary workspace outside a workspace context', async () => {
+    connection.workspaceCwd = '/tmp/standalone-private';
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({
+      globalNewSessionUsesStandalone: true,
+      onNewSession,
+    });
+    const globalNewTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    );
+
+    await act(async () => {
+      click(globalNewTask!);
+      await Promise.resolve();
+    });
+
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/project');
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenCalledWith('/tmp/project');
+  });
+
+  it('starts No workspace explicitly without refreshing a workspace catalog', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({
+      globalNewSessionUsesStandalone: true,
+      onNewSession,
+    });
+    const scopeMenu = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Choose workspace for new task"]',
+    );
+    expect(scopeMenu).not.toBeNull();
+
+    await act(async () => {
+      click(scopeMenu!);
+      await Promise.resolve();
+    });
+    const noWorkspace = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'No workspace');
+    expect(noWorkspace).toBeDefined();
+
+    await act(async () => {
+      click(noWorkspace!);
+      await Promise.resolve();
+    });
+
     expect(onNewSession).toHaveBeenCalledWith(undefined);
     expect(refreshWorkspaceSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('offers only trusted non-Live workspace scopes', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({
+      globalNewSessionUsesStandalone: true,
+      onNewSession,
+      workspaces: [
+        ...capabilities.workspaces,
+        {
+          id: 'live',
+          cwd: '/tmp/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    });
+    const scopeMenu = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Choose workspace for new task"]',
+    );
+
+    await act(async () => {
+      click(scopeMenu!);
+      await Promise.resolve();
+    });
+    const labels = menuItemLabels();
+    expect(labels).toContain('projectcurrent');
+    expect(labels).toContain('other');
+    expect(labels).toContain('No workspace');
+    expect(labels).not.toContain('danger');
+    expect(labels).not.toContain('live');
+
+    const secondary = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'other');
+    await act(async () => {
+      click(secondary!);
+      await Promise.resolve();
+    });
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('keeps a locked workspace as the only global New Task target', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      defaultNewSessionWorkspaceCwd: '/tmp/other',
+      onNewSession,
+    });
+
+    expect(
+      container.querySelector(
+        'button[aria-label="Choose workspace for new task"]',
+      ),
+    ).toBeNull();
+    const globalNewTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    );
+    await act(async () => {
+      click(globalNewTask!);
+      await Promise.resolve();
+    });
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
   });
 
   it('hides workspace management navigation outside workspace contexts', () => {
@@ -1649,6 +1775,97 @@ describe('WebShellSidebar workspace removal', () => {
       autoLoad: false,
       enabled: false,
     });
+  });
+
+  it('keeps explicit workspace management entries outside workspace contexts', async () => {
+    const onOpenPlugins = vi.fn();
+    const onOpenScheduledTasks = vi.fn();
+    renderSidebar({
+      projectFeaturesEnabled: false,
+      workspaceManagementEnabled: true,
+      onOpenPlugins,
+      onOpenScheduledTasks,
+    });
+
+    const plugins = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Plugins"]',
+    );
+    const scheduledTasks = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Scheduled Tasks"]',
+    );
+    expect(plugins).not.toBeNull();
+    expect(scheduledTasks).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Goals"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
+
+    await act(async () => {
+      click(plugins!);
+      click(scheduledTasks!);
+      await Promise.resolve();
+    });
+    expect(onOpenPlugins).toHaveBeenCalledOnce();
+    expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('keeps workspace session navigation outside workspace contexts', async () => {
+    active.sessions.push({
+      sessionId: 'primary-session',
+      displayName: 'Primary workspace session',
+      workspaceCwd: '/tmp/project',
+    });
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === '/tmp/other'
+        ? [
+            {
+              sessionId: 'secondary-session',
+              displayName: 'Secondary workspace session',
+              workspaceCwd: cwd,
+            },
+          ]
+        : [],
+    );
+    const onLoadSession = vi.fn();
+
+    renderSidebar({
+      projectFeaturesEnabled: false,
+      projectNavigationEnabled: true,
+      onLoadSession,
+      onOpenAddWorkspace: vi.fn(),
+      onOpenWorkspacesOverview: vi.fn(),
+      onOpenGitDiff: vi.fn(),
+      onNewWorktreeSession: vi.fn(),
+      workspaceOverview: {},
+    });
+    await ensureWorkspaceExpanded('project');
+    await ensureWorkspaceExpanded('other');
+
+    expect(container.textContent).toContain('Project');
+    expect(container.textContent).toContain('Primary workspace session');
+    expect(container.textContent).toContain('Secondary workspace session');
+    expect(
+      container.querySelector('button[aria-label="Add workspace"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace actions"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
+
+    const secondarySession = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((row) => row.textContent?.includes('Secondary workspace session'));
+    expect(secondarySession).toBeDefined();
+    await act(async () => {
+      click(secondarySession!);
+      await Promise.resolve();
+    });
+
+    expect(onLoadSession).toHaveBeenCalledWith(
+      'secondary-session',
+      '/tmp/other',
+    );
   });
 
   it('stops channel grouping when project features hide while the channel source is active', async () => {

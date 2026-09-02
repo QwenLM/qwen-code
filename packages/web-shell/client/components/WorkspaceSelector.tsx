@@ -1,5 +1,10 @@
 import { useRef, useState } from 'react';
-import { FolderClosedIcon, FolderPlusIcon, LockIcon } from 'lucide-react';
+import {
+  FolderClosedIcon,
+  FolderPlusIcon,
+  LockIcon,
+  MessageCircleIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   DropdownMenu,
@@ -20,6 +25,8 @@ import {
   TooltipTrigger,
 } from './ui/tooltip';
 
+const NO_WORKSPACE_VALUE = 'qwen-code:no-workspace';
+
 export interface WorkspaceSelectorOption {
   id: string;
   cwd: string;
@@ -31,12 +38,15 @@ export interface WorkspaceSelectorOption {
 interface WorkspaceSelectorProps {
   workspaces: WorkspaceSelectorOption[];
   selectedWorkspaceCwd?: string;
+  noWorkspaceSupported?: boolean;
+  noWorkspaceSelected?: boolean;
   disabled?: boolean;
   busy?: boolean;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  onSelectNoWorkspace?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
 }
@@ -48,12 +58,15 @@ interface WorkspaceSelectorProps {
 export function WorkspaceSelector({
   workspaces,
   selectedWorkspaceCwd,
+  noWorkspaceSupported = false,
+  noWorkspaceSelected = false,
   disabled,
   busy,
   scratchSupported,
   existingFolderSupported,
   className,
   onSelectWorkspace,
+  onSelectNoWorkspace,
   onCreateScratch,
   onOpenExistingFolder,
 }: WorkspaceSelectorProps) {
@@ -63,12 +76,17 @@ export function WorkspaceSelector({
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const selected = workspaces.find((workspace) =>
-    selectedWorkspaceCwd
+    !noWorkspaceSelected && selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
-      : workspace.primary,
+      : !noWorkspaceSelected && workspace.primary,
   );
+  const selectedLabel = noWorkspaceSelected
+    ? t('sidebar.noWorkspace')
+    : (selected?.label ?? '');
   const canCreate = scratchSupported || existingFolderSupported;
-  if (workspaces.length <= 1 && !canCreate) return null;
+  if (workspaces.length <= 1 && !noWorkspaceSupported && !canCreate) {
+    return null;
+  }
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -114,17 +132,25 @@ export function WorkspaceSelector({
                   }
                 }}
               >
-                <FolderClosedIcon size={16} strokeWidth={1.2} />
-                <span data-slot="select-value">{selected?.label ?? ''}</span>
+                {noWorkspaceSelected ? (
+                  <MessageCircleIcon size={16} strokeWidth={1.2} />
+                ) : (
+                  <FolderClosedIcon size={16} strokeWidth={1.2} />
+                )}
+                <span data-slot="select-value">{selectedLabel}</span>
               </button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent side="top">{selected?.label}</TooltipContent>
+          <TooltipContent side="top">{selectedLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent align="start" className="min-w-56">
           <DropdownMenuRadioGroup
-            value={selected?.id}
+            value={noWorkspaceSelected ? NO_WORKSPACE_VALUE : selected?.id}
             onValueChange={(id) => {
+              if (id === NO_WORKSPACE_VALUE) {
+                onSelectNoWorkspace?.();
+                return;
+              }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
               onSelectWorkspace(next.primary ? undefined : next.cwd);
@@ -148,6 +174,12 @@ export function WorkspaceSelector({
                 )}
               </DropdownMenuRadioItem>
             ))}
+            {noWorkspaceSupported && onSelectNoWorkspace && (
+              <DropdownMenuRadioItem value={NO_WORKSPACE_VALUE}>
+                <MessageCircleIcon />
+                {t('sidebar.noWorkspace')}
+              </DropdownMenuRadioItem>
+            )}
           </DropdownMenuRadioGroup>
           {canCreate && (
             <>

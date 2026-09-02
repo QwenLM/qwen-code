@@ -131,6 +131,37 @@ afterEach(() => {
 });
 
 describe('SkillsManagerPage', () => {
+  it('omits direct skill invocation when the host only exposes management', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'ok',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+      },
+    ];
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <SkillsManagerPage onClose={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+    const skill = container.querySelector<HTMLElement>('[aria-label="review"]');
+    expect(skill).not.toBeNull();
+    await act(async () => {
+      skill!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(runButton()).toBeUndefined();
+    expect(
+      container.querySelector('[data-testid="skill-actions"]'),
+    ).not.toBeNull();
+  });
+
   it('does not treat the retired Skill toggle capability as settings support', async () => {
     workspaceState.current.capabilities.features = ['workspace_skill_toggle'];
     skillsState.current.skills = [
