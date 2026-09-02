@@ -12801,6 +12801,26 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.spanAttributes).toHaveProperty('success', false);
   });
 
+  it('classifies an agent-shaped cooperative cancellation as cancelled', async () => {
+    const abortController = new AbortController();
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: [{ text: 'Agent was cancelled by the user.' }],
+          returnDisplay: 'Agent cancelled',
+          aborted: true,
+        };
+      }),
+    });
+
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(
+      (completedCalls[0] as CompletedToolCall).response.executionStatus,
+    ).toBe('cancelled');
+  });
+
   // tool.execution sub-span lifecycle assertions —
   // ensure the sub-span is started/ended on every meaningful path so that
   // future regressions (e.g. dropping the sub-span call or mis-marking a

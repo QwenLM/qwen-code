@@ -9763,6 +9763,10 @@ hello
             hasSubstantiveWork: true,
             failedToolNames: new Set(['edit']),
           };
+          client['pendingExperienceOutcomes'].set('stale-edit', {
+            toolName: 'edit',
+            outcome: 'failure',
+          });
 
           await fromAsync(
             client.sendMessageStream(
@@ -9780,6 +9784,20 @@ hello
             hasSubstantiveWork: false,
             failedToolNames: new Set(),
           });
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+
+          await sendToolResult('stale-edit', 'edit', {
+            error: 'stale failure',
+          });
+          recordOutcome('fresh-edit', 'edit', 'success', 'success', {
+            output: 'done',
+          });
+          await sendToolResult('fresh-edit', 'edit', { output: 'done' });
+
+          expect(
+            client['experienceSignalsSinceReview'].failedToolNames,
+          ).toEqual(new Set());
+          expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
         },
       );
 
@@ -9921,6 +9939,35 @@ hello
         );
 
         expect(client['userSteeredSinceReview']).toBe(true);
+      });
+
+      it('does not count an accepted empty steer carrier as user input', async () => {
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'empty-steer-read',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-autoskill-empty-attached-steer',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: { parts: [], accept, restore },
+            },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+        expect(client['userSteeredSinceReview']).toBe(false);
       });
 
       it('clears the window and pending outcomes when the session changes', async () => {

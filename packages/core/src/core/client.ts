@@ -547,7 +547,6 @@ export class LlmClient {
     // Session switch (/resume, /branch) reuses this client: the review
     // window belongs to the old session and must not leak into the new one.
     this.resetSkillReviewWindow();
-    this.pendingExperienceOutcomes.clear();
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -1475,7 +1474,6 @@ export class LlmClient {
     this.initializedSessionId = undefined;
     // /clear starts a fresh session; the skill-review window must not leak.
     this.resetSkillReviewWindow();
-    this.pendingExperienceOutcomes.clear();
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2690,6 +2688,7 @@ export class LlmClient {
       hasSubstantiveWork: false,
       failedToolNames: new Set(),
     };
+    this.pendingExperienceOutcomes.clear();
   }
 
   recordCompletedToolCall(
@@ -3092,7 +3091,9 @@ export class LlmClient {
       } catch (error) {
         debugLogger.warn(`Failed to settle steer input: ${error}`);
       }
-      if (accepted) this.userSteeredSinceReview = true;
+      if (accepted && steerInput.parts.length > 0) {
+        this.userSteeredSinceReview = true;
+      }
     };
 
     const attachedSteerInput = options?.steerInput;
@@ -3138,7 +3139,7 @@ export class LlmClient {
         // A steer attached to an accepted ToolResult submission counts as a
         // user steer too: the CLI's mid-tool-loop steer flow submits steers
         // under ToolResult, not SendMessageType.Steer.
-        if (attachedSteerInput) {
+        if (attachedSteerInput && attachedSteerInput.parts.length > 0) {
           this.userSteeredSinceReview = true;
         }
       } else if (messageType === SendMessageType.Steer) {

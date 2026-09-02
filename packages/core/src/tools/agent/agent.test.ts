@@ -7301,6 +7301,35 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Agent was cancelled by the user.');
       expect(llmText).toContain('halfway through');
+      expect(result.aborted).toBeUndefined();
+    });
+
+    it('marks a foreground cancellation that interrupts execution', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.CANCELLED,
+      );
+      const controller = new AbortController();
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        controller.abort();
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const result = await invocation.execute(controller.signal);
+
+      expect(result.aborted).toBe(true);
     });
 
     it('should allow background in non-interactive mode (headless support)', async () => {
