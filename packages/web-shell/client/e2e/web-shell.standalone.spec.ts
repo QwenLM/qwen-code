@@ -100,21 +100,21 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   await gotoNewStandaloneChat(page);
 
-  // One New task for the sidebar itself plus one on the workspace row: a
-  // projectless chat must not strand the user away from their workspaces.
+  // The workspace row survives the projectless context: without it there is no
+  // route back to a workspace.
   const sidebar = page.getByRole('complementary');
+  const workspaceRow = sidebar.getByRole('button', {
+    name: /^qwen-web-shell-e2e/,
+  });
+  await expect(workspaceRow).toBeVisible();
+
+  // Row actions are hidden until the row is hovered.
+  await workspaceRow.hover();
   const newTaskButtons = sidebar.getByRole('button', {
     name: 'New task',
     exact: true,
   });
   await expect(newTaskButtons).toHaveCount(2);
-
-  // Row actions stay hidden until the row is hovered.
-  const workspaceRow = sidebar.getByRole('button', {
-    name: /^qwen-web-shell-e2e/,
-  });
-  await expect(workspaceRow).toBeVisible();
-  await workspaceRow.hover();
   await newTaskButtons.last().click();
 
   await fillComposer(page, 'Back to the workspace');
