@@ -66,9 +66,12 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
     // Every field below is peer-controlled, and this is the screen where
     // the user decides untrusted messages: a forged listing line or a
     // terminal-rewriting ESC sequence here spoofs the review itself.
-    const who = flattenPeerLabel(
-      entry.frame.fromName ?? entry.frame.from ?? 'unknown session',
+    const peerLabel = flattenPeerLabel(
+      entry.frame.fromName ??
+        entry.frame.from ??
+        (entry.selfSent ? 'this session' : 'unknown session'),
     );
+    const who = `${entry.selfSent ? '[own process]' : '[peer]'} ${peerLabel}`;
     const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
       `  ${handle}  ${who}\n` +
