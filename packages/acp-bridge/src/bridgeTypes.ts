@@ -1598,7 +1598,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Replace the in-memory PR binding list of a live session with the
-   * persisted sidecar contents after a rewrite that can evict bindings
+   * authoritative persisted one after a rewrite that can evict bindings
    * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
    * entry that already holds bindings, so the summary merge cannot
    * resurrect evicted numbers from a stale entry. No-op when the entry is
