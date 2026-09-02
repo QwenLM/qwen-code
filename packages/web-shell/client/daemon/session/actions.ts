@@ -418,8 +418,13 @@ export function createDaemonSessionActions({
   function discardsSlashCommandAttachments(text: string): boolean {
     const trimmed = text.trim();
     if (!trimmed.startsWith('/')) return false;
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*')) return false;
     const name = trimmed.slice(1).trim().split(/\s+/, 1)[0];
     if (!name) return false;
+    if (name.includes('/') || name.includes('\\')) return false;
+    // Keep this lexical gate and two-pass lookup aligned with the daemon's
+    // isSlashCommand/parseSlashCommand behavior. A built-in entry marks a
+    // fully loaded command snapshot; until then unresolved commands fail closed.
     const connection = getConnection();
     const command =
       connection.commands?.find((candidate) => candidate.name === name) ??

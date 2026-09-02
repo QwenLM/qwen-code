@@ -2419,6 +2419,68 @@ describe('createDaemonSessionActions', () => {
     expect(session.uploadAttachment).not.toHaveBeenCalled();
   });
 
+  it('does not upload a slash command before command metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/remember this API shape', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '// stack trace from prod',
+    '/* crash note */',
+    '/var/log/app.log shows the crash',
+    '/var\\log\\app.log shows the crash',
+  ])('uploads attachments for non-command slash input %s', async (text) => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt(text, {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text },
+        {
+          type: 'image',
+          attachmentId: 'image.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    });
+  });
+
   it('uploads attachments for unknown commands after metadata loads', async () => {
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({
