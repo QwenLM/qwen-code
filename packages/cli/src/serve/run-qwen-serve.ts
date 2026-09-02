@@ -7279,7 +7279,9 @@ async function runQwenServeImpl(
             runtimeToDrain.provenance !== 'live-conversation'
           ) {
             await channelWorkerManager
-              .removeWorkspace(runtimeToDrain.workspaceCwd)
+              .removeWorkspace(runtimeToDrain.workspaceCwd, {
+                permanent: reason === 'workspace_removed',
+              })
               .catch((err) => {
                 daemonLog.error(
                   'workspace channel worker cleanup error',
