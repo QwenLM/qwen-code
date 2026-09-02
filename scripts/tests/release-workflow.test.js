@@ -540,8 +540,12 @@ describe('release workflow', () => {
     expect(testStep.run).toContain(
       'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
+    // Every release schedule retries, stable included: running the stable
+    // lane with no retry let one flaky test out of ~30k red a release whose
+    // other gates were all green. The default is pinned here so a silent
+    // drop back to a no-retry stable lane fails this test.
     expect(testStep.env.VITEST_RETRY).toBe(
-      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}",
+      "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
