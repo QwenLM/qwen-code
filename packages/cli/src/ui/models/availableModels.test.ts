@@ -94,6 +94,12 @@ describe('availableModels', () => {
             authType: AuthType.QWEN_OAUTH,
             isVision: false,
           },
+          {
+            id: 'image',
+            label: 'Image',
+            authType: AuthType.QWEN_OAUTH,
+            imageOnly: true,
+          },
         ]),
       } as unknown as Config;
 

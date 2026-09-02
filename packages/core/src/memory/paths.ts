@@ -7,11 +7,18 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { QWEN_DIR, resolvePath, sanitizeCwd } from '../utils/paths.js';
+import {
+  QWEN_DIR,
+  realpathNearestExisting,
+  resolvePath,
+  sanitizeCwd,
+} from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
+import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
+export const AUTO_MEMORY_PINNED_DIRNAME = 'pinned';
 export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
@@ -29,6 +36,11 @@ export const USER_AUTO_MEMORY_DIRNAME = 'memories';
  * lives INSIDE the repository and is tracked by git, which is the sync transport.
  */
 export const TEAM_AUTO_MEMORY_DIRNAME = 'team-memory';
+
+// Canonical definitions live in scopes.ts (a zero-import leaf module that can
+// be subpath-imported without pulling the core barrel). Re-exported here so
+// the barrel surface is unchanged.
+export { MEMORY_PROJECT_SCOPES, type MemoryProjectScope } from './scopes.js';
 
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
@@ -60,18 +72,51 @@ export function getMemoryBaseDir(): string {
   return Storage.getRuntimeBaseDir();
 }
 
-// Memoize by projectRoot plus the runtime-specific base dir. In daemon mode,
-// different sessions can share a project root while writing to different output dirs.
+// Memoize by projectRoot, project scope, and the runtime-specific base dir.
+// The base dir is part of the key because in daemon mode different sessions can
+// share one projectRoot yet write to different output dirs.
 const _autoMemoryRootCache = new Map<string, string>();
 
 // Memoized on projectRoot alone: the team root resolves via findGitRoot, which
 // does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
+let warnedUnknownMemoryProjectScope = false;
+
+/**
+ * Resolve QWEN_CODE_MEMORY_PROJECT_SCOPE. Only "workspace" (after trimming and
+ * lowercasing) opts into per-workspace partitioning; anything else keeps the
+ * git-root scope. An unrecognized non-empty value warns once so a typo surfaces
+ * instead of silently falling back to the shared scope this flag exists to
+ * prevent.
+ */
+function resolveWorkspaceProjectScope(): boolean {
+  const raw = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'workspace') return true;
+  if (
+    normalized !== '' &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(normalized) &&
+    !warnedUnknownMemoryProjectScope
+  ) {
+    warnedUnknownMemoryProjectScope = true;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring unrecognized QWEN_CODE_MEMORY_PROJECT_SCOPE="${raw}"; ` +
+        'falling back to "git-root". Expected "git-root" or "workspace".',
+    );
+  }
+  return false;
+}
+
 export function getAutoMemoryRoot(projectRoot: string): string {
   const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
+  const useWorkspaceRoot = resolveWorkspaceProjectScope();
   const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
-  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${projectRoot}`;
+  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${
+    useWorkspaceRoot ? 'workspace' : 'git-root'
+  }\0${projectRoot}`;
   const cached = _autoMemoryRootCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
@@ -79,15 +124,19 @@ export function getAutoMemoryRoot(projectRoot: string): string {
   if (useLocalMemory) {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
-    // Anchor at the nearest git root WITHOUT resolving linked worktrees back
-    // to their canonical repository root: each worktree gets its own memory,
-    // consistent with the per-worktree isolation of chats/, workflows/, and
-    // team memory (getTeamAutoMemoryRoot). See #6449.
-    const gitRoot = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    // In git-root scope, anchor at the nearest git root WITHOUT resolving
+    // linked worktrees back to their canonical repository root: each worktree
+    // gets its own memory, consistent with the per-worktree isolation of
+    // chats/, workflows/, and team memory (getTeamAutoMemoryRoot). See #6449.
+    // In workspace scope, key by the exact resolved workspace dir instead so
+    // nested workspaces in one checkout do not share memory.
+    const projectKey = useWorkspaceRoot
+      ? path.resolve(projectRoot)
+      : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
     result = path.join(
       memoryBaseDir,
       'projects',
-      sanitizeCwd(gitRoot),
+      sanitizeCwd(projectKey),
       AUTO_MEMORY_DIRNAME,
     );
   }
@@ -99,6 +148,26 @@ export function getAutoMemoryRoot(projectRoot: string): string {
 export function clearAutoMemoryRootCache(): void {
   _autoMemoryRootCache.clear();
   _teamAutoMemoryRootCache.clear();
+  warnedUnknownMemoryProjectScope = false;
+}
+
+/**
+ * The trusted filesystem anchor for a project's managed-memory root: the prefix
+ * of getAutoMemoryRoot() that is derived from the user's environment rather than
+ * repo-tracked contents, and is therefore safe to canonicalize through symlinks.
+ *
+ * In local-memory mode (`QWEN_CODE_MEMORY_LOCAL=1`) the root is
+ * `<projectRoot>/.qwen/memory`, so the anchor is the project root; otherwise the
+ * root lives under the shared memory base dir, which is the anchor. The write
+ * boundary (isAllowedMemoryPath) canonicalizes this anchor but appends the
+ * managed suffix literally, so a symlink planted INSIDE the suffix (e.g. a
+ * repo-tracked `.qwen -> /outside`) can't silently relocate the allowed root
+ * out of the trusted anchor.
+ */
+export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
+  return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
+    ? projectRoot
+    : getMemoryBaseDir();
 }
 
 /**
@@ -272,71 +341,6 @@ export function isManagedMemoryPath(
     const rel = path.relative(resolvedRoot, resolvedPath);
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
-}
-
-/**
- * Follow a leading symlink chain at `inputPath` to its eventual target, even
- * when that target does not exist yet (a dangling link).
- *
- * Security-load-bearing: `fs.existsSync` follows links and reports a dangling
- * symlink as "missing". Relying on it lets an attacker pre-place
- * `decoy.md -> .qwen/team-memory/leak.md` (target absent) so the path classifies
- * OUTSIDE team memory and the secret scanner is skipped — while the real write
- * follows the link INTO team memory. lstat/readlink (no-follow) resolve the link
- * target so classification matches where the bytes will actually land.
- */
-function resolveLeafSymlink(inputPath: string): string {
-  const maxHops = 40; // POSIX SYMLOOP_MAX
-  let current = path.resolve(inputPath);
-  for (let i = 0; i < maxHops; i++) {
-    let stat: fs.Stats;
-    try {
-      stat = fs.lstatSync(current);
-    } catch {
-      return current; // missing or unreadable — nothing left to follow
-    }
-    if (!stat.isSymbolicLink()) {
-      return current;
-    }
-    const target = fs.readlinkSync(current);
-    if (path.isAbsolute(target)) {
-      current = target;
-    } else {
-      // Resolve relative targets against the link's real parent so an
-      // intermediate directory symlink can't mis-resolve the target.
-      let parent: string;
-      try {
-        parent = fs.realpathSync(path.dirname(current));
-      } catch {
-        parent = path.dirname(current);
-      }
-      current = path.resolve(parent, target);
-    }
-  }
-  return current; // chain too deep — caller still range-checks the result
-}
-
-function realpathNearestExisting(inputPath: string): string {
-  // Resolve a leading (possibly dangling) symlink first so a dangling link into
-  // team memory is classified by its target, not treated as a plain missing file.
-  const resolved = resolveLeafSymlink(inputPath);
-  const missingSegments: string[] = [];
-  let current = resolved;
-
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return resolved;
-    }
-    missingSegments.unshift(path.basename(current));
-    current = parent;
-  }
-
-  try {
-    return path.join(fs.realpathSync(current), ...missingSegments);
-  } catch {
-    return resolved;
-  }
 }
 
 /**

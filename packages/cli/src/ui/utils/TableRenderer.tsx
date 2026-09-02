@@ -13,6 +13,13 @@ import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  mergeInlineMathMatches,
+  unescapeMarkdownBeforeMath,
+  unescapeMarkdownDollars,
+} from './inline-math.js';
+import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -42,17 +49,9 @@ const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
-const INLINE_MATH_MAX_CHARS = 1024;
-
-const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
 const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
-  'g',
-);
-const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 
@@ -252,21 +251,36 @@ const ansiFmt = {
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
  */
 function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
-  const inlineRegex = enableInlineMath
-    ? INLINE_MARKDOWN_WITH_MATH_REGEX
-    : INLINE_MARKDOWN_REGEX;
-  inlineRegex.lastIndex = 0;
-
   // Capability is stable for the duration of one cell render — read it once
   // here instead of per matched token.
   const canHyperlink = supportsHyperlinks();
 
   let result = '';
   let lastIndex = 0;
-  let match;
 
-  while ((match = inlineRegex.exec(text)) !== null) {
-    result += text.slice(lastIndex, match.index);
+  for (const token of mergeInlineMathMatches(
+    text,
+    INLINE_MARKDOWN_REGEX,
+    enableInlineMath,
+  )) {
+    const index =
+      token.kind === 'math' ? token.span.index : (token.match.index ?? 0);
+    const prose = text.slice(lastIndex, index);
+    result +=
+      token.kind === 'math'
+        ? unescapeMarkdownBeforeMath(prose)
+        : unescapeMarkdownDollars(prose);
+
+    if (token.kind === 'math') {
+      result += applyColor(
+        renderInlineLatex(unescapeMarkdownDollars(token.span.content)),
+        theme.text.accent,
+      );
+      lastIndex = index + token.span.raw.length;
+      continue;
+    }
+
+    const match = token.match;
     const fullMatch = match[0]!;
     let rendered: string | null = null;
 
@@ -275,27 +289,31 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       fullMatch.endsWith('**') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.bold(fullMatch.slice(2, -2));
+      rendered = ansiFmt.bold(unescapeMarkdownDollars(fullMatch.slice(2, -2)));
     } else if (
       fullMatch.length > 2 &&
       ((fullMatch.startsWith('*') && fullMatch.endsWith('*')) ||
         (fullMatch.startsWith('_') && fullMatch.endsWith('_'))) &&
-      !/\w/.test(text.substring(match.index - 1, match.index)) &&
+      !/\w/.test(text.substring(index - 1, index)) &&
       !/\w/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 1),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 1),
       ) &&
-      !/\S[./\\]/.test(text.substring(match.index - 2, match.index)) &&
+      !/\S[./\\]/.test(text.substring(index - 2, index)) &&
       !/[./\\]\S/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 2),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 2),
       )
     ) {
-      rendered = ansiFmt.italic(fullMatch.slice(1, -1));
+      rendered = ansiFmt.italic(
+        unescapeMarkdownDollars(fullMatch.slice(1, -1)),
+      );
     } else if (
       fullMatch.startsWith('~~') &&
       fullMatch.endsWith('~~') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.strikethrough(fullMatch.slice(2, -2));
+      rendered = ansiFmt.strikethrough(
+        unescapeMarkdownDollars(fullMatch.slice(2, -2)),
+      );
     } else if (
       fullMatch.startsWith('`') &&
       fullMatch.endsWith('`') &&
@@ -312,7 +330,7 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ) {
       const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
       if (linkMatch) {
-        const labelText = linkMatch[1] ?? '';
+        const labelText = unescapeMarkdownDollars(linkMatch[1] ?? '');
         const url = linkMatch[2] ?? '';
         // When OSC 8 wraps, show only the label — long URLs in narrow
         // table cells were the worst offender for layout cluttering, so
@@ -344,25 +362,20 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
         }
       }
     } else if (
-      enableInlineMath &&
-      fullMatch.startsWith('$') &&
-      fullMatch.endsWith('$') &&
-      fullMatch.length > 2
-    ) {
-      rendered = applyColor(
-        renderInlineLatex(fullMatch.slice(1, -1)),
-        theme.text.accent,
-      );
-    } else if (
       fullMatch.startsWith('<u>') &&
       fullMatch.endsWith('</u>') &&
       fullMatch.length > 7
     ) {
-      rendered = ansiFmt.underline(fullMatch.slice(3, -4));
+      rendered = ansiFmt.underline(
+        unescapeMarkdownDollars(fullMatch.slice(3, -4)),
+      );
     } else if (/^https?:\/\//.test(fullMatch)) {
       const visible = applyColor(fullMatch, theme.text.link);
       if (canHyperlink) {
-        const trimmedUrl = trimTrailingUrlPunctuation(fullMatch);
+        const trimmedUrl = trimTrailingUrlPunctuation(
+          fullMatch,
+          text[index + fullMatch.length],
+        );
         rendered = isSafeOscScheme(trimmedUrl)
           ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
           : visible;
@@ -371,11 +384,11 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       }
     }
 
-    result += rendered ?? fullMatch;
-    lastIndex = inlineRegex.lastIndex;
+    result += rendered ?? unescapeMarkdownDollars(fullMatch);
+    lastIndex = index + fullMatch.length;
   }
 
-  result += text.slice(lastIndex);
+  result += unescapeMarkdownDollars(text.slice(lastIndex));
   return result;
 }
 

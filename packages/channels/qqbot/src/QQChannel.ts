@@ -19,14 +19,18 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   ChannelAgentBridge,
+  ChannelOutputSegmentContext,
+  Envelope,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   readFileSync,
   writeFileSync,
@@ -58,6 +62,9 @@ import {
   sendQQMessage,
 } from './api.js';
 
+/** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
+const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
+
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
@@ -72,6 +79,21 @@ export class DeliveryError extends Error {
     super(message);
     this.name = 'DeliveryError';
   }
+}
+
+interface QQReplyContext {
+  chatId: string;
+  msgId: string;
+  timestamp: number;
+}
+
+interface QQStreamState {
+  chatId: string;
+  buffer: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  retryCount: number;
+  replyContext?: QQReplyContext;
+  sourceLabel?: string;
 }
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
@@ -122,6 +144,8 @@ export class QQChannel extends ChannelBase {
   /** Track the latest user messageId per chatId for proper reply (msg_id). */
   private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
     new Map();
+  private replyContextByMessageId = new Map<string, QQReplyContext>();
+  private inboundReplyContext = new AsyncLocalStorage<QQReplyContext>();
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
   /** Periodic cleanup timer for expired replyMsgId entries. */
@@ -141,6 +165,8 @@ export class QQChannel extends ChannelBase {
 
   /** Per-group bot OPENID map for multi-group support. */
   private botOpenIdByGroup: Map<string, string> = new Map();
+  /** Dedup set for unexpected senderOpenId format warnings (key: `${chatId}:${senderOpenId}`). */
+  private warnedSenderOpenIds: Set<string> = new Set();
   /** Guard: set to true after first READY + session restore completes. */
   private _ready: boolean = false;
   /** Whether this process has never received READY (cold start). */
@@ -194,20 +220,27 @@ export class QQChannel extends ChannelBase {
    *   - flushedSessions tracks already-sent sessions to skip final fullText
    */
   // ── Streaming state ───────────────────────────────────────────
-  private streamState: Map<
-    string,
-    {
-      chatId: string;
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-      retryCount: number;
-    }
-  > = new Map();
+  private streamState = new Map<string, QQStreamState>();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
+  /**
+   * Sessions with a prompt turn currently in flight, tracked via
+   * onPromptStart/onPromptEnd.
+   *
+   * This is the discriminator the cron textChunk handler uses to tell
+   * "prompt-response chunk" from "cron/non-prompt chunk". streamState
+   * cannot serve that role (#6094): it is never populated when
+   * blockStreaming is 'on' (onResponseChunk early-returns), so prompt
+   * chunks leak into cronBuffer; and a residual entry from a finished
+   * turn's unsettled flush silently blocks cron delivery. This set is
+   * reliable because ChannelBase always brackets a prompt turn with
+   * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel), independent of streaming config.
+   */
+  private activePromptSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -296,7 +329,13 @@ export class QQChannel extends ChannelBase {
         return;
       }
       if (!wasInCronFlow) return;
-      if (this.streamState.has(sessionId)) return;
+      // Sessions with an active prompt turn belong to the prompt path
+      // (which delivers the response itself) — never capture their chunks
+      // into the cron buffer. Keyed on activePromptSessions rather than
+      // streamState (#6094): streamState is empty under blockStreaming:'on'
+      // (prompt chunks would be duplicated) and can linger after a turn
+      // ends (cron chunks would be silently dropped).
+      if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
         entry = { buffer: '', timer: null };
@@ -321,7 +360,7 @@ export class QQChannel extends ChannelBase {
         if (toFlush) {
           const target = this.router.getTarget(sessionId);
           if (target) {
-            this.sendMessage(target.chatId, toFlush)
+            this.sendMessageWithReplyContext(target.chatId, toFlush)
               .then(() => {
                 if (!entry!.buffer && this.cronBuffer.get(sessionId) === entry)
                   this.cronBuffer.delete(sessionId);
@@ -361,7 +400,7 @@ export class QQChannel extends ChannelBase {
                     this.cronBuffer.delete(sessionId);
                     return;
                   }
-                  this.sendMessage(retryTarget.chatId, toFlush)
+                  this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
                     .then(() => {
                       entry!.pendingRetry = '';
                       if (
@@ -414,7 +453,10 @@ export class QQChannel extends ChannelBase {
                             this.cronBuffer.delete(sessionId);
                             return;
                           }
-                          this.sendMessage(retryTarget2.chatId, toFlush)
+                          this.sendMessageWithReplyContext(
+                            retryTarget2.chatId,
+                            toFlush,
+                          )
                             .then(() => {
                               entry!.pendingRetry = '';
                               if (
@@ -550,6 +592,8 @@ export class QQChannel extends ChannelBase {
           '## @提及格式',
           '',
           '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+          '消息前缀 [昵称(OPENID)] 中紧邻 ] 之前的括号内是该发送者的 32 位十六进制 OPENID，可用 <@OPENID> 回复时 @他。',
+          '注意：群成员昵称可能本身包含括号或特殊字符，昵称中的括号内容不是 OPENID，请勿使用。',
           '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
           '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
@@ -591,7 +635,77 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    const context = envelope.messageId
+      ? this.replyContextByMessageId.get(envelope.messageId)
+      : undefined;
+    if (!context || context.chatId !== envelope.chatId) {
+      await super.handleInbound(envelope);
+      return;
+    }
+    await this.inboundReplyContext.run(context, () =>
+      super.handleInbound(envelope),
+    );
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
+    const inboundContext = this.inboundReplyContext.getStore();
+    const latest = this.replyMsgId.get(chatId);
+    const replyContext =
+      inboundContext?.chatId === chatId
+        ? inboundContext
+        : latest
+          ? { chatId, ...latest }
+          : undefined;
+    await this.sendMessageWithReplyContext(chatId, text, replyContext);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const inboundContext = this.inboundReplyContext.getStore();
+    const latest = this.replyMsgId.get(chatId);
+    const replyContext =
+      inboundContext?.chatId === chatId
+        ? inboundContext
+        : latest
+          ? { chatId, ...latest }
+          : undefined;
+    await this.sendMessageWithReplyContext(
+      chatId,
+      text,
+      replyContext,
+      sourceLabel,
+    );
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const messageId = this.getResponseMessageId(sessionId);
+    const replyContext = messageId
+      ? this.replyContextByMessageId.get(messageId)
+      : undefined;
+    await this.sendMessageWithReplyContext(
+      chatId,
+      text,
+      replyContext,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
+  }
+
+  private async sendMessageWithReplyContext(
+    chatId: string,
+    text: string,
+    replyContext?: QQReplyContext,
+    sourceLabel?: string,
+  ): Promise<void> {
     // <noreply> suppression
     if (text.trim() === '<noreply>') {
       process.stderr.write(
@@ -599,12 +713,13 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    const outgoingText = this.formatMarkdownAttributedText(text, sourceLabel);
+    const plainOutgoingText = this.formatAttributedText(text, sourceLabel);
 
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
-    // Look up reply context with TTL check
-    const entry = this.replyMsgId.get(chatId);
+    const entry = replyContext?.chatId === chatId ? replyContext : undefined;
     const msgId =
       entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
         ? entry.msgId
@@ -613,8 +728,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
       );
-      this.msgSeqMap.delete(entry.msgId);
-      this.replyMsgId.delete(chatId);
+      this.deleteReplyContext(entry);
       this.saveQQState();
     }
 
@@ -639,7 +753,7 @@ export class QQChannel extends ChannelBase {
       // ── STEP 1: Passive markdown attempt ──
       const passiveBody: Record<string, unknown> = {
         msg_type: 2,
-        markdown: { content: text },
+        markdown: { content: outgoingText },
       };
       nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
       if (msgId) {
@@ -701,7 +815,7 @@ export class QQChannel extends ChannelBase {
           // ── STEP 2: Active markdown (msg_type: 2, NO msg_id/msg_seq) ──
           const activeMdBody: Record<string, unknown> = {
             msg_type: 2,
-            markdown: { content: text },
+            markdown: { content: outgoingText },
           };
           const activeMdResp = await sendQQMessage(
             route.base,
@@ -739,7 +853,7 @@ export class QQChannel extends ChannelBase {
 
           // ── STEP 3: Active plain-text (msg_type: 0, NO msg_id/msg_seq) ──
           const activeTextBody: Record<string, unknown> = {
-            content: text,
+            content: plainOutgoingText,
             msg_type: 0,
           };
           const activeTextResp = await sendQQMessage(
@@ -784,7 +898,7 @@ export class QQChannel extends ChannelBase {
 
         // Plain-text fallback for pure active messages (no reply context)
         const plainBody: Record<string, unknown> = {
-          content: text,
+          content: plainOutgoingText,
           msg_type: 0,
         };
         const fallbackRes = await sendQQMessage(
@@ -941,8 +1055,10 @@ export class QQChannel extends ChannelBase {
     this.detachCronHandler();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
+    this.replyContextByMessageId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
+    this.warnedSenderOpenIds.clear();
     this.groupActiveMsgEnabled.clear();
     this.seenMessages.clear();
     this.coldStart = true;
@@ -959,24 +1075,31 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
+    this.activePromptSessions.clear();
   }
 
   /**
-   * QQ Bot API V2 does not provide a typing indicator endpoint.
-   * ChannelBase calls these hooks to signal prompt start/end;
-   * they are intentionally no-ops for this channel.
+   * QQ Bot API V2 does not provide a typing indicator endpoint, but these
+   * hooks still maintain activePromptSessions — the cron textChunk
+   * discriminator (see activePromptSessions). ChannelBase always pairs the
+   * two calls per prompt turn (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel).
    */
   protected override onPromptStart(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.add(sessionId);
+  }
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.delete(sessionId);
+  }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
 
@@ -984,42 +1107,49 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
     if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
-      state = { chatId, buffer: chunk, timer: null, retryCount: 0 } as {
-        chatId: string;
-        buffer: string;
-        timer: ReturnType<typeof setTimeout> | null;
-        retryCount: number;
+      const messageId =
+        segment?.messageId ?? this.getResponseMessageId(sessionId);
+      const replyContext = messageId
+        ? this.replyContextByMessageId.get(messageId)
+        : undefined;
+      state = {
+        chatId,
+        buffer: chunk,
+        timer: null,
+        retryCount: 0,
+        ...(replyContext ? { replyContext } : {}),
+        ...(segment?.sourceLabel ? { sourceLabel: segment.sourceLabel } : {}),
       };
       this.streamState.set(sessionId, state);
     } else {
+      state.sourceLabel ??= segment?.sourceLabel;
       state.buffer += chunk;
       if (state.timer) {
         clearTimeout(state.timer);
         state.timer = null;
       }
-      // Size-cap flush: check flushingSessions to prevent concurrent sends.
-      if (
-        state.buffer.length >=
-        (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
-      ) {
-        const buf = state.buffer;
-        state.buffer = '';
-        if (this.flushingSessions.has(sessionId)) {
-          // Send in-flight — re-buffer and let the in-flight send's .then() pick it up
-          state.buffer = buf + (state.buffer || '');
-          state.timer = setTimeout(() => {
-            this.idleFlush(sessionId, this._reconnectId);
-          }, QQChannel.IDLE_FLUSH_MS);
-          state.timer.unref?.();
-          return;
-        }
-        this.flushAndTrack(sessionId, buf, state, 'idleFlush');
+    }
+    // Size-cap flush: reserve room for the independently rendered source
+    // label and prevent concurrent sends.
+    if (state.buffer.length >= this.streamBufferLimit(state)) {
+      const buf = state.buffer;
+      state.buffer = '';
+      if (this.flushingSessions.has(sessionId)) {
+        // Send in-flight — re-buffer and let the in-flight send's .then() pick it up
+        state.buffer = buf + (state.buffer || '');
+        state.timer = setTimeout(() => {
+          this.idleFlush(sessionId, this._reconnectId);
+        }, QQChannel.IDLE_FLUSH_MS);
+        state.timer.unref?.();
         return;
       }
+      this.flushAndTrack(sessionId, buf, state, 'idleFlush');
+      return;
     }
     const reconnectId = this._reconnectId;
     state.timer = setTimeout(() => {
@@ -1062,19 +1192,19 @@ export class QQChannel extends ChannelBase {
   private flushAndTrack(
     sessionId: string,
     buffer: string,
-    state: {
-      chatId: string;
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-      retryCount: number;
-    },
+    state: QQStreamState,
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
     // sendMessage throws DeliveryError for delivery failures.
     // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
     // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
-    this.sendMessage(state.chatId, buffer)
+    this.sendMessageWithReplyContext(
+      state.chatId,
+      buffer,
+      state.replyContext,
+      state.sourceLabel,
+    )
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
         const current = this.streamState.get(sessionId);
@@ -1164,10 +1294,7 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
             // #3: If re-buffer exceeds max length, flush immediately
-            if (
-              current.buffer.length >=
-              (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
-            ) {
+            if (current.buffer.length >= this.streamBufferLimit(current)) {
               current.retryCount++;
               if (
                 this.maxFlushRetries > 0 &&
@@ -1250,6 +1377,7 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
@@ -1265,11 +1393,26 @@ export class QQChannel extends ChannelBase {
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
     const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
+    const sourceLabel =
+      segment?.sourceLabel ??
+      state?.sourceLabel ??
+      this.getResponseSourceLabel(sessionId);
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     if (remaining) {
-      await super.onResponseComplete(chatId, remaining, sessionId);
+      await this.sendResponseMessage(chatId, remaining, sessionId, sourceLabel);
     }
+  }
+
+  private streamBufferLimit(state: QQStreamState): number {
+    const configured =
+      this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+    if (!state.sourceLabel) return configured;
+    const attributed = this.formatMarkdownAttributedText(
+      'x',
+      state.sourceLabel,
+    );
+    return Math.max(1, configured - (attributed.length - 1));
   }
 
   override onSessionDied(sessionId: string): void {
@@ -1281,6 +1424,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.activePromptSessions.delete(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -1441,6 +1585,8 @@ export class QQChannel extends ChannelBase {
                     (o['msgId'] as string).length <= 128 &&
                     typeof o['timestamp'] === 'number' &&
                     Number.isFinite(o['timestamp']) &&
+                    o['timestamp'] >=
+                      Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS &&
                     o['timestamp'] <= Date.now() + QQChannel.REPLY_MSG_ID_TTL_MS
                   );
                 })
@@ -1458,6 +1604,12 @@ export class QQChannel extends ChannelBase {
           );
         }
       }
+      this.replyContextByMessageId = new Map(
+        Array.from(this.replyMsgId, ([chatId, entry]) => [
+          entry.msgId,
+          { chatId, ...entry },
+        ]),
+      );
       if (raw.msgSeqMap) {
         const arr = raw.msgSeqMap as Array<[string, unknown]>;
         const totalRaw = Array.isArray(arr) ? arr.length : 0;
@@ -1477,6 +1629,11 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] restoreQQState: accepted ${this.msgSeqMap.size} msgSeqMap entries (rejected ${totalRaw - this.msgSeqMap.size})\n`,
           );
+        }
+      }
+      for (const msgId of this.msgSeqMap.keys()) {
+        if (!this.replyContextByMessageId.has(msgId)) {
+          this.msgSeqMap.delete(msgId);
         }
       }
       if (raw.groupActiveMsgEnabled) {
@@ -1508,7 +1665,7 @@ export class QQChannel extends ChannelBase {
                   typeof k === 'string' &&
                   k.length <= 256 &&
                   typeof v === 'string' &&
-                  /^[A-F0-9]{32}$/i.test(v),
+                  QQ_OPENID_RE.test(v),
               )
             : [],
         ) as Map<string, string>;
@@ -1614,17 +1771,19 @@ export class QQChannel extends ChannelBase {
 
   // ── ReplyMsgId helpers ────────────────────────────────────────
 
-  /**
-   * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
-   * to prevent orphaned entries accumulating over time.
-   */
   private setReplyMsgId(chatId: string, msgId: string): void {
-    const oldEntry = this.replyMsgId.get(chatId);
-    if (oldEntry && oldEntry.msgId !== msgId) {
-      this.msgSeqMap.delete(oldEntry.msgId);
-    }
-    this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
+    const timestamp = Date.now();
+    this.replyMsgId.set(chatId, { msgId, timestamp });
+    this.replyContextByMessageId.set(msgId, { chatId, msgId, timestamp });
     this.saveQQState();
+  }
+
+  private deleteReplyContext(context: QQReplyContext): void {
+    this.replyContextByMessageId.delete(context.msgId);
+    this.msgSeqMap.delete(context.msgId);
+    if (this.replyMsgId.get(context.chatId)?.msgId === context.msgId) {
+      this.replyMsgId.delete(context.chatId);
+    }
   }
 
   /**
@@ -1637,6 +1796,12 @@ export class QQChannel extends ChannelBase {
     this.replyMsgIdCleanupTimer = setInterval(() => {
       const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
       let dirty = false;
+      for (const context of this.replyContextByMessageId.values()) {
+        if (context.timestamp < cutoff) {
+          this.deleteReplyContext(context);
+          dirty = true;
+        }
+      }
       for (const [chatId, entry] of this.replyMsgId) {
         if (entry.timestamp < cutoff) {
           this.msgSeqMap.delete(entry.msgId);
@@ -1973,6 +2138,7 @@ export class QQChannel extends ChannelBase {
                 onReady();
               })
               .catch(() => {
+                this.fixRestoredSessions();
                 process.stderr.write(
                   `[QQ:${this.name}] WARNING: router session restore failed — cron messages will be dropped until sessions re-establish\n`,
                 );
@@ -2234,7 +2400,7 @@ export class QQChannel extends ChannelBase {
     const selfMention = mentions?.find((m) => m.is_you);
     if (!selfMention) return '';
     const botOpenId = selfMention.member_openid || selfMention.id || '';
-    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
+    if (!QQ_OPENID_RE.test(botOpenId)) {
       process.stderr.write(
         `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
       );
@@ -2282,25 +2448,37 @@ export class QQChannel extends ChannelBase {
     safeName: string;
     cleanText: string;
     text: string;
+    displayText: string;
     senderName: string;
   } | null {
-    const senderName =
-      event.author?.username ||
-      event.author?.id ||
-      event.author?.member_openid ||
-      'QQ User';
+    // Keep identity values out of the display-name position. In particular,
+    // falling back to member_openid would expose a full mentionable OPENID
+    // even when allowMention is disabled and duplicate it when enabled.
+    const senderName = event.author?.username || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const senderOpenId =
       event.author?.member_openid || event.author?.user_openid || '';
+    const senderIdentity = senderOpenId || event.author?.id || '';
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    let mentionIndex = 0;
+    const displayContent = content
+      .replace(/<@[^>]{1,64}>/g, (mention) =>
+        event.mentions?.[mentionIndex++]?.is_you ? '' : mention,
+      )
+      .trim();
     // Strip trusted tags that could be forged by users
     const safeContent = content
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const safeCleanText = cleanText
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '')
+      .trim();
+    const safeDisplayText = displayContent
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '')
@@ -2340,9 +2518,54 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.allowMention !== false && groupBotOpenId
         ? `\n机器人 OPENID: ${groupBotOpenId}`
         : '';
+    // Full sender OPENID is only exposed when mention support is enabled
+    // and the value is a well-formed 32-hex OPENID.
+    const showSenderOpenId =
+      this.qqConfig.allowMention !== false &&
+      !!senderOpenId &&
+      QQ_OPENID_RE.test(senderOpenId);
+    // Warn once per (chatId, senderOpenId) about malformed OPENIDs, and only
+    // when mention support is enabled (with allowMention=false the 8-char
+    // fragment below surfaces the value instead, so a warning is noise).
+    // Bounded: reset the set past 500 entries so unusual chatId/senderOpenId
+    // combos can't accumulate without limit. `showSenderOpenId` is exactly
+    // `allowMention !== false && senderOpenId && QQ_OPENID_RE.test(...)`, so
+    // this condition is equivalent to the old explicit re-test, without the
+    // duplicate regex evaluation.
+    if (
+      !showSenderOpenId &&
+      this.qqConfig.allowMention !== false &&
+      senderOpenId
+    ) {
+      // chatId is already validated and bounded. Cap only the remote-controlled
+      // sender component so different senders in a long chatId remain distinct.
+      const dedupKey = `${chatId}:${truncateCodePoints(senderOpenId, 64)}`;
+      if (!this.warnedSenderOpenIds.has(dedupKey)) {
+        this.warnedSenderOpenIds.add(dedupKey);
+        if (this.warnedSenderOpenIds.size > 500) {
+          this.warnedSenderOpenIds.clear();
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] Unexpected senderOpenId format: ${sanitizeLogText(senderOpenId, 64)}\n`,
+        );
+      }
+    }
+    // Unified fallback: whenever the full OPENID can't be shown (mention
+    // support off, the value failing the 32-hex shape, or only a legacy author
+    // ID being available), surface a short 8-code-point identity fragment +
+    // ellipsis so same-nickname senders stay distinguishable without exposing
+    // a constructible full <@OPENID>.
+    // Truncation is code-point aware (truncateCodePoints), so an emoji-laden
+    // malformed id can't be split mid-surrogate-pair into a lone surrogate.
+    const senderTag = showSenderOpenId
+      ? `(${senderOpenId})`
+      : senderIdentity
+        ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
+        : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+    const displayText = sanitizePromptText(safeDisplayText);
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2350,6 +2573,7 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       text,
+      displayText,
       senderName,
     };
   }
@@ -2400,6 +2624,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText: sanitizePromptText(safeContent),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2452,7 +2677,8 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, senderName, safeName, cleanText } = result;
+    const { isSlash, text, displayText, senderName, safeName, cleanText } =
+      result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2486,6 +2712,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2531,7 +2758,15 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
+    const {
+      isSlash,
+      text,
+      displayText,
+      senderName,
+      isAtBot,
+      safeName,
+      cleanText,
+    } = result;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2629,6 +2864,7 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
+      displayText,
       senderId,
       senderName,
       messageId: event.id,
@@ -2687,6 +2923,12 @@ export class QQChannel extends ChannelBase {
     const replyEntry = this.replyMsgId.get(groupId);
     if (replyEntry) this.msgSeqMap.delete(replyEntry.msgId);
     this.replyMsgId.delete(groupId);
+    for (const context of this.replyContextByMessageId.values()) {
+      if (context.chatId === groupId) {
+        this.replyContextByMessageId.delete(context.msgId);
+        this.msgSeqMap.delete(context.msgId);
+      }
+    }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)

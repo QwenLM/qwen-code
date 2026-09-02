@@ -4,17 +4,72 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
+  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
   readonly routePrefix: string;
+}
+
+export function resolveWorkspaceEntryFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceEntry | null {
+  const selector = req.params[paramName] ?? '';
+  const byId = registry.getEntryByWorkspaceId(selector);
+  if (byId) return byId;
+
+  if (!isPortableAbsolutePath(selector)) {
+    res.status(400).json({
+      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
+      code: 'workspace_mismatch',
+    });
+    return null;
+  }
+
+  const exact = registry.getEntryByWorkspaceCwd(selector);
+  if (exact) return exact;
+  if (path.isAbsolute(selector) && !isUncPath(selector)) {
+    try {
+      const canonicalSelector = canonicalizeWorkspace(selector);
+      const canonicalMatch = registry.getEntryByWorkspaceCwd(canonicalSelector);
+      if (canonicalMatch) return canonicalMatch;
+      for (const candidate of registry.listEntries()) {
+        if (
+          canonicalizeWorkspace(candidate.workspaceCwd) === canonicalSelector
+        ) {
+          return candidate;
+        }
+      }
+    } catch {
+      // Fall through to lexical matching for unavailable paths.
+    }
+  }
+  const normalizedSelector = normalizePortableAbsolutePath(selector);
+  const entry = registry
+    .listEntries()
+    .find(
+      (candidate) =>
+        normalizePortableAbsolutePath(candidate.workspaceCwd) ===
+        normalizedSelector,
+    );
+  if (!entry) {
+    sendWorkspaceMismatch(res, registry);
+    return null;
+  }
+  return entry;
 }
 
 export function isPortableAbsolutePath(value: string): boolean {
@@ -74,15 +129,18 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
   selector: string,
 ): WorkspaceRuntime | undefined {
   const exact = registry.getManagedByWorkspaceCwd(selector);
-  if (exact) return exact;
+  if (exact && !isInternalWorkspaceRuntime(exact)) return exact;
 
   if (path.isAbsolute(selector) && !isUncPath(selector)) {
     try {
       const canonicalSelector = canonicalizeWorkspace(selector);
       const canonicalMatch =
         registry.getManagedByWorkspaceCwd(canonicalSelector);
-      if (canonicalMatch) return canonicalMatch;
+      if (canonicalMatch && !isInternalWorkspaceRuntime(canonicalMatch)) {
+        return canonicalMatch;
+      }
       for (const runtime of registry.listManaged()) {
+        if (isInternalWorkspaceRuntime(runtime)) continue;
         if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
           return runtime;
         }
@@ -97,8 +155,9 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
     .listManaged()
     .find(
       (runtime) =>
+        !isInternalWorkspaceRuntime(runtime) &&
         normalizePortableAbsolutePath(runtime.workspaceCwd) ===
-        normalizedSelector,
+          normalizedSelector,
     );
 }
 
@@ -108,27 +167,99 @@ export function resolveWorkspaceRuntimeFromParam(
   res: Response,
   paramName = 'workspace',
 ): WorkspaceRuntime | null {
-  const selector = req.params[paramName] ?? '';
-  const byId = registry.getByWorkspaceId(selector);
-  if (byId) return byId;
-
-  if (!isPortableAbsolutePath(selector)) {
-    res.status(400).json({
-      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
-      code: 'workspace_mismatch',
-    });
-    return null;
-  }
-
-  const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-    registry,
-    selector,
-  );
+  const entry = resolveWorkspaceEntryFromParam(registry, req, res, paramName);
+  if (!entry) return null;
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
   if (!runtime) {
-    sendWorkspaceMismatch(res, registry);
+    sendWorkspaceRuntimeUnavailable(res, entry);
     return null;
   }
   return runtime;
+}
+
+export function resolveTrustedRuntime(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const runtime = resolveWorkspaceRuntimeFromParam(
+    registry,
+    req,
+    res,
+    paramName,
+  );
+  if (!runtime) return null;
+  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
+}
+
+export function resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  if (
+    typeof registry.getManagedEntryByWorkspaceId !== 'function' ||
+    typeof registry.getManagedEntryByWorkspaceCwd !== 'function'
+  ) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const selector = req.params[paramName] ?? '';
+  let entry = registry.getManagedEntryByWorkspaceId(selector);
+  if (!entry && isPortableAbsolutePath(selector)) {
+    entry = registry.getManagedEntryByWorkspaceCwd(selector);
+  }
+  if (!entry?.internal) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
+  if (!runtime) {
+    sendConversationRuntimeUnavailable(res);
+    return null;
+  }
+  return runtime;
+}
+
+export function sendConversationRuntimeUnavailable(res: Response): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'The Conversations runtime is temporarily unavailable.',
+    code: 'conversation_runtime_unavailable',
+    retryable: true,
+  });
+}
+
+export function sendWorkspaceRuntimeUnavailable(
+  res: Response,
+  entry?: Pick<WorkspaceEntry, 'workspaceCwd' | 'workspaceId'>,
+): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'Workspace runtime is not active.',
+    code: 'workspace_runtime_unavailable',
+    ...(entry
+      ? { workspaceCwd: entry.workspaceCwd, workspaceId: entry.workspaceId }
+      : {}),
+  });
+}
+
+export function isGenerationClosedError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'workspace_generation_closed',
+  );
+}
+
+export function sendGenerationClosedError(
+  res: Response,
+  error: unknown,
+): boolean {
+  if (!isGenerationClosedError(error)) return false;
+  sendWorkspaceRuntimeUnavailable(res);
+  return true;
 }
 
 export function resolveManagedWorkspaceRuntimeFromParam(
@@ -139,7 +270,7 @@ export function resolveManagedWorkspaceRuntimeFromParam(
 ): WorkspaceRuntime | null {
   const selector = req.params[paramName] ?? '';
   const byId = registry.getManagedByWorkspaceId(selector);
-  if (byId) return byId;
+  if (byId && !isInternalWorkspaceRuntime(byId)) return byId;
 
   if (!isPortableAbsolutePath(selector)) {
     res.status(400).json({
@@ -204,11 +335,68 @@ export function sendWorkspaceMismatch(
   res: Response,
   registry: WorkspaceRegistry,
 ): void {
-  const runtimes = registry.list();
   res.status(400).json({
     error:
       'Workspace mismatch: the requested workspace is not registered with this daemon.',
     code: 'workspace_mismatch',
-    workspaceCount: runtimes.length,
+    workspaceCount: registry.listEntries().length,
   });
+}
+
+/**
+ * Resolve an optional `?cwd=` query parameter to a path contained within the
+ * workspace root. Returns the workspace root itself when the parameter is
+ * absent, unresolvable, or escapes the workspace boundary.
+ */
+export function resolveContainedCwd(
+  req: Request,
+  workspaceCwd: string,
+): string {
+  const rawCwd = req.query['cwd'];
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+    return workspaceCwd;
+  }
+  try {
+    const resolved = fs.realpathSync(path.resolve(rawCwd));
+    const root = fs.realpathSync(workspaceCwd);
+    if (isWithinRoot(resolved, root)) {
+      return resolved;
+    }
+  } catch {
+    // Path doesn't exist or can't be resolved — fall back to workspace root.
+  }
+  return workspaceCwd;
+}
+
+/**
+ * Strict variant of {@link resolveContainedCwd} for mutation routes. Returns
+ * `null` when a supplied `?cwd=` is invalid, inaccessible, or escapes the
+ * workspace boundary, so the caller can reject the request instead of
+ * silently operating on the workspace root.
+ */
+export function resolveContainedCwdOrFail(
+  req: Request,
+  workspaceCwd: string,
+): string | null {
+  const rawCwd = req.query['cwd'];
+  // Default to the workspace root only when the parameter is genuinely
+  // absent. A supplied-but-malformed value — an array (a duplicated
+  // ?cwd= param), an object, or an empty string — must fail closed so a
+  // mutation never silently runs in the registered root.
+  if (rawCwd === undefined) {
+    return workspaceCwd;
+  }
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+    return null;
+  }
+  try {
+    const resolved = fs.realpathSync(path.resolve(rawCwd));
+    const root = fs.realpathSync(workspaceCwd);
+    if (isWithinRoot(resolved, root)) {
+      return resolved;
+    }
+  } catch {
+    // Path doesn't exist or can't be resolved.
+  }
+  return null;
 }

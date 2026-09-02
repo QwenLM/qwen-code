@@ -6,6 +6,7 @@
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { parseToolCallArguments } from '../tool-call-arguments.js';
 
 const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
@@ -49,7 +50,12 @@ export class StreamingToolCallParser {
   private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
-  /** Remapped slots awaiting a stable ID from a later chunk. */
+  /**
+   * Maps a provider index to the actual slot it was remapped to on collision.
+   * Two readers consume it: an id that arrives after its name/args adopts the
+   * slot, and later id-less continuation chunks at the same provider index are
+   * routed to it.
+   */
   private pendingIndexRemaps: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
@@ -110,10 +116,18 @@ export class StreamingToolCallParser {
       if (this.idToIndexMap.has(id)) {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
-      } else if (this.pendingIndexRemaps.has(index)) {
-        // Some providers stream name or arguments before the stable ID.
+      } else if (
+        this.pendingIndexRemaps.has(index) &&
+        !this.toolCallMeta.get(this.pendingIndexRemaps.get(index)!)?.id
+      ) {
+        // Some providers stream name or arguments before the stable ID. Only
+        // adopt the remapped slot while it has not yet been claimed by an id:
+        // once it has one, the remap only exists to route later id-less
+        // continuation chunks, so a brand-new id must not hijack that slot.
+        // The remap is deliberately left in place — the re-registration on the
+        // common path below keeps `index -> actualIndex` alive so subsequent
+        // id-less continuation chunks at this provider index still resolve here.
         actualIndex = this.pendingIndexRemaps.get(index)!;
-        this.pendingIndexRemaps.delete(index);
         this.idToIndexMap.set(id, actualIndex);
       } else {
         // New tool call ID
@@ -206,7 +220,7 @@ export class StreamingToolCallParser {
       } else {
         this.namelessToolCallIndices.delete(actualIndex);
       }
-      if (!meta.id && actualIndex !== index) {
+      if (actualIndex !== index) {
         this.pendingIndexRemaps.set(index, actualIndex);
       }
       return { actualIndex, complete: false };
@@ -236,7 +250,7 @@ export class StreamingToolCallParser {
         meta.name = validName;
       }
     }
-    if (!meta.id && actualIndex !== index) {
+    if (actualIndex !== index) {
       this.pendingIndexRemaps.set(index, actualIndex);
     }
 
@@ -335,15 +349,7 @@ export class StreamingToolCallParser {
   hasInvalidToolCallArguments(): boolean {
     for (const [index, buffer] of this.buffers.entries()) {
       if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
-
-      try {
-        const args: unknown = JSON.parse(buffer);
-        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-          return true;
-        }
-      } catch {
-        return true;
-      }
+      if (!parseToolCallArguments(buffer).ok) return true;
     }
     return false;
   }

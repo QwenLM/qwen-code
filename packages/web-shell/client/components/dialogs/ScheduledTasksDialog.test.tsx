@@ -30,10 +30,12 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  sessionMode?: 'persistent' | 'per_run';
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
     sessionId?: string;
+    sessionDispatchFailed?: boolean;
   }>;
 }
 
@@ -50,14 +52,16 @@ const { actions } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
 }));
 
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
 const { I18nProvider } = await import('../../i18n');
+const { WebShellPortalRootContext } = await import('../../portalRoot');
 
 let container: HTMLDivElement | null = null;
+let portalRoot: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 async function mount(
@@ -69,6 +73,23 @@ async function mount(
       sessionId: string | null,
     ) => void | Promise<void>;
     onError?: (error: unknown, message: string) => void;
+    currentSession?: {
+      sessionId: string;
+      workspaceCwd: string;
+      parentSessionId?: string;
+      sourceType?: string;
+      sourceId?: string;
+      hasActivePrompt?: boolean;
+      pendingInteractionCount?: number;
+    };
+    currentSessionSchedulingAvailable?: boolean;
+    lockedWorkspace?: {
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      kind: 'ordinary';
+    };
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -84,21 +105,41 @@ async function mount(
     servers: [],
   });
   container = document.createElement('div');
+  portalRoot = document.createElement('div');
+  portalRoot.setAttribute('data-web-shell-portal-root', '');
+  portalRoot.setAttribute('data-web-shell-shadcn', '');
   document.body.appendChild(container);
+  document.body.appendChild(portalRoot);
   root = createRoot(container);
-  await act(async () => {
-    root!.render(
-      <I18nProvider language="en">
-        <ScheduledTasksDialog
-          onRunPrompt={opts.onRunPrompt ?? vi.fn()}
-          onCreateViaChat={vi.fn()}
-          onOpenSession={opts.onOpenSession}
-          onError={opts.onError ?? vi.fn()}
-        />
-      </I18nProvider>,
-    );
-  });
+  const render = async (nextOpts: typeof opts) => {
+    await act(async () => {
+      root!.render(
+        <WebShellPortalRootContext.Provider value={portalRoot}>
+          <I18nProvider language="en">
+            <ScheduledTasksDialog
+              onRunPrompt={nextOpts.onRunPrompt ?? vi.fn()}
+              onCreateViaChat={vi.fn()}
+              onOpenSession={nextOpts.onOpenSession}
+              currentSession={nextOpts.currentSession}
+              currentSessionSchedulingAvailable={
+                nextOpts.currentSessionSchedulingAvailable
+              }
+              lockedWorkspace={nextOpts.lockedWorkspace}
+              onError={nextOpts.onError ?? vi.fn()}
+            />
+          </I18nProvider>
+        </WebShellPortalRootContext.Provider>,
+      );
+    });
+  };
+  await render(opts);
   await flush();
+  return {
+    rerender: async (nextOpts: typeof opts) => {
+      await render(nextOpts);
+      await flush();
+    },
+  };
 }
 
 // Flush the async list load (and any post-action reload) so state settles.
@@ -137,6 +178,12 @@ function findFrequencySelect(): HTMLSelectElement | undefined {
   );
 }
 
+function findSessionModeSelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (select) => !!select.querySelector('option[value="per_run"]'),
+  );
+}
+
 function deferred<T = unknown>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -160,8 +207,10 @@ function dispatchClipboardEvent(
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  portalRoot?.remove();
   root = null;
   container = null;
+  portalRoot = null;
   vi.clearAllMocks();
 });
 
@@ -181,6 +230,201 @@ const baseTask = (over: Partial<MockTask>): MockTask => ({
 });
 
 describe('ScheduledTasksDialog editing', () => {
+  const currentSession = {
+    sessionId: '10000000-0000-4000-8000-000000000001',
+    workspaceCwd: '/repo/main',
+    sourceType: 'default',
+  };
+
+  async function enterPromptAndCreate(value: string) {
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]');
+    if (!prompt) throw new Error('prompt editor not found');
+    act(() => {
+      prompt.textContent = value;
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+  }
+
+  it('hides session binding without the daemon capability', async () => {
+    await mount([], { currentSession });
+
+    click(findButton('New scheduled task'));
+
+    expect(document.body.textContent).not.toContain('Current conversation');
+  });
+
+  it('defaults to a fresh conversation per run and omits sessionId', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    expect(sessionSelect?.value).toBe('per_run');
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionMode: 'per_run' }),
+      undefined,
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'sessionId',
+    );
+  });
+
+  it('sends the outer current session only after an explicit selection', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    act(() => {
+      sessionSelect!.value = 'current';
+      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: currentSession.sessionId,
+        sessionMode: 'persistent',
+      }),
+      undefined,
+    );
+  });
+
+  it('returns to a fresh session per run when the capability disappears', async () => {
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+    const { rerender } = await mount([], {
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    const sessionSelect = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="current"]'),
+    );
+    act(() => {
+      sessionSelect!.value = 'current';
+      sessionSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await rerender({ currentSession });
+    expect(document.querySelector('option[value="current"]')).toBeNull();
+    await enterPromptAndCreate('continue later');
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionMode: 'per_run' }),
+      undefined,
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'sessionId',
+    );
+  });
+
+  it('reenables the current conversation when its interaction resolves', async () => {
+    const { rerender } = await mount([], {
+      currentSession: { ...currentSession, pendingInteractionCount: 1 },
+      currentSessionSchedulingAvailable: true,
+    });
+
+    click(findButton('New scheduled task'));
+    expect(
+      document.querySelector<HTMLOptionElement>('option[value="current"]')
+        ?.disabled,
+    ).toBe(true);
+    await rerender({
+      currentSession: { ...currentSession, pendingInteractionCount: 0 },
+      currentSessionSchedulingAvailable: true,
+    });
+    expect(
+      document.querySelector<HTMLOptionElement>('option[value="current"]')
+        ?.disabled,
+    ).toBe(false);
+  });
+
+  it.each([
+    ['missing', undefined, [], undefined],
+    ['busy', { ...currentSession, hasActivePrompt: true }, [], undefined],
+    [
+      'pending interaction',
+      { ...currentSession, pendingInteractionCount: 1 },
+      [],
+      undefined,
+    ],
+    [
+      'child session',
+      { ...currentSession, parentSessionId: 'parent-1' },
+      [],
+      undefined,
+    ],
+    [
+      'channel source',
+      { ...currentSession, sourceType: 'channel' },
+      [],
+      undefined,
+    ],
+    [
+      'workspace mismatch',
+      currentSession,
+      [],
+      {
+        id: 'other',
+        cwd: '/repo/other',
+        primary: false,
+        trusted: true,
+        kind: 'ordinary' as const,
+      },
+    ],
+    [
+      'existing task binding',
+      currentSession,
+      [baseTask({ sessionId: currentSession.sessionId })],
+      undefined,
+    ],
+  ])(
+    'disables current-session binding for %s',
+    async (_name, session, tasks, lockedWorkspace) => {
+      await mount(tasks, {
+        currentSession: session,
+        currentSessionSchedulingAvailable: true,
+        lockedWorkspace,
+      });
+
+      click(findButton('New scheduled task'));
+      const option = document.querySelector<HTMLOptionElement>(
+        'option[value="current"]',
+      );
+      expect(option?.disabled).toBe(true);
+    },
+  );
+
+  it('uses flat icons for task actions and session mode status', async () => {
+    await mount([baseTask({ sessionMode: 'per_run' })]);
+
+    for (const label of ['Run now', 'Edit', 'Delete']) {
+      const action = document.querySelector(`[aria-label="${label}"]`);
+      expect(action?.querySelector('svg')).not.toBeNull();
+      expect(action?.textContent?.trim()).toBe('');
+    }
+    expect(
+      document
+        .querySelector(
+          '[title="Each run gets a clean context and its own conversation."]',
+        )
+        ?.querySelector('svg'),
+    ).not.toBeNull();
+  });
   it('keeps the prompt placeholder outside the editable textbox', async () => {
     await mount([]);
 
@@ -192,6 +436,31 @@ describe('ScheduledTasksDialog editing', () => {
       'What should this task do?',
     );
     expect(document.body.textContent).toContain('What should this task do?');
+  });
+
+  it('defaults new tasks to a fresh session for every run', async () => {
+    actions.createScheduledTask.mockResolvedValue(
+      baseTask({ sessionMode: 'per_run' }),
+    );
+    await mount([]);
+    click(findButton('New scheduled task'));
+
+    expect(findSessionModeSelect()?.value).toBe('per_run');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'review pull requests';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'review pull requests',
+        sessionMode: 'per_run',
+      }),
+      undefined,
+    );
   });
 
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
@@ -222,6 +491,7 @@ describe('ScheduledTasksDialog editing', () => {
         cron: '30 12 * * 1-5',
         prompt: 'summarize the day',
         name: 'Digest',
+        sessionMode: 'persistent',
       },
       undefined,
     );
@@ -255,6 +525,55 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({
         prompt: promptText,
+      }),
+      undefined,
+    );
+  });
+
+  it('removes a prompt reference tag and its adjacent spacer', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+    expect(removeButtons[0]?.getAttribute('aria-label')).toBe(
+      'Remove clickhouse',
+    );
+
+    click(removeButtons[1]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse @mcp:repo-tools',
+      }),
+      undefined,
+    );
+  });
+
+  it('removes spacing before a trailing prompt reference tag', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+
+    click(removeButtons[2]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse /review',
       }),
       undefined,
     );
@@ -326,7 +645,7 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
+          displayName: '\u001b[31mAlibaba Cloud\u001b[0m\u202e\u0007',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -374,8 +693,12 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButtonContaining('repo-tools'));
     await flush();
 
-    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
-      'alibabacloud-compute-suite',
+    const extensionTag = document.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('Alibaba Cloud');
+    expect(extensionTag?.dataset.promptTagSerialized).toBe(
+      '@ext:alibabacloud-compute-suite',
     );
 
     click(findButton('Create'));
@@ -465,6 +788,29 @@ describe('ScheduledTasksDialog editing', () => {
     expect(findButtonContaining('alibabacloud-compute-suite')).toBeUndefined();
   });
 
+  it('renders the reference picker inside the Web Shell portal root', async () => {
+    await mount([]);
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Skills'));
+    await flush();
+
+    const picker = document.querySelector('[role="listbox"]');
+    expect(picker).not.toBeNull();
+    expect(portalRoot?.contains(picker)).toBe(true);
+  });
+
   it('drops plain text only into the prompt editor', async () => {
     await mount([]);
     click(findButton('New scheduled task'));
@@ -542,7 +888,6 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -565,6 +910,11 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
     click(findButtonContaining('alibabacloud-compute-suite'));
     await flush();
+
+    const extensionTag = prompt.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('alibabacloud-compute-suite');
 
     click(findButton('Create'));
     await flush();
@@ -628,6 +978,25 @@ describe('ScheduledTasksDialog run history', () => {
 });
 
 describe('ScheduledTasksDialog run now', () => {
+  it('lets the daemon run a per-run task without enqueueing its controller session', async () => {
+    const onRunPrompt = vi.fn();
+    await mount(
+      [
+        baseTask({
+          sessionId: 'controller-1',
+          sessionMode: 'per_run',
+          prompt: 'do it',
+        }),
+      ],
+      { onRunPrompt },
+    );
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(onRunPrompt).not.toHaveBeenCalled();
+  });
+
   it('records the run and executes the prompt in the task’s bound session', async () => {
     const onRunPrompt = vi.fn();
     await mount([baseTask({ sessionId: 'sess-9', prompt: 'do it' })], {
@@ -636,7 +1005,7 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
   });
 
@@ -744,7 +1113,7 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
@@ -814,6 +1183,31 @@ describe('ScheduledTasksDialog far-future countdown', () => {
 });
 
 describe('ScheduledTasksDialog view-history (bound session)', () => {
+  it('opens the individual child session for a per-run history entry', async () => {
+    const onOpenSession = vi.fn();
+    await mount(
+      [
+        baseTask({
+          sessionId: 'controller-1',
+          sessionMode: 'per_run',
+          runs: [
+            {
+              at: 1_700_000_100_000,
+              kind: 'scheduled',
+              sessionId: 'child-1',
+            },
+          ],
+        }),
+      ],
+      { onOpenSession },
+    );
+
+    expect(findButton('View conversation (1)')).toBeUndefined();
+    click(findButton('Run history (1)'));
+    click(document.querySelector('[title="Open this run session"]'));
+    expect(onOpenSession).toHaveBeenCalledWith('child-1');
+  });
+
   it('opens the bound session when its history control is clicked', async () => {
     const onOpenSession = vi.fn();
     await mount(
@@ -880,8 +1274,20 @@ describe('ScheduledTasksDialog next-run countdown', () => {
 
 describe('ScheduledTasksDialog multi-workspace', () => {
   const WORKSPACES = [
-    { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
-    { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    {
+      id: 'id-main',
+      cwd: '/repo/main',
+      displayName: 'Main Workspace',
+      primary: true,
+      trusted: true,
+    },
+    {
+      id: 'id-other',
+      cwd: '/repo/other',
+      displayName: 'Payments API',
+      primary: false,
+      trusted: true,
+    },
     { id: 'id-locked', cwd: '/repo/locked', primary: false, trusted: false },
   ];
 
@@ -947,13 +1353,13 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
 
-    // Each card carries a workspace badge (title = cwd), labeled by basename.
+    // Each card carries a workspace badge (title = cwd), labeled for display.
     const primaryBadge = document.querySelector('[title="/repo/main"]');
     const secondaryBadge = document.querySelector('[title="/repo/other"]');
-    expect(primaryBadge?.textContent).toContain('main');
+    expect(primaryBadge?.textContent).toContain('Main Workspace');
     // The primary is no longer singled out with a "(primary)" tag.
     expect(primaryBadge?.textContent).not.toContain('(primary)');
-    expect(secondaryBadge?.textContent).toContain('other');
+    expect(secondaryBadge?.textContent).toContain('Payments API');
   });
 
   it('creates a task in the workspace chosen in the picker', async () => {
@@ -964,14 +1370,14 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
-    // Options show the workspace basename only — no "(primary)" tag on the
-    // primary entry (the label this PR removed). Guards the visible dropdown
+    // Options show each workspace label with no "(primary)" tag on the primary
+    // entry (the label this PR removed). Guards the visible dropdown
     // text, which the count/value assertions above do not cover.
     expect(
       Array.from(wsSelect!.querySelectorAll('option')).map(
         (o) => o.textContent,
       ),
-    ).toEqual(['main', 'other']);
+    ).toEqual(['Main Workspace', 'Payments API']);
 
     // Choose the secondary workspace.
     act(() => {

@@ -15,7 +15,7 @@ import {
   type Client,
 } from '@modelcontextprotocol/sdk/client/index.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { SdkControlClientTransport } from '@qwen-code/qwen-code-core';
+import { SdkControlClientTransport, Storage } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 import {
@@ -23,6 +23,8 @@ import {
   type ClientMcpServerProvider,
 } from './client-mcp-ws.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -184,6 +186,7 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
     return new Promise<void>((resolve, reject) => {
       const app = express();
       app.use(express.json());
+      const archiveCoordinator = new SessionArchiveCoordinator();
       const handle = mountAcpHttp(app, fakeBridge, {
         boundWorkspace: '/ws',
         workspace: fakeWorkspace,
@@ -193,6 +196,17 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
         allowUnpairedClientMcp: opts.allowUnpairedClientMcp,
         verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
         ...(opts.withProvider === false ? {} : { clientMcpProvider: provider }),
+        archiveCoordinator,
+        requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+          archiveCoordinator,
+          getBridges: () => [fakeBridge],
+          getPersistenceTargets: () => [
+            {
+              workspaceCwd: '/ws',
+              runtimeBaseDir: Storage.getRuntimeBaseDir(),
+            },
+          ],
+        }),
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;

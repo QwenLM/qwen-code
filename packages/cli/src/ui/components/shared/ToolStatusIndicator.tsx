@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { ToolCallStatus } from '../../types.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
+import { RespondingSpinner } from '../RespondingSpinner.js';
 import {
   TOOL_STATUS,
   SHELL_COMMAND_NAME,
@@ -15,6 +15,11 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 
+// One column for the status glyph plus one trailing column so the tool
+// name never sits flush against the indicator. Paired with flexShrink={0}
+// on the indicator Box so the reservation survives a tight header row.
+// The fixed 2-col width ensures both 1-col and 2-col glyphs push text
+// to the same start position.
 export const STATUS_INDICATOR_WIDTH = 2;
 
 type ToolStatusIndicatorProps = {
@@ -30,12 +35,14 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
   const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
 
   return (
-    <Box minWidth={STATUS_INDICATOR_WIDTH}>
+    // minWidth (not width) so the box can grow for wider content like the
+    // tmux spinner frames or test mocks; all production glyphs are ≤2 cols.
+    <Box minWidth={STATUS_INDICATOR_WIDTH} flexShrink={0}>
       {status === ToolCallStatus.Pending && (
         <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
       )}
       {status === ToolCallStatus.Executing && (
-        <GeminiRespondingSpinner
+        <RespondingSpinner
           spinnerType="toggle"
           nonRespondingDisplay={TOOL_STATUS.EXECUTING}
         />

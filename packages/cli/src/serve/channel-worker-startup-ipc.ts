@@ -16,6 +16,12 @@ export interface ChannelStartupFailure {
   message: string;
 }
 
+export interface ChannelAdapterSnapshot {
+  name: string;
+  state: 'starting' | 'connected' | 'error';
+  error?: string;
+}
+
 export interface ChannelStartupFailureMessage {
   type: 'channel_startup_failure';
   failure: ChannelStartupFailure;

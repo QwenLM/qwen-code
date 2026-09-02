@@ -6,6 +6,11 @@
 
 export { createServeApp, type ServeAppDeps } from './server.js';
 export {
+  getServeAppLifecycle,
+  type ServeAppLifecycle,
+  type ServeAppLifecycleBindingOptions,
+} from './serve-app-lifecycle.js';
+export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
@@ -37,6 +42,7 @@ export {
 export {
   ACP_PREFLIGHT_KINDS,
   BridgeTimeoutError,
+  SessionRestoreTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_ERROR_KINDS,
   SERVE_STATUS_EXT_METHODS,

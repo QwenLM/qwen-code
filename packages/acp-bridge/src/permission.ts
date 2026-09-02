@@ -5,36 +5,32 @@
  */
 
 /**
- * `PermissionMediator` — type-only interface contract for daemon
- * permission flow. **No implementation lives here.** Permission voting
- * still runs inside `BridgeClient.requestPermission`
- * (`@qwen-code/acp-bridge/bridgeClient`) and
- * `respondToPermission` (inside `createHttpAcpBridge` factory closure
- * at `@qwen-code/acp-bridge/bridge` after F1 step 3), hard-coded to
- * `first-responder`. A future change will move that code behind this
- * interface and add the other three policies.
+ * `PermissionMediator` — interface contract for daemon permission flow.
+ * `MultiClientPermissionMediator` in `permissionMediator.ts` owns the
+ * policy dispatch and pending/resolved permission state used by
+ * `BridgeClient.requestPermission` plus the `respondToPermission` route
+ * in `createHttpAcpBridge`.
  *
- * The four policies are ordered from cheapest to strongest:
+ * The four policy contracts are ordered from cheapest to strongest:
  *
  * - `first-responder` — first valid `POST /permission/:requestId`
  *   wins; later voters get `permission_already_resolved`. Today's
  *   default; preserves the live-collaboration UX.
  * - `designated` — only the `originatorClientId` that started the
  *   prompt may answer; other clients see `permission_forbidden`.
- *   Use case: per-tenant SaaS where a UI surface must own its own
- *   approvals.
- * - `consensus` — N-of-M quorum across pair-token-authenticated
- *   clients before resolving; intermediate `permission_partial_vote`
- *   events let UIs render progress. Use case: enterprise change
- *   review where two operators must agree.
+ *   Prompts with no originator fall back to first-responder. Use case:
+ *   per-tenant SaaS where a UI surface must own its own approvals.
+ * - `consensus` — N-of-M quorum across the session client IDs
+ *   captured when the permission request is issued. Client identity is
+ *   self-declared until pair-token authentication lands; intermediate
+ *   `permission_partial_vote` events let UIs render progress. Use case:
+ *   enterprise change review where two operators must agree.
  * - `local-only` — refuses any HTTP voter; the prompt blocks until
  *   a loopback client (the local TUI super-client) resolves it.
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `bridgeClient.ts BridgeClient.requestPermission` for the
- * current first-responder implementation; the `FIXME(stage-1.5)`
- * block above that method scoped this contract.
+ * See `permissionMediator.ts` for the implementation details.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -43,10 +39,7 @@ export type PermissionPolicy =
   | 'local-only';
 
 /**
- * One pending permission tracked by a `PermissionMediator`. The
- * shape mirrors the current `PendingPermission` record in
- * `@qwen-code/acp-bridge/bridgeClient`
- * so the mediation implementation's lift is a structural rename rather than a redesign.
+ * One pending permission tracked by a `PermissionMediator`.
  */
 export interface PermissionRequestRecord {
   /** ACP `RequestPermission` request id, unique per session. */
@@ -55,6 +48,8 @@ export interface PermissionRequestRecord {
    * always per-session — workspace-scoped permission is out of
    * scope for v1. */
   readonly sessionId: string;
+  /** Admitted prompt that produced this permission request, when known. */
+  readonly promptId?: string;
   /**
    * `originatorClientId` that triggered the underlying prompt.
    * `designated` policy votes are only accepted from this id;
@@ -146,9 +141,7 @@ export type PermissionResolution =
 
 /**
  * The contract `qwen serve`'s permission route layer talks to.
- * Today there is one implementation (first-responder) wired
- * inline in `BridgeClient`; The implementation will provide all four behind
- * this surface plus pair-token authentication and an audit log.
+ * `MultiClientPermissionMediator` provides the implementation.
  */
 export interface PermissionMediator {
   /** Active policy. May be reconfigured per session in future

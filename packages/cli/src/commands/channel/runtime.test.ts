@@ -1,18 +1,30 @@
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  channelLoopPath,
+  daemonChannelLoopPath,
+  daemonChannelStateDir,
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   sessionsPath,
 } from './runtime.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
-  hashDaemonWorkspace: (workspace: string) =>
-    workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    APPROVAL_MODES: actual.APPROVAL_MODES,
+    isInternalSecretEnvVar: actual.isInternalSecretEnvVar,
+    Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+    hashDaemonWorkspace: (workspace: string) =>
+      workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
+  };
+});
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: () => ({ merged: {} }),
@@ -34,12 +46,63 @@ vi.mock('./channel-registry.js', () => ({
 
 it('isolates daemon route stores by workspace hash', () => {
   expect(daemonSessionRoutesPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'routes.json',
+    ),
   );
   expect(daemonSessionRoutesPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/routes.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'routes.json'),
   );
   expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates observed contact stores beside daemon routes', () => {
+  expect(daemonObservedContactsPath('/workspace')).toBe(
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'observed-contacts.json',
+    ),
+  );
+  expect(daemonObservedContactsPath('/other')).toBe(
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'other-hash',
+      'observed-contacts.json',
+    ),
+  );
+  expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates daemon loop stores by workspace hash', () => {
+  expect(daemonChannelLoopPath('/workspace')).toBe(
+    path.join('/tmp/qwen', 'channels', 'daemon', 'workspace-hash', 'cron.json'),
+  );
+  expect(daemonChannelLoopPath('/other')).toBe(
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'cron.json'),
+  );
+  expect(daemonChannelLoopPath('/workspace')).not.toBe(channelLoopPath());
+  expect(daemonChannelLoopPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates daemon channel state by workspace and safe instance key', () => {
+  const stateDir = daemonChannelStateDir('/workspace', 'team/../bot');
+
+  expect(stateDir.replaceAll(path.sep, '/')).toMatch(
+    /^\/tmp\/qwen\/channels\/daemon\/workspace-hash\/instances\/team_\.\._bot-[0-9a-f]{16}$/,
+  );
+  expect(stateDir.replaceAll(path.sep, '/')).not.toContain('/../');
+  expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
+  expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
+  expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);
 });
 
 describe('parseConfiguredChannels', () => {
@@ -78,7 +141,7 @@ describe('parseConfiguredChannels', () => {
         config: expect.objectContaining({
           type: 'telegram',
           token: 'secret',
-          cwd: '/workspace',
+          cwd: path.resolve('/workspace'),
         }),
       }),
     ]);
@@ -294,6 +357,137 @@ describe('registerPermissionRelay', () => {
       requestId: 'req-1',
       outcome: { outcome: 'cancelled' },
     });
+  });
+});
+
+describe('registerBackgroundResponseRelay', () => {
+  it('routes the final background response without joining the active prompt', async () => {
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi.fn().mockResolvedValue(undefined),
+    };
+
+    registerBackgroundResponseRelay(
+      bridge as never,
+      router as never,
+      new Map([['telegram', channel as never]]),
+    );
+    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+
+    await vi.waitFor(() => {
+      expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
+        'session-1',
+        'Background final answer.',
+      );
+    });
+  });
+
+  it('logs when no route exists for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = { getTarget: vi.fn() };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No route for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs when the channel is not found for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No channel "telegram" for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs when dispatchBackgroundResponse rejects', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi
+        .fn()
+        .mockRejectedValue(new Error('network down')),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map([['telegram', channel as never]]),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'Background response relay failed for session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 

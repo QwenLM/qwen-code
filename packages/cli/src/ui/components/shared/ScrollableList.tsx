@@ -61,6 +61,8 @@ function ScrollableList<T>(
           scrollHeight: 0,
           innerHeight: 0,
         },
+      getViewportRect: () =>
+        virtualizedListRef.current?.getViewportRect() ?? null,
     }),
     [],
   );

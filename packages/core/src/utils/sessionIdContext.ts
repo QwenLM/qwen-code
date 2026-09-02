@@ -61,3 +61,59 @@ export function getSessionProjectDir(sessionId: string): string | undefined {
 export function unregisterSessionProjectDir(sessionId: string): void {
   projectDirBySession.delete(sessionId);
 }
+
+/**
+ * Each session's active model id, keyed by its session id.
+ *
+ * A subprocess that reports which model ran (the /review compose step) needs
+ * the model that is ACTIVE in this session, and settings files are not a
+ * substitute: they miss /model switches and, under QWEN_HOME isolation,
+ * describe a different home entirely. So the live model is passed down through
+ * the environment.
+ *
+ * Keyed on the session for the same reason the project dir is: a single
+ * process-global slot holds whichever session booted first, and in daemon mode
+ * every later session would then hand its subprocesses another session's model
+ * — a confidently-wrong id, worse than an absent one.
+ */
+const modelBySession = new Map<string, string>();
+
+/**
+ * The same model qualified by WHERE it resolves — `<model>@<8 hex of
+ * authType+baseUrl>` — keyed per session for the reason above, and for one
+ * more: a bare id is unique only inside one provider configuration, so a
+ * session handed ANOTHER session's qualification is handed a confidently
+ * wrong answer that passes gates the coarse id would have failed.
+ */
+const modelIdentityBySession = new Map<string, string>();
+
+export function registerSessionModel(
+  sessionId: string,
+  model: string,
+  identity?: string,
+): void {
+  if (!sessionId || !model) return;
+  modelBySession.set(sessionId, model);
+  // Registered together, dropped together: an identity left behind by an
+  // earlier model would qualify the wrong one.
+  if (identity) modelIdentityBySession.set(sessionId, identity);
+  else modelIdentityBySession.delete(sessionId);
+}
+
+export function getSessionModel(sessionId: string): string | undefined {
+  return modelBySession.get(sessionId);
+}
+
+export function getSessionModelIdentity(sessionId: string): string | undefined {
+  return modelIdentityBySession.get(sessionId);
+}
+
+/**
+ * Drop a session's entry when it ends, for the same reason as
+ * {@link unregisterSessionProjectDir}: the map would otherwise grow one entry
+ * per session for the life of a daemon process.
+ */
+export function unregisterSessionModel(sessionId: string): void {
+  modelBySession.delete(sessionId);
+  modelIdentityBySession.delete(sessionId);
+}

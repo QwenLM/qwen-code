@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   CompressionStatus,
   getStartupContextLength,
+  isClearedMediaPlaceholder,
   isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
@@ -39,7 +40,7 @@ export function isRealUserTurn(
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
  */
-function isUserTextContent(content: Content): boolean {
+export function isUserTextContent(content: Content): boolean {
   if (content.role !== 'user') return false;
   if (!content.parts || content.parts.length === 0) return false;
 
@@ -56,14 +57,61 @@ function isUserTextContent(content: Content): boolean {
   // is NOT excluded.
   if (isSystemReminderContent(content)) return false;
 
-  return content.parts.some((part) => 'text' in part && part.text);
+  // Exclude microcompaction media-clear placeholders. `/compress-fast`'s
+  // microcompaction replaces the top-level inlineData/fileData parts of
+  // user entries with text placeholders. A media-only user entry never
+  // produced a UI user turn, but once cleared it carries a text part;
+  // counting it here desynchronizes the API prompt count from the UI turn
+  // count and makes the walk below truncate one turn early, silently
+  // dropping a turn the UI still shows. Match the FULL generated
+  // placeholder shape, not just its prefix: microcompaction never rewrites
+  // text parts, so a user prompt that merely begins with the prefix (e.g.
+  // a pasted placeholder) is genuine and must keep counting. An entry that
+  // mixes placeholders with real prompt text still counts (it IS a real
+  // turn).
+  //
+  // Known limitation (exact-match collision): a genuine prompt whose ENTIRE
+  // text equals a generated placeholder shape is indistinguishable from a
+  // cleared media-only entry once serialized — both carry the identical
+  // text. Such a prompt is excluded here, leaving the API prompt count one
+  // behind the UI turn count. Every rewind target AFTER the colliding turn
+  // then returns -1 and AppContainer surfaces a loud "Cannot rewind to a
+  // turn that was compressed" abort. Rewinding TO the colliding turn itself
+  // depends on position: as the first post-compression turn it works via
+  // the uiUserTurnCount === 0 shortcut; mid-history the walk lands on the
+  // next counted prompt and truncates one turn LATE, so the colliding
+  // turn's prompt+response stays in model context while the UI removes the
+  // turn (under-deletion of context, not loss of context the UI keeps).
+  // Disambiguating any of this durably needs a structural sentinel on
+  // cleared parts, which changes the persisted API history shape and is out
+  // of scope for this fix; see the pinned tests in historyMapping.test.ts.
+  //
+  // The ACP session's private `#isUserTextContent`
+  // (packages/cli/src/acp-integration/session/Session.ts) deliberately
+  // keeps the bare text-presence check (`'text' in part && part.text`),
+  // which counts these placeholders: ACP rewind maps against per-prompt
+  // file-history snapshots, which ARE created for media-only prompts, so
+  // cleared placeholders must stay counted there. Do not mirror this
+  // exclusion into that twin.
+  return content.parts.some(
+    (part) =>
+      'text' in part && !!part.text && !isClearedMediaPlaceholder(part.text),
+  );
 }
 
+/**
+ * Finds the last successful *summarizing* compression marker. Fast
+ * (rule-based) compression markers are excluded: `/compress-fast` removes no
+ * user prompts from the API history and inserts no summary prefix, so its
+ * marker is not a truncation boundary — treating it as one collapses the
+ * rewind anchor and silently drops the pre-marker history.
+ */
 function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
   return history.findLastIndex(
     (item) =>
       item.type === 'compression' &&
-      item.compression.compressionStatus === CompressionStatus.COMPRESSED,
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED &&
+      item.compression.compressionKind !== 'fast',
   );
 }
 
@@ -124,6 +172,16 @@ export function computeApiTruncationIndex(
   });
 
   if (uiUserTurnCount === 0) {
+    // Marker-less auto-compaction (entrance 3): the API history carries a
+    // compressed prefix but the UI has no summarizing compression boundary.
+    // Rewinding to the first turn would silently truncate to
+    // [prelude, summary, ack] and drop every real turn — fail loud instead.
+    if (
+      compressionIndex === -1 &&
+      startIndex > getStartupContextLength(apiHistory)
+    ) {
+      return -1;
+    }
     // Rewinding to the first user turn: keep only startup context (if any)
     return startIndex;
   }

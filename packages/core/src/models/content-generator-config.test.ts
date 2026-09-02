@@ -46,6 +46,7 @@ describe('buildAgentContentGeneratorConfig', () => {
     samplingParams: { temperature: 0.7, top_p: 0.9 },
     reasoning: { effort: 'high' as const },
     timeout: 30000,
+    streamIdleTimeoutMs: 300000,
     maxRetries: 3,
     contextWindowSize: 128000,
     extra_body: { custom: 'value' },
@@ -68,9 +69,23 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.samplingParams).toEqual({ temperature: 0.7, top_p: 0.9 });
       expect(result.reasoning).toEqual({ effort: 'high' });
       expect(result.timeout).toBe(30000);
+      expect(result.streamIdleTimeoutMs).toBe(300000);
       expect(result.maxRetries).toBe(3);
       expect(result.contextWindowSize).toBe(128000);
       expect(result.extra_body).toEqual({ custom: 'value' });
+    });
+
+    it('does not inherit mandatory thinking from another model', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        thinkingMandatory: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+      });
+
+      expect(result.thinkingMandatory).toBeUndefined();
     });
   });
 
@@ -88,6 +103,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.samplingParams).toBeUndefined();
       expect(result.reasoning).toBeUndefined();
       expect(result.timeout).toBeUndefined();
+      expect(result.streamIdleTimeoutMs).toBeUndefined();
       expect(result.maxRetries).toBeUndefined();
       expect(result.contextWindowSize).toBeUndefined();
       expect(result.extra_body).toBeUndefined();
@@ -139,6 +155,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       envKey: 'REGISTRY_API_KEY',
       generationConfig: {
         samplingParams: { temperature: 0.5 },
+        streamIdleTimeoutMs: 600000,
         contextWindowSize: 200000,
         reasoning: { effort: 'medium' as const },
       },
@@ -169,10 +186,29 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.apiKeyEnvKey).toBe('REGISTRY_API_KEY');
       // Registry generation config applied
       expect(result.samplingParams).toEqual({ temperature: 0.5 });
+      expect(result.streamIdleTimeoutMs).toBe(600000);
       expect(result.contextWindowSize).toBe(200000);
       expect(result.reasoning).toEqual({ effort: 'medium' });
       // Fields not in registry stay cleared (cross-provider)
       expect(result.extra_body).toBeUndefined();
+    });
+
+    it('should preserve a zero stream idle timeout from the registry', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        generationConfig: {
+          ...resolvedModel.generationConfig,
+          streamIdleTimeoutMs: 0,
+        },
+      });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'anthropic' },
+      );
+
+      expect(result.streamIdleTimeoutMs).toBe(0);
     });
 
     it('should prefer explicit auth overrides over registry values', () => {
@@ -209,6 +245,55 @@ describe('buildAgentContentGeneratorConfig', () => {
         'registry-model-id',
         'https://registry.example.com',
       );
+    });
+
+    it('does not inherit mandatory thinking from another same-provider model', () => {
+      const config = createMockConfig(
+        { ...parentConfig, thinkingMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.thinkingMandatory).toBeUndefined();
+    });
+
+    it('rejects image-only models for agent content generation', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        imageOnly: true,
+      });
+
+      expect(() =>
+        buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+          authType: 'anthropic',
+        }),
+      ).toThrow(
+        "Image-only model 'registry-model-id' cannot be used for content generation",
+      );
+    });
+
+    it('allows dual-role models for agent content generation', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        supportsImageGeneration: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'anthropic' },
+      );
+
+      expect(result.model).toBe('registry-model-id');
+      expect(result.authType).toBe('anthropic');
     });
   });
 

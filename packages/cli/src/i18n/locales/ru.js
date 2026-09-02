@@ -62,6 +62,7 @@ export default {
     'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
+  'Pasting…': 'Вставка…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -88,7 +89,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to view transcript': 'показать транскрипт',
+  'to expand details': 'развернуть детали',
 
   // ============================================================================
   // Поля системной информации
@@ -254,9 +255,6 @@ export default {
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
   Transcript: 'Транскрипт',
-  'to close': 'закрыть',
-  'to scroll': 'прокрутить',
-  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
   'Read {{count}} file': 'Прочитано файлов: {{count}}',
   'Read {{count}} files': 'Прочитано файлов: {{count}}',
   'Reading {{count}} file': 'Чтение файлов: {{count}}',
@@ -465,8 +463,10 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
   'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
   Auto: 'Авто',
   Text: 'Текст',
@@ -604,7 +604,7 @@ export default {
     'Пожалуйста, укажите имя удаляемого расширения как позиционный аргумент.',
   'Enables an extension.': 'Включает расширение.',
   'The name of the extension to enable.': 'Имя включаемого расширения.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Область для включения расширения. Если не задана, будет включено во всех областях.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно включено для области "{{scope}}".',
@@ -614,7 +614,7 @@ export default {
     'Недопустимая область: {{scope}}. Пожалуйста, используйте одну из {{scopes}}.',
   'Disables an extension.': 'Отключает расширение.',
   'The name of the extension to disable.': 'Имя отключаемого расширения.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'Область для отключения расширения.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно отключено для области "{{scope}}".',
@@ -810,8 +810,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with original user prompt text.':
-    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -1006,6 +1006,14 @@ export default {
     'Генерация сводки уже выполняется, дождитесь завершения предыдущего запроса',
   'No conversation found to summarize.':
     'Не найдено диалогов для создания сводки.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Путь сводки уже существует и не является сгенерированной сводкой: {{path}}',
+  'Summary path must be within the project root.':
+    'Путь сводки должен находиться в корне проекта.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Путь сводки указывает на существующий каталог: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Путь сводки заканчивается разделителем, но является существующим файлом: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1058,6 +1066,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1392,6 +1406,11 @@ export default {
   reviewed: 'проверено',
   'Code Changes:': 'Изменения кода:',
   Performance: 'Производительность',
+  'Generation Metrics': 'Метрики генерации',
+  'Latest Request': 'Последний запрос',
+  'Generation Time': 'Время генерации',
+  'Average TTFT': 'Среднее TTFT',
+  'Session TPS': 'TPS сеанса',
   'Wall Time:': 'Общее время:',
   'Agent Active:': 'Активность агента:',
   'API Time:': 'Время API:',
@@ -1467,8 +1486,18 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
+  Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен. Вызов агента, ожидающий одобрения инструмента, удерживает запуск в этом состоянии и продолжает учитываться в лимите активного времени, пока одобрение не будет обработано.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить. /clear, /branch и переключение сессий отменяют приостановленные запуски.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Подсказка: используйте `/workflows p <runId>` или «Фоновые задачи» + p для кооперативной приостановки/возобновления; используйте `/workflows <runId>` для подробностей.',
   Completed: 'Завершено',
   Failed: 'Ошибка',
   Stopped: 'Остановлено',
@@ -1967,6 +1996,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
@@ -2119,8 +2160,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Не удалось проверить обновления ({{reason}}). Проверьте сеть или настройки registry.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Проверка обновлений пропущена ({{reason}}) — выполните /update для повторной попытки.',
+  'registry did not respond within {{seconds}}s':
+    'registry не ответил за {{seconds}} с',
+  'registry unreachable': 'registry недоступен',
+  'registry error': 'ошибка registry',
   'Unable to check for updates: {{reason}}':
     'Невозможно проверить обновления: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2202,4 +2249,67 @@ export default {
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Управление автоматическими навыками проекта с учетом недавнего использования.',
+  'Show project auto-skill lifecycle status.':
+    'Показать состояние жизненного цикла автоматических навыков проекта.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Запустить обслуживание жизненного цикла автоматических навыков проекта.',
+  'Restore an archived project auto-skill.':
+    'Восстановить архивированный автоматический навык проекта.',
+  'Auto-skill curator': 'Куратор автоматических навыков',
+  'Last run: {{time}}': 'Последний запуск: {{time}}',
+  'Active: {{count}}': 'Активные: {{count}}',
+  'Stale: {{count}}': 'Устаревшие: {{count}}',
+  'Archived: {{count}}': 'Архивированные: {{count}}',
+  'Stale skills:': 'Устаревшие навыки:',
+  'Pinned skills:': 'Закрепленные навыки:',
+  'Archived skills:': 'Архивированные навыки:',
+  'Dry run complete.': 'Пробный запуск завершен.',
+  'Curator run complete.': 'Запуск куратора завершен.',
+  'Checked: {{count}}': 'Проверено: {{count}}',
+  'First observed: {{count}}': 'Обнаружено впервые: {{count}}',
+  'Marked stale: {{count}}': 'Отмечено как устаревшие: {{count}}',
+  'Reactivated: {{count}}': 'Повторно активировано: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Пропущено конфликтов архивирования: {{count}}',
+  'Archive candidates:': 'Кандидаты на архивирование:',
+  'Skipped archive collisions:': 'Пропущенные конфликты архивирования:',
+  'Skipped rename errors: {{count}}':
+    'Пропущено ошибок переименования: {{count}}',
+  'Skipped rename errors:': 'Пропущенные ошибки переименования:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Будет архивировано',
+  Archived: 'Архивировано',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Не удалось прочитать состояние куратора автоматических навыков: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Использование: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Не удалось запустить куратор автоматических навыков: {{message}}',
+  'Usage: /curator restore <directory>':
+    'Использование: /curator restore <каталог>',
+  'Restored auto-skill: {{name}}':
+    'Автоматический навык восстановлен: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Не удалось восстановить автоматический навык: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Исключить автоматический навык из автоматического обслуживания.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Вернуть закрепленный автоматический навык в автоматическое обслуживание.',
+  'Usage: /curator pin <directory>': 'Использование: /curator pin <каталог>',
+  'Usage: /curator unpin <directory>':
+    'Использование: /curator unpin <каталог>',
+  'Pinned auto-skill: {{name}}': 'Автоматический навык закреплен: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Автоматический навык откреплен: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Не удалось изменить закрепление автоматического навыка: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Изменения куратора автоматических навыков отключены в безопасном режиме.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 };

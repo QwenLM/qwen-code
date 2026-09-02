@@ -10,6 +10,8 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
+  recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -29,6 +31,27 @@ import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
+
+export async function recordAutoSkillCommandUsage(
+  config: Config | null,
+  command: SlashCommand,
+): Promise<void> {
+  const detail = command.skillDetail;
+  if (!config || detail?.level !== 'project' || !detail.filePath) {
+    return;
+  }
+  try {
+    await recordAutoSkillUsage(config.getProjectRoot(), {
+      name: detail.name,
+      level: 'project',
+      filePath: detail.filePath,
+    });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to record auto-skill command usage: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 /**
  * Loads user-level, project-level, and extension-level skills as slash
@@ -64,22 +87,17 @@ export class SkillCommandLoader implements ICommandLoader {
 
       const allSkills = [...userSkills, ...projectSkills, ...extensionSkills];
 
-      // Apply user-controlled `skills.disabled` filter HERE (inside the
-      // skill loader) rather than via `CommandService`'s global denylist —
-      // a global filter would also hide a same-named built-in command or
-      // MCP prompt. See `Config.getDisabledSkillNames` for why this is a
-      // live-read provider rather than a frozen field.
-      const disabled =
-        this.config?.getDisabledSkillNames() ?? new Set<string>();
+      // Filter by source here; a global denylist would also hide unrelated
+      // commands or skills with the same name.
       const visibleSkills = allSkills.filter(
-        (skill) => !disabled.has(skill.name.toLowerCase()),
+        (skill) => this.config?.isSkillEnabled(skill) ?? true,
       );
       const nonUserInvocableCount = visibleSkills.filter(
         (skill) => skill.userInvocable === false,
       ).length;
 
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
       return visibleSkills.map((skill) => {
@@ -95,7 +113,7 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `${t('Extension:')} ${skill.extensionName ?? 'unknown'}`
+          ? `${t('Extension:')} ${skill.extensionDisplayName ?? skill.extensionName ?? 'unknown'}`
           : skill.level === 'project'
             ? t('Project')
             : t('User');
@@ -122,17 +140,32 @@ export class SkillCommandLoader implements ICommandLoader {
             name: skill.name,
             description: skill.description,
             body: skill.body,
+            filePath: skill.filePath,
             level: skill.level,
             ...(isExtension && skill.extensionName
               ? { extensionName: skill.extensionName }
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            if (this.config && !this.config.isSkillEnabled(skill)) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: `Skill "${skill.name}" is disabled.`,
+              };
+            }
             // Auto-approve the skill's declared allowedTools before its body is submitted.
-            applySkillAllowedTools(
-              this.config?.getPermissionManager(),
-              skill.allowedTools,
-            );
+            if (this.config && canApplySkillSideEffects(skill, this.config)) {
+              applySkillAllowedTools(
+                this.config.getPermissionManager(),
+                skill.allowedTools,
+                { trustGated: skill.level === 'project' },
+              );
+            } else if (skill.allowedTools?.length) {
+              debugLogger.warn(
+                `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools.`,
+              );
+            }
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

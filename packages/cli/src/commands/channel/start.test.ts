@@ -14,11 +14,13 @@ const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home'),
 );
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
   vi.fn((cron: string) => {
@@ -66,6 +68,7 @@ const mockRouterGetTarget = vi.hoisted(() => vi.fn());
 const mockRouterHandleSessionDied = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
+const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
@@ -81,10 +84,12 @@ const mockChannelLoopStore = vi.hoisted(() =>
 );
 const mockChannelLoopSchedulerStart = vi.hoisted(() => vi.fn());
 const mockChannelLoopSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelLoopSchedulerMarkRecovery = vi.hoisted(() => vi.fn());
 const mockChannelLoopScheduler = vi.hoisted(() =>
   vi.fn((_options?: unknown) => ({
     start: mockChannelLoopSchedulerStart,
     stop: mockChannelLoopSchedulerStop,
+    markBridgeRecovery: mockChannelLoopSchedulerMarkRecovery,
   })),
 );
 const mockSessionRouter = vi.hoisted(() =>
@@ -94,6 +99,7 @@ const mockSessionRouter = vi.hoisted(() =>
     handleSessionDied: mockRouterHandleSessionDied,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
+    setChannelApprovalMode: mockRouterSetChannelApprovalMode,
     setChannelScope: mockRouterSetChannelScope,
   })),
 );
@@ -106,11 +112,13 @@ vi.mock('undici', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
   updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
   Storage: {
@@ -156,6 +164,7 @@ vi.mock('@qwen-code/channel-base', () => ({
 }));
 
 import {
+  BRIDGE_SESSION_RESTORE_TIMEOUT_MS,
   resolveExtensionChannelEntrySpecifier,
   resolveProxy,
   startCommand,
@@ -222,10 +231,10 @@ beforeEach(() => {
 });
 
 describe('resolveProxy', () => {
-  it('prefers the CLI proxy over settings and environment proxies', () => {
+  it('prefers the CLI proxy over settings and environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       'http://cli.example.com:8080',
       'http://settings.example.com:8080',
     );
@@ -240,10 +249,13 @@ describe('resolveProxy', () => {
     });
   });
 
-  it('prefers settings.proxy over environment proxies', () => {
+  it('prefers settings.proxy over environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(undefined, 'http://settings.example.com:8080');
+    const proxy = await resolveProxy(
+      undefined,
+      'http://settings.example.com:8080',
+    );
 
     expect(proxy).toBe('http://settings.example.com:8080');
     expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
@@ -252,10 +264,10 @@ describe('resolveProxy', () => {
     });
   });
 
-  it('falls back to proxy environment variables', () => {
+  it('falls back to proxy environment variables', async () => {
     process.env['HTTP_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy();
+    const proxy = await resolveProxy();
 
     expect(proxy).toBe('http://env.example.com:8080');
     expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
@@ -302,6 +314,56 @@ describe('startCommand.handler', () => {
       expect.stringContaining('managed by qwen serve'),
     );
     expect(mockBridgeStart).not.toHaveBeenCalled();
+  });
+
+  it('rejects named sessions in standalone single-channel mode', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      multiSession: true,
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('only for daemon-managed Channels'),
+    );
+    expect(mockAcpBridge).not.toHaveBeenCalled();
+  });
+
+  it('rejects named sessions in standalone all-channel mode', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      multiSession: true,
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('only for daemon-managed Channels'),
+    );
+    expect(mockAcpBridge).not.toHaveBeenCalled();
   });
 
   it('loads settings.merged.proxy when no CLI proxy is provided', async () => {
@@ -592,6 +654,10 @@ describe('startCommand.handler', () => {
   it('starts a standalone AcpBridge before creating the channel', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      approvalMode: 'yolo',
+    });
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
     });
@@ -620,9 +686,16 @@ describe('startCommand.handler', () => {
       mockParsedChannelConfig.sessionScope,
       expect.any(String),
     );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'telegram',
+      'yolo',
+    );
     expect(mockCreateChannel).toHaveBeenCalledWith(
       'telegram',
-      mockParsedChannelConfig,
+      expect.objectContaining({
+        ...mockParsedChannelConfig,
+        approvalMode: 'yolo',
+      }),
       bridge,
       expect.objectContaining({ router }),
     );
@@ -768,7 +841,7 @@ describe('startCommand.handler', () => {
       const restartedBridge = mockAcpBridge.mock.results[1]!.value;
       expect(mockRouterSetBridge).toHaveBeenCalledWith(restartedBridge);
       expect(mockChannelSetBridge).toHaveBeenCalledWith(restartedBridge);
-      expect(mockChannelConnect).toHaveBeenCalledTimes(2);
+      expect(mockChannelConnect).toHaveBeenCalledTimes(1);
 
       const sessionDiedCalls = mockBridgeOn.mock.calls.filter(
         ([eventName]) => eventName === 'sessionDied',
@@ -780,7 +853,7 @@ describe('startCommand.handler', () => {
       expect(mockBridgeOn.mock.invocationCallOrder.at(-2)).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
-      expect(mockChannelConnect.mock.invocationCallOrder[1]).toBeLessThan(
+      expect(mockChannelConnect.mock.invocationCallOrder[0]).toBeLessThan(
         mockRouterRestoreSessions.mock.invocationCallOrder[0]!,
       );
 
@@ -791,6 +864,260 @@ describe('startCommand.handler', () => {
       );
     } finally {
       processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers a standalone bridge without reconnecting the channel adapter', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      expect(mockChannelConnect).toHaveBeenCalledTimes(1);
+      expect(mockChannelDisconnect).not.toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerMarkRecovery).toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces duplicate standalone disconnect events into one recovery', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      disconnectedListener!();
+      disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(6000);
+      disconnectedListener!();
+
+      expect(mockAcpBridge).toHaveBeenCalledTimes(2);
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the readiness gate blocked and coalesces replacement disconnects', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    let resolveFirstRestore:
+      | ((value: { failed: number; restored: number }) => void)
+      | undefined;
+    let resolveSecondRestore:
+      | ((value: { failed: number; restored: number }) => void)
+      | undefined;
+    mockRouterRestoreSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirstRestore = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecondRestore = resolve;
+          }),
+      );
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const options = mockCreateChannel.mock.calls[0]?.[3] as
+        | ChannelBaseOptions
+        | undefined;
+      const firstDisconnect = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => void) | undefined;
+      expect(firstDisconnect).toBeDefined();
+
+      vi.useFakeTimers();
+      firstDisconnect!();
+      const recoveryGate = options?.bridgeRecovery?.();
+      let gateReleased = false;
+      void recoveryGate?.then(() => {
+        gateReleased = true;
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() =>
+        expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1),
+      );
+
+      const disconnectListeners = mockBridgeOn.mock.calls.filter(
+        ([eventName]) => eventName === 'disconnected',
+      );
+      expect(disconnectListeners).toHaveLength(2);
+      const replacementDisconnect = disconnectListeners[1]![1] as () => void;
+      replacementDisconnect();
+      replacementDisconnect();
+
+      resolveFirstRestore!({ failed: 0, restored: 0 });
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() =>
+        expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(2),
+      );
+
+      expect(gateReleased).toBe(false);
+      expect(mockAcpBridge).toHaveBeenCalledTimes(3);
+
+      resolveSecondRestore!({ failed: 0, restored: 0 });
+      await vi.waitFor(() => expect(gateReleased).toBe(true));
+
+      expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(2);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans up standalone service state when replacement startup fails', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockBridgeStart
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('replacement failed'));
+    mockChannelDisconnect.mockImplementationOnce(() => {
+      throw new Error('disconnect failed');
+    });
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => void) | undefined;
+
+      vi.useFakeTimers();
+      disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => expect(mockRemoveServiceInfo).toHaveBeenCalled());
+
+      expect(mockRouterClearAll).toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      processOnSpy.mockRestore();
+      exitSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the replacement bridge when session restore fails', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockRouterRestoreSessions.mockRejectedValueOnce(
+      new Error('restore failed'),
+    );
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => void) | undefined;
+
+      vi.useFakeTimers();
+      disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => expect(mockRemoveServiceInfo).toHaveBeenCalled());
+
+      expect(mockBridgeStart).toHaveBeenCalledTimes(2);
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      processOnSpy.mockRestore();
+      exitSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out a wedged session restore and stops the replacement bridge', async () => {
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockRouterRestoreSessions.mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await new Promise((resolve) => setImmediate(resolve));
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => void) | undefined;
+
+      vi.useFakeTimers();
+      disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(
+        3000 + BRIDGE_SESSION_RESTORE_TIMEOUT_MS,
+      );
+      await vi.waitFor(() => expect(mockRemoveServiceInfo).toHaveBeenCalled());
+
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Session restore timed out'),
+      );
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      processOnSpy.mockRestore();
+      exitSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -806,6 +1133,7 @@ describe('startCommand.handler', () => {
       cwd: `/tmp/${name}`,
       model: 'shared-model',
       sessionScope: name === 'first' ? 'thread' : 'single',
+      approvalMode: name === 'first' ? 'yolo' : 'default',
     }));
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
@@ -833,6 +1161,14 @@ describe('startCommand.handler', () => {
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('first', 'thread');
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('second', 'single');
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'first',
+      'yolo',
+    );
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'second',
+      'default',
+    );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
       1,
       'first',
@@ -872,6 +1208,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -881,6 +1218,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
   });
@@ -913,6 +1251,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -922,6 +1261,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
@@ -932,6 +1272,7 @@ describe('startCommand.handler', () => {
       expect.objectContaining({
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -1047,6 +1388,63 @@ describe('startCommand.handler', () => {
         ),
       ).toHaveLength(2);
       expect(mockRouterRestoreSessions).toHaveBeenCalledTimes(1);
+    } finally {
+      processOnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+  it('recovers a shared bridge without reconnecting channel adapters', async () => {
+    const channels = {
+      first: { type: 'telegram' },
+      second: { type: 'telegram' },
+    };
+    const firstChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    const secondChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      onSessionDied: vi.fn(),
+      onToolCall: vi.fn(),
+      setBridge: vi.fn(),
+    };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockImplementation(async (name: string) => ({
+      ...mockParsedChannelConfig,
+      cwd: `/tmp/${name}`,
+      model: 'shared-model',
+      sessionScope: 'user',
+    }));
+    mockCreateChannel
+      .mockReturnValueOnce(firstChannel)
+      .mockReturnValueOnce(secondChannel);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+
+    try {
+      void invokeStartHandler({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const disconnectedListener = mockBridgeOn.mock.calls.find(
+        ([eventName]) => eventName === 'disconnected',
+      )?.[1] as (() => Promise<void>) | undefined;
+      expect(disconnectedListener).toBeDefined();
+
+      vi.useFakeTimers();
+      const restart = disconnectedListener!();
+      await vi.advanceTimersByTimeAsync(3000);
+      await restart;
+
+      expect(firstChannel.connect).toHaveBeenCalledTimes(1);
+      expect(secondChannel.connect).toHaveBeenCalledTimes(1);
+      expect(firstChannel.disconnect).not.toHaveBeenCalled();
+      expect(secondChannel.disconnect).not.toHaveBeenCalled();
+      expect(mockChannelLoopSchedulerStop).not.toHaveBeenCalled();
     } finally {
       processOnSpy.mockRestore();
       vi.useRealTimers();

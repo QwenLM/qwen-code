@@ -64,6 +64,7 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://localhost:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        userId: 'settings-user',
         includeSensitiveSpanAttributes: true,
         sensitiveSpanAttributeMaxLength: 1234,
         outfile: 'settings.log',
@@ -87,6 +88,7 @@ describe('telemetry/config helpers', () => {
         otlpEndpoint: 'http://settings:4317',
         otlpProtocol: 'grpc' as const,
         logPrompts: false,
+        userId: 'settings-user',
         includeSensitiveSpanAttributes: false,
         sensitiveSpanAttributeMaxLength: 1234,
         outfile: 'settings.log',
@@ -97,6 +99,7 @@ describe('telemetry/config helpers', () => {
         QWEN_TELEMETRY_OTLP_ENDPOINT: 'http://env:4317',
         QWEN_TELEMETRY_OTLP_PROTOCOL: 'http',
         QWEN_TELEMETRY_LOG_PROMPTS: 'true',
+        QWEN_TELEMETRY_USER_ID: 'env-user',
         QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
         QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: '2048',
         QWEN_TELEMETRY_OUTFILE: 'env.log',
@@ -120,6 +123,7 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: true,
+        userId: 'env-user',
         includeSensitiveSpanAttributes: true,
         sensitiveSpanAttributeMaxLength: 2048,
         outfile: 'env.log',
@@ -142,6 +146,7 @@ describe('telemetry/config helpers', () => {
         otlpLogsEndpoint: undefined,
         otlpMetricsEndpoint: undefined,
         logPrompts: false,
+        userId: 'env-user',
         includeSensitiveSpanAttributes: true,
         sensitiveSpanAttributeMaxLength: 2048,
         outfile: 'argv.log',
@@ -155,6 +160,48 @@ describe('telemetry/config helpers', () => {
       const resolved = await resolveTelemetrySettings({});
 
       expect(resolved.includeSensitiveSpanAttributes).toBe(false);
+    });
+
+    it('resolves and normalizes the telemetry user ID', async () => {
+      const resolvedFromSettings = await resolveTelemetrySettings({
+        settings: { userId: '  user α  beta  ' },
+      });
+      expect(resolvedFromSettings.userId).toBe('user α  beta');
+
+      const resolvedFromEnv = await resolveTelemetrySettings({
+        env: { QWEN_TELEMETRY_USER_ID: '  0  ' },
+        settings: { userId: 'settings-user' },
+      });
+      expect(resolvedFromEnv.userId).toBe('0');
+    });
+
+    it('falls back to settings when the telemetry user ID env var is blank', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { QWEN_TELEMETRY_USER_ID: '   ' },
+        settings: { userId: ' settings-user ' },
+      });
+
+      expect(resolved.userId).toBe('settings-user');
+    });
+
+    it('omits the telemetry user ID when both sources are blank', async () => {
+      const resolved = await resolveTelemetrySettings({
+        env: { QWEN_TELEMETRY_USER_ID: '\t' },
+        settings: { userId: ' ' },
+      });
+
+      expect(resolved.userId).toBeUndefined();
+    });
+
+    it('rejects a non-string telemetry user ID setting', async () => {
+      await expect(
+        resolveTelemetrySettings({
+          settings: {
+            // @ts-expect-error — runtime defensive path against bad JSON.
+            userId: 42,
+          },
+        }),
+      ).rejects.toThrow(/telemetry\.userId.*must be a string.*number/);
     });
 
     it('defaults sensitiveSpanAttributeMaxLength to 1MiB', async () => {

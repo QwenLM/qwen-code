@@ -9,6 +9,13 @@ import { tool } from '../../tool.js';
 import { formatJsonResult, formatToolError } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
 import { handler, resolveSessionId } from '../helpers.js';
+import { PERMISSION_MODES } from '../../../types/permission-mode.js';
+
+const SAFE_LOCAL_APPROVAL_MODES = new Set(['plan', 'default']);
+const GLOBAL_SCOPE_APPROVAL_MODES = PERMISSION_MODES.filter(
+  (mode) => !SAFE_LOCAL_APPROVAL_MODES.has(mode),
+);
+const PERMISSION_MODE_LIST = PERMISSION_MODES.join(', ');
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceWriteTools(state: BridgeState): any[] {
@@ -80,11 +87,9 @@ export function workspaceWriteTools(state: BridgeState): any[] {
 
     tool(
       'session_set_approval_mode',
-      'Change the approval mode of a session (plan, default, auto-edit, auto, yolo).',
+      `Change the approval mode of a session (${PERMISSION_MODE_LIST}).`,
       {
-        mode: z
-          .enum(['plan', 'default', 'auto-edit', 'auto', 'yolo'])
-          .describe('Approval mode.'),
+        mode: z.enum(PERMISSION_MODES).describe('Approval mode.'),
         persist: z
           .boolean()
           .optional()
@@ -97,10 +102,9 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       handler(async (args) => {
         // Block dangerous modes and persistent changes without explicit opt-in
         if (!state.allowGlobalScope) {
-          const dangerousModes = ['yolo', 'auto', 'auto-edit'];
-          if (dangerousModes.includes(args.mode)) {
+          if (GLOBAL_SCOPE_APPROVAL_MODES.includes(args.mode)) {
             return formatToolError(
-              `Approval modes '${dangerousModes.join("', '")}' are restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
+              `Approval modes '${GLOBAL_SCOPE_APPROVAL_MODES.join("', '")}' are restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
             );
           }
           if (args.persist) {
@@ -245,6 +249,13 @@ export function workspaceWriteTools(state: BridgeState): any[] {
           .optional()
           .describe('Disallowed tool names.'),
         model: z.string().optional().describe('Model ID for the agent.'),
+        approval_mode: z.string().optional().describe('Approval mode.'),
+        permission_mode: z.string().optional().describe('Permission mode.'),
+        max_turns: z.number().int().positive().optional(),
+        color: z.string().optional(),
+        mcp_servers: z.record(z.string(), z.unknown()).optional(),
+        hooks: z.record(z.string(), z.unknown()).optional(),
+        background: z.boolean().optional(),
       },
       handler(async (args) => handleAgentsManage(state, args)),
     ),
@@ -295,7 +306,10 @@ async function handleAgentGet(state: BridgeState, args: any): Promise<any> {
     return formatToolError('agent_type is required for get action.');
   }
   return formatJsonResult(
-    await state.client.getWorkspaceAgent(args.agent_type),
+    await state.client.getWorkspaceAgent(
+      args.agent_type,
+      args.scope ? { scope: args.scope } : {},
+    ),
   );
 }
 
@@ -314,6 +328,13 @@ async function handleAgentCreate(state: BridgeState, args: any): Promise<any> {
       tools: args.tools,
       disallowedTools: args.disallowed_tools,
       model: args.model,
+      approvalMode: args.approval_mode,
+      permissionMode: args.permission_mode,
+      maxTurns: args.max_turns,
+      color: args.color,
+      mcpServers: args.mcp_servers,
+      hooks: args.hooks,
+      background: args.background,
     }),
   );
 }
@@ -327,10 +348,17 @@ async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
     args.system_prompt !== undefined ||
     args.tools !== undefined ||
     args.disallowed_tools !== undefined ||
-    args.model !== undefined;
+    args.model !== undefined ||
+    args.approval_mode !== undefined ||
+    args.permission_mode !== undefined ||
+    args.max_turns !== undefined ||
+    args.color !== undefined ||
+    args.mcp_servers !== undefined ||
+    args.hooks !== undefined ||
+    args.background !== undefined;
   if (!hasField) {
     return formatToolError(
-      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, or model).',
+      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, model, approval_mode, permission_mode, max_turns, color, mcp_servers, hooks, or background).',
     );
   }
   return formatJsonResult(
@@ -342,6 +370,13 @@ async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
         tools: args.tools,
         disallowedTools: args.disallowed_tools,
         model: args.model,
+        approvalMode: args.approval_mode,
+        permissionMode: args.permission_mode,
+        maxTurns: args.max_turns,
+        color: args.color,
+        mcpServers: args.mcp_servers,
+        hooks: args.hooks,
+        background: args.background,
       },
       { scope: args.scope },
     ),

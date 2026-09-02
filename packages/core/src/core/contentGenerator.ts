@@ -5,15 +5,12 @@
  */
 
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
 import type {
   ConfigSource,
   ConfigSourceKind,
@@ -30,10 +27,11 @@ import {
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
+import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
- * Interface abstracting the core functionalities for generating content and counting tokens.
+ * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
   generateContent(
@@ -46,20 +44,19 @@ export interface ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>>;
 
-  countTokens(request: CountTokensParameters): Promise<CountTokensResponse>;
-
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
-
-  useSummarizedThinking(): boolean;
 }
 
-export enum AuthType {
-  USE_OPENAI = 'openai',
-  QWEN_OAUTH = 'qwen-oauth',
-  USE_GEMINI = 'gemini',
-  USE_VERTEX_AI = 'vertex-ai',
-  USE_ANTHROPIC = 'anthropic',
-}
+import { AuthType } from '../utils/auth-type.js';
+export { AuthType };
+
+export type PromptCacheSharingParameters = GenerateContentParameters & {
+  /**
+   * Marks reusable history before a non-reusable trailing directive. The
+   * final message is deliberately excluded from cache breakpoints.
+   */
+  promptCacheSharing?: boolean;
+};
 
 /**
  * Supported input modalities for a model.
@@ -87,14 +84,40 @@ export type ContentGeneratorConfig = {
   // The SDK `timeout` only covers connect + first response, so a stream that
   // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
   streamIdleTimeoutMs?: number;
+  // Total-lifetime cap for one streaming response, NOT refreshed by chunk
+  // arrival: a drip-fed stream resets the idle watchdog forever while never
+  // completing the message (issue #8597), so that shape needs a bound the
+  // chunks cannot reset. `<= 0` disables it. Honored by the OpenAI-compatible
+  // pipeline and the Anthropic generator (shared `withStreamGuards`,
+  // issue #9005 finding 4); the Gemini generator does not implement it, so on
+  // that auth type the drip-fed shape stays unbounded.
+  streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
+  retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
+  retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
-  enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  enableCacheControl?: boolean; // Enable provider prompt-cache controls
   // Force `scope: 'global'` on Anthropic cache_control entries even when the
   // base URL is not an Anthropic-native origin (e.g. proxy providers like
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
   // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
   forceGlobalCacheScope?: boolean;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier (`ttl: '1h'`).
+   */
+  cacheRetention?: 'ephemeral' | '1h';
+  /**
+   * Per-anchor override of {@link cacheRetention}. Keys are the three
+   * cache anchors the Anthropic converter places `cache_control` on;
+   * missing keys inherit the top-level `cacheRetention`.
+   */
+  cacheRetentionByBlock?: Partial<
+    Record<'system' | 'tool' | 'user.last', 'ephemeral' | '1h'>
+  >;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -115,8 +138,9 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - The default OpenAI-compatible pipeline forwards the tier verbatim
-        //     (no 'max' clamp); Gemini caps at 'high'.
+        //   - Generic OpenAI-compatible endpoints and the DashScope
+        //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
+        //     not part of the generic ladder); Gemini caps at 'high'.
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via
@@ -137,6 +161,9 @@ export type ContentGeneratorConfig = {
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body
   extra_body?: Record<string, unknown>;
+  // When true, the model rejects enable_thinking=false with a 400 error
+  // (e.g. qwen3.8-max-preview), so thinking must never be disabled on the wire.
+  thinkingMandatory?: boolean;
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
@@ -254,6 +281,40 @@ export interface ModelConfigValidationResult {
   errors: Error[];
 }
 
+export const VERTEX_PROJECT_ENV_VAR = 'GOOGLE_CLOUD_PROJECT';
+
+/**
+ * Single definition of "a Vertex project is configured", shared by every gate
+ * that decides whether Application Default Credentials are usable. Callers that
+ * read from somewhere other than the process environment pass their own lookup
+ * so all gates agree on whitespace handling.
+ */
+export function hasVertexProjectConfigured(
+  lookup: (key: string) => string | undefined = (key) => process.env[key],
+): boolean {
+  return !!lookup(VERTEX_PROJECT_ENV_VAR)?.trim();
+}
+
+/**
+ * Vertex AI accepts Application Default Credentials in place of an API key:
+ * with a project configured and no key passed, the @google/genai client
+ * resolves ADC itself. Passing any key value instead switches the client to
+ * Vertex Express mode and disables ADC, so the key must stay absent.
+ *
+ * An entry that declares its own key variable is excluded: falling back to ADC
+ * there would authenticate as a different principal than the one configured,
+ * silently, whenever that variable failed to be injected.
+ */
+function usesVertexApplicationDefaultCredentials(
+  config: ContentGeneratorConfig,
+): boolean {
+  return (
+    config.authType === AuthType.USE_VERTEX_AI &&
+    !config.apiKeyEnvKey &&
+    hasVertexProjectConfigured()
+  );
+}
+
 /**
  * Validate a resolved model configuration.
  * This is the single validation entry point used across Core.
@@ -270,7 +331,7 @@ export function validateModelConfig(
   }
 
   // API key is required for all other auth types
-  if (!config.apiKey) {
+  if (!config.apiKey && !usesVertexApplicationDefaultCredentials(config)) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
@@ -288,6 +349,7 @@ export function validateModelConfig(
           model: config.model,
           baseUrl: config.baseUrl,
           envKey,
+          explicitEnvKey: config.apiKeyEnvKey,
         }),
       );
     }
@@ -350,6 +412,93 @@ function getModuleNotFoundError(
   return undefined;
 }
 
+function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
+  const moduleNotFoundError = getModuleNotFoundError(error);
+  if (!moduleNotFoundError) {
+    return error;
+  }
+
+  return new Error(
+    `Qwen Code was updated in the background and needs to be restarted.\n` +
+      `Please exit and restart Qwen Code to use the '${authType}' provider.`,
+    { cause: moduleNotFoundError },
+  );
+}
+
+class LazyContentGenerator implements ContentGenerator {
+  private generatorPromise?: Promise<ContentGenerator>;
+  private preloadedOnly = false;
+
+  constructor(private readonly loader: () => Promise<ContentGenerator>) {}
+
+  private getGenerator(): Promise<ContentGenerator> {
+    this.generatorPromise ??= this.loader();
+    return this.generatorPromise;
+  }
+
+  private getGeneratorForUse(): Promise<ContentGenerator> {
+    this.preloadedOnly = false;
+    return this.getGenerator();
+  }
+
+  preload(): Promise<ContentGenerator> {
+    if (!this.generatorPromise) {
+      this.preloadedOnly = true;
+    }
+    return this.getGenerator();
+  }
+
+  resetPreload(): void {
+    if (!this.preloadedOnly) return;
+    this.preloadedOnly = false;
+    this.generatorPromise = undefined;
+  }
+
+  async generateContent(
+    request: GenerateContentParameters,
+    userPromptId: string,
+  ): Promise<GenerateContentResponse> {
+    return (await this.getGeneratorForUse()).generateContent(
+      request,
+      userPromptId,
+    );
+  }
+
+  async generateContentStream(
+    request: GenerateContentParameters,
+    userPromptId: string,
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    return (await this.getGeneratorForUse()).generateContentStream(
+      request,
+      userPromptId,
+    );
+  }
+
+  async embedContent(
+    request: EmbedContentParameters,
+  ): Promise<EmbedContentResponse> {
+    return (await this.getGeneratorForUse()).embedContent(request);
+  }
+}
+
+/** @internal */
+export async function preloadContentGenerator(
+  generator: ContentGenerator,
+): Promise<void> {
+  if (generator instanceof LazyContentGenerator) {
+    await generator.preload();
+  }
+}
+
+/** @internal */
+export function resetPreloadedContentGenerator(
+  generator: ContentGenerator | undefined,
+): void {
+  if (generator instanceof LazyContentGenerator) {
+    generator.resetPreload();
+  }
+}
+
 export async function createContentGenerator(
   generatorConfig: ContentGeneratorConfig,
   config: Config,
@@ -365,20 +514,24 @@ export async function createContentGenerator(
     throw new Error('ContentGeneratorConfig must have an authType');
   }
 
-  let baseGenerator: ContentGenerator;
+  // Provider constructors below synchronously build undici-backed fetch
+  // options; load undici here so it stays out of the eager startup closure
+  // (issue #7264).
+  await preloadRuntimeFetchModule();
+
+  let loadBaseGenerator: () => Promise<ContentGenerator>;
 
   try {
     if (authType === AuthType.USE_OPENAI) {
-      const { createOpenAIContentGenerator } = await import(
-        './openaiContentGenerator/index.js'
-      );
-      baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+      loadBaseGenerator = async () => {
+        const { createOpenAIContentGenerator } = await import(
+          './openaiContentGenerator/index.js'
+        );
+        return createOpenAIContentGenerator(generatorConfig, config);
+      };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'
-      );
-      const { QwenContentGenerator } = await import(
-        '../qwen/qwenContentGenerator.js'
       );
 
       try {
@@ -386,11 +539,12 @@ export async function createContentGenerator(
           config,
           isInitialAuth ? { requireCachedCredentials: true } : undefined,
         );
-        baseGenerator = new QwenContentGenerator(
-          qwenClient,
-          generatorConfig,
-          config,
-        );
+        loadBaseGenerator = async () => {
+          const { QwenContentGenerator } = await import(
+            '../qwen/qwenContentGenerator.js'
+          );
+          return new QwenContentGenerator(qwenClient, generatorConfig, config);
+        };
       } catch (error) {
         if (getModuleNotFoundError(error)) {
           throw error;
@@ -398,34 +552,44 @@ export async function createContentGenerator(
         throw new Error(error instanceof Error ? error.message : String(error));
       }
     } else if (authType === AuthType.USE_ANTHROPIC) {
-      const { createAnthropicContentGenerator } = await import(
-        './anthropicContentGenerator/index.js'
-      );
-      baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
+      loadBaseGenerator = async () => {
+        const { createAnthropicContentGenerator } = await import(
+          './anthropicContentGenerator/index.js'
+        );
+        return createAnthropicContentGenerator(generatorConfig, config);
+      };
     } else if (
       authType === AuthType.USE_GEMINI ||
       authType === AuthType.USE_VERTEX_AI
     ) {
-      const { createGeminiContentGenerator } = await import(
-        './geminiContentGenerator/index.js'
-      );
-      baseGenerator = createGeminiContentGenerator(generatorConfig, config);
+      loadBaseGenerator = async () => {
+        const { createLlmContentGenerator } = await import(
+          './llm-content-generator/index.js'
+        );
+        return createLlmContentGenerator(generatorConfig, config);
+      };
     } else {
       throw new Error(
         `Error creating contentGenerator: Unsupported authType: ${authType}`,
       );
     }
   } catch (error) {
-    const moduleNotFoundError = getModuleNotFoundError(error);
-    if (moduleNotFoundError) {
-      throw new Error(
-        `Qwen Code was updated in the background and needs to be restarted.\n` +
-          `Please exit and restart Qwen Code to use the '${authType}' provider.`,
-        { cause: moduleNotFoundError },
-      );
-    }
-    throw error;
+    throw wrapProviderLoadError(error, authType);
   }
 
-  return new LoggingContentGenerator(baseGenerator, config, generatorConfig);
+  return new LazyContentGenerator(async () => {
+    try {
+      const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
+        loadBaseGenerator(),
+        import('./loggingContentGenerator/index.js'),
+      ]);
+      return new LoggingContentGenerator(
+        baseGenerator,
+        config,
+        generatorConfig,
+      );
+    } catch (error) {
+      throw wrapProviderLoadError(error, authType);
+    }
+  });
 }

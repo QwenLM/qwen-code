@@ -10,9 +10,10 @@ import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
+import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   getDialogSettingKeys,
   setPendingSettingValue,
@@ -27,8 +28,11 @@ import {
   getNestedValue,
   getEffectiveValue,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
-import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
+} from '../../config/settingsUtils.js';
+import {
+  isAutoLanguage,
+  writeOutputLanguageAndRegisterPath,
+} from '../../i18n/languageUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -52,7 +56,7 @@ import { StatsDialog } from './StatsDialog.js';
 import {
   getExtendedSystemInfo,
   type ExtendedSystemInfo,
-} from '../../utils/systemInfo.js';
+} from '../systemInfo.js';
 
 interface SettingsDialogProps {
   settings: LoadedSettings;
@@ -213,7 +217,15 @@ export function SettingsDialog({
   }, [selectedScope, settings, globalPendingChanges]);
 
   const generateSettingsItems = () => {
-    const settingKeys = getDialogSettingKeys();
+    // Workspace-restricted settings are stripped before the merge, so offering
+    // them under Workspace scope is a trap: the dialog renders from the raw
+    // scope file, so a toggle here would keep displaying the value it wrote
+    // while the feature stayed at its merged value, leaving a dead entry in
+    // the repo's .qwen/settings.json. They stay listed under the scopes that
+    // do honor them.
+    const settingKeys = getDialogSettingKeys({
+      excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
+    });
 
     return settingKeys.map((key: string) => {
       const definition = getSettingDefinition(key);
@@ -1259,21 +1271,29 @@ export function SettingsDialog({
 
               const defaultValue = getDefaultValue(item.value);
 
-              if (currentValue !== undefined && currentValue !== null) {
-                displayValue = String(currentValue);
-              } else {
-                displayValue =
-                  defaultValue !== undefined && defaultValue !== null
-                    ? String(defaultValue)
-                    : '';
-              }
-
-              // Add * if value differs from default OR if currently being modified
-              const isModified = modifiedSettings.has(item.value);
               const effectiveCurrentValue =
                 currentValue !== undefined && currentValue !== null
                   ? currentValue
                   : defaultValue;
+
+              if (
+                item.value === 'general.outputLanguage' &&
+                isAutoLanguage(
+                  effectiveCurrentValue as string | null | undefined,
+                )
+              ) {
+                displayValue = t('Auto (follow user input)');
+              } else if (
+                effectiveCurrentValue !== undefined &&
+                effectiveCurrentValue !== null
+              ) {
+                displayValue = String(effectiveCurrentValue);
+              } else {
+                displayValue = '';
+              }
+
+              // Add * if value differs from default OR if currently being modified
+              const isModified = modifiedSettings.has(item.value);
               const isDifferentFromDefault =
                 effectiveCurrentValue !== defaultValue;
 
@@ -1312,7 +1332,7 @@ export function SettingsDialog({
                       isActive ? theme.status.success : theme.text.secondary
                     }
                   >
-                    {isActive ? '●' : ''}
+                    {isActive ? ICON.CIRCLE_FILLED : ''}
                   </Text>
                 </Box>
                 <Box flexGrow={1} flexShrink={1}>

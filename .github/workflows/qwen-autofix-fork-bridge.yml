@@ -1,0 +1,180 @@
+name: 'Qwen Autofix Fork Bridge'
+
+# The base-context half of the bridge described in
+# `qwen-autofix-fork-signal.yml`. A `workflow_run` run is created on the
+# DEFAULT BRANCH with the repository's own token and secrets — exactly what the
+# fork-PR review lane is denied — so this is where the review scan can actually
+# be started for a fork PR.
+#
+# It never checks out or executes pull request code, and it holds no PAT. Its
+# only write is a `workflow_dispatch` of `qwen-autofix.yml` naming ONE PR
+# number, using the run's own `actions: write` token (the same lever Fleet
+# Shepherd already pulls). The dispatched run re-derives admission from live
+# API state — open, targeting main, authored by the bot or carrying the
+# takeover label, and for a fork a live write+ author plus maintainer edits
+# allowed — so the number only says WHEN to look, never who may be touched.
+#
+# Which PR was reviewed — and by whom — rides the signal's run-name, which
+# GitHub surfaces on the workflow_run event as `display_title` (a fork cannot
+# forge it: fork-triggered runs execute the signal FILE from the base branch,
+# and that file supplies the run-name). A head SHA alone cannot carry the
+# binding: it authenticates the revision, not which PR generated the review,
+# and two open fork PRs can share one head commit — resolving by head only
+# would dispatch every PR sharing it on a review submitted to one.
+# `workflow_run.head_sha` still matters as the freshness gate: for a
+# `pull_request_review` run it IS the reviewed PR's head SHA (verified: run
+# 31152873061's head_sha equals PR #8436's headRefOid), and a push landing
+# between the review and this run leaves the bound PR no longer carrying that
+# head — the bridge no-ops green instead of reading the race as a security
+# event, and the scheduled scan remains the backstop for the stale review.
+# (`workflow_run.pull_requests` is EMPTY for fork PRs — measured — so it
+# cannot supply the binding.)
+
+on:
+  workflow_run:
+    workflows:
+      - 'Qwen Autofix Fork Signal'
+    types:
+      - 'completed'
+
+# The scan side honors the `source=fork-bridge` marker (staying quiet at the
+# round cap) only after verifying provenance against a SUCCESSFUL run of THIS
+# workflow naming the PR — propagate the signal's title into the run title so
+# that check has something to match.
+run-name: 'fork-bridge: ${{ github.event.workflow_run.display_title }}'
+
+permissions:
+  actions: 'write'
+  # The reviewer live-permission re-check reads
+  # `repos/{repo}/collaborators/{user}/permission` — the same call route
+  # makes with `contents: read`.
+  contents: 'read'
+  pull-requests: 'read'
+
+defaults:
+  run:
+    shell: 'bash'
+
+# Keyed on the conclusion AS WELL AS the reviewed head. Every signal run —
+# including ones that gated themselves out as `skipped` and ones `cancelled`
+# by the signal's own concurrency — fires `workflow_run: completed`, so
+# without the conclusion in the key a skipped bridge run would enter the same
+# group as the real one, cancel it, and then skip its own job: repeating an
+# ungated review could hold the bridge off a fork PR indefinitely. With it,
+# only genuine `success` signals share a group, where two reviews landing on
+# the same commit want one scan and the newer signal supersedes the older.
+# Duplicates past this point are harmless anyway — review-scan holds a per-PR
+# lock and advances a watermark — so collapsing the burst is an economy, not
+# a correctness gate.
+concurrency:
+  group: 'qwen-autofix-fork-bridge-${{ github.event.workflow_run.conclusion }}-${{ github.event.workflow_run.head_sha }}'
+  cancel-in-progress: true
+
+env:
+  # Mirrors qwen-autofix.yml's AUTOFIX_BOT / REVIEW_BOT / TAKEOVER_LABEL /
+  # SKIP_LABEL; pinned to them by
+  # scripts/tests/qwen-autofix-fork-bridge-workflow.test.js.
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  REVIEW_BOT: 'qwen-code-ci-bot'
+  TAKEOVER_LABEL: 'autofix/takeover'
+  SKIP_LABEL: 'autofix/skip'
+
+jobs:
+  dispatch:
+    name: 'Dispatch the autofix review lane'
+    # A signal that gated itself out (in-repo PR, untrusted review, unmanaged
+    # PR) completes as `skipped`, never `success`.
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code'
+      && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    env:
+      REPO: '${{ github.repository }}'
+      # The head commit of the run that produced the signal — for a
+      # `pull_request_review` run the reviewed PR's head SHA; the freshness
+      # gate the resolved PR is checked against.
+      SIGNAL_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+      # The signal's run-name — the GitHub-owned binding that names the
+      # reviewed PR and the reviewer.
+      SIGNAL_TITLE: '${{ github.event.workflow_run.display_title }}'
+      GITHUB_TOKEN: '${{ github.token }}'
+    steps:
+      - name: 'Resolve the signalled PR and dispatch the scan'
+        run: |-
+          # The signal encodes the reviewed PR and the reviewer in its
+          # run-name (a base-branch file the fork cannot edit); GitHub
+          # surfaces it as the workflow_run's display_title. That binding —
+          # not the head SHA — says WHICH PR the review targeted.
+          TITLE_RE='^fork-signal: PR ([0-9]+) reviewed by (.+)$'
+          if [[ ! "${SIGNAL_TITLE}" =~ ${TITLE_RE} ]]; then
+            echo "::error::could not parse the PR binding from the signal run title '${SIGNAL_TITLE}' — signal and bridge are out of contract"
+            exit 1
+          fi
+          SIGNAL_PR="${BASH_REMATCH[1]}"
+          SIGNAL_REVIEWER="${BASH_REMATCH[2]}"
+
+          # The signal gate trusts the reviewer's author_association, but
+          # MEMBER/COLLABORATOR does not guarantee LIVE write permission —
+          # the direct pull_request_review lane rejects a below-write
+          # reviewer on exactly this event. Re-check live here (the
+          # review-bot exception mirrors route's), so a read/triage
+          # collaborator cannot signal the secret-bearing lane. A rejected
+          # reviewer is a green no-op: the direct lane declined the same
+          # review, and the scheduled scan remains the backstop.
+          if [[ "${SIGNAL_REVIEWER}" != "${REVIEW_BOT}" ]]; then
+            REVIEWER_PERM="$(gh api "repos/${REPO}/collaborators/${SIGNAL_REVIEWER}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+            case "${REVIEWER_PERM}" in
+              admin|maintain|write) : ;;
+              *)
+                echo "🧭 reviewer '${SIGNAL_REVIEWER}' permission='${REVIEWER_PERM:-none}' is below write — the direct lane would decline this review, so nothing is dispatched"
+                exit 0
+                ;;
+            esac
+          fi
+
+          # Live re-read of the bound PR: consent can move between the review
+          # and the dispatch. These filters mirror route's fork admission
+          # plus SKIP-wins-everywhere — cheap early-outs, not a security
+          # boundary: review-scan re-derives all of it. They exist so a PR
+          # that closed, retargeted, moved its head, or withdrew consent
+          # between the review and now costs one API read instead of a whole
+          # dispatched run, and so the log says which it was.
+          if ! PR_JSON="$(gh pr view "${SIGNAL_PR}" --repo "${REPO}" \
+            --json number,author,labels,headRefOid,isCrossRepository,maintainerCanModify,state,baseRefName 2> /dev/null)"; then
+            echo "::error::could not read PR #${SIGNAL_PR} to resolve the signal"
+            exit 1
+          fi
+
+          ELIGIBLE="$(jq -r --arg sha "${SIGNAL_HEAD_SHA}" --arg bot "${AUTOFIX_BOT}" \
+            --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" '
+            select(.state == "OPEN" and .baseRefName == "main")
+            | select(.headRefOid == $sha and .isCrossRepository == true and .maintainerCanModify == true)
+            | select((.author.login // "") == $bot or (([.labels[]?.name] | index($take)) != null))
+            | select(([.labels[]?.name] | index($skip)) == null)
+            | .number' <<< "${PR_JSON}")"
+          if [[ -z "${ELIGIBLE}" ]]; then
+            echo "🧭 signalled PR #${SIGNAL_PR} no longer carries head ${SIGNAL_HEAD_SHA} as an eligible fork PR (head moved, PR closed, or consent withdrawn) — the scheduled scan remains the backstop"
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            if gh workflow run qwen-autofix.yml --repo "${REPO}" --ref main \
+              -f pr_number="${ELIGIBLE}" -f source=fork-bridge; then
+              echo "🚀 dispatched the autofix review lane for fork PR #${ELIGIBLE}"
+              {
+                echo "### 🌉 AutoFix fork bridge"
+                echo
+                echo "Dispatched the review lane for [#${ELIGIBLE}](${GITHUB_SERVER_URL}/${REPO}/pull/${ELIGIBLE}) — a fork PR whose own review event carries no repository secrets."
+              } >> "${GITHUB_STEP_SUMMARY}"
+              exit 0
+            fi
+            echo "::warning::dispatch for #${ELIGIBLE} failed (attempt ${attempt}/3)" >&2
+            if [[ "${attempt}" -lt 3 ]]; then sleep "${attempt}"; fi
+          done
+          # Red on purpose when a dispatch never landed. The scheduled scan
+          # still reaches the PR eventually, but a bridge that cannot
+          # dispatch is broken in a way no later tick repairs, and silence
+          # here would look identical to a working bridge with nothing to do.
+          echo "::error::could not dispatch the autofix review lane for resolved PR #${ELIGIBLE}"
+          exit 1

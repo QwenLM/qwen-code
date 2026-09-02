@@ -7,10 +7,21 @@
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { sendJsonBodyParserError } from './request-helpers.js';
 
 export function installJsonBodyParser(app: Application): void {
-  app.use(express.json({ limit: '10mb' }));
+  const parseJson = express.json({ limit: '10mb' });
+  app.use((req, res, next) => {
+    if (
+      req.method === 'POST' &&
+      /^\/session\/[^/]+\/attachments\/?$/i.test(req.path)
+    ) {
+      next();
+      return;
+    }
+    parseJson(req, res, next);
+  });
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (sendJsonBodyParserError(res, err)) return;
     next(err);
@@ -27,6 +38,7 @@ function isMalformedRouteEncoding(err: unknown): boolean {
 export function installFinalErrorHandler(app: Application): void {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (sendJsonBodyParserError(res, err)) return;
+    if (sendGenerationClosedError(res, err)) return;
     if (isMalformedRouteEncoding(err)) {
       res.status(400).json({
         error: 'Malformed URL encoding',

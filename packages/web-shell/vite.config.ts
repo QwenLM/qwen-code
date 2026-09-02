@@ -10,6 +10,16 @@ const daemonProxy: ProxyOptions = {
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
+    // These paths overlap daemon route prefixes and client source directories.
+    if (
+      req.method === 'GET' &&
+      (req.url?.startsWith('/extensions/') ||
+        req.url?.startsWith('/session-catalog/') ||
+        req.url?.startsWith('/live/')) &&
+      /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
+    ) {
+      return req.url;
+    }
     const fetchMode = req.headers['sec-fetch-mode'];
     const fetchDest = req.headers['sec-fetch-dest'];
     const accept = req.headers.accept ?? '';
@@ -27,22 +37,28 @@ const daemonProxy: ProxyOptions = {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
     });
+    proxy.on('proxyReqWs', (proxyReq) => {
+      proxyReq.removeHeader('origin');
+      proxyReq.removeHeader('referer');
+    });
   },
 };
+
+export const QUALIFIED_VOICE_STREAM_PROXY =
+  '^/workspaces/[^/]+/voice/stream/?$';
 
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
       '@': resolve(__dirname, './client'),
       ...(command === 'serve'
         ? {
-            '@qwen-code/webui/daemon-react-sdk': resolve(
-              __dirname,
-              '../webui/src/daemon-react-sdk.ts',
-            ),
-            '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
             '@qwen-code/sdk/daemon': resolve(
               __dirname,
               '../sdk-typescript/src/daemon/index.ts',
@@ -54,7 +70,7 @@ export default defineConfig(({ command }) => ({
           }
         : {}),
     },
-    dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
+    dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
     outDir: '../dist',
@@ -69,14 +85,18 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      '/mcp-app-sandbox': { ...daemonProxy, bypass: undefined },
       // Daemon status report; scoped to the exact route the dashboard uses (a
       // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,
       '/list': daemonProxy,
@@ -86,16 +106,31 @@ export default defineConfig(({ command }) => ({
       // without it the SPA fallback returns index.html in dev and the dialog
       // fails JSON parsing / reports an HTTP error on open.
       '/scheduled-tasks': daemonProxy,
+      // Goals page (`GET /goals`). Without it the SPA fallback returns
+      // index.html in dev and the page fails JSON parsing on open.
+      '/goals': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.
       '/usage': daemonProxy,
+      // Standalone-session CRUD (`/standalone/sessions*`) — the sidebar's
+      // standalone sessions list/load/create. Without it the SPA fallback
+      // returns index.html in dev and clicking or creating a standalone
+      // session fails JSON parsing.
+      '/standalone': daemonProxy,
+      // Live voice routes (`/live/status`, `/live/setup`, ...). The prefix
+      // overlaps `client/live/*` source modules; the bypass above exempts
+      // those source files from proxying.
+      '/live': daemonProxy,
       // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
       // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
       // path — a bare `/voice` prefix would shadow the client's own
       // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
       // vite must serve, and blanks the page.
       '/voice/stream': { ...daemonProxy, ws: true },
+      // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
+      // HTTP upgrade to the daemon, same as `/voice/stream`.
+      '/terminal': { ...daemonProxy, ws: true },
     },
   },
 }));

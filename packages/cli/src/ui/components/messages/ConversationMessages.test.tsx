@@ -5,11 +5,107 @@
  */
 
 import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { vi } from 'vitest';
 import {
+  AssistantMessage,
+  AssistantMessageContent,
   ThinkMessage,
   ThinkMessageContent,
   toggleKeyHint,
 } from './ConversationMessages.js';
+
+vi.mock('../TerminalImage.js', () => ({
+  TerminalImage: ({
+    image,
+    availableTerminalHeight,
+  }: {
+    image: { mimeType: string };
+    availableTerminalHeight?: number;
+  }) => (
+    <Text>
+      MockTerminalImage:{image.mimeType}:height=
+      {availableTerminalHeight ?? 'undef'}
+    </Text>
+  ),
+}));
+
+describe('<AssistantMessage />', () => {
+  it('routes assistant images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+
+  it('renders the number of omitted images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        omittedImageCount={2}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the pending height budget across assistant images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text="streaming"
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+        isPending={true}
+        availableTerminalHeight={20}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=6');
+  });
+
+  it('gives image-only assistant messages the full image height budget', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+        isPending={false}
+        availableTerminalHeight={20}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=10');
+  });
+});
+
+describe('<AssistantMessageContent />', () => {
+  it('routes continuation images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessageContent
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+});
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {
@@ -164,7 +260,7 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Line 4');
   });
 
-  it('should only show tail lines when pending and not expanded', () => {
+  it('should show only the header when pending and not expanded', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
     const longText = lines.join('\n');
     const { lastFrame } = render(
@@ -178,8 +274,27 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).toContain('Line 20');
-    expect(output).not.toContain('Line 1\n');
+    // No thinking body content when collapsed — prevents height flicker.
+    expect(output).not.toContain('Line 20');
+    expect(output).not.toContain('Line 1');
+  });
+
+  it('should show full content when pending and expanded', () => {
+    const lines = Array.from({ length: 5 }, (_, i) => `Line ${i + 1}`);
+    const text = lines.join('\n');
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={text}
+        isPending={true}
+        expanded={true}
+        contentWidth={40}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thinking');
+    expect(output).toContain('Line 1');
+    expect(output).toContain('Line 5');
   });
 });
 
@@ -189,12 +304,11 @@ describe('<ThinkMessageContent />', () => {
     contentWidth: 80,
   };
 
-  it('should render when pending (streaming)', () => {
+  it('should render nothing when pending and not expanded', () => {
     const { lastFrame } = render(
       <ThinkMessageContent {...defaultProps} isPending={true} />,
     );
-    const output = lastFrame();
-    expect(output).not.toBe('');
+    expect(lastFrame()).toBe('');
   });
 
   it('should render nothing when committed and not expanded', () => {

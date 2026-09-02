@@ -10,17 +10,18 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
-  GeminiEventType,
+  LlmEventType,
   isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
+  toolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -34,13 +35,16 @@ import type {
   ContentBlock,
   ControlMessage,
   ExtendedUsage,
+  PermissionSuggestion,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
+import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -114,7 +118,7 @@ export interface MessageEmitter {
  */
 export interface JsonOutputAdapterInterface extends MessageEmitter {
   startAssistantMessage(): void;
-  processEvent(event: ServerGeminiStreamEvent): void;
+  processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
 
@@ -197,7 +201,7 @@ export abstract class BaseJsonOutputAdapter {
   /**
    * Creates a Usage object from metadata.
    *
-   * @param metadata - Optional usage metadata from Gemini API
+   * @param metadata - Optional LLM usage metadata
    * @returns Usage object
    */
   protected createUsage(
@@ -601,27 +605,27 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
-   * Processes a stream event from the Gemini API.
+   * Processes an LLM stream event.
    * This is a shared implementation used by both streaming and non-streaming adapters.
    *
-   * @param event - Stream event from Gemini API
+   * @param event - LLM stream event
    */
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     const state = this.mainAgentMessageState;
     if (state.finalized) {
       return;
     }
 
     switch (event.type) {
-      case GeminiEventType.Content:
+      case LlmEventType.Content:
         this.appendText(state, event.value, null);
         break;
-      case GeminiEventType.Citation:
+      case LlmEventType.Citation:
         if (typeof event.value === 'string') {
           this.appendText(state, `\n${event.value}`, null);
         }
         break;
-      case GeminiEventType.Thought:
+      case LlmEventType.Thought:
         this.appendThinking(
           state,
           event.value.subject,
@@ -629,16 +633,16 @@ export abstract class BaseJsonOutputAdapter {
           null,
         );
         break;
-      case GeminiEventType.ToolCallRequest:
+      case LlmEventType.ToolCallRequest:
         this.appendToolUse(state, event.value, null);
         break;
-      case GeminiEventType.Finished:
+      case LlmEventType.Finished:
         if (event.value?.usageMetadata) {
           state.usage = this.createUsage(event.value.usageMetadata);
         }
         this.finalizePendingBlocks(state, null);
         break;
-      case GeminiEventType.Error: {
+      case LlmEventType.Error: {
         // Format the error message using parseAndFormatApiError for consistency
         // with interactive mode error display
         const errorText = parseAndFormatApiError(
@@ -648,7 +652,7 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
-      case GeminiEventType.ModelFallback:
+      case LlmEventType.ModelFallback:
         // Surface model fallback transitions so non-interactive consumers
         // (CI pipelines, SDK clients) can observe capacity-driven model
         // switches without parsing assistant content.
@@ -1057,8 +1061,10 @@ export abstract class BaseJsonOutputAdapter {
       is_error: hasError,
     };
     const content = toolResultContent(response);
+    let projectedContent: string | undefined;
     if (content !== undefined) {
-      block.content = content;
+      projectedContent = projectHeadlessToolResultContent(content);
+      block.content = projectedContent;
     }
 
     const message: CLIUserMessage = {
@@ -1071,6 +1077,19 @@ export abstract class BaseJsonOutputAdapter {
         content: [block],
       },
     };
+    if (content !== undefined && projectedContent !== undefined) {
+      observeHeadlessToolResultProjection(
+        message,
+        content,
+        projectedContent,
+        request.callId,
+        response.boundaryArtifact ??
+          toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          ),
+      );
+    }
     this.emitMessageImpl(message);
   }
 
@@ -1101,6 +1120,7 @@ export abstract class BaseJsonOutputAdapter {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     const message: ControlMessage = {
       type: 'control_request',
@@ -1110,7 +1130,7 @@ export abstract class BaseJsonOutputAdapter {
         tool_name: toolName,
         tool_use_id: toolUseId,
         input,
-        permission_suggestions: null,
+        permission_suggestions: permissionSuggestions,
         blocked_path: blockedPath,
       },
     };
@@ -1400,9 +1420,33 @@ function checkResponsePartsForError(
  * @param response - Tool call response
  * @returns String content or undefined
  */
+function mcpAppFallbackText(display: unknown): string | undefined {
+  if (
+    !display ||
+    typeof display !== 'object' ||
+    !('type' in display) ||
+    display.type !== 'mcp_app' ||
+    !('fallbackText' in display) ||
+    typeof display.fallbackText !== 'string'
+  ) {
+    return undefined;
+  }
+  const text = display.fallbackText.trim();
+  return text.length > 0 ? display.fallbackText : undefined;
+}
+
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
+  }
   if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
     const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
     if (response.error) {
@@ -1426,6 +1470,10 @@ export function toolResultContent(
   }
   if (response.error) {
     return response.error.message;
+  }
+  const mcpAppFallback = mcpAppFallbackText(response.resultDisplay);
+  if (mcpAppFallback) {
+    return mcpAppFallback;
   }
   if (
     typeof response.resultDisplay === 'string' &&

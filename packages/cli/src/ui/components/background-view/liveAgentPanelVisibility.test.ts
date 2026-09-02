@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   getLiveAgentPanelLayoutKey,
+  getLiveAgentPanelVpMaxRows,
   isLiveAgentPanelVisibleEntry,
   TERMINAL_VISIBLE_MS,
 } from './liveAgentPanelVisibility.js';
@@ -135,5 +136,30 @@ describe('isLiveAgentPanelVisibleEntry (eviction window)', () => {
     expect(
       isLiveAgentPanelVisibleEntry(entry, 1000 + TERMINAL_VISIBLE_MS + 1),
     ).toBe(false);
+  });
+});
+
+describe('getLiveAgentPanelVpMaxRows', () => {
+  it('returns min rows (3) for short terminals', () => {
+    expect(getLiveAgentPanelVpMaxRows(15)).toBe(3);
+    expect(getLiveAgentPanelVpMaxRows(24)).toBe(3);
+  });
+
+  it('grows with terminal height', () => {
+    // clamp(floor(h/10), 3, 5)
+    expect(getLiveAgentPanelVpMaxRows(30)).toBe(3);
+    expect(getLiveAgentPanelVpMaxRows(40)).toBe(4);
+    expect(getLiveAgentPanelVpMaxRows(50)).toBe(5);
+  });
+
+  it('caps at max rows (5) for tall terminals', () => {
+    expect(getLiveAgentPanelVpMaxRows(80)).toBe(5);
+    expect(getLiveAgentPanelVpMaxRows(100)).toBe(5);
+  });
+
+  it('returns min rows for invalid heights', () => {
+    expect(getLiveAgentPanelVpMaxRows(0)).toBe(3);
+    expect(getLiveAgentPanelVpMaxRows(-1)).toBe(3);
+    expect(getLiveAgentPanelVpMaxRows(Number.NaN)).toBe(3);
   });
 });

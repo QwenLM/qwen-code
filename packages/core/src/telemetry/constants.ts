@@ -9,11 +9,15 @@ export const SERVICE_NAME = 'qwen-code';
 export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
 export const EVENT_USER_RETRY = 'qwen-code.user_retry';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';
+export const EVENT_REPEATED_TOOL_FAILURE_GUARD =
+  'qwen-code.repeated_tool_failure_guard';
 export const EVENT_API_REQUEST = 'qwen-code.api_request';
 export const EVENT_API_ERROR = 'qwen-code.api_error';
 export const EVENT_API_CANCEL = 'qwen-code.api_cancel';
 export const EVENT_API_RESPONSE = 'qwen-code.api_response';
 export const EVENT_CLI_CONFIG = 'qwen-code.config';
+export const EVENT_SESSION_START = 'session.start';
+export const EVENT_SESSION_END = 'session.end';
 export const EVENT_EXTENSION_DISABLE = 'qwen-code.extension_disable';
 export const EVENT_EXTENSION_ENABLE = 'qwen-code.extension_enable';
 export const EVENT_EXTENSION_INSTALL = 'qwen-code.extension_install';
@@ -21,6 +25,8 @@ export const EVENT_EXTENSION_UNINSTALL = 'qwen-code.extension_uninstall';
 export const EVENT_EXTENSION_UPDATE = 'qwen-code.extension_update';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_RIPGREP_FALLBACK = 'qwen-code.ripgrep_fallback';
+export const EVENT_RIPGREP_RUNTIME_RECOVERY =
+  'qwen-code.ripgrep_runtime_recovery';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
 export const EVENT_SLASH_COMMAND = 'qwen-code.slash_command';
 export const EVENT_IDE_CONNECTION = 'qwen-code.ide_connection';
@@ -33,7 +39,7 @@ export const EVENT_PROTOCOL_TAG_SANITIZED =
   'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
-// which is fired by geminiChat for InvalidStreamError retries on a separate
+// which is fired by llmChat for InvalidStreamError retries on a separate
 // retry budget. See docs/design/telemetry-llm-request-timing-design.md.
 export const EVENT_API_RETRY = 'qwen-code.api_retry';
 export const EVENT_CONVERSATION_FINISHED = 'qwen-code.conversation_finished';
@@ -81,6 +87,7 @@ export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
 export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
+export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';
@@ -98,3 +105,24 @@ export const SPAN_HOOK = 'qwen-code.hook';
  * (#3731 Phase 3).
  */
 export const SPAN_SUBAGENT = 'qwen-code.subagent';
+
+// Tool failure kind span attribute and vocabulary — shared across
+// coreToolScheduler, session-tracing, and telemetry docs so the
+// write sites and documented values cannot drift.
+export const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+export const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+export const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+export const TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED =
+  'invocation_guard_denied';
+export const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
+export const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
+export const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
+export const TOOL_FAILURE_KIND_PERMISSION_DENIED = 'permission_denied';
+export const TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED =
+  'permission_hook_denied';
+export const TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED = 'plan_mode_blocked';
+export const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED =
+  'non_interactive_denied';
+export const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED =
+  'background_agent_denied';
+export const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';

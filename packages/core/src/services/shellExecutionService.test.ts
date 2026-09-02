@@ -42,6 +42,7 @@ const mockSpawnSync = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
+const mockLoadXtermHeadless = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToText = vi.hoisted(() =>
   vi.fn((terminal: pkg.Terminal): string => {
@@ -103,6 +104,9 @@ vi.mock('os', () => ({
 vi.mock('../utils/getPty.js', () => ({
   getPty: mockGetPty,
 }));
+vi.mock('../utils/load-xterm-headless.js', () => ({
+  loadXtermHeadless: mockLoadXtermHeadless,
+}));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
   serializeTerminalToText: mockSerializeTerminalToText,
@@ -123,6 +127,7 @@ const mockProcessKill = vi
 // to avoid PATH/CWD binary planting. Compute the expected path the same way so
 // assertions stay in sync across platforms (SystemRoot is unset off Windows).
 const TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const HIDDEN_WINDOW = { windowsHide: true };
 const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
 
 const shellExecutionConfig = {
@@ -250,6 +255,7 @@ describe('ShellExecutionService', () => {
       module: { spawn: mockPtySpawn },
       name: 'mock-pty',
     });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
 
     onOutputEventMock = vi.fn();
 
@@ -317,6 +323,36 @@ describe('ShellExecutionService', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      const spawnEnv = (
+        mockPtySpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture output', async () => {
       const { result, handle } = await simulateExecution('ls -l', (pty) => {
@@ -340,6 +376,15 @@ describe('ShellExecutionService', () => {
         type: 'data',
         chunk: createExpectedAnsiOutput('file1.txt'),
       });
+    });
+
+    it('normalizes node-pty clean-exit signal 0 to null', async () => {
+      const { result } = await simulateExecution('echo clean', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.signal).toBeNull();
     });
 
     it('disposes PTY terminal resources on natural exit', async () => {
@@ -412,6 +457,32 @@ describe('ShellExecutionService', () => {
           chunk: createExpectedAnsiOutput('aredword'),
         }),
       );
+    });
+
+    it('suppresses parser diagnostics for malformed PTY output', async () => {
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      try {
+        const { result } = await simulateExecution(
+          'malformed-output',
+          (pty) => {
+            pty.onData.mock.calls[0][0]('\u001b\xb0');
+            pty.onData.mock.calls[0][0]('recovered');
+            pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+          },
+        );
+
+        expect(
+          consoleErrorSpy.mock.calls.some((args) =>
+            args.some((arg) => String(arg).includes('Parsing error')),
+          ),
+        ).toBe(false);
+        expect(result.output).toContain('recovered');
+      } finally {
+        consoleErrorSpy.mockRestore();
+      }
     });
 
     it('should correctly decode multi-byte characters split across chunks', async () => {
@@ -990,13 +1061,14 @@ describe('ShellExecutionService', () => {
       );
       expect(result.promoted).toBe(true);
       // After promote, drive the PTY's onExit to simulate natural
-      // completion. The service attaches a new exit listener for
+      // completion with its raw clean-exit signal metadata. The service
+      // attaches a new exit listener for
       // post-promote settle — find the most-recently-registered.
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
       expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
       const postPromoteExitHandler =
         onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      postPromoteExitHandler({ exitCode: 0, signal: 0 });
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].exitCode).toBe(0);
       expect(settleCalls[0].signal).toBeNull();
@@ -1340,29 +1412,27 @@ describe('ShellExecutionService', () => {
       expect(result.aborted).toBe(true);
       // Cancel tree-kills (/t) SYNCHRONOUSLY (spawnSync) so taskkill enumerates
       // the tree before ptyProcess.kill() fires ClosePseudoConsole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
       // The finalizer reap (async cpSpawn via windowsKillPid) must ALSO
       // tree-kill on cancel — positively asserted so removing the reap or
       // forcing cancelKillDispatched=false fails here, not just trivially via
       // the negative check below. See #5873.
-      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
       // ...and it must never downgrade to a shell-only (/f without /t) kill
       // that could leave the abandoned descendant tree behind. See #5873.
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
       // ...and still calls ptyProcess.kill() so that if taskkill cannot launch,
       // the ConPTY host is torn down and onExit fires (the cancel can't hang).
       // See #5873.
@@ -1386,17 +1456,16 @@ describe('ShellExecutionService', () => {
       expect(result.exitCode).toBe(0);
       // Reap kills only the shell pid — no /t — so a child the command
       // intentionally detached (e.g. Start-Process) survives. See #5873.
-      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('normal completion on win32 swallows a taskkill launch error (no crash)', async () => {
@@ -1443,6 +1512,7 @@ describe('ShellExecutionService', () => {
         expect(mockCpSpawn).not.toHaveBeenCalledWith(
           TASKKILL,
           expect.anything(),
+          HIDDEN_WINDOW,
         );
       } finally {
         // clearAllMocks() resets calls but not implementations — restore the
@@ -1458,7 +1528,11 @@ describe('ShellExecutionService', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, expect.anything());
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(
+        TASKKILL,
+        expect.anything(),
+        HIDDEN_WINDOW,
+      );
     });
 
     it('exit cleanup on win32 tree-kills via taskkill and tears down the host', () => {
@@ -1475,12 +1549,11 @@ describe('ShellExecutionService', () => {
       ShellExecutionService.cleanup();
       ShellExecutionService['activePtys'].delete(pid);
 
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(pid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(pid)],
+        HIDDEN_WINDOW,
+      );
       // The ConPTY host is torn down unconditionally, alongside the tree-kill.
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
@@ -1551,17 +1624,17 @@ describe('ShellExecutionService', () => {
 
         expect(result.aborted).toBe(true);
         // performCancelKill's sync tree-kill still runs...
-        expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-          '/f',
-          '/t',
-          '/pid',
-          String(mockPtyProcess.pid),
-        ]);
+        expect(mockSpawnSync).toHaveBeenCalledWith(
+          TASKKILL,
+          ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+          HIDDEN_WINDOW,
+        );
         // ...but the finalizer reap is skipped (isPtyActive false via ESRCH),
         // so no async taskkill fires there.
         expect(mockCpSpawn).not.toHaveBeenCalledWith(
           TASKKILL,
           expect.anything(),
+          HIDDEN_WINDOW,
         );
       } finally {
         mockProcessKill.mockImplementation(() => true);
@@ -1599,12 +1672,11 @@ describe('ShellExecutionService', () => {
 
       // Pins killChildProcesses on the absolute System32 path — a regression to
       // the bare 'taskkill' name reopens the binary-planting hole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(childPid),
-      ]);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(childPid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('win32 taskkill is invoked by absolute System32 path, not the bare name', async () => {
@@ -1642,17 +1714,16 @@ describe('ShellExecutionService', () => {
       );
 
       expect(result.exitCode).toBe(0);
-      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('win32 promoted shell reaps its lingering pwsh on natural exit (shell-pid-only)', async () => {
@@ -1683,17 +1754,16 @@ describe('ShellExecutionService', () => {
       postPromoteExitHandler({ exitCode: 0, signal: undefined });
 
       expect(settleCalls).toHaveLength(1);
-      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/t',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('win32 promoted shell reaps on natural exit even with onData only (no onSettle)', async () => {
@@ -1719,11 +1789,11 @@ describe('ShellExecutionService', () => {
         onExitRegistrations[onExitRegistrations.length - 1][0];
       postPromoteExitHandler({ exitCode: 0, signal: undefined });
 
-      expect(mockCpSpawn).toHaveBeenCalledWith(TASKKILL, [
-        '/f',
-        '/pid',
-        String(mockPtyProcess.pid),
-      ]);
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        TASKKILL,
+        ['/f', '/pid', String(mockPtyProcess.pid)],
+        HIDDEN_WINDOW,
+      );
     });
 
     it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
@@ -1763,6 +1833,7 @@ describe('ShellExecutionService', () => {
         expect(mockCpSpawn).not.toHaveBeenCalledWith(
           TASKKILL,
           expect.anything(),
+          HIDDEN_WINDOW,
         );
       } finally {
         mockProcessKill.mockImplementation(() => true);
@@ -2253,6 +2324,37 @@ describe('ShellExecutionService child_process fallback', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      const spawnEnv = (
+        mockCpSpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
       const { result, handle } = await simulateExecution('ls -l', (cp) => {
@@ -2530,12 +2632,11 @@ describe('ShellExecutionService child_process fallback', () => {
               expectedSignal,
             );
           } else {
-            expect(mockCpSpawn).toHaveBeenCalledWith(expectedCommand, [
-              '/f',
-              '/t',
-              '/pid',
-              String(mockChildProcess.pid),
-            ]);
+            expect(mockCpSpawn).toHaveBeenCalledWith(
+              expectedCommand,
+              ['/f', '/t', '/pid', String(mockChildProcess.pid)],
+              HIDDEN_WINDOW,
+            );
           }
         });
       },
@@ -3442,6 +3543,42 @@ describe('ShellExecutionService execution method selection', () => {
       expect(mockCpSpawn).not.toHaveBeenCalled();
     },
   );
+
+  it('does not spawn when aborted while xterm is loading', async () => {
+    let resolveXterm:
+      | ((value: { Terminal: typeof Terminal }) => void)
+      | undefined;
+    mockLoadXtermHeadless.mockReturnValue(
+      new Promise((resolve) => {
+        resolveXterm = resolve;
+      }),
+    );
+    const abortController = new AbortController();
+    const handlePromise = ShellExecutionService.execute(
+      'test command',
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      shellExecutionConfig,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockLoadXtermHeadless).toHaveBeenCalledOnce();
+    });
+    abortController.abort();
+    resolveXterm?.({ Terminal });
+
+    const handle = await handlePromise;
+    expect(await handle.result).toMatchObject({
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+      output: '',
+    });
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).not.toHaveBeenCalled();
+  });
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();

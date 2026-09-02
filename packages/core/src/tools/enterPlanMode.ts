@@ -17,6 +17,7 @@ import {
   buildSubagentPlanToolBlockedResult,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { getPlanModeSystemReminder } from '../core/prompts.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -158,10 +159,10 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
       const revealedBefore = registry.isDeferredToolRevealed(exitPlanModeName);
       if (!revealedBefore) {
         registry.revealDeferredTool(exitPlanModeName);
-        const geminiClient = this.config.getGeminiClient();
-        if (geminiClient) {
+        const llmClient = this.config.getLlmClient();
+        if (llmClient) {
           try {
-            await geminiClient.setTools();
+            await llmClient.setTools();
           } catch (setErr) {
             // Rollback the reveal on setTools failure so the registry
             // stays consistent with the chat's declaration list.
@@ -182,8 +183,7 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     return {
-      llmContent:
-        'Plan mode is now active. Continue with read-only investigation, ask the user when needed, and use exit_plan_mode when the plan is ready.',
+      llmContent: getPlanModeSystemReminder(this.config.getSdkMode()),
       returnDisplay: 'Entered plan mode.',
     };
   }
@@ -194,6 +194,10 @@ export class EnterPlanModeTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name: string = ToolNames.ENTER_PLAN_MODE;
+
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
 
   constructor(private readonly config: Config) {
     super(

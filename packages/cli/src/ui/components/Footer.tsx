@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { type RefObject, useRef } from 'react';
+import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -21,31 +22,63 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { GeminiSpinner } from './GeminiRespondingSpinner.js';
-import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import { Spinner } from './RespondingSpinner.js';
+import {
+  GoalPill,
+  isLiveGoalSnapshot,
+  useFooterGoalState,
+} from './GoalPill.js';
 import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
+import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { StreamingState } from '../types.js';
 
-export const Footer: React.FC = () => {
+import type { PasteProgress } from '../contexts/KeypressContext.js';
+
+const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
+  progress,
+}) => {
+  const { receivedBytes } = progress;
+  const kb = receivedBytes / 1024;
+  const label = kb >= 1 ? `${kb.toFixed(0)} KB` : `${receivedBytes} B`;
+
+  return (
+    <Text dimColor>
+      {t('Pasting…')} {label}
+    </Text>
+  );
+};
+
+interface FooterProps {
+  containerRef?: RefObject<DOMElement | null>;
+}
+
+export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
+  const isNarrow = isNarrowWidth(terminalWidth);
+  const statusLineRef = useRef<DOMElement>(null);
+  const { width: statusLineWidth, hasMeasured: hasMeasuredStatusLine } =
+    useBoxMetrics(statusLineRef);
+  const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
     hideContextIndicator,
-  } = useStatusLine();
+  } = useStatusLine(
+    isNarrow,
+    hasMeasuredStatusLine ? statusLineWidth : undefined,
+  );
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
-
-  const { columns: terminalWidth } = useTerminalSize();
-  const isNarrow = isNarrowWidth(terminalWidth);
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -82,6 +115,8 @@ export const Footer: React.FC = () => {
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+  ) : pasteProgress.active ? (
+    <PasteProgressBar progress={pasteProgress} />
   ) : uiState.rewindEscPending ? (
     <Text color={theme.text.secondary}>
       {t('Press Esc again to rewind conversation.')}
@@ -94,17 +129,27 @@ export const Footer: React.FC = () => {
     <ShellModeIndicator />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {configInitMessage}
+      <Spinner /> {configInitMessage}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+      <Spinner /> {t('IDE connecting... context may be unavailable')}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
     <Text color={theme.status.warning}>
       {t('IDE connection unavailable: {{message}}', {
         message: uiState.startupIdeConnectionStatus.message,
       })}
+    </Text>
+  ) : uiState.streamingState === StreamingState.Responding ? (
+    <Text color={theme.text.secondary}>
+      {t('Enter to steer · Ctrl+Q to queue')}
+      {showAutoAcceptIndicator !== undefined && (
+        <>
+          {' · '}
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+        </>
+      )}
     </Text>
   ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
@@ -152,9 +197,12 @@ export const Footer: React.FC = () => {
   // Goal pill: only present in `rightItems` when a goal is active so the
   // divider chain stays tight; the pill itself does the live elapsed-time
   // refresh internally.
-  const goalActive = useFooterGoalState() !== undefined;
-  if (goalActive) {
-    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  const goalState = useFooterGoalState();
+  if (isLiveGoalSnapshot(goalState)) {
+    rightItems.push({
+      key: 'goal',
+      node: <GoalPill snapshot={goalState} />,
+    });
   }
   const cronTaskCount = useFooterCronTaskCount();
   if (cronTaskCount > 0) {
@@ -165,6 +213,7 @@ export const Footer: React.FC = () => {
   // (bottom), right section has indicators. Status line and hints coexist.
   return (
     <Box
+      ref={containerRef}
       flexDirection={isNarrow ? 'column' : 'row'}
       justifyContent={isNarrow ? 'flex-start' : 'space-between'}
       width="100%"
@@ -173,6 +222,7 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box
+        ref={statusLineRef}
         flexDirection="column"
         flexGrow={1}
         flexShrink={isNarrow ? 0 : 1}
@@ -232,12 +282,21 @@ export const Footer: React.FC = () => {
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
+          {/* Every child of this shrinkable row must keep wrap="truncate", or
+              the footer grows mid-turn once the row overflows (#8667/#8666). */}
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {uiState.messageQueue.length > 0 && (
+            <Text color={theme.text.secondary} wrap="truncate">
+              {` ⏳ ${t('{{count}} queued', {
+                count: String(uiState.messageQueue.length),
+              })}`}
+            </Text>
+          )}
           {!uiState.isSkillReviewDialogOpen &&
             (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
-              <Text color={theme.status.warning}>
+              <Text color={theme.status.warning} wrap="truncate">
                 {` ⚠ ${t('{{count}} skill(s) pending review', {
                   count: String(uiState.skillReviewPending!.skills.length),
                 })}`}

@@ -28,11 +28,13 @@ import {
   waitForServeRuntimeOrExit,
 } from './fast-path.js';
 import {
+  consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathEnvironment,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   resetServeFastPathHomeEnvBootstrapForTesting,
 } from './fast-path-settings.js';
+import { resetLoaderKeyRejectionReportingForTesting } from '../config/shared-env-keys.js';
 import {
   getGlobalQwenDirLite,
   SETTINGS_DIRECTORY_NAME,
@@ -69,6 +71,11 @@ const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
 const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
+const originalNodeCompileCache = process.env['NODE_COMPILE_CACHE'];
+const originalNodeDisableCompileCache =
+  process.env['NODE_DISABLE_COMPILE_CACHE'];
+const originalPendingCompileCache =
+  process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
 
@@ -189,6 +196,11 @@ function useTempQwenHome(): string {
     mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-')),
   );
   process.env['QWEN_HOME'] = tempQwenHome;
+  // getUserLevelEnvPathsFastPath always includes os.homedir() candidates,
+  // so redirect HOME/USERPROFILE too — a real ~/.env or ~/.qwen/.env would
+  // otherwise leak keys and warning counts into these tests.
+  process.env['HOME'] = tempQwenHome;
+  process.env['USERPROFILE'] = tempQwenHome;
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
     tempQwenHome,
     'system-settings.json',
@@ -334,6 +346,22 @@ afterEach(() => {
   } else {
     process.env['GOOGLE_CLOUD_PROJECT'] = originalGoogleCloudProject;
   }
+  if (originalNodeCompileCache === undefined) {
+    delete process.env['NODE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_COMPILE_CACHE'] = originalNodeCompileCache;
+  }
+  if (originalNodeDisableCompileCache === undefined) {
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_DISABLE_COMPILE_CACHE'] = originalNodeDisableCompileCache;
+  }
+  if (originalPendingCompileCache === undefined) {
+    delete process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
+  } else {
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] =
+      originalPendingCompileCache;
+  }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
   } else {
@@ -368,8 +396,8 @@ describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
     const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(cliSource).not.toContain("import './gemini.js'");
-    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("import './llm.js'");
+    expect(cliSource).not.toContain("import { main } from './llm.js'");
     expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
@@ -452,9 +480,13 @@ describe('CLI entry import boundary', () => {
     expect(requestHelpersSource).toContain(
       "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
     );
-    expect(requestHelpersSource).toContain(
-      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    // MAX_WORKSPACE_PATH_LENGTH (and, since #7139, the sandbox path
+    // translation) must come from the workspacePaths subpath — never the
+    // acp-bridge barrel or the compatibility shim.
+    expect(requestHelpersSource).toMatch(
+      /import \{[^}]*\bMAX_WORKSPACE_PATH_LENGTH\b[^}]*\} from '@qwen-code\/acp-bridge\/workspacePaths';/,
     );
+    expect(requestHelpersSource).not.toMatch(/from '@qwen-code\/acp-bridge';/);
   });
 
   it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
@@ -504,6 +536,7 @@ describe('serve fast path argument parsing', () => {
 
     expect(parsed).toEqual({
       kind: 'serve',
+      openWithAuth: false,
       httpBridge: true,
       open: false,
       options: {
@@ -533,6 +566,28 @@ describe('serve fast path argument parsing', () => {
         tlsKey: '/tmp/key.pem',
       },
     });
+  });
+
+  it('parses valid memory project scopes and falls back for invalid values', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope', 'workspace']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'workspace' },
+    });
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope=git-root']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'git-root' },
+    });
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--memory-project-scope',
+        'unsupported',
+      ]),
+    ).toEqual({ kind: 'fallback' });
   });
 
   it('parses bundled entrypoint argv before serve', () => {
@@ -627,14 +682,23 @@ describe('serve fast path argument parsing', () => {
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
       ],
+      ['max-journal-events', ['--max-journal-events', '10000']],
+      ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
       ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
+      ['open-with-auth', ['--open-with-auth']],
+      ['local-control', ['--local-control']],
+      ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
+      ['memory-budget-mb', ['--memory-budget-mb', '8192']],
+      ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
+      ['child-heap-mode', ['--child-heap-mode', 'observe']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -642,8 +706,14 @@ describe('serve fast path argument parsing', () => {
       ['prompt-deadline-ms', ['--prompt-deadline-ms', '1000']],
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
+      ['initialize-timeout-ms', ['--initialize-timeout-ms', '30000']],
+      ['session-restore-timeout-ms', ['--session-restore-timeout-ms', '60000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
+      [
+        'session-prompt-settled-close-grace-ms',
+        ['--session-prompt-settled-close-grace-ms', '60000'],
+      ],
       [
         'permission-response-timeout-ms',
         ['--permission-response-timeout-ms', '1000'],
@@ -654,11 +724,30 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['restore-ask-user-question', ['--restore-ask-user-question']],
+      ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
+      [
+        'external-tool-guard-endpoint',
+        ['--external-tool-guard-endpoint', 'http://127.0.0.1:3001/v1'],
+      ],
+      [
+        'external-tool-guard-timeout-ms',
+        ['--external-tool-guard-timeout-ms', '3000'],
+      ],
       ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
+    const expectedFallbackOptions = new Set([
+      'channel',
+      'external-tool-guard-endpoint',
+      'external-tool-guard-mode',
+      'external-tool-guard-timeout-ms',
+      'help',
+      'local-control',
+      'local-control-address',
+      'version',
+    ]);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),
@@ -697,6 +786,53 @@ describe('serve fast path argument parsing', () => {
     );
   });
 
+  it('parses --memory-pressure-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--memory-pressure-mode', 'off'],
+      ['serve', '--memory-pressure-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { memoryPressureMode: 'off' },
+      });
+    }
+    // An out-of-range choice defers to yargs rather than the fast path
+    // inventing a second wording for the same error.
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-pressure-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('parses --child-heap-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--child-heap-mode', 'off'],
+      ['serve', '--child-heap-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { childHeapMode: 'off' },
+      });
+    }
+    // `enforce` is deliberately not a value yet, so it is the sample worth
+    // pinning: the fast path must defer to yargs rather than smuggle it in.
+    expect(
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('parses --memory-budget-mb on the fast path in both spellings', () => {
+    for (const argv of [
+      ['serve', '--memory-budget-mb', '8192'],
+      ['serve', '--memory-budget-mb=8192'],
+    ]) {
+      const parsed = parseServeFastPathArgs(argv);
+      expect(parsed).toMatchObject({
+        kind: 'serve',
+        options: { memoryBudgetMb: 8192 },
+      });
+    }
+  });
+
   it('parses --compacted-replay-max-bytes on the fast path', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -716,6 +852,38 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { experimentalLsp: true },
+    });
+  });
+
+  it('keeps --restore-ask-user-question on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--restore-ask-user-question',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { restoreAskUserQuestion: true },
+    });
+  });
+
+  it('keeps authenticated open on the fast path', () => {
+    const parsed = parseServeFastPathArgs(['serve', '--open-with-auth']);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
+    });
+  });
+
+  it('lets authenticated open imply --open regardless of --no-open', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--open-with-auth', '--no-open']),
+    ).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
     });
   });
 
@@ -765,6 +933,10 @@ describe('serve fast path argument parsing', () => {
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
       'qwen serve: --rate-limit-prompt must be a positive integer.',
     ],
+    [
+      ['serve', '--memory-budget-mb', '512'],
+      'qwen serve: --memory-budget-mb must be an integer in [1024, 1048576].',
+    ],
   ])(
     'validates %s before bootstrapping settings and environment',
     async (argv, message) => {
@@ -787,6 +959,32 @@ describe('serve fast path argument parsing', () => {
       expect(stderrWrites.join('')).toContain(message);
     },
   );
+
+  it.each([
+    [['serve', '--memory-budget-mb', '8192'], 'valid --memory-budget-mb'],
+    [['serve'], 'absent --memory-budget-mb'],
+  ])('accepts %s without a range error', async (argv, _label) => {
+    const qwenHome = useTempQwenHome();
+    writeFileSync(join(qwenHome, 'settings.json'), '{');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('unexpected process.exit');
+    }) as typeof process.exit);
+
+    // Bootstrap fails (broken settings.json), but validation must pass
+    // first — a spurious range error would exit(1) before reaching it.
+    const result = await tryRunServeFastPath(argv);
+
+    expect(result).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'must be an integer in [1024, 1048576]',
+    );
+  });
 
   it('does not enable rate limiting just because tuning flags are present', () => {
     const parsed = parseServeFastPathArgs([
@@ -1128,6 +1326,26 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
   });
 
+  it('preserves workspace .env compile cache over the pending default', async () => {
+    delete process.env['NODE_COMPILE_CACHE'];
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-compile-cache-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', '.env'),
+      'NODE_COMPILE_CACHE=/tmp/operator-cache\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/operator-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
+  });
+
   it('loads .env from --workspace even when launched from another directory', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
@@ -1223,6 +1441,8 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
     delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    delete process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_DESKTOP'];
     tempLaunchCwd = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-fake-home-')),
     );
@@ -1238,7 +1458,11 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempLaunchCwd, '.env'),
-      'QWEN_RUNTIME_DIR=from-home-env\n',
+      [
+        'QWEN_RUNTIME_DIR=from-home-env',
+        'QWEN_CODE_SERVE=1',
+        'QWEN_CODE_DESKTOP=1',
+      ].join('\n'),
     );
     writeFileSync(
       join(tempQwenHome, '.env'),
@@ -1258,6 +1482,8 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBe(
       'from-discovered-trust',
     );
+    expect(process.env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(process.env['QWEN_CODE_DESKTOP']).toBeUndefined();
   });
 
   it('still pre-resolves missing home-scoped keys when QWEN_HOME and runtime are already set', () => {
@@ -1531,7 +1757,410 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
-  it('prioritizes trusted parent folders over nested distrust rules', async () => {
+  // Regression for #8653: the fast path runs before runQwenServeImpl freezes
+  // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base
+  // env distributed to every workspace's session subprocesses — the exact
+  // cross-workspace vector the daemon-side scrub closes.
+  it('never applies loader-affecting keys from .env files or settings.env', () => {
+    // Hermetic: the walk-up reaches the user-level candidates, so the real
+    // ~/.qwen/.env must not leak into this test.
+    useTempQwenHome();
+    const trackedKeys = [
+      'NODE_OPTIONS',
+      'npm_config_node_options',
+      'npm_config_node-options',
+      'NPM_CONFIG_NODE_OPTIONS',
+      'NODE_PATH',
+      'LD_PRELOAD',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-env-')),
+    );
+    try {
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        [
+          'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+          'npm_config_node_options=--import file:///workspace-a/hook.mjs',
+          // npm applies npm_config_* case-insensitively and maps
+          // non-leading underscores onto hyphens, so the gate must reject
+          // case variants and the hyphen spelling too.
+          'NPM_CONFIG_NODE_OPTIONS=--import file:///workspace-a/upper.mjs',
+          'npm_config_node-options=--import file:///workspace-a/hyphen.mjs',
+          'FASTPATH_DOTENV_ALLOWED=allowed',
+          '',
+        ].join('\n'),
+      );
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['FASTPATH_DOTENV_ALLOWED']).toBe('allowed');
+      rmSync(tempWorkspace, { recursive: true, force: true });
+
+      // The privileged .qwen/.env scope bypasses excludedEnvVars, so pin it
+      // separately: exempting it would ship green without this case.
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-env-')),
+      );
+      mkdirSync(join(tempWorkspace, SETTINGS_DIRECTORY_NAME));
+      writeFileSync(
+        join(tempWorkspace, SETTINGS_DIRECTORY_NAME, '.env'),
+        [
+          'NODE_PATH=/workspace-a/node_modules',
+          'FASTPATH_QWEN_ALLOWED=allowed',
+          '',
+        ].join('\n'),
+      );
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_PATH']).toBeUndefined();
+      expect(process.env['FASTPATH_QWEN_ALLOWED']).toBe('allowed');
+
+      loadServeFastPathEnvironment(
+        {
+          env: {
+            LD_PRELOAD: '/workspace-a/hijack.so',
+            NPM_CONFIG_NODE_OPTIONS: '--import file:///workspace-a/upper.mjs',
+            'npm_config_node-options':
+              '--import file:///workspace-a/hyphen.mjs',
+            FASTPATH_SETTINGS_ALLOWED: 'allowed',
+          },
+        },
+        tempWorkspace,
+      );
+      expect(process.env['LD_PRELOAD']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
+      expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_DOTENV_ALLOWED'];
+      delete process.env['FASTPATH_QWEN_ALLOWED'];
+      delete process.env['FASTPATH_SETTINGS_ALLOWED'];
+    }
+  });
+
+  // The loader gate runs before any scope check, and home-scoped files are
+  // exempt from PROJECT_ENV_HARDCODED_EXCLUSIONS — pin that a home-scoped
+  // exemption mutant for loader keys cannot ship green on the fast path.
+  it('never applies loader-affecting keys from user-level .env files either', () => {
+    const trackedKeys = ['NODE_OPTIONS', 'npm_config_node_options'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-home-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      [
+        'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+        'npm_config_node_options=--import file:///workspace-a/hook.mjs',
+        'FASTPATH_HOME_ALLOWED=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['FASTPATH_HOME_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_HOME_ALLOWED'];
+    }
+  });
+
+  // QWEN_CLI_ENTRY is the spawned session-process entrypoint: a start-dir
+  // .env fixing it turns `qwen serve` in an untrusted repo into arbitrary
+  // script execution for every workspace's sessions. The fast path consults
+  // no reload tier, so the key must be hardcoded-excluded here.
+  it('never applies QWEN_CLI_ENTRY from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = ['QWEN_CLI_ENTRY', 'qwen_cli_entry'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-cli-entry-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_CLI_ENTRY=/workspace-a/evil-entry.js',
+        // Windows env lookup is case-insensitive, so the gate must reject
+        // case variants too.
+        'qwen_cli_entry=/workspace-a/evil-entry-lower.js',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+      expect(process.env['qwen_cli_entry']).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location: a start-dir .env fixing it redirects storage for every
+  // workspace the daemon serves, and reads resolve the configured root first
+  // — an attacker repo would capture uploads and serve back tampered bytes.
+  it('never applies QWEN_SERVE_SESSION_ATTACHMENTS_ROOT from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-attachments-root-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT=./exfil', ''].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'],
+      ).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  // The fast-path settings.env loop rejects hardcoded exclusions through the
+  // case-folded isHardcodedProjectEnvExclusion predicate. Every other
+  // settings.env fixture uses loader/allowlisted keys, so a regression to
+  // exact-case membership would ship green — this pins a lowercase hardcoded
+  // key (the entrypoint hijack) being rejected from settings.env.
+  it('never applies a case-variant hardcoded exclusion from settings.env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = [
+      'QWEN_CLI_ENTRY',
+      'qwen_cli_entry',
+      'node_extra_ca_certs',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-hardcoded-')),
+    );
+
+    try {
+      loadServeFastPathEnvironment(
+        {
+          env: {
+            qwen_cli_entry: '/workspace-a/evil-entry-lower.js',
+            node_extra_ca_certs: '/workspace-a/evil-ca.pem',
+          },
+        },
+        tempWorkspace,
+      );
+      expect(process.env['qwen_cli_entry']).toBeUndefined();
+      expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+      expect(process.env['node_extra_ca_certs']).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  // Daemon-side loadSettings() skips the .env load for untrusted workspaces
+  // and only re-runs it later for trusted ones, so a loader key rejected at
+  // boot would vanish without a breadcrumb unless the fast path reports it.
+  it('warns when loader-affecting keys are rejected on the fast path', () => {
+    resetLoaderKeyRejectionReportingForTesting();
+    useTempQwenHome();
+    const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-warn-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['NODE_OPTIONS=--max-old-space-size=8192', ''].join('\n'),
+    );
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+
+    try {
+      loadServeFastPathEnvironment(
+        { env: { LD_PRELOAD: '/workspace-a/hijack.so' } },
+        tempWorkspace,
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(2);
+    const combined = warnings.join('');
+    expect(combined).toContain(join(tempWorkspace, '.env'));
+    expect(combined).toContain('NODE_OPTIONS');
+    expect(combined).toContain('settings.env');
+    expect(combined).toContain('LD_PRELOAD');
+  });
+
+  // The daemon consumes the stashed fast-path rejections once at boot to
+  // persist them; the reset keeps a later consume (a second consumer or a
+  // re-entered boot path in one process) from re-logging the same keys.
+  it('resets the rejected-loader-key stash after one consume', () => {
+    useTempQwenHome();
+    const trackedKeys = ['NODE_OPTIONS'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-consume-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(consumeServeFastPathRejectedLoaderKeys()).toContain(
+        'NODE_OPTIONS',
+      );
+      expect(consumeServeFastPathRejectedLoaderKeys()).toEqual([]);
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  // A second fast-path load must not clobber the keys rejected by the
+  // first, and the same key rejected by both loads lands in the stash once.
+  it('accumulates rejected loader keys across loads without duplicates', () => {
+    useTempQwenHome();
+    const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const firstWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-accum-1-')),
+    );
+    const secondWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-accum-2-')),
+    );
+    writeFileSync(
+      join(firstWorkspace, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+    writeFileSync(join(secondWorkspace, '.env'), 'LD_PRELOAD=/hijack.so\n');
+
+    try {
+      // The stash is a module-global; drain any residue left by earlier tests
+      // so this exact-match assertion does not depend on test declaration
+      // order (partial `-t` selection, --sequence.shuffle, or a new load-
+      // bearing test inserted before this one).
+      consumeServeFastPathRejectedLoaderKeys();
+      loadServeFastPathEnvironment({}, firstWorkspace);
+      loadServeFastPathEnvironment(
+        { env: { LD_PRELOAD: '/hijack.so', NODE_OPTIONS: '--inspect' } },
+        secondWorkspace,
+      );
+      expect([...consumeServeFastPathRejectedLoaderKeys()].sort()).toEqual([
+        'LD_PRELOAD',
+        'NODE_OPTIONS',
+      ]);
+    } finally {
+      rmSync(firstWorkspace, { recursive: true, force: true });
+      rmSync(secondWorkspace, { recursive: true, force: true });
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  it('does not load env from an explicitly untrusted nested workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1558,7 +2187,108 @@ describe('serve fast path environment bootstrap', () => {
 
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('does not load env from a descendant of an explicitly untrusted workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-descendant-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'evil-repo');
+    const subDir = join(childWorkspace, 'packages', 'foo');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.TRUST_FOLDER,
+        [childWorkspace]: TrustLevel.DO_NOT_TRUST,
+      }),
+    );
+    writeFileSync(
+      join(childWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-untrusted-descendant-env\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(subDir);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('allows a trusted child rule to override an untrusted parent', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-opt-in-')),
+    );
+    const trustedWorkspace = join(tempWorkspace, 'good-repo');
+    const subDir = join(trustedWorkspace, 'src');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [trustedWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+    writeFileSync(
+      join(trustedWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-trusted-child-env\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(subDir);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
+  });
+
+  it('does not load a distrusted parent .env for a trusted child workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-child-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'child');
+    mkdirSync(childWorkspace);
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [childWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {
@@ -1621,6 +2351,37 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
+  });
+
+  it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    delete process.env['FAST_PATH_LEAKED_COPY'];
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-secret-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: {
+          FAST_PATH_LEAKED_COPY: 'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+        },
+      }),
+    );
+    process.chdir(tempWorkspace);
+
+    try {
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+      // The placeholders survive verbatim, exactly like an unset variable's;
+      // the daemon bearer token is never copied under another key.
+      expect(process.env['FAST_PATH_LEAKED_COPY']).toBe(
+        'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+      );
+    } finally {
+      delete process.env['FAST_PATH_LEAKED_COPY'];
+    }
   });
 
   it('expands home .env fallback placeholders in workspace settings.env', async () => {

@@ -13,6 +13,7 @@ import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { ApprovalMode } from '../../config/config.js';
+import { getBuiltInOutputStyle } from '../../core/output-styles.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -72,6 +73,8 @@ const createMockConfig = (
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
+  getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
     getFunctionDeclarationsFiltered: () => [],
@@ -401,6 +404,67 @@ describe('ArenaManager', () => {
           inProcess?: { chatHistory?: unknown };
         };
         expect(spawnConfig.inProcess?.chatHistory).toBeUndefined();
+      }
+    });
+
+    it('builds the in-process worker prompt with headless mode and the active style', async () => {
+      // Arena workers run non-interactively, so ArenaManager passes 'headless'
+      // as the interaction mode (4th arg) to getCoreSystemPrompt. A regression
+      // that drops that argument would fall back to the interactive prompt,
+      // telling arena workers to ask the user questions no one can answer.
+      // Assert on the produced prompt: the headless variant carries a
+      // single-turn marker that is absent from every other interaction mode.
+      mockBackend.type = 'in-process';
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+      };
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).toContain(
+          'This is a non-interactive, single-turn run',
+        );
+        expect(systemPrompt).toContain('# Output Style: Concise');
+      }
+    });
+
+    it('does not embed the auto-memory section in the worker system prompt', async () => {
+      // The in-process worker's AgentCore appends the volatile auto-memory
+      // section itself (buildChatSystemPrompt), and the per-agent Config
+      // inherits a non-empty getAutoMemoryPrompt() from this base. If
+      // ArenaManager also appended it, the section would appear twice in the
+      // worker's system prompt. Assert ArenaManager leaves it out.
+      const marker = '__ARENA_AUTO_MEMORY_MARKER__';
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getAutoMemoryPrompt: () => marker,
+      };
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).not.toContain(marker);
       }
     });
   });

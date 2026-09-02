@@ -15,19 +15,63 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
-import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  isUnrecognizedDiagnosticReason,
+} from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
-import { isRecord } from './utils.js';
+import { detachString, isRecord } from './utils.js';
 
 const DEFAULT_MAX_BLOCKS = 1_000;
+/**
+ * Byte budget for retained transcript blocks. Blocks carry raw tool payloads
+ * (up to the daemon's per-frame cap each), so the block-count window alone
+ * does not bound memory; trimming evicts the oldest blocks until the running
+ * estimate is back under this budget. The ceiling is therefore budget + one
+ * worst-case block.
+ */
+const DEFAULT_MAX_RETAINED_BYTES = 128 * 1024 * 1024;
+/**
+ * Cap for the `unrecognizedDiagnostics` sidechannel. Forward-compat noise
+ * must stay inspectable without growing unboundedly in long sessions.
+ */
+export const UNRECOGNIZED_DIAGNOSTICS_LIMIT = 50;
 const TRIMMED_TOOL_BLOCK_ID = '__trimmed_tool_block__';
 const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
+
+/**
+ * True when a `toolBlockByCallId` entry is the trimmed-block sentinel (the
+ * original block was evicted by retention trimming). Lets consumers merge a
+ * pagination-resurrected real mapping without letting the stale sentinel win.
+ */
+export function isTrimmedToolBlockId(blockId: string | undefined): boolean {
+  return blockId === TRIMMED_TOOL_BLOCK_ID;
+}
+
+/**
+ * True when a `permissionBlockByRequestId` entry is the trimmed-block
+ * sentinel (the original block was evicted by retention trimming). Lets
+ * consumers merge a pagination-resurrected real mapping without letting the
+ * stale sentinel win.
+ */
+export function isTrimmedPermissionBlockId(
+  blockId: string | undefined,
+): boolean {
+  return blockId === TRIMMED_PERMISSION_BLOCK_ID;
+}
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 const MAX_CLONE_DEPTH = 16;
+const truncationCallbacks = new WeakMap<
+  DaemonTranscriptState,
+  NonNullable<DaemonTranscriptReducerOptions['onTruncation']>
+>();
 type TimestampFormatOptions = {
   locale?: string;
   timeZone?: string;
@@ -39,22 +83,28 @@ const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
-  return {
+  const state: DaemonTranscriptState = {
     blocks: [],
-    blockIndexById: {},
-    toolBlockByCallId: {},
-    trimmedToolNotificationByCallId: {},
-    permissionBlockByRequestId: {},
-    activeAssistantBlockByParent: {},
-    activeThoughtBlockByParent: {},
+    blockIndexById: createIndex(),
+    toolBlockByCallId: createIndex(),
+    trimmedToolNotificationByCallId: createIndex(),
+    permissionBlockByRequestId: createIndex(),
+    activeAssistantBlockByParent: createIndex(),
+    activeThoughtBlockByParent: createIndex(),
     // PR-E sidechannel: track current tool / approval mode / progress
-    toolProgress: {},
+    toolProgress: createIndex(),
+    unrecognizedDiagnostics: [],
     awaitingResync: false,
     resyncRequiredCount: 0,
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
+    retainedBytes: 0,
+    maxRetainedBytes: opts.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES,
+    retainSubagentBlocks: opts.retainSubagentBlocks ?? true,
   };
+  if (opts.onTruncation) truncationCallbacks.set(state, opts.onTruncation);
+  return state;
 }
 
 /**
@@ -97,6 +147,13 @@ export function appendLocalUserTranscriptMessage(
   text: string,
   opts: DaemonTranscriptReducerOptions & {
     images?: Array<{ data: string; mimeType: string }>;
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>;
     meta?: DaemonTextDeltaMeta;
   } = {},
 ): DaemonTranscriptState {
@@ -113,22 +170,25 @@ export function appendLocalUserTranscriptMessage(
   if (opts.images && opts.images.length > 0) {
     (block as DaemonTextTranscriptBlock).images = [...opts.images];
   }
+  if (opts.files && opts.files.length > 0) {
+    (block as DaemonTextTranscriptBlock).files = [...opts.files];
+  }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
 }
 
-// Freeze retained blocks at the dispatch boundary to catch consumers that
-// mutate a COW-shared blocks array in place (see reduceDaemonTranscriptEvents).
-// This is a dev/CI safety net; in production it is pure O(blocks) overhead on
-// every dispatch and the reducer's own mutation discipline (takeBlocksOwnership)
-// does not depend on it, so skip it there. App bundlers statically replace
-// `process.env.NODE_ENV`, folding the check to `false`. The `typeof process`
-// guard keeps an unbundled browser consumer from throwing a ReferenceError —
+// Freeze retained COW collections at the dispatch boundary to catch consumers
+// that mutate a shared snapshot (see reduceDaemonTranscriptEvents). This is a
+// dev/CI safety net; the reducer's own ownership discipline does not depend on
+// it, so skip the O(blocks) freeze in production. App bundlers statically
+// replace `process.env.NODE_ENV`, folding the check to `false`. The `typeof
+// process` guard keeps an unbundled browser consumer from throwing a
+// ReferenceError —
 // this module sits on the browser-hostile `daemon/ui` surface and Vite lib
 // builds preserve `process.env.NODE_ENV` in their output — matching the
 // existing SDK idiom (see ProcessTransport, cliPath).
-const FREEZE_TRANSCRIPT_BLOCKS =
+const FREEZE_TRANSCRIPT_COLLECTIONS =
   typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
 
 export function reduceDaemonTranscriptEvents(
@@ -137,32 +197,90 @@ export function reduceDaemonTranscriptEvents(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
   if (events.length === 0) return state;
-  const next = cloneTranscriptState(state, opts);
+  const maxBlocks = opts.maxBlocks ?? state.maxBlocks;
+  const shareSideIndexes =
+    state.blocks.length + events.length <= maxBlocks &&
+    events.every(
+      (event) =>
+        (event.type === 'assistant.text.delta' ||
+          event.type === 'thought.text.delta') &&
+        event.parentToolCallId === undefined,
+    );
+  const next = cloneTranscriptState(state, opts, shareSideIndexes);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
-  const result = trimTranscriptState(next);
-  // With lazy COW, `state.blocks` is shared across
-  // sidechannel-only snapshots. A misbehaving consumer doing
-  // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
-  // EVERY snapshot that shares the reference (previously only the
-  // current one). Freeze the array at the dispatch boundary so external
-  // in-place mutation throws in strict mode instead of silently
-  // poisoning future snapshots. Internal reducer mutation goes through
-  // `takeBlocksOwnership` which copies BEFORE mutating, so the frozen
-  // shared reference is never touched in-place by the next dispatch.
-  if (FREEZE_TRANSCRIPT_BLOCKS) {
+  const result = trimTranscriptState(next, shareSideIndexes);
+  // With lazy COW, these collections can be shared across snapshots. Freeze
+  // them at the dispatch boundary so external in-place mutation throws in
+  // strict mode instead of poisoning every snapshot sharing the reference.
+  if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
+    Object.freeze(result.blockIndexById);
+    Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.activeAssistantBlockByParent);
+    Object.freeze(result.activeThoughtBlockByParent);
+    Object.freeze(result.trimmedToolNotificationByCallId);
+    Object.freeze(result.permissionBlockByRequestId);
+    for (const progress of Object.values(result.toolProgress)) {
+      Object.freeze(progress);
+    }
+    Object.freeze(result.toolProgress);
   }
   return result;
+}
+
+export function finalizeOfflineDaemonTranscriptState(
+  state: DaemonTranscriptState,
+): DaemonTranscriptState {
+  const next = cloneTranscriptState(state, { now: 0 });
+  finishAssistant(next);
+  next.activeUserBlockId = undefined;
+  Object.freeze(next.blocks);
+  Object.freeze(next.blockIndexById);
+  return next;
 }
 
 export function rebuildDaemonTranscriptBlockIndex(
   blocks: readonly DaemonTranscriptBlock[],
 ): Record<string, number> {
-  const blockIndexById: Record<string, number> = {};
+  const blockIndexById = createIndex<number>();
   blocks.forEach((block, index) => {
     blockIndexById[block.id] = index;
   });
   return blockIndexById;
+}
+
+function userBlockForAttachment(
+  next: DaemonTranscriptState,
+  event: Extract<
+    DaemonUiEvent,
+    { type: 'user.image.delta' | 'user.file.delta' }
+  >,
+): DaemonTextTranscriptBlock {
+  const activeUserIndex = next.activeUserBlockId
+    ? next.blockIndexById[next.activeUserBlockId]
+    : undefined;
+  const activeUser =
+    activeUserIndex !== undefined ? next.blocks[activeUserIndex] : undefined;
+  if (
+    activeUser?.kind === 'user' &&
+    stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
+  ) {
+    const block = getWritableBlockById(next, activeUser.id);
+    if (block?.kind === 'user') return block;
+  }
+  const block = createTextBlock(
+    next,
+    'user',
+    '',
+    event.eventId,
+    event.serverTimestamp,
+    event.meta,
+    event.sourceRecordIds,
+    event.promptId,
+  ) as DaemonTextTranscriptBlock;
+  appendBlock(next, block);
+  next.activeUserBlockId = block.id;
+  return block;
 }
 
 function applyDaemonTranscriptEvent(
@@ -211,31 +329,36 @@ function applyDaemonTranscriptEvent(
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
     case 'user.image.delta': {
-      if (!next.activeUserBlockId) {
-        const block = createTextBlock(
-          next,
-          'user',
-          '',
-        ) as DaemonTextTranscriptBlock;
-        block.images = [{ data: event.data, mimeType: event.mimeType }];
-        appendBlock(next, block);
-        next.activeUserBlockId = block.id;
-      } else {
-        // Use getWritableBlockById to ensure COW safety when mutating block.images
-        const block = getWritableBlockById(next, next.activeUserBlockId) as
-          | DaemonTextTranscriptBlock
-          | undefined;
-        if (block && block.kind === 'user') {
-          // Use immutable update to avoid mutating a shared array reference
-          block.images = [
-            ...(block.images ?? []),
-            { data: event.data, mimeType: event.mimeType },
-          ];
-        }
-      }
+      const block = userBlockForAttachment(next, event);
+      // Measure the retained block before the write path clones it (same
+      // pattern as upsertToolBlock) so merged attachments stay counted
+      // against the byte budget.
+      const bytesBefore = estimateBlockBytes(block);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      block.images = [
+        ...(block.images ?? []),
+        { data: event.data, mimeType: event.mimeType },
+      ];
+      next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      break;
+    }
+    case 'user.file.delta': {
+      const fileBlock = userBlockForAttachment(next, event);
+      const fileBytesBefore = estimateBlockBytes(fileBlock);
+      if (event.meta) fileBlock.meta = { ...fileBlock.meta, ...event.meta };
+      fileBlock.files = [
+        ...(fileBlock.files ?? []),
+        {
+          name: event.name,
+          mimeType: event.mimeType,
+          attachmentId: event.attachmentId,
+        },
+      ];
+      next.retainedBytes += estimateBlockBytes(fileBlock) - fileBytesBefore;
       break;
     }
     case 'assistant.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'assistant',
@@ -245,6 +368,23 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
+      if (
+        event.branchRecordId &&
+        event.promptId &&
+        event.reason === 'end_turn'
+      ) {
+        const assistant = getWritableBlockById(
+          next,
+          findFinalVisibleAssistantForPrompt(next, event.promptId),
+        );
+        if (assistant?.kind === 'assistant') {
+          assistant.branchRecordId = event.branchRecordId;
+          assistant.sourceRecordIds = unionStrings(
+            assistant.sourceRecordIds,
+            event.sourceRecordIds,
+          );
+        }
+      }
       finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
@@ -264,9 +404,14 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
-      applyAssistantUsage(next, event);
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        applySubagentUsageToParentTool(next, event);
+      } else {
+        applyAssistantUsage(next, event);
+      }
       break;
     case 'thought.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'thought',
@@ -276,6 +421,10 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'tool.update':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        discardToolBlock(next, event.toolCallId);
+        break;
+      }
       upsertToolBlock(next, event);
       break;
     case 'shell.output':
@@ -300,6 +449,14 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      if (isUnrecognizedDiagnostic(event)) {
+        appendUnrecognizedDiagnostic(next, event);
+        break;
+      }
+      appendStatusBlock(next, event.type, event.text, event, {
+        clearActiveText: event.clearActiveText,
+      });
+      break;
     case 'error':
       appendStatusBlock(next, event.type, event.text, event);
       break;
@@ -471,26 +628,27 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block. The
- * daemon emits usage right after that round's assistant text, so the active
- * block is the one it belongs to; multiple rounds accumulate, and renderers sum
- * a turn's blocks for the total.
+ * Fold a round's token usage onto the latest top-level assistant block in the
+ * current user turn. A tool update finalizes the active text block before the
+ * model stream's trailing usage frame arrives, so the active pointer alone is
+ * not sufficient.
+ * Subagent usage stays part of the spawning turn's total for compatibility.
+ * Summary projections route it to the parent tool before calling this helper.
  *
- * Sub-agent rounds (which arrive with a parentToolCallId) are folded in too:
- * their tokens are part of the spawning turn's real cost, and the parent is
- * blocked on the Task call while they run, so the top-level active block is
- * still that turn's. Excluding them made the turn under-count badly against
- * /stats. The sub-agent's own *text* still lives on its parent-keyed block; only
- * the usage counter rides the top-level block.
- *
- * No active block (a rare usage frame with no preceding top-level assistant
- * text) drops the count rather than minting a stray empty block.
+ * A turn with no preceding top-level assistant text still drops the count
+ * rather than crossing a user boundary or minting a stray empty block.
  */
 function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  if (isLegacySubagentUsageDuplicate(state, event)) return;
+  const activeBlockId =
+    state.activeAssistantBlockId ??
+    (event.parentToolCallId
+      ? undefined
+      : latestTopLevelAssistantBlockIdInCurrentTurn(state));
+  const block = getWritableBlockById(state, activeBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
@@ -499,6 +657,84 @@ function applyAssistantUsage(
     cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
+}
+
+function isLegacySubagentUsageDuplicate(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): boolean {
+  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  const sourceRecordIds = new Set(event.sourceRecordIds);
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return false;
+    if (
+      block.kind !== 'tool' ||
+      !block.sourceRecordIds?.some((id) => sourceRecordIds.has(id))
+    ) {
+      continue;
+    }
+    const rawOutput = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+    const summary =
+      rawOutput && isRecord(rawOutput['executionSummary'])
+        ? rawOutput['executionSummary']
+        : undefined;
+    return (
+      summary?.['inputTokens'] === event.usage.inputTokens &&
+      summary['outputTokens'] === event.usage.outputTokens &&
+      (summary['cachedTokens'] ?? 0) === (event.usage.cachedTokens ?? 0)
+    );
+  }
+  return false;
+}
+
+function latestTopLevelAssistantBlockIdInCurrentTurn(
+  state: DaemonTranscriptState,
+): string | undefined {
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return undefined;
+    if (block.kind === 'assistant' && !block.parentToolCallId) return block.id;
+  }
+  return undefined;
+}
+
+function applySubagentUsageToParentTool(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): void {
+  if (!event.parentToolCallId) return;
+  const block = getWritableBlockById(
+    state,
+    state.toolBlockByCallId[event.parentToolCallId],
+  );
+  if (block?.kind !== 'tool') return;
+  const current = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+  const currentSummary = isRecord(current?.['executionSummary'])
+    ? current['executionSummary']
+    : undefined;
+  const inputTokens =
+    finiteNumber(currentSummary?.['inputTokens']) + event.usage.inputTokens;
+  const outputTokens =
+    finiteNumber(currentSummary?.['outputTokens']) + event.usage.outputTokens;
+  const cachedTokens =
+    finiteNumber(currentSummary?.['cachedTokens']) +
+    (event.usage.cachedTokens ?? 0);
+  block.rawOutput = {
+    ...(current ?? { type: 'task_execution', status: 'running' }),
+    executionSummary: {
+      ...(currentSummary ?? {}),
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+      totalTokens: inputTokens + outputTokens,
+    },
+  };
+  block.updatedAt = state.now;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function clearActiveThought(
@@ -571,7 +807,7 @@ function appendTextDelta(
     existing.kind === kind &&
     canMergeTextDelta(existing, event)
   ) {
-    existing.text = appendBoundedText(existing.text, text);
+    existing.text = appendBoundedText(state, existing, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
@@ -580,8 +816,21 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
-    if (kind === 'assistant' || kind === 'thought') existing.streaming = true;
+    // The merge predicate admits deltas when one side omits `promptId`;
+    // backfill so a late exact-promptId lookup (e.g. `assistant.done`
+    // attaching the branch checkpoint) still matches the merged block.
+    if (existing.promptId === undefined && event.promptId !== undefined) {
+      existing.promptId = event.promptId;
+    }
+    if (kind === 'assistant' && event.branchRecordId) {
+      existing.branchRecordId = event.branchRecordId;
+    }
+    if (kind !== 'user') existing.streaming = true;
     return;
+  }
+  if (existing?.kind === kind && kind !== 'user') {
+    existing.streaming = false;
+    existing.updatedAt = state.now;
   }
 
   const block = createTextBlock(
@@ -591,8 +840,13 @@ function appendTextDelta(
     event.eventId,
     event.serverTimestamp,
     'meta' in event ? event.meta : undefined,
+    event.sourceRecordIds,
+    event.promptId,
   );
-  if (kind === 'assistant' || kind === 'thought') block.streaming = true;
+  if (kind === 'assistant' && event.branchRecordId) {
+    block.branchRecordId = event.branchRecordId;
+  }
+  if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
@@ -631,7 +885,34 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (
+    existing.promptId !== undefined &&
+    event.promptId !== undefined &&
+    existing.promptId !== event.promptId
+  )
+    return false;
+  if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
+    return false;
+  }
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+}
+
+function findFinalVisibleAssistantForPrompt(
+  state: DaemonTranscriptState,
+  promptId: string,
+): string | undefined {
+  for (let index = state.blocks.length - 1; index >= 0; index--) {
+    const block = state.blocks[index];
+    if (
+      block?.kind === 'assistant' &&
+      block.parentToolCallId === undefined &&
+      block.promptId === promptId &&
+      block.text.trim().length > 0
+    ) {
+      return block.id;
+    }
+  }
+  return undefined;
 }
 
 function finishAssistant(
@@ -653,6 +934,14 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  const compactTaskOutput =
+    !state.retainSubagentBlocks &&
+    isRecord(event.rawOutput) &&
+    event.rawOutput['type'] === 'task_execution';
+  let rawOutput = compactTaskExecutionOutput(
+    event.rawOutput,
+    state.retainSubagentBlocks,
+  );
   const existingId = state.toolBlockByCallId[event.toolCallId];
   if (existingId === TRIMMED_TOOL_BLOCK_ID) {
     if (shouldRecreateTrimmedToolBlock(event)) {
@@ -672,6 +961,15 @@ function upsertToolBlock(
     }
     return;
   }
+  // Measure the block as currently retained BEFORE the write path clones it
+  // (`getWritableBlockById` swaps in a COW clone, whose structure can estimate
+  // slightly differently); the delta stays exact against what is actually
+  // retained before and after.
+  const retainedIndex =
+    existingId !== undefined ? state.blockIndexById[existingId] : undefined;
+  const retainedBefore =
+    retainedIndex !== undefined ? state.blocks[retainedIndex] : undefined;
+  const bytesBefore = retainedBefore ? estimateBlockBytes(retainedBefore) : 0;
   const existing = getWritableBlockById(state, existingId);
   if (existing?.kind === 'tool') {
     if (event.title !== undefined) existing.title = event.title;
@@ -686,10 +984,61 @@ function upsertToolBlock(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.details) existing.details = event.details;
-    if (event.content !== undefined) existing.content = event.content;
+    if (compactTaskOutput) delete existing.content;
+    else if (event.content !== undefined) existing.content = event.content;
     if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
-    if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
+    if (rawOutput !== undefined) {
+      if (
+        compactTaskOutput &&
+        isRecord(rawOutput) &&
+        isRecord(existing.rawOutput)
+      ) {
+        const prevSummary = isRecord(existing.rawOutput['executionSummary'])
+          ? existing.rawOutput['executionSummary']
+          : undefined;
+        const nextSummary = isRecord(rawOutput['executionSummary'])
+          ? rawOutput['executionSummary']
+          : undefined;
+        if (prevSummary && nextSummary) {
+          const inputTokens = Math.max(
+            finiteNumber(prevSummary['inputTokens']),
+            finiteNumber(nextSummary['inputTokens']),
+          );
+          const outputTokens = Math.max(
+            finiteNumber(prevSummary['outputTokens']),
+            finiteNumber(nextSummary['outputTokens']),
+          );
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: {
+              ...nextSummary,
+              inputTokens,
+              outputTokens,
+              cachedTokens: Math.max(
+                finiteNumber(prevSummary['cachedTokens']),
+                finiteNumber(nextSummary['cachedTokens']),
+              ),
+              totalTokens: Math.max(
+                finiteNumber(prevSummary['totalTokens']),
+                finiteNumber(nextSummary['totalTokens']),
+                inputTokens + outputTokens,
+              ),
+            },
+          };
+        } else if (prevSummary) {
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: { ...prevSummary },
+          };
+        }
+      }
+      existing.rawOutput = rawOutput;
+    }
+    existing.sourceRecordIds = unionStrings(
+      existing.sourceRecordIds,
+      event.sourceRecordIds,
+    );
     if (event.toolName) existing.toolName = event.toolName;
     if (event.toolKind) existing.toolKind = event.toolKind;
     // PR-K subagent nesting — daemon may stamp parent context on later
@@ -713,6 +1062,7 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
   }
@@ -744,11 +1094,16 @@ function upsertToolBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: [...event.sourceRecordIds] }
+      : {}),
     ...(event.details ? { details: event.details } : {}),
-    ...(event.content !== undefined ? { content: event.content } : {}),
+    ...(!compactTaskOutput && event.content !== undefined
+      ? { content: event.content }
+      : {}),
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
-    ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
+    ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
@@ -784,6 +1139,76 @@ function upsertToolBlock(
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
   clearActiveText(state, event.parentToolCallId);
+}
+
+function discardToolBlock(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+): void {
+  const blockId = state.toolBlockByCallId[toolCallId];
+  if (!blockId || blockId === TRIMMED_TOOL_BLOCK_ID) return;
+  const droppedIndex = state.blockIndexById[blockId];
+  const dropped =
+    droppedIndex !== undefined ? state.blocks[droppedIndex] : undefined;
+  takeBlocksOwnership(state);
+  state.blocks = state.blocks.filter((block) => block.id !== blockId);
+  if (dropped) {
+    state.retainedBytes = Math.max(
+      0,
+      state.retainedBytes - estimateBlockBytes(dropped),
+    );
+  }
+  state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
+  delete state.toolBlockByCallId[toolCallId];
+  delete state.toolProgress[toolCallId];
+  if (state.currentToolCallId === toolCallId) {
+    state.currentToolCallId = undefined;
+  }
+}
+
+/**
+ * The task-display projection carries exactly these two `executionMode`
+ * literals. Fail closed: any other value (corrupted recording, future runtime
+ * mode) must fall back to the legacy argument/status heuristic instead of
+ * forcing a classification. Both consumer-side whitelists — webui's
+ * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
+ * call this single guard so live-summary and recorded-transcript clients
+ * accept the same literal set; when a third mode lands, extend it here once.
+ */
+export function isTaskExecutionMode(
+  value: unknown,
+): value is 'foreground' | 'background' {
+  return value === 'foreground' || value === 'background';
+}
+
+function compactTaskExecutionOutput(
+  rawOutput: unknown,
+  retainSubagentBlocks: boolean,
+): unknown {
+  if (
+    retainSubagentBlocks ||
+    !isRecord(rawOutput) ||
+    rawOutput['type'] !== 'task_execution'
+  ) {
+    return rawOutput;
+  }
+  const compact: Record<string, unknown> = { type: 'task_execution' };
+  for (const key of [
+    'subagentName',
+    'subagentColor',
+    'taskDescription',
+    'status',
+    'executionMode',
+    'terminateReason',
+    'tokenCount',
+    'executionSummary',
+    'skills',
+  ]) {
+    if (rawOutput[key] !== undefined) compact[key] = rawOutput[key];
+  }
+  return compact;
 }
 
 /**
@@ -857,17 +1282,18 @@ function appendShellBlock(
   if (last?.kind === 'shell' && last.stream === event.stream) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
-      writable.text = appendBoundedText(writable.text, event.text);
+      writable.text = appendBoundedText(state, writable, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
     return;
   }
 
+  const blockId = allocateBlockId(state, 'shell');
   const block: DaemonShellTranscriptBlock = {
-    id: allocateBlockId(state, 'shell'),
+    id: blockId,
     kind: 'shell',
-    text: truncateText(event.text),
+    text: truncateText(state, blockId, undefined, event.text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -894,7 +1320,7 @@ function appendUserShellBlock(
   ) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'user_shell') {
-      writable.text = appendBoundedText(writable.text, event.text);
+      writable.text = appendBoundedText(state, writable, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
@@ -903,10 +1329,11 @@ function appendUserShellBlock(
 
   const pending = state.pendingUserShellCommand;
   const previous = last?.kind === 'user_shell' ? last : undefined;
+  const blockId = allocateBlockId(state, 'user-shell');
   const block: DaemonUserShellTranscriptBlock = {
-    id: allocateBlockId(state, 'user-shell'),
+    id: blockId,
     kind: 'user_shell',
-    text: truncateText(event.text),
+    text: truncateText(state, blockId, undefined, event.text),
     command: pending?.command ?? previous?.command ?? '',
     ...(pending?.cwd || previous?.cwd
       ? { cwd: pending?.cwd ?? previous?.cwd }
@@ -1020,6 +1447,75 @@ function resolvePermissionBlock(
   clearActiveText(state);
 }
 
+type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
+  type: 'debug';
+  debugReason: DaemonUnrecognizedDiagnosticReason;
+};
+
+function isUnrecognizedDiagnostic(
+  event: DaemonUiStatusEvent,
+): event is UnrecognizedDiagnosticEvent {
+  return (
+    event.type === 'debug' && isUnrecognizedDiagnosticReason(event.debugReason)
+  );
+}
+
+/**
+ * Route forward-compatibility noise to the bounded `unrecognizedDiagnostics`
+ * sidechannel instead of `blocks[]`. Appending it as a status block would
+ * run the default `clearActiveText`, finalizing the streaming assistant/
+ * thought block so a following `assistant.usage` frame is dropped, and each
+ * block would consume the `maxBlocks` budget — repeated noise then evicts
+ * real conversation content in `trimTranscriptState`. Renderer-side
+ * filtering runs strictly after these mutations, so hiding the block later
+ * cannot prevent either symptom. `malformed_payload` diagnostics and
+ * client-dispatched debug events keep their block semantics.
+ */
+function appendUnrecognizedDiagnostic(
+  state: DaemonTranscriptState,
+  event: UnrecognizedDiagnosticEvent,
+): void {
+  // The replaced `appendStatusBlock` path also reset the user pointer
+  // (its non-user block append runs `state.activeUserBlockId = undefined`).
+  // Keep that reset: diagnostics carry no association with the active user
+  // block, and a stale pointer lets a later mergeable `user.text.delta`
+  // with no promptId stamp (e.g. a peer client's `$ <cmd>` echo) append
+  // onto an earlier user block, collapsing two turns into one and skewing
+  // `rewindTranscriptToUserTurn`'s turn indexing. The streaming
+  // assistant/thought pointer stays untouched — that is the whole point of
+  // the sidechannel (see the doc above).
+  state.activeUserBlockId = undefined;
+  // The replaced `appendStatusBlock` path capped exactly these diagnostics at
+  // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
+  // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.
+  // Shares `truncateTextAtLimit` with the block path; the only delta is the
+  // truncation report, which has no block id to report under.
+  const diagnostic: DaemonUnrecognizedDiagnostic = {
+    debugReason: event.debugReason,
+    text: truncateTextAtLimit(event.text),
+    clientReceivedAt: state.now,
+    ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
+    ...(event.sourceRecordIds !== undefined
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
+    ...(event.branchRecordId !== undefined
+      ? { branchRecordId: event.branchRecordId }
+      : {}),
+    ...(event.originatorClientId !== undefined
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  const diagnostics = [...state.unrecognizedDiagnostics, diagnostic];
+  state.unrecognizedDiagnostics =
+    diagnostics.length > UNRECOGNIZED_DIAGNOSTICS_LIMIT
+      ? diagnostics.slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT)
+      : diagnostics;
+}
+
 function appendStatusBlock(
   state: DaemonTranscriptState,
   kind: 'status' | 'error' | 'debug',
@@ -1027,10 +1523,11 @@ function appendStatusBlock(
   event?: DaemonUiEvent,
   opts: { clearActiveText?: boolean } = {},
 ): void {
+  const blockId = allocateBlockId(state, kind);
   const block: DaemonStatusTranscriptBlock = {
-    id: allocateBlockId(state, kind),
+    id: blockId,
     kind,
-    text: truncateText(text),
+    text: truncateText(state, blockId, undefined, text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1055,6 +1552,10 @@ function appendStatusBlock(
     event.data !== undefined
       ? { data: event.data }
       : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') &&
+    event.debugReason
+      ? { debugReason: event.debugReason }
+      : {}),
     ...(event?.type === 'session.branched'
       ? {
           source: 'session_branched',
@@ -1068,6 +1569,10 @@ function appendStatusBlock(
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
+  // Opt-out only protects the streaming assistant/thought block; the user
+  // pointer must still reset, otherwise a later mergeable user.text.delta
+  // (e.g. a peer client's prompt echo) appends onto the command echo block.
+  else state.activeUserBlockId = undefined;
 }
 
 function appendPromptCancelledBlock(
@@ -1097,16 +1602,21 @@ function createTextBlock(
   eventId?: number,
   serverTimestamp?: number,
   meta?: Record<string, unknown>,
+  sourceRecordIds?: readonly string[],
+  promptId?: string,
 ): DaemonTextTranscriptBlock {
+  const blockId = allocateBlockId(state, kind);
   return {
-    id: allocateBlockId(state, kind),
+    id: blockId,
     kind,
-    text: truncateText(text),
+    text: truncateText(state, blockId, sourceRecordIds, text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
 }
@@ -1114,11 +1624,15 @@ function createTextBlock(
 function cloneTranscriptState(
   state: DaemonTranscriptState,
   opts: DaemonTranscriptReducerOptions,
+  shareSideIndexes = false,
 ): DaemonTranscriptState {
-  return {
+  const next: DaemonTranscriptState = {
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
+    maxRetainedBytes: opts.maxRetainedBytes ?? state.maxRetainedBytes,
+    retainSubagentBlocks:
+      opts.retainSubagentBlocks ?? state.retainSubagentBlocks,
     // Lazy copy-on-write for
     // `blocks` + `blockIndexById`. Eager `[...state.blocks]` defeated the
     // `sortedBlocksCache` / `childrenIndexCache` WeakMaps — every dispatch
@@ -1131,22 +1645,32 @@ function cloneTranscriptState(
     // consumers + the WeakMap caches want.
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
-    toolBlockByCallId: { ...state.toolBlockByCallId },
-    activeAssistantBlockByParent: { ...state.activeAssistantBlockByParent },
-    activeThoughtBlockByParent: { ...state.activeThoughtBlockByParent },
-    trimmedToolNotificationByCallId: {
-      ...state.trimmedToolNotificationByCallId,
-    },
-    permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
-    // Deep-clone the inner progress records.
-    // The outer spread alone shares `{ ratio?, step? }` references between
-    // snapshots — once `tool.progress` event handlers start mutating in
-    // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
-    // by `Object.keys(state.toolProgress).length` which is small (only
-    // in-flight tools).
-    toolProgress: Object.fromEntries(
-      Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
-    ),
+    // Top-level streamed text cannot mutate these side indexes. Sharing them
+    // avoids work proportional to historical tool count on every delta.
+    toolBlockByCallId: shareSideIndexes
+      ? state.toolBlockByCallId
+      : createIndex(state.toolBlockByCallId),
+    activeAssistantBlockByParent: shareSideIndexes
+      ? state.activeAssistantBlockByParent
+      : createIndex(state.activeAssistantBlockByParent),
+    activeThoughtBlockByParent: shareSideIndexes
+      ? state.activeThoughtBlockByParent
+      : createIndex(state.activeThoughtBlockByParent),
+    trimmedToolNotificationByCallId: shareSideIndexes
+      ? state.trimmedToolNotificationByCallId
+      : createIndex(state.trimmedToolNotificationByCallId),
+    permissionBlockByRequestId: shareSideIndexes
+      ? state.permissionBlockByRequestId
+      : createIndex(state.permissionBlockByRequestId),
+    // Other reducer events may mutate the inner progress records, so those
+    // paths still deep-clone them before applying updates.
+    toolProgress: shareSideIndexes
+      ? state.toolProgress
+      : createIndex(
+          Object.fromEntries(
+            Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+          ),
+        ),
     lastResyncRequired:
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
@@ -1157,21 +1681,124 @@ function cloneTranscriptState(
     // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
     // that don't touch the suggestion.
     lastFollowupSuggestion: state.lastFollowupSuggestion,
+    // Same reference-stability contract: the reducer replaces the whole
+    // array when appending, never mutates it in-place.
+    unrecognizedDiagnostics: state.unrecognizedDiagnostics,
   };
+  const onTruncation = opts.onTruncation ?? truncationCallbacks.get(state);
+  if (onTruncation) truncationCallbacks.set(next, onTruncation);
+  return next;
+}
+
+function sharesSourceRecordId(
+  a: DaemonTranscriptBlock,
+  b: DaemonTranscriptBlock,
+): boolean {
+  const aIds = a.sourceRecordIds;
+  const bIds = b.sourceRecordIds;
+  if (!aIds?.length || !bIds?.length) return false;
+  const set = new Set(aIds);
+  return bIds.some((recordId) => set.has(recordId));
 }
 
 function trimTranscriptState(
   state: DaemonTranscriptState,
+  sideIndexesShared = false,
 ): DaemonTranscriptState {
-  if (state.blocks.length <= state.maxBlocks) return state;
-  const blocks = state.blocks.slice(-state.maxBlocks);
+  const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
+  if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
+  // Count-based floor: keep at most the last `maxBlocks` blocks. Keep at least
+  // one block: a non-positive, non-finite, or fractional maxBlocks is a
+  // degenerate input that must not evict the whole window nor leave removeCount
+  // fractional (the record snap below indexes blocks[removeCount] and would
+  // read one past the end of the block array).
+  const effectiveMaxBlocks = Math.max(
+    1,
+    Math.floor(Number.isFinite(state.maxBlocks) ? state.maxBlocks : 1),
+  );
+  let removeCount = Math.max(0, state.blocks.length - effectiveMaxBlocks);
+  let bytes = state.retainedBytes;
+  for (let i = 0; i < removeCount; i += 1) {
+    bytes -= estimateBlockBytes(state.blocks[i]!);
+  }
+  // Byte budget: keep evicting oldest blocks until the retained estimate is
+  // back under the budget. The last block always survives, so the ceiling is
+  // budget + one worst-case block rather than strictly the budget.
+  while (
+    removeCount < state.blocks.length - 1 &&
+    bytes > state.maxRetainedBytes
+  ) {
+    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
+    removeCount += 1;
+  }
+  // Snap the cut to record boundaries: one persisted record fans out into
+  // several blocks sharing a sourceRecordIds entry, and trimming is
+  // block-granular, so the boundary can land mid-record. A partially evicted
+  // record is unrecoverable from both directions — exclusive-before
+  // pagination anchored at the shared record never returns the evicted
+  // sibling blocks, and the recordId dedup filter drops any later page that
+  // still advertises the recordId. Advance the cut until it no longer lands
+  // inside a record, keeping the at-least-one-block floor.
+  while (
+    removeCount > 0 &&
+    removeCount < state.blocks.length - 1 &&
+    sharesSourceRecordId(
+      state.blocks[removeCount - 1]!,
+      state.blocks[removeCount]!,
+    )
+  ) {
+    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
+    removeCount += 1;
+  }
+  // The forward snap can be pinned by the floor: the byte loop evicts down to
+  // the last block and the snap's `removeCount < len - 1` bound stops there even
+  // when the evicted tail shares a record with the surviving block — a
+  // mid-record cut the snap detects but cannot fix by advancing. Back the cut
+  // off the floor instead, re-retaining siblings while the boundary pair still
+  // shares a record so the record stays whole. A single record can fan out into
+  // several contiguous blocks, so this loops; when nothing is left to evict the
+  // `removeCount === 0` guard below keeps the whole window rather than cutting
+  // mid-record. This trades at most one extra retained record against the
+  // budget, extending the "budget + one worst-case block" ceiling the byte loop
+  // above already documents.
+  while (
+    removeCount > 0 &&
+    sharesSourceRecordId(
+      state.blocks[removeCount - 1]!,
+      state.blocks[removeCount]!,
+    )
+  ) {
+    removeCount -= 1;
+    bytes += estimateBlockBytes(state.blocks[removeCount]!);
+  }
+  // Nothing evictable (e.g. one oversized block): skip the callback and
+  // rebuild. Firing `kind: 'blocks'` with zero removals records a false
+  // truncation and churns snapshot identity on every dispatch.
+  if (removeCount === 0) return state;
+  state.retainedBytes = Math.max(0, bytes);
+  const blocks = state.blocks.slice(removeCount);
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
-  // Trim replaces both arrays with fresh objects; register that this
-  // state now owns its blocks so future appends in the same dispatch
-  // don't double-copy.
+  // Trim replaces both collections with fresh objects; register ownership so
+  // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
+  ownedBlockIndexes.set(state, state.blockIndexById);
+  if (sideIndexesShared) {
+    state.toolBlockByCallId = createIndex(state.toolBlockByCallId);
+    state.activeAssistantBlockByParent = createIndex(
+      state.activeAssistantBlockByParent,
+    );
+    state.activeThoughtBlockByParent = createIndex(
+      state.activeThoughtBlockByParent,
+    );
+    state.trimmedToolNotificationByCallId = createIndex(
+      state.trimmedToolNotificationByCallId,
+    );
+    state.permissionBlockByRequestId = createIndex(
+      state.permissionBlockByRequestId,
+    );
+  }
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;
@@ -1232,6 +1859,21 @@ function trimTranscriptState(
       delete state.activeThoughtBlockByParent[parentId];
     }
   }
+  // Fired after the mutation completes so listeners observe the post-trim
+  // window (e.g. re-anchoring an exclusive pagination anchor to the oldest
+  // retained record — the evicted anchor can never be re-fetched).
+  const oldestRetainedBlock = state.blocks.find(
+    (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+  );
+  truncationCallbacks.get(state)?.({
+    kind: 'blocks',
+    oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+    evictedOldest: true,
+    blockCount: state.blocks.length,
+    retainedBytes: state.retainedBytes,
+    maxBlocks: state.maxBlocks,
+    maxRetainedBytes: state.maxRetainedBytes,
+  });
   return state;
 }
 
@@ -1245,7 +1887,7 @@ function shouldRecreateTrimmedToolBlock(
 }
 
 /**
- * Lazy copy-on-write for `state.blocks` / `state.blockIndexById`.
+ * Lazy copy-on-write for `state.blocks`.
  *
  * `cloneTranscriptState` shares the parent's `blocks` reference (not
  * eager-copies) so non-block-mutating events keep the same array
@@ -1263,12 +1905,21 @@ const ownedBlocks = new WeakMap<
   DaemonTranscriptState,
   readonly DaemonTranscriptBlock[]
 >();
+const ownedBlockIndexes = new WeakMap<
+  DaemonTranscriptState,
+  Readonly<Record<string, number>>
+>();
 
 function takeBlocksOwnership(state: DaemonTranscriptState): void {
   if (ownedBlocks.get(state) === state.blocks) return;
   state.blocks = [...state.blocks];
-  state.blockIndexById = { ...state.blockIndexById };
   ownedBlocks.set(state, state.blocks);
+}
+
+function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
+  if (ownedBlockIndexes.get(state) === state.blockIndexById) return;
+  state.blockIndexById = createIndex(state.blockIndexById);
+  ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
 // Applies a daemon rewind event to this in-memory transcript only. The target
@@ -1301,25 +1952,51 @@ function truncateTranscriptBeforeBlock(
   blockIndex: number,
 ): void {
   takeBlocksOwnership(state);
+  const originalLength = state.blocks.length;
+  let droppedBytes = 0;
+  for (let index = blockIndex; index < state.blocks.length; index += 1) {
+    const block = state.blocks[index];
+    if (block) droppedBytes += estimateBlockBytes(block);
+  }
   state.blocks = state.blocks.slice(0, blockIndex);
+  state.retainedBytes = Math.max(0, state.retainedBytes - droppedBytes);
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
+  ownedBlockIndexes.set(state, state.blockIndexById);
+  if (state.blocks.length < originalLength) {
+    // A rewind frees retention capacity just like an eviction does. Fire the
+    // same 'blocks' truncation signal so consumers reconciling a pagination
+    // capacity latch on freed capacity observe rewinds too. `evictedOldest`
+    // is false: a rewind drops the NEWEST blocks, so the oldest pagination
+    // anchor stays valid and must not be re-anchored.
+    const oldestRetainedBlock = state.blocks.find(
+      (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+    );
+    truncationCallbacks.get(state)?.({
+      kind: 'blocks',
+      oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
+      evictedOldest: false,
+      blockCount: state.blocks.length,
+      retainedBytes: state.retainedBytes,
+      maxBlocks: state.maxBlocks,
+      maxRetainedBytes: state.maxRetainedBytes,
+    });
+  }
 }
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
-  state.toolBlockByCallId = {};
-  state.permissionBlockByRequestId = {};
-  state.trimmedToolNotificationByCallId = {};
+  state.toolBlockByCallId = createIndex();
+  state.permissionBlockByRequestId = createIndex();
+  state.trimmedToolNotificationByCallId = createIndex();
   state.activeUserBlockId = undefined;
   state.activeAssistantBlockId = undefined;
   state.activeThoughtBlockId = undefined;
-  state.activeAssistantBlockByParent = {};
-  state.activeThoughtBlockByParent = {};
+  state.activeAssistantBlockByParent = createIndex();
+  state.activeThoughtBlockByParent = createIndex();
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
-
   const liveToolCallIds = new Set<string>();
   for (const block of state.blocks) {
     if (block.kind === 'tool') {
@@ -1342,8 +2019,11 @@ function appendBlock(
   block: DaemonTranscriptBlock,
 ): void {
   takeBlocksOwnership(state);
-  state.blockIndexById[block.id] = state.blocks.length;
+  takeBlockIndexOwnership(state);
+  (state.blockIndexById as Record<string, number>)[block.id] =
+    state.blocks.length;
   (state.blocks as DaemonTranscriptBlock[]).push(block);
+  state.retainedBytes += estimateBlockBytes(block);
 }
 
 function getWritableBlockById(
@@ -1406,18 +2086,126 @@ function clearActiveText(
   }
 }
 
-function appendBoundedText(existing: string, text: string): string {
-  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) return existing;
-  return truncateText(existing + text);
+function appendBoundedText(
+  state: DaemonTranscriptState,
+  block: DaemonTranscriptBlock,
+  text: string,
+): string {
+  const existing = 'text' in block ? block.text : '';
+  let next: string;
+  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) {
+    if (text) reportTextTruncation(state, block.id, block.sourceRecordIds);
+    next = existing;
+  } else {
+    next = truncateText(
+      state,
+      block.id,
+      block.sourceRecordIds,
+      existing + text,
+    );
+  }
+  state.retainedBytes += (next.length - existing.length) * 2;
+  return next;
 }
 
-function truncateText(text: string): string {
+function truncateTextAtLimit(text: string): string {
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
   const keepLength = Math.max(
     0,
     MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
   );
-  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+  // detach: a bare slice would keep the oversized parent string's backing
+  // store alive for as long as the block is retained.
+  return `${detachString(text.slice(0, keepLength))}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
+function truncateText(
+  state: DaemonTranscriptState,
+  blockId: string,
+  sourceRecordIds: readonly string[] | undefined,
+  text: string,
+): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  reportTextTruncation(state, blockId, sourceRecordIds);
+  return truncateTextAtLimit(text);
+}
+
+function reportTextTruncation(
+  state: DaemonTranscriptState,
+  blockId: string,
+  sourceRecordIds?: readonly string[],
+): void {
+  truncationCallbacks.get(state)?.({
+    kind: 'text',
+    blockId,
+    sourceRecordIds,
+  });
+}
+
+/**
+ * Cheap structural size estimate of a retained value (bytes). Strings count
+ * as 2 bytes per UTF-16 code unit; records/arrays add a small per-entry
+ * overhead. Deliberately approximate: it drives the retention byte budget,
+ * not billing. The walk is bounded by the same depth cap as cloning.
+ */
+function estimateRetainedBytes(value: unknown, depth = 0): number {
+  if (depth > MAX_CLONE_DEPTH) return 0;
+  if (typeof value === 'string') return value.length * 2;
+  if (typeof value === 'number' || typeof value === 'boolean') return 16;
+  // Binary payloads (Blob/File, ArrayBuffer, typed-array/DataView views) carry
+  // their content in non-enumerable internal slots, so the record walk below
+  // would only charge the fixed object overhead for them. Charge by real binary
+  // size instead, or media-heavy transcripts never trip the budget — the OOM
+  // class this budget exists to stop.
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return value.size;
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (Array.isArray(value)) {
+    let total = 32;
+    for (const entry of value) {
+      total += estimateRetainedBytes(entry, depth + 1);
+    }
+    return total;
+  }
+  if (isRecord(value)) {
+    let total = 64;
+    for (const [key, entry] of Object.entries(value)) {
+      total += key.length * 2 + estimateRetainedBytes(entry, depth + 1);
+    }
+    return total;
+  }
+  return 0;
+}
+
+export function estimateDaemonTranscriptBlockBytes(
+  block: DaemonTranscriptBlock,
+): number {
+  return estimateRetainedBytes(block);
+}
+
+const estimateBlockBytes = estimateDaemonTranscriptBlockBytes;
+
+function createIndex<T>(
+  source?: Readonly<Record<string, T>>,
+): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, source);
+}
+
+function stringArraysEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function unionStrings(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (!left && !right) return undefined;
+  return [...new Set([...(left ?? []), ...(right ?? [])])];
 }
 
 function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {
@@ -1559,6 +2347,19 @@ export function selectLastFollowupSuggestion(
   state: DaemonTranscriptState,
 ): { suggestion: string; promptId: string } | undefined {
   return state.lastFollowupSuggestion;
+}
+
+/**
+ * Forward-compatibility diagnostics mirrored from normalizer-classified
+ * `unrecognized_event` / `unrecognized_session_update` debug events. These
+ * live outside `blocks[]` (see `appendUnrecognizedDiagnostic`), so developer
+ * tooling can still inspect them after renderers hide them. Bounded by
+ * `UNRECOGNIZED_DIAGNOSTICS_LIMIT`, newest last.
+ */
+export function selectUnrecognizedDiagnostics(
+  state: DaemonTranscriptState,
+): readonly DaemonUnrecognizedDiagnostic[] {
+  return state.unrecognizedDiagnostics;
 }
 
 /**

@@ -1,5 +1,7 @@
 import type { ACPToolCall } from '../../adapters/types';
 
+export { isActiveToolStatus } from '../../adapters/toolClassification';
+
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
  * core's `ToolDisplayNames` (mapped to wire names, as the CLI's shared
@@ -13,11 +15,15 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  zoom_image: 'ZoomImage',
   grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
   todo_write: 'TodoList',
+  get_goal: 'Goal',
+  update_goal: 'UpdateGoal',
+  propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
@@ -34,6 +40,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
+  list_agents: 'ListAgents',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',
@@ -49,10 +56,14 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
+  request_shutdown: 'RequestShutdown',
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  report_findings: 'ReportFindings',
   web_search: 'WebSearch',
+  image_gen: 'ImageGen',
+  display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
   read: 'ReadFile',
@@ -69,9 +80,13 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
  * collapse whitespace before rendering single-line labels.
  */
 // Matches bare C0/C1 control bytes but not `\n`/`\t` (mirrors the CLI's
-// MULTILINE_CONTROL_CHARS_REGEX).
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+// MULTILINE_CONTROL_CHARS_REGEX), plus the Unicode bidi embedding/isolate
+// controls (U+202A–202E, U+2066–2069) so a crafted filename can't visually
+// reorder or spoof its extension (bidi/"trojan source" style attacks).
+/* eslint-disable no-control-regex */
+const CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 export function sanitizeControlChars(text: string): string {
   return text.replace(CONTROL_CHARS_REGEX, (ch) => {
@@ -462,23 +477,23 @@ export function getAgentCancellationReason(agent: ACPToolCall): string {
   );
 }
 
+export function isAgentCancelled(agent: ACPToolCall): boolean {
+  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') return false;
+  const raw = agent.rawOutput as Record<string, unknown>;
+  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
+  const reason = getAgentCancellationReason(agent);
+  return (
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    reason.toLowerCase().includes('cancel')
+  );
+}
+
 export function getAgentDisplayStatus(
   agent: ACPToolCall,
 ): ACPToolCall['status'] {
   if (agent.status === 'failed') return 'failed';
-  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') {
-    return agent.status;
-  }
-  const raw = agent.rawOutput as Record<string, unknown>;
-  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
-  const reason = getAgentCancellationReason(agent);
-  if (
-    status === 'cancelled' ||
-    status === 'canceled' ||
-    reason.toLowerCase().includes('cancel')
-  ) {
-    return 'failed';
-  }
+  if (isAgentCancelled(agent)) return 'failed';
   return agent.status;
 }
 
@@ -500,6 +515,33 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
+}
+
+/**
+ * Locale-aware agent type display name. Looks up `agentType.<name>`
+ * (case-insensitive) via the translator; falls back to the raw name
+ * for user-defined agents that have no i18n entry.
+ */
+export function localizeAgentTypeName(
+  agentType: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const keys = [
+    `agentType.${agentType}`,
+    `agentType.${agentType.toLowerCase()}`,
+  ];
+  for (const key of keys) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
+  return agentType;
 }
 
 export function getAgentDescription(agent: ACPToolCall): string {

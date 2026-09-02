@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -18,10 +19,58 @@ import {
   type RefObject,
   type TouchEvent as ReactTouchEvent,
 } from 'react';
-import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import { useInteractionBlocker } from '../../interactionBlockContext';
-import { useTheme, WebShellThemeId } from '../../themeContext';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
+import { Button } from '../ui/button';
+import { Checkbox } from '../ui/checkbox';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from '../ui/popover';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import {
+  ArrowDownIcon,
+  ArrowDownUpIcon,
+  ArrowUpIcon,
+  BoltIcon,
+  CheckIcon,
+  CopyIcon,
+  FilterIcon,
+  GripVerticalIcon,
+  MinusIcon,
+  PlusIcon,
+  Rows3Icon,
+  XIcon,
+} from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{
@@ -96,8 +145,6 @@ interface ColumnFilter {
 
 interface OpenFilterMenu {
   columnIndex: number;
-  left: number;
-  top: number;
 }
 
 interface ColumnContextMenu {
@@ -140,45 +187,25 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
 
 export const MAX_ENHANCED_TABLE_ROWS = 500;
 export const MAX_ENHANCED_TABLE_COLUMNS = 50;
+// Must stay in sync with --action-column-width in EnhancedMarkdownTable.module.css
+const ACTION_COLUMN_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH = 160;
+const COMPACT_COLUMN_WIDTH = 72;
 const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 const LONG_CELL_TEXT_LENGTH = 60;
 const LONG_CELL_LINE_COUNT = 3;
-const DENSITY_ORDER: TableDensity[] = ['standard', 'compact', 'comfortable'];
-const DEFAULT_COLUMN_STYLE: CSSProperties = {
-  width: DEFAULT_COLUMN_WIDTH,
-  minWidth: DEFAULT_COLUMN_WIDTH,
-  maxWidth: DEFAULT_COLUMN_WIDTH,
-};
-const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
-  width: 'auto',
+const DENSITY_OPTIONS: TableDensity[] = ['standard', 'compact', 'comfortable'];
+const ACTION_COLUMN_STYLE: CSSProperties = {
+  width: ACTION_COLUMN_WIDTH,
+  minWidth: ACTION_COLUMN_WIDTH,
+  maxWidth: ACTION_COLUMN_WIDTH,
 };
 
 function clampColumnWidth(width: number): number {
   return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
-}
-
-const FOCUSABLE_FILTER_MENU_SELECTOR =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const FOCUSABLE_CELL_DIALOG_SELECTOR =
-  'a[href]:not([hidden]), button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden])';
-
-function getFocusableFilterMenuElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(
-    container.querySelectorAll<HTMLElement>(FOCUSABLE_FILTER_MENU_SELECTOR),
-  ).filter((element) => !element.hasAttribute('hidden'));
-}
-
-function getFocusableCellDialogElements(
-  container: HTMLElement | null,
-): HTMLElement[] {
-  if (!container) return [];
-  return Array.from(
-    container.querySelectorAll<HTMLElement>(FOCUSABLE_CELL_DIALOG_SELECTOR),
-  );
 }
 
 function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
@@ -212,11 +239,6 @@ function isLongCellText(value: string): boolean {
   );
 }
 
-function nextDensity(current: TableDensity): TableDensity {
-  const index = DENSITY_ORDER.indexOf(current);
-  return DENSITY_ORDER[(index + 1) % DENSITY_ORDER.length] ?? 'standard';
-}
-
 function densityClassName(density: TableDensity): string {
   switch (density) {
     case 'compact':
@@ -227,6 +249,24 @@ function densityClassName(density: TableDensity): string {
     default:
       return styles.densityStandard;
   }
+}
+
+function findVerticalScrollContainer(
+  element: HTMLElement | null,
+): HTMLElement | null {
+  let current = element;
+  while (current) {
+    const overflowY = window.getComputedStyle(current).overflowY;
+    if (
+      overflowY === 'auto' ||
+      overflowY === 'scroll' ||
+      overflowY === 'overlay'
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
 }
 
 function getTextContent(node: ReactNode): string {
@@ -583,27 +623,6 @@ function moveColumn(order: number[], fromColumn: number, toColumn: number) {
   return next;
 }
 
-function moveVisibleColumn(
-  order: number[],
-  fromColumn: number,
-  toColumn: number,
-  hiddenColumns: Set<number>,
-) {
-  if (hiddenColumns.size === 0) return moveColumn(order, fromColumn, toColumn);
-  const visibleColumns = order.filter(
-    (columnIndex) => !hiddenColumns.has(columnIndex),
-  );
-  const nextVisibleColumns = moveColumn(visibleColumns, fromColumn, toColumn);
-  if (nextVisibleColumns === visibleColumns) return order;
-  let visibleIndex = 0;
-  return order.map((columnIndex) => {
-    if (hiddenColumns.has(columnIndex)) return columnIndex;
-    const nextColumn = nextVisibleColumns[visibleIndex];
-    visibleIndex += 1;
-    return nextColumn ?? columnIndex;
-  });
-}
-
 function initialColumnOrder(columnCount: number): number[] {
   return Array.from({ length: columnCount }, (_, index) => index);
 }
@@ -799,67 +818,6 @@ function normalizeFilter(
   return isFilterActive(next) ? next : undefined;
 }
 
-function SortMenuSection({
-  columnIndex,
-  sortedThisColumn,
-  onSort,
-}: {
-  columnIndex: number;
-  sortedThisColumn: SortState | null;
-  onSort: (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => void;
-}) {
-  const { t } = useI18n();
-
-  return (
-    <div className={styles.filterMenuSection}>
-      <button
-        className={`${styles.filterMenuAction} ${
-          sortedThisColumn?.direction === 'asc' ? styles.activeAction : ''
-        }`}
-        type="button"
-        onClick={() => onSort(columnIndex, 'asc')}
-      >
-        {t('markdownTable.sort.asc')}
-      </button>
-      <button
-        className={`${styles.filterMenuAction} ${
-          sortedThisColumn?.direction === 'desc' ? styles.activeAction : ''
-        }`}
-        type="button"
-        onClick={() => onSort(columnIndex, 'desc')}
-      >
-        {t('markdownTable.sort.desc')}
-      </button>
-      <button
-        className={styles.filterMenuAction}
-        type="button"
-        onClick={() => onSort(columnIndex, null)}
-      >
-        {t('markdownTable.sort.clear')}
-      </button>
-    </div>
-  );
-}
-
-function VisibilityMenuSection({ onHideColumn }: { onHideColumn: () => void }) {
-  const { t } = useI18n();
-
-  return (
-    <div className={styles.filterMenuSection}>
-      <button
-        className={styles.filterMenuAction}
-        type="button"
-        onClick={onHideColumn}
-      >
-        {t('markdownTable.hideColumn')}
-      </button>
-    </div>
-  );
-}
-
 function ValueFilterSection({
   columnIndex,
   columnName,
@@ -888,10 +846,10 @@ function ValueFilterSection({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <input
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <Input
         ref={searchInputRef}
-        className={styles.filterSearch}
+        className="h-7 text-xs"
         value={search}
         onChange={(event) => onSearchChange(event.currentTarget.value)}
         placeholder={t('markdownTable.filter.searchPlaceholder')}
@@ -900,40 +858,53 @@ function ValueFilterSection({
           column: columnName,
         })}
       />
-      <label className={styles.filterOption}>
-        <input
-          type="checkbox"
+      <Label
+        htmlFor={`markdown-table-filter-all-${columnIndex}`}
+        className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+      >
+        <Checkbox
+          id={`markdown-table-filter-all-${columnIndex}`}
           name={`markdown-table-filter-all-${columnIndex}`}
+          data-name={`markdown-table-filter-all-${columnIndex}`}
           checked={allFilteredSelected}
-          onChange={(event) =>
-            onFilteredSelectionChange(event.currentTarget.checked)
+          onCheckedChange={(checked) =>
+            onFilteredSelectionChange(checked === true)
           }
         />
         <span>{t('markdownTable.filter.selectVisible')}</span>
-        <span className={styles.optionCount}>{filteredOptions.length}</span>
-      </label>
-      <div className={styles.filterOptionList}>
+        <span className="ml-auto text-muted-foreground tabular-nums">
+          {filteredOptions.length}
+        </span>
+      </Label>
+      <div className="max-h-[170px] overflow-auto rounded-md border bg-muted/50">
         {visibleOptions.map((option, optionIndex) => (
-          <label key={option.value} className={styles.filterOption}>
-            <input
-              type="checkbox"
+          <Label
+            key={option.value}
+            htmlFor={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+            className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+          >
+            <Checkbox
+              id={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
               name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+              data-name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
               checked={selectedValues.has(option.value)}
-              onChange={() => onToggleValue(option.value)}
+              onCheckedChange={() => onToggleValue(option.value)}
             />
-            <span className={styles.optionLabel}>{option.label}</span>
-            <span className={styles.optionCount}>{option.count}</span>
-          </label>
+            <span className="min-w-0 flex-1 truncate">{option.label}</span>
+            <span className="ml-auto text-muted-foreground tabular-nums">
+              {option.count}
+            </span>
+          </Label>
         ))}
         {filteredOptions.length > visibleOptions.length && (
-          <div className={styles.optionLimitHint}>
+          <div className="p-2 text-center text-muted-foreground">
             {t('markdownTable.filter.optionLimit', {
               count: visibleOptions.length,
             })}
           </div>
         )}
         {filteredOptions.length === 0 && (
-          <div className={styles.optionLimitHint}>
+          <div className="p-2 text-center text-muted-foreground">
             {t('markdownTable.filter.noOptions')}
           </div>
         )}
@@ -943,6 +914,7 @@ function ValueFilterSection({
 }
 
 function CustomFilterSection({
+  overlayId,
   columnIndex,
   columnName,
   isNumeric,
@@ -957,6 +929,7 @@ function CustomFilterSection({
   onNumberValueChange,
   onNumberValueToChange,
 }: {
+  overlayId: string;
   columnIndex: number;
   columnName: string;
   isNumeric: boolean;
@@ -974,36 +947,50 @@ function CustomFilterSection({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <div className={styles.conditionTitle}>
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <div className="font-semibold text-muted-foreground">
         {t('markdownTable.filter.custom')}
       </div>
       {isNumeric ? (
         <>
-          <select
-            className={styles.conditionSelect}
+          <Select
             value={numberOperator}
             name={`markdown-table-number-operator-${columnIndex}`}
-            onChange={(event) =>
-              onNumberOperatorChange(
-                event.currentTarget.value as NumberFilterOperator,
-              )
+            onValueChange={(value) =>
+              onNumberOperatorChange(value as NumberFilterOperator)
             }
-            aria-label={t('markdownTable.filter.numberAria', {
-              column: columnName,
-            })}
           >
-            {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
-              ([value, labelKey]) => (
-                <option key={value} value={value}>
-                  {t(labelKey)}
-                </option>
-              ),
-            )}
-          </select>
-          <div className={styles.conditionInputs}>
-            <input
-              className={styles.conditionInput}
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              data-name={`markdown-table-number-operator-${columnIndex}`}
+              aria-label={t('markdownTable.filter.numberAria', {
+                column: columnName,
+              })}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent
+              data-markdown-table-filter-owner={overlayId}
+              className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+            >
+              {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <SelectItem
+                    key={value}
+                    value={value}
+                    data-value={value}
+                    className="text-xs"
+                  >
+                    {t(labelKey)}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+          <div className="flex gap-1.5">
+            <Input
+              className="h-7 text-xs"
               value={numberValue}
               onChange={(event) =>
                 onNumberValueChange(event.currentTarget.value)
@@ -1012,8 +999,8 @@ function CustomFilterSection({
               name={`markdown-table-number-filter-${columnIndex}`}
             />
             {numberOperator === 'between' && (
-              <input
-                className={styles.conditionInput}
+              <Input
+                className="h-7 text-xs"
                 value={numberValueTo}
                 onChange={(event) =>
                   onNumberValueToChange(event.currentTarget.value)
@@ -1026,27 +1013,43 @@ function CustomFilterSection({
         </>
       ) : (
         <>
-          <select
-            className={styles.conditionSelect}
+          <Select
             value={textOperator}
             name={`markdown-table-text-operator-${columnIndex}`}
-            onChange={(event) =>
-              onTextOperatorChange(
-                event.currentTarget.value as TextFilterOperator,
-              )
+            onValueChange={(value) =>
+              onTextOperatorChange(value as TextFilterOperator)
             }
-            aria-label={t('markdownTable.filter.textAria', {
-              column: columnName,
-            })}
           >
-            {Object.entries(TEXT_FILTER_LABEL_KEYS).map(([value, labelKey]) => (
-              <option key={value} value={value}>
-                {t(labelKey)}
-              </option>
-            ))}
-          </select>
-          <input
-            className={styles.conditionInput}
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              data-name={`markdown-table-text-operator-${columnIndex}`}
+              aria-label={t('markdownTable.filter.textAria', {
+                column: columnName,
+              })}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent
+              data-markdown-table-filter-owner={overlayId}
+              className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+            >
+              {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <SelectItem
+                    key={value}
+                    value={value}
+                    data-value={value}
+                    className="text-xs"
+                  >
+                    {t(labelKey)}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+          <Input
+            className="h-7 text-xs"
             value={textValue}
             onChange={(event) => onTextValueChange(event.currentTarget.value)}
             placeholder={t('markdownTable.filter.textPlaceholder')}
@@ -1070,25 +1073,17 @@ function FilterMenuFooter({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterFooter}>
-      <button
-        className={styles.secondaryButton}
-        type="button"
-        onClick={onClear}
-      >
+    <div className="flex items-center gap-1.5 px-2.5 py-2">
+      <Button variant="outline" size="sm" type="button" onClick={onClear}>
         {t('markdownTable.filter.reset')}
-      </button>
-      <span className={styles.footerSpacer} />
-      <button
-        className={styles.secondaryButton}
-        type="button"
-        onClick={onClose}
-      >
+      </Button>
+      <span className="flex-1" />
+      <Button variant="outline" size="sm" type="button" onClick={onClose}>
         {t('markdownTable.filter.cancel')}
-      </button>
-      <button className={styles.primaryButton} type="button" onClick={onApply}>
+      </Button>
+      <Button size="sm" type="button" onClick={onApply}>
         {t('markdownTable.filter.confirm')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1100,14 +1095,8 @@ function ColumnFilterMenu({
   filter,
   isNumeric,
   options,
-  sort,
-  style,
-  menuRef,
-  canHideColumn,
   onApply,
   onClose,
-  onHideColumn,
-  onSort,
 }: {
   id: string;
   columnName: string;
@@ -1115,17 +1104,8 @@ function ColumnFilterMenu({
   filter?: ColumnFilter;
   isNumeric: boolean;
   options: FilterOption[];
-  sort: SortState | null;
-  style?: CSSProperties;
-  menuRef: RefObject<HTMLDivElement | null>;
-  canHideColumn: boolean;
   onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
   onClose: () => void;
-  onHideColumn: (columnIndex: number) => void;
-  onSort: (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => void;
 }) {
   const allOptionValues = useMemo(
     () => options.map((option) => option.value),
@@ -1217,28 +1197,30 @@ function ColumnFilterMenu({
     onApply(columnIndex, undefined);
   };
 
-  const sortedThisColumn = sort?.columnIndex === columnIndex ? sort : null;
-
   return (
-    <div
-      ref={menuRef}
+    <PopoverContent
       id={id}
-      className={styles.filterMenu}
-      style={style}
+      data-markdown-table-filter-owner={id}
+      align="end"
+      sideOffset={2}
+      collisionPadding={6}
+      onCloseAutoFocus={(event) => {
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body
+        ) {
+          event.preventDefault();
+        }
+      }}
+      className="max-h-[min(430px,calc(100vh-16px))] w-[300px] max-w-[80vw] gap-0 overflow-auto p-0 text-xs"
       role="dialog"
       aria-labelledby={`${id}-title`}
     >
-      <div id={`${id}-title`} className={styles.filterMenuTitle}>
-        {columnName}
-      </div>
-      <SortMenuSection
-        columnIndex={columnIndex}
-        sortedThisColumn={sortedThisColumn}
-        onSort={onSort}
-      />
-      {canHideColumn && (
-        <VisibilityMenuSection onHideColumn={() => onHideColumn(columnIndex)} />
-      )}
+      <PopoverHeader className="border-b px-2.5 py-2">
+        <PopoverTitle id={`${id}-title`} className="truncate text-xs font-bold">
+          {columnName}
+        </PopoverTitle>
+      </PopoverHeader>
       <ValueFilterSection
         columnIndex={columnIndex}
         columnName={columnName}
@@ -1253,6 +1235,7 @@ function ColumnFilterMenu({
         onToggleValue={toggleValue}
       />
       <CustomFilterSection
+        overlayId={id}
         columnIndex={columnIndex}
         columnName={columnName}
         isNumeric={isNumeric}
@@ -1272,7 +1255,7 @@ function ColumnFilterMenu({
         onClose={onClose}
         onApply={applyDraft}
       />
-    </div>
+    </PopoverContent>
   );
 }
 
@@ -1308,6 +1291,174 @@ export function EnhancedMarkdownTable({
   return <EnhancedTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
+function CustomColumnsPopover({
+  headers,
+  columnOrder,
+  hiddenColumns,
+  detailColumns,
+  onToggleTableColumn,
+  onToggleAllTableColumns,
+  onToggleDetailColumn,
+  onToggleAllDetailColumns,
+  onReset,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
+}: {
+  headers: EnhancedTableCell[];
+  columnOrder: number[];
+  hiddenColumns: Set<number>;
+  detailColumns: Set<number>;
+  onToggleTableColumn: (columnIndex: number) => void;
+  onToggleAllTableColumns: (visible: boolean) => void;
+  onToggleDetailColumn: (columnIndex: number) => void;
+  onToggleAllDetailColumns: (visible: boolean) => void;
+  onReset: () => void;
+  onDragStart: (
+    event: ReactDragEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => void;
+  onDragEnd: () => void;
+  onDragOver: (event: ReactDragEvent<HTMLElement>) => void;
+  onDrop: (event: ReactDragEvent<HTMLElement>, columnIndex: number) => void;
+}) {
+  const { t } = useI18n();
+  const id = useId();
+  const visibleColumnCount = headers.length - hiddenColumns.size;
+  const allTableColumnsVisible = visibleColumnCount === headers.length;
+  const allDetailColumnsVisible = detailColumns.size === headers.length;
+  const tableColumnsChecked =
+    visibleColumnCount === 0
+      ? false
+      : allTableColumnsVisible
+        ? true
+        : 'indeterminate';
+  const detailColumnsChecked =
+    detailColumns.size === 0
+      ? false
+      : allDetailColumnsVisible
+        ? true
+        : 'indeterminate';
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={`${styles.toolbarControl} ${styles.compactToolbarControl}`}
+          aria-label={t('markdownTable.customColumns')}
+          type="button"
+        >
+          <BoltIcon />
+          <span className={styles.compactToolbarLabel}>
+            {t('markdownTable.customColumns')}
+          </span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className={`${styles.columnsPopover} max-h-[min(520px,calc(100vh-16px))] w-80 max-w-[85vw] gap-0 overflow-auto p-0`}
+      >
+        <div className="flex items-center gap-3 border-b px-3 py-3">
+          <Checkbox
+            checked={tableColumnsChecked}
+            onCheckedChange={(checked) =>
+              onToggleAllTableColumns(checked === true)
+            }
+            aria-label={t('markdownTable.customColumns.toggleAllTable')}
+          />
+          <span className="flex-1 text-xs text-muted-foreground">
+            {t('markdownTable.customColumns.tableSection')}
+          </span>
+          <Button variant="ghost" size="sm" type="button" onClick={onReset}>
+            {t('markdownTable.customColumns.reset')}
+          </Button>
+        </div>
+        <div className="p-2">
+          {columnOrder.map((columnIndex) => {
+            const header = headers[columnIndex];
+            if (!header) return null;
+            const columnName =
+              header.text ||
+              t('markdownTable.column', { index: columnIndex + 1 });
+            return (
+              <div
+                key={header.key}
+                className="flex min-h-9 items-center gap-2 rounded-md px-1.5 hover:bg-muted"
+                onDragOver={onDragOver}
+                onDrop={(event) => onDrop(event, columnIndex)}
+              >
+                <button
+                  className="flex size-7 shrink-0 cursor-grab items-center justify-center rounded-md text-muted-foreground hover:bg-muted-foreground/10 active:cursor-grabbing"
+                  type="button"
+                  draggable
+                  onDragStart={(event) => onDragStart(event, columnIndex)}
+                  onDragEnd={onDragEnd}
+                  aria-label={t('markdownTable.moveColumn', {
+                    column: columnName,
+                  })}
+                >
+                  <GripVerticalIcon className="size-3.5" />
+                </button>
+                <Checkbox
+                  id={`${id}-table-${columnIndex}`}
+                  checked={!hiddenColumns.has(columnIndex)}
+                  onCheckedChange={() => onToggleTableColumn(columnIndex)}
+                />
+                <Label
+                  htmlFor={`${id}-table-${columnIndex}`}
+                  className="min-w-0 flex-1 cursor-pointer truncate font-normal"
+                >
+                  {columnName}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-3 border-y px-3 py-3">
+          <Checkbox
+            checked={detailColumnsChecked}
+            onCheckedChange={(checked) =>
+              onToggleAllDetailColumns(checked === true)
+            }
+            aria-label={t('markdownTable.customColumns.toggleAllDetails')}
+          />
+          <span className="text-xs text-muted-foreground">
+            {t('markdownTable.customColumns.detailSection')}
+          </span>
+        </div>
+        <div className="p-2">
+          {headers.map((header, columnIndex) => {
+            const columnName =
+              header.text ||
+              t('markdownTable.column', { index: columnIndex + 1 });
+            return (
+              <div
+                key={`${header.key}-detail`}
+                className="flex min-h-9 items-center gap-2 rounded-md px-1.5 hover:bg-muted"
+              >
+                <Checkbox
+                  id={`${id}-detail-${columnIndex}`}
+                  checked={detailColumns.has(columnIndex)}
+                  onCheckedChange={() => onToggleDetailColumn(columnIndex)}
+                />
+                <Label
+                  htmlFor={`${id}-detail-${columnIndex}`}
+                  className="min-w-0 flex-1 cursor-pointer truncate font-normal"
+                >
+                  {columnName}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function EnhancedTable({
   table,
   toolbarExtra,
@@ -1316,7 +1467,6 @@ export function EnhancedTable({
   toolbarExtra?: ReactNode;
 }) {
   const { language, t } = useI18n();
-  const theme = useTheme();
   const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
@@ -1330,6 +1480,9 @@ export function EnhancedTable({
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
     () => new Set(),
   );
+  const [detailColumns, setDetailColumns] = useState<Set<number>>(
+    () => new Set(initialColumnOrder(table.columnCount)),
+  );
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
   const [columnOrder, setColumnOrder] = useState<number[]>(() =>
     initialColumnOrder(table.columnCount),
@@ -1342,6 +1495,9 @@ export function EnhancedTable({
   const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
   const [longTextExpanded, setLongTextExpanded] = useState(false);
   const [density, setDensity] = useState<TableDensity>('standard');
+  const [frozenColumnShadowLeft, setFrozenColumnShadowLeft] = useState<
+    number | null
+  >(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
@@ -1362,12 +1518,15 @@ export function EnhancedTable({
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const filterMenuRef = useRef<HTMLDivElement | null>(null);
+  const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
+  const detailToggleAnchorRef = useRef<{
+    element: HTMLElement;
+    scrollContainer: HTMLElement | null;
+    top: number;
+  } | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
-  const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
-  const focusReturnFrameRef = useRef(0);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
     columnIndex: number;
@@ -1383,21 +1542,9 @@ export function EnhancedTable({
   );
   const tableStructureKeyRef = useRef(tableStructureKey);
 
-  const focusFilterTrigger = useCallback(() => {
-    if (focusReturnFrameRef.current) {
-      cancelAnimationFrame(focusReturnFrameRef.current);
-    }
-    focusReturnFrameRef.current = requestAnimationFrame(() => {
-      focusReturnFrameRef.current = 0;
-      const trigger = filterTriggerRef.current;
-      if (trigger?.isConnected) trigger.focus();
-    });
-  }, []);
-
   const closeFilterMenu = useCallback(() => {
     setOpenFilterMenu(null);
-    focusFilterTrigger();
-  }, [focusFilterTrigger]);
+  }, []);
 
   const resetCopiedVisible = useCallback(() => {
     copiedVisibleGenRef.current += 1;
@@ -1465,9 +1612,6 @@ export function EnhancedTable({
       if (selectionFrameRef.current) {
         cancelAnimationFrame(selectionFrameRef.current);
       }
-      if (focusReturnFrameRef.current) {
-        cancelAnimationFrame(focusReturnFrameRef.current);
-      }
     };
   }, [stopDragging]);
 
@@ -1480,6 +1624,7 @@ export function EnhancedTable({
     setOpenFilterMenu(null);
     setColumnContextMenu(null);
     setHiddenColumns(new Set());
+    setDetailColumns(new Set(initialColumnOrder(table.columnCount)));
     setColumnWidths({});
     setColumnOrder(initialColumnOrder(table.columnCount));
     setActiveColumn(null);
@@ -1530,66 +1675,29 @@ export function EnhancedTable({
 
   useEffect(() => {
     if (!openFilterMenu) return;
-    const closeMenu = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        !filterMenuRef.current?.contains(target) &&
-        !filterTriggerRef.current?.contains(target)
-      ) {
-        setOpenFilterMenu(null);
-      }
-    };
-    const handleMenuKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeFilterMenu();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const menu = filterMenuRef.current;
-      const activeElement = document.activeElement;
-      if (
-        !menu ||
-        !(activeElement instanceof Node) ||
-        !menu.contains(activeElement)
-      ) {
-        return;
-      }
-      const focusableElements = getFocusableFilterMenuElements(menu);
-      if (focusableElements.length === 0) return;
-      const currentIndex =
-        activeElement instanceof HTMLElement
-          ? focusableElements.indexOf(activeElement)
-          : -1;
-      const nextIndex = event.shiftKey
-        ? currentIndex <= 0
-          ? focusableElements.length - 1
-          : currentIndex - 1
-        : currentIndex === -1 || currentIndex === focusableElements.length - 1
-          ? 0
-          : currentIndex + 1;
-      event.preventDefault();
-      focusableElements[nextIndex]?.focus();
-    };
+    const filterOwnerId = `${tableId}-filter-${openFilterMenu.columnIndex}`;
     const closeOnScroll = (event: Event) => {
-      const target = event.target;
-      if (target instanceof Node && filterMenuRef.current?.contains(target)) {
-        return;
+      if (event.target instanceof Element) {
+        const owner = event.target.closest(
+          '[data-markdown-table-filter-owner]',
+        );
+        if (
+          owner?.getAttribute('data-markdown-table-filter-owner') ===
+          filterOwnerId
+        ) {
+          return;
+        }
       }
       setOpenFilterMenu(null);
     };
     const closeOnResize = () => setOpenFilterMenu(null);
-    document.addEventListener('mousedown', closeMenu);
-    document.addEventListener('keydown', handleMenuKeyDown);
     document.addEventListener('scroll', closeOnScroll, true);
     window.addEventListener('resize', closeOnResize);
     return () => {
-      document.removeEventListener('mousedown', closeMenu);
-      document.removeEventListener('keydown', handleMenuKeyDown);
       document.removeEventListener('scroll', closeOnScroll, true);
       window.removeEventListener('resize', closeOnResize);
     };
-  }, [closeFilterMenu, openFilterMenu]);
+  }, [openFilterMenu, tableId]);
 
   useEffect(() => {
     if (!columnContextMenu) return;
@@ -1650,6 +1758,24 @@ export function EnhancedTable({
     };
   }, [cellDialog, columnContextMenu, openFilterMenu]);
 
+  useEffect(() => {
+    if (!selection) return;
+    const clearSelectionOnOutsideMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !shellRef.current?.contains(target)) {
+        stopDragging();
+        setSelection(null);
+      }
+    };
+    document.addEventListener('mousedown', clearSelectionOnOutsideMouseDown);
+    return () => {
+      document.removeEventListener(
+        'mousedown',
+        clearSelectionOnOutsideMouseDown,
+      );
+    };
+  }, [selection, stopDragging]);
+
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
     [filters, table.rows],
@@ -1689,18 +1815,30 @@ export function EnhancedTable({
         .filter((index) => !hiddenColumns.has(index)),
     [columnOrder, hiddenColumns, table.columnCount],
   );
+  const detailColumnIndexes = useMemo(
+    () =>
+      initialColumnOrder(table.columnCount).filter((index) =>
+        detailColumns.has(index),
+      ),
+    [detailColumns, table.columnCount],
+  );
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
+  const fixedVisibleColumnWidth = orderedVisibleColumnIndexes.reduce(
+    (total, index) => total + (columnWidths[index] ?? 0),
+    0,
+  );
+  const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
+    (index) => columnWidths[index] === undefined,
+  ).length;
+  const hasFillerColumn = flexibleColumnCount === 0;
   const currentCellDialogCell = useMemo(() => {
     if (!cellDialog) return null;
     const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
     return row?.cells[cellDialog.columnIndex] ?? null;
   }, [cellDialog, visibleRows]);
   const currentCellDialogText = currentCellDialogCell?.text;
-  const cellDialogThemeClass =
-    theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
-
   useEffect(() => {
     resetCopiedVisible();
   }, [resetCopiedVisible, orderedVisibleColumnIndexes, visibleRows]);
@@ -1765,6 +1903,19 @@ export function EnhancedTable({
     }
   }, [cellDialog, detailRowKey, visibleRows]);
 
+  useLayoutEffect(() => {
+    const anchor = detailToggleAnchorRef.current;
+    detailToggleAnchorRef.current = null;
+    if (!anchor?.element.isConnected) return;
+    const offset = anchor.element.getBoundingClientRect().top - anchor.top;
+    if (offset === 0) return;
+    if (anchor.scrollContainer) {
+      anchor.scrollContainer.scrollTop += offset;
+    } else {
+      window.scrollBy(0, offset);
+    }
+  }, [detailRowKey]);
+
   useEffect(() => {
     if (!cellDialog) return;
     return registerInteractionBlocker();
@@ -1777,55 +1928,12 @@ export function EnhancedTable({
 
   useEffect(() => {
     if (!cellDialog) return;
-    const dialog = cellDialogRef.current;
-    const focusableElements = getFocusableCellDialogElements(dialog);
-    (focusableElements[0] ?? dialog)?.focus();
-
-    const handleDialogKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.isComposing || event.keyCode === 229) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        setCellDialog(null);
-        resetCopiedCellDialog();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const nextFocusableElements = getFocusableCellDialogElements(
-        cellDialogRef.current,
-      );
-      if (nextFocusableElements.length === 0) {
-        event.preventDefault();
-        cellDialogRef.current?.focus();
-        return;
-      }
-      const first = nextFocusableElements[0];
-      const last = nextFocusableElements[nextFocusableElements.length - 1];
-      const activeElement = document.activeElement;
-      const currentIndex =
-        activeElement instanceof HTMLElement
-          ? nextFocusableElements.indexOf(activeElement)
-          : -1;
-      if (event.shiftKey && (activeElement === first || currentIndex === -1)) {
-        event.preventDefault();
-        last?.focus();
-      } else if (
-        !event.shiftKey &&
-        (activeElement === last || currentIndex === -1)
-      ) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener('keydown', handleDialogKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleDialogKeyDown);
       const focusReturn = cellDialogFocusReturnRef.current;
       cellDialogFocusReturnRef.current = null;
-      if (focusReturn?.isConnected) focusReturn.focus();
+      if (focusReturn?.isConnected) focusReturn.focus({ preventScroll: true });
     };
-  }, [cellDialog, resetCopiedCellDialog]);
+  }, [cellDialog]);
 
   const setColumnFilter = (
     columnIndex: number,
@@ -1844,15 +1952,6 @@ export function EnhancedTable({
     closeFilterMenu();
   };
 
-  const setColumnSort = (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => {
-    setSelection(null);
-    setActiveColumn(columnIndex);
-    setSort(direction ? { columnIndex, direction } : null);
-  };
-
   const toggleSort = (columnIndex: number) => {
     setSelection(null);
     setActiveColumn(columnIndex);
@@ -1867,39 +1966,20 @@ export function EnhancedTable({
     });
   };
 
-  const toggleFilterMenu = (
-    event: ReactMouseEvent<HTMLButtonElement>,
-    columnIndex: number,
-  ) => {
+  const setFilterMenuOpen = (columnIndex: number, open: boolean) => {
+    if (!open) {
+      setOpenFilterMenu((current) =>
+        current?.columnIndex === columnIndex ? null : current,
+      );
+      return;
+    }
     setSelection(null);
     setActiveColumn(columnIndex);
     setColumnContextMenu(null);
-    filterTriggerRef.current = event.currentTarget;
-    const buttonRect = event.currentTarget.getBoundingClientRect();
-    const menuWidth = 300;
-    const menuHeight = 430;
-    const nextMenu = {
-      columnIndex,
-      left: Math.max(
-        6,
-        Math.min(
-          buttonRect.right - menuWidth,
-          window.innerWidth - menuWidth - 6,
-        ),
-      ),
-      top:
-        window.innerHeight - buttonRect.bottom < menuHeight
-          ? Math.max(8, buttonRect.top - menuHeight - 2)
-          : buttonRect.bottom + 2,
-    };
-
-    setOpenFilterMenu((current) =>
-      current?.columnIndex === columnIndex ? null : nextMenu,
-    );
+    setOpenFilterMenu({ columnIndex });
   };
 
-  const hideColumn = (columnIndex: number) => {
-    if (orderedVisibleColumnIndexes.length <= 1) return;
+  const toggleTableColumn = (columnIndex: number) => {
     setSelection(null);
     setActiveColumn((current) => (current === columnIndex ? null : current));
     closeFilterMenu();
@@ -1913,14 +1993,55 @@ export function EnhancedTable({
     );
     setHiddenColumns((current) => {
       const next = new Set(current);
-      next.add(columnIndex);
+      if (next.has(columnIndex)) {
+        next.delete(columnIndex);
+      } else {
+        next.add(columnIndex);
+      }
       return next;
     });
   };
 
-  const showHiddenColumns = () => {
+  const toggleAllTableColumns = (visible: boolean) => {
     setSelection(null);
+    setActiveColumn(null);
+    closeFilterMenu();
+    if (visible) {
+      setHiddenColumns(new Set());
+      return;
+    }
+    setHiddenColumns(new Set(initialColumnOrder(table.columnCount)));
+    setFilters({});
+    setSort(null);
+  };
+
+  const toggleDetailColumn = (columnIndex: number) => {
+    setDetailColumns((current) => {
+      const next = new Set(current);
+      if (next.has(columnIndex)) {
+        next.delete(columnIndex);
+      } else {
+        next.add(columnIndex);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllDetailColumns = (visible: boolean) => {
+    setDetailColumns(
+      visible
+        ? new Set(initialColumnOrder(table.columnCount))
+        : new Set<number>(),
+    );
+  };
+
+  const resetColumns = () => {
+    setSelection(null);
+    setActiveColumn(null);
+    closeFilterMenu();
+    setColumnOrder(initialColumnOrder(table.columnCount));
     setHiddenColumns(new Set());
+    setDetailColumns(new Set(initialColumnOrder(table.columnCount)));
   };
 
   const toggleFreezeFirstColumnFromMenu = () => {
@@ -1953,11 +2074,16 @@ export function EnhancedTable({
     });
   };
 
-  const toggleDensity = () => {
-    setDensity((current) => nextDensity(current));
-  };
-
-  const toggleRowDetail = (rowKey: string) => {
+  const toggleRowDetail = (rowKey: string, rowElement: HTMLElement | null) => {
+    if (detailRowKey !== rowKey && rowElement) {
+      detailToggleAnchorRef.current = {
+        element: rowElement,
+        scrollContainer: findVerticalScrollContainer(
+          shellRef.current?.parentElement ?? null,
+        ),
+        top: rowElement.getBoundingClientRect().top,
+      };
+    }
     setSelection(null);
     setCellDialog(null);
     resetCopiedCellDialog();
@@ -1985,10 +2111,9 @@ export function EnhancedTable({
   };
 
   const copyCellDialogValue = () => {
-    if (currentCellDialogText == null || !navigator.clipboard) return;
+    if (currentCellDialogText == null) return;
     const copyGeneration = copiedCellDialogGenRef.current;
-    void navigator.clipboard
-      .writeText(sanitizeForClipboard(currentCellDialogText))
+    void writeClipboardText(sanitizeForClipboard(currentCellDialogText))
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedCellDialogGenRef.current !== copyGeneration) return;
@@ -2001,9 +2126,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const selectionRowBounds = useMemo(
@@ -2026,25 +2149,58 @@ export function EnhancedTable({
     );
   };
 
-  const columnStyle = (
-    columnIndex: number,
-    extra?: CSSProperties,
-  ): CSSProperties => {
+  const flexibleColumnWidth = (
+    minWidth: number,
+    fixedWidth: number,
+    flexibleColumnCount: number,
+  ): string =>
+    `max(${minWidth}px, calc((100cqw - ${ACTION_COLUMN_WIDTH}px - ${fixedWidth}px) / ${flexibleColumnCount}))`;
+
+  const columnGroupStyle = (columnIndex: number): CSSProperties => {
     const width = columnWidths[columnIndex];
-    if (width === undefined) {
-      const defaultStyle =
-        density === 'compact'
-          ? COMPACT_AUTO_COLUMN_STYLE
-          : DEFAULT_COLUMN_STYLE;
-      return extra ? { ...defaultStyle, ...extra } : defaultStyle;
-    }
+    if (width !== undefined) return { width };
+    const minWidth =
+      density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
     return {
-      width,
-      minWidth: width,
-      maxWidth: width,
-      ...extra,
+      width: flexibleColumnWidth(
+        minWidth,
+        fixedVisibleColumnWidth,
+        flexibleColumnCount,
+      ),
     };
   };
+
+  useLayoutEffect(() => {
+    if (!freezeFirstColumn || frozenColumnIndex === undefined) {
+      setFrozenColumnShadowLeft(null);
+      return;
+    }
+    const shell = shellRef.current;
+    const frozenHeader = frozenHeaderCellRef.current;
+    if (!shell || !frozenHeader) return;
+    const updateShadowPosition = () => {
+      const shellRect = shell.getBoundingClientRect();
+      const headerRect = frozenHeader.getBoundingClientRect();
+      setFrozenColumnShadowLeft(
+        Math.max(0, headerRect.right - shellRect.left - shell.clientLeft),
+      );
+    };
+    updateShadowPosition();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateShadowPosition);
+      return () => window.removeEventListener('resize', updateShadowPosition);
+    }
+    const resizeObserver = new ResizeObserver(updateShadowPosition);
+    resizeObserver.observe(shell);
+    resizeObserver.observe(frozenHeader);
+    return () => resizeObserver.disconnect();
+  }, [
+    columnWidths,
+    density,
+    freezeFirstColumn,
+    frozenColumnIndex,
+    orderedVisibleColumnIndexes,
+  ]);
 
   const startColumnResize = (
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -2132,12 +2288,7 @@ export function EnhancedTable({
     setSelection(null);
     setActiveColumn(sourceColumnIndex);
     setColumnOrder((current) =>
-      moveVisibleColumn(
-        current,
-        sourceColumnIndex,
-        targetColumnIndex,
-        hiddenColumns,
-      ),
+      moveColumn(current, sourceColumnIndex, targetColumnIndex),
     );
   };
 
@@ -2237,10 +2388,9 @@ export function EnhancedTable({
       visibleRows,
       orderedVisibleColumnIndexes,
     );
-    if (!text || !navigator.clipboard) return;
+    if (!text) return;
     const copyGeneration = copiedSelectionGenRef.current;
-    void navigator.clipboard
-      .writeText(text)
+    void writeClipboardText(text)
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedSelectionGenRef.current !== copyGeneration) return;
@@ -2253,9 +2403,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const copyVisibleTable = () => {
@@ -2264,10 +2412,9 @@ export function EnhancedTable({
       visibleRows,
       orderedVisibleColumnIndexes,
     );
-    if (!text || !navigator.clipboard) return;
+    if (!text) return;
     const copyGeneration = copiedVisibleGenRef.current;
-    void navigator.clipboard
-      .writeText(text)
+    void writeClipboardText(text)
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedVisibleGenRef.current !== copyGeneration) return;
@@ -2280,9 +2427,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -2309,7 +2454,6 @@ export function EnhancedTable({
   const selectedCount = selectionStatistics?.selectedCount ?? 0;
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
-  const densityLabel = t(`markdownTable.density.${density}`);
   const hasLongText = useMemo(
     () =>
       visibleRows.some((row) =>
@@ -2327,16 +2471,6 @@ export function EnhancedTable({
           visible: visibleRows.length,
           total: table.rows.length,
         });
-  const openFilterHeader =
-    openFilterMenu === null
-      ? undefined
-      : table.headers[openFilterMenu.columnIndex];
-  const openFilterColumnName =
-    openFilterHeader && openFilterMenu
-      ? openFilterHeader.text ||
-        t('markdownTable.column', { index: openFilterMenu.columnIndex + 1 })
-      : '';
-
   const renderCellContent = (cell: EnhancedTableCell, expanded: boolean) => {
     const displayText = cellReadableText(cell);
     const isLong = isLongCellText(displayText);
@@ -2377,143 +2511,194 @@ export function EnhancedTable({
         freezeFirstColumn ? styles.hasFrozenColumn : ''
       } ${isDragging ? styles.dragging : ''}`}
     >
-      <div className={styles.toolbar}>
-        <span className={styles.summary}>{rowSummary}</span>
-        <span className={styles.hint}>{t('markdownTable.hint')}</span>
-        <button
-          className={styles.copyButton}
-          type="button"
-          onClick={copyVisibleTable}
-        >
-          {copiedVisible ? (
-            <>
-              <span className={styles.copyCheck}>✓</span>
-              {t('code.copied')}
-            </>
-          ) : (
-            t('markdownTable.copyVisible')
+      <TooltipProvider delayDuration={300}>
+        <div className={styles.toolbar}>
+          <span className={styles.summary}>{rowSummary}</span>
+          {activeFilterCount > 0 && (
+            <span className={styles.selection}>
+              {t('markdownTable.filtersActive', { count: activeFilterCount })}
+            </span>
           )}
-        </button>
-        {hiddenColumns.size > 0 && (
-          <button
-            className={styles.copyButton}
-            type="button"
-            onClick={showHiddenColumns}
-          >
-            {t('markdownTable.showHiddenColumns', {
-              count: hiddenColumns.size,
-            })}
-          </button>
-        )}
-        <button
-          className={styles.copyButton}
-          type="button"
-          onClick={toggleDensity}
-        >
-          {t('markdownTable.density', { density: densityLabel })}
-        </button>
-        {hasLongText && (
-          <button
-            className={styles.copyButton}
-            type="button"
-            onClick={() => setLongTextExpanded((current) => !current)}
-          >
-            {longTextExpanded
-              ? t('markdownTable.collapseLongText')
-              : t('markdownTable.expandLongText')}
-          </button>
-        )}
-        {activeFilterCount > 0 && (
-          <span className={styles.selection}>
-            {t('markdownTable.filtersActive', { count: activeFilterCount })}
-          </span>
-        )}
-        {selectedCount > 0 && (
-          <>
-            {selectionStatistics && (
-              <div className={styles.selectionStats}>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.selected')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.selectedCount}
-                  </strong>
-                </span>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.nonEmpty')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.nonEmptyCount}
-                  </strong>
-                </span>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.numeric')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.numericCount}
-                  </strong>
-                </span>
-                {selectionStatistics.numericCount > 0 && (
-                  <>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.sum')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.sum,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.average')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.average,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.min')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.min,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.max')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.max,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-            <button
-              className={styles.copyButton}
-              type="button"
-              onClick={copySelection}
-            >
-              {copiedSelection ? (
+          {selectedCount > 0 && selectionStatistics && (
+            <div className={styles.selectionStats}>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.selected')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.selectedCount}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.nonEmpty')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.nonEmptyCount}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.numeric')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.numericCount}
+                </strong>
+              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    className={styles.selectionCopyButton}
+                    type="button"
+                    onClick={copySelection}
+                    aria-label={t('markdownTable.copyTsv')}
+                  >
+                    {copiedSelection
+                      ? t('code.copied')
+                      : t('markdownTable.copyTsv')}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {t('markdownTable.copyTsvHint')}
+                </TooltipContent>
+              </Tooltip>
+              {selectionStatistics.numericCount > 0 && (
                 <>
-                  <span className={styles.copyCheck}>✓</span>
-                  {t('code.copied')}
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.sum')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.sum,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.average')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.average,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.min')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.min,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.max')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.max,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
                 </>
-              ) : (
-                t('markdownTable.copyTsv')
               )}
-            </button>
-          </>
-        )}
-        {toolbarExtra}
-      </div>
+            </div>
+          )}
+          <span className={styles.toolbarSpacer} />
+          <Select
+            value={density}
+            onValueChange={(value) => setDensity(value as TableDensity)}
+          >
+            <SelectTrigger
+              size="sm"
+              className={styles.densityTrigger}
+              aria-label={t('markdownTable.densityLabel')}
+            >
+              <Rows3Icon className="size-4" />
+              <SelectValue>
+                <span className={styles.compactToolbarLabel}>
+                  {t('markdownTable.densityCurrent', {
+                    density: t(`markdownTable.density.${density}`),
+                  })}
+                </span>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent className={styles.densityMenu}>
+              {DENSITY_OPTIONS.map((option) => (
+                <SelectItem key={option} value={option} data-value={option}>
+                  {t(`markdownTable.density.${option}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <CustomColumnsPopover
+            headers={table.headers}
+            columnOrder={columnOrder}
+            hiddenColumns={hiddenColumns}
+            detailColumns={detailColumns}
+            onToggleTableColumn={toggleTableColumn}
+            onToggleAllTableColumns={toggleAllTableColumns}
+            onToggleDetailColumn={toggleDetailColumn}
+            onToggleAllDetailColumns={toggleAllDetailColumns}
+            onReset={resetColumns}
+            onDragStart={startColumnDrag}
+            onDragEnd={stopColumnDrag}
+            onDragOver={dragOverColumn}
+            onDrop={dropColumn}
+          />
+          {hasLongText && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={styles.toolbarControl}
+              type="button"
+              onClick={() => setLongTextExpanded((current) => !current)}
+            >
+              {longTextExpanded
+                ? t('markdownTable.collapseLongText')
+                : t('markdownTable.expandLongText')}
+            </Button>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                className={styles.iconButton}
+                type="button"
+                onClick={copyVisibleTable}
+                aria-label={t('markdownTable.copyVisible')}
+              >
+                {copiedVisible ? (
+                  <>
+                    <CheckIcon aria-hidden="true" />
+                    <span className="sr-only">✓</span>
+                  </>
+                ) : (
+                  <CopyIcon aria-hidden="true" />
+                )}
+                <span className="sr-only">
+                  {copiedVisible
+                    ? t('code.copied')
+                    : t('markdownTable.copyVisible')}
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {copiedVisible
+                ? t('code.copied')
+                : t('markdownTable.copyVisible')}
+            </TooltipContent>
+          </Tooltip>
+          {toolbarExtra}
+        </div>
+      </TooltipProvider>
       <div
         ref={containerRef}
         className={styles.scroller}
@@ -2521,6 +2706,16 @@ export function EnhancedTable({
         onCopy={handleCopy}
       >
         <table className={styles.table}>
+          <colgroup>
+            <col className={styles.actionColumn} style={ACTION_COLUMN_STYLE} />
+            {orderedVisibleColumnIndexes.map((columnIndex) => (
+              <col
+                key={`column-${columnIndex}`}
+                style={columnGroupStyle(columnIndex)}
+              />
+            ))}
+            {hasFillerColumn && <col className={styles.fillerColumn} />}
+          </colgroup>
           <thead>
             <tr>
               <th
@@ -2528,7 +2723,7 @@ export function EnhancedTable({
                   freezeFirstColumn ? styles.stickyActionHeaderCell : ''
                 }`}
               >
-                {t('markdownTable.actions')}
+                <span className="sr-only">{t('markdownTable.actions')}</span>
               </th>
               {orderedVisibleColumnIndexes.map((columnIndex) => {
                 const header = table.headers[columnIndex];
@@ -2536,11 +2731,6 @@ export function EnhancedTable({
                 const isSorted = sort?.columnIndex === columnIndex;
                 const isFiltered = isFilterActive(filters[columnIndex]);
                 const isMenuOpen = openFilterMenu?.columnIndex === columnIndex;
-                const sortLabel = isSorted
-                  ? sort.direction === 'asc'
-                    ? '↑'
-                    : '↓'
-                  : '↕';
                 const columnName =
                   header.text ||
                   t('markdownTable.column', { index: columnIndex + 1 });
@@ -2566,6 +2756,7 @@ export function EnhancedTable({
                 return (
                   <th
                     key={header.key}
+                    ref={isFrozenColumn ? frozenHeaderCellRef : undefined}
                     className={`${styles.headerCell} ${
                       isFrozenColumn ? styles.frozenHeaderCell : ''
                     } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
@@ -2573,61 +2764,69 @@ export function EnhancedTable({
                     onContextMenu={(event) =>
                       openColumnContextMenu(event, columnIndex)
                     }
-                    onDragOver={dragOverColumn}
-                    onDrop={(event) => dropColumn(event, columnIndex)}
-                    style={columnStyle(columnIndex, headerAlignStyle)}
+                    style={headerAlignStyle}
                     title={columnName}
                   >
                     <div className={styles.headerControls}>
+                      <span
+                        className={styles.headerText}
+                        style={headerAlignStyle}
+                      >
+                        {header.content}
+                      </span>
+                      <Popover
+                        open={isMenuOpen}
+                        onOpenChange={(open) =>
+                          setFilterMenuOpen(columnIndex, open)
+                        }
+                      >
+                        <PopoverTrigger asChild>
+                          <button
+                            className={`${styles.filterTrigger} ${
+                              isFiltered ? styles.filterTriggerActive : ''
+                            }`}
+                            type="button"
+                            aria-label={t('markdownTable.filterColumn', {
+                              column: columnName,
+                            })}
+                            aria-controls={
+                              isMenuOpen ? filterMenuId : undefined
+                            }
+                          >
+                            <FilterIcon aria-hidden="true" />
+                          </button>
+                        </PopoverTrigger>
+                        {isMenuOpen && (
+                          <ColumnFilterMenu
+                            key={columnIndex}
+                            id={filterMenuId}
+                            columnName={columnName}
+                            columnIndex={columnIndex}
+                            filter={filters[columnIndex]}
+                            isNumeric={numericColumns[columnIndex] ?? false}
+                            options={openFilterOptions}
+                            onApply={setColumnFilter}
+                            onClose={closeFilterMenu}
+                          />
+                        )}
+                      </Popover>
                       <button
-                        className={styles.headerButton}
+                        className={`${styles.sortTrigger} ${
+                          isSorted ? styles.sortTriggerActive : ''
+                        }`}
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
                         aria-label={sortAriaLabel}
-                        style={headerAlignStyle}
                       >
-                        <span
-                          className={styles.headerText}
-                          style={headerAlignStyle}
-                        >
-                          {header.content}
-                        </span>
-                        <span className={styles.sortIcon} aria-hidden="true">
-                          {sortLabel}
-                        </span>
-                      </button>
-                      <button
-                        className={`${styles.reorderHandle} ${
-                          isActiveColumn ? styles.reorderHandleVisible : ''
-                        }`}
-                        type="button"
-                        draggable
-                        tabIndex={isActiveColumn ? 0 : -1}
-                        onDragStart={(event) =>
-                          startColumnDrag(event, columnIndex)
-                        }
-                        onDragEnd={stopColumnDrag}
-                        aria-label={t('markdownTable.moveColumn', {
-                          column: columnName,
-                        })}
-                      >
-                        ⋮⋮
-                      </button>
-                      <button
-                        className={`${styles.filterTrigger} ${
-                          isFiltered ? styles.filterTriggerActive : ''
-                        }`}
-                        type="button"
-                        onClick={(event) =>
-                          toggleFilterMenu(event, columnIndex)
-                        }
-                        aria-label={t('markdownTable.filterColumn', {
-                          column: columnName,
-                        })}
-                        aria-expanded={isMenuOpen}
-                        aria-controls={isMenuOpen ? filterMenuId : undefined}
-                      >
-                        ▾
+                        {isSorted ? (
+                          sort.direction === 'asc' ? (
+                            <ArrowUpIcon aria-hidden="true" />
+                          ) : (
+                            <ArrowDownIcon aria-hidden="true" />
+                          )
+                        ) : (
+                          <ArrowDownUpIcon aria-hidden="true" />
+                        )}
                       </button>
                     </div>
                     <button
@@ -2653,6 +2852,9 @@ export function EnhancedTable({
                   </th>
                 );
               })}
+              {hasFillerColumn && (
+                <th className={styles.fillerHeaderCell} aria-hidden="true" />
+              )}
             </tr>
           </thead>
           <tbody>
@@ -2661,9 +2863,7 @@ export function EnhancedTable({
               const detailId = `${tableId}-detail-${row.key}`;
               return (
                 <Fragment key={row.key}>
-                  <tr
-                    className={rowIndex % 2 === 1 ? styles.evenRow : undefined}
-                  >
+                  <tr>
                     <td
                       className={`${styles.cell} ${styles.actionCell} ${
                         freezeFirstColumn ? styles.stickyActionCell : ''
@@ -2672,7 +2872,12 @@ export function EnhancedTable({
                       <button
                         className={styles.rowDetailButton}
                         type="button"
-                        onClick={() => toggleRowDetail(row.key)}
+                        onClick={(event) =>
+                          toggleRowDetail(
+                            row.key,
+                            event.currentTarget.closest('tr'),
+                          )
+                        }
                         aria-expanded={detailOpen}
                         aria-controls={detailId}
                         aria-label={t(
@@ -2682,7 +2887,11 @@ export function EnhancedTable({
                           { index: rowIndex + 1 },
                         )}
                       >
-                        {t('markdownTable.rowDetails')}
+                        {detailOpen ? (
+                          <MinusIcon aria-hidden="true" />
+                        ) : (
+                          <PlusIcon aria-hidden="true" />
+                        )}
                       </button>
                     </td>
                     {orderedVisibleColumnIndexes.map((columnIndex) => {
@@ -2700,7 +2909,7 @@ export function EnhancedTable({
                               ? styles.selectedCell
                               : ''
                           } ${isFrozenColumn ? styles.frozenCell : ''}`}
-                          style={columnStyle(columnIndex, cellAlignStyle)}
+                          style={cellAlignStyle}
                           data-row-index={rowIndex}
                           data-column-index={columnIndex}
                           onMouseDown={(event) =>
@@ -2726,18 +2935,25 @@ export function EnhancedTable({
                         </td>
                       );
                     })}
+                    {hasFillerColumn && (
+                      <td className={styles.fillerCell} aria-hidden="true" />
+                    )}
                   </tr>
                   {detailOpen && (
                     <tr id={detailId} className={styles.detailRow}>
                       <td
                         className={styles.detailCell}
-                        colSpan={orderedVisibleColumnIndexes.length + 1}
+                        colSpan={
+                          orderedVisibleColumnIndexes.length +
+                          1 +
+                          (hasFillerColumn ? 1 : 0)
+                        }
                       >
                         <div className={styles.detailPanel}>
-                          <div className={styles.detailTitle}>
+                          <span className="sr-only">
                             {t('markdownTable.detailsHeader')}
-                          </div>
-                          {orderedVisibleColumnIndexes.map((columnIndex) => {
+                          </span>
+                          {detailColumnIndexes.map((columnIndex) => {
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
@@ -2758,6 +2974,11 @@ export function EnhancedTable({
                               </div>
                             );
                           })}
+                          {detailColumnIndexes.length === 0 && (
+                            <div className={styles.emptyValue}>
+                              {t('markdownTable.customColumns.noDetails')}
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -2775,6 +2996,13 @@ export function EnhancedTable({
           </div>
         )}
       </div>
+      {freezeFirstColumn && frozenColumnShadowLeft !== null && (
+        <div
+          className={styles.frozenColumnShadow}
+          style={{ left: frozenColumnShadowLeft }}
+          aria-hidden="true"
+        />
+      )}
       {columnContextMenu && orderedVisibleColumnIndexes.length > 0 && (
         <div
           ref={columnContextMenuRef}
@@ -2797,84 +3025,54 @@ export function EnhancedTable({
           </button>
         </div>
       )}
-      {openFilterMenu && openFilterHeader && (
-        <ColumnFilterMenu
-          key={openFilterMenu.columnIndex}
-          id={`${tableId}-filter-${openFilterMenu.columnIndex}`}
-          columnName={openFilterColumnName}
-          columnIndex={openFilterMenu.columnIndex}
-          filter={filters[openFilterMenu.columnIndex]}
-          isNumeric={numericColumns[openFilterMenu.columnIndex] ?? false}
-          options={openFilterOptions}
-          sort={sort}
-          style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
-          menuRef={filterMenuRef}
-          canHideColumn={orderedVisibleColumnIndexes.length > 1}
-          onApply={setColumnFilter}
-          onClose={closeFilterMenu}
-          onHideColumn={hideColumn}
-          onSort={setColumnSort}
-        />
-      )}
-      {cellDialog &&
-        currentCellDialogCell &&
-        createPortal(
-          <div
-            className={`${styles.cellDialogBackdrop} ${cellDialogThemeClass}`}
-            onMouseDown={closeCellDialog}
+      <Dialog
+        open={cellDialog !== null && currentCellDialogCell !== null}
+        onOpenChange={(open) => {
+          if (!open) closeCellDialog();
+        }}
+      >
+        {currentCellDialogCell && (
+          <DialogContent
+            ref={cellDialogRef}
+            className="sm:max-w-lg"
+            showCloseButton={false}
+            overlayProps={{ onMouseDown: closeCellDialog }}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              cellDialogRef.current?.focus();
+            }}
+            tabIndex={-1}
           >
-            <div
-              ref={cellDialogRef}
-              className={styles.cellDialog}
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby={`${tableId}-cell-dialog-title`}
-              tabIndex={-1}
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <button
-                className={styles.cellDialogCloseIcon}
-                type="button"
-                onClick={closeCellDialog}
+            <DialogClose asChild>
+              <Button
+                variant="ghost"
+                className="absolute top-2 right-2"
+                size="icon-sm"
                 aria-label={t('markdownTable.close')}
               >
-                ×
-              </button>
-              <div
-                id={`${tableId}-cell-dialog-title`}
-                className={styles.cellDialogTitle}
-              >
-                {t('markdownTable.cellDialogTitle')}
-              </div>
-              <div className={styles.cellDialogValue}>
-                {currentCellDialogCell.content}
-              </div>
-              <div className={styles.cellDialogFooter}>
-                <div className={styles.cellDialogActions}>
-                  <button
-                    className={styles.cellDialogButton}
-                    type="button"
-                    onClick={copyCellDialogValue}
-                  >
-                    {copiedCellDialog
-                      ? t('code.copied')
-                      : t('markdownTable.copyCell')}
-                  </button>
-                  <button
-                    className={`${styles.cellDialogButton} ${
-                      styles.cellDialogPrimaryButton
-                    }`}
-                    type="button"
-                    onClick={closeCellDialog}
-                  >
-                    {t('markdownTable.close')}
-                  </button>
-                </div>
-              </div>
+                <XIcon className="size-3.5" strokeWidth={1.5} />
+                <span className="sr-only">{t('markdownTable.close')}</span>
+              </Button>
+            </DialogClose>
+            <DialogHeader>
+              <DialogTitle>{t('markdownTable.cellDialogTitle')}</DialogTitle>
+            </DialogHeader>
+            <div className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text">
+              {currentCellDialogCell.content}
             </div>
-          </div>,
-          document.body,
+            <DialogFooter>
+              <Button variant="outline" onClick={copyCellDialogValue}>
+                {copiedCellDialog
+                  ? t('code.copied')
+                  : t('markdownTable.copyCell')}
+              </Button>
+              <DialogClose asChild>
+                <Button>{t('markdownTable.close')}</Button>
+              </DialogClose>
+            </DialogFooter>
+          </DialogContent>
         )}
+      </Dialog>
     </div>
   );
 }

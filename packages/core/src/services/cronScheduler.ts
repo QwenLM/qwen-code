@@ -12,9 +12,14 @@ import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { DurableCronTask } from './cronTasksFile.js';
+import type {
+  CronRunSessionOutcome,
+  CronTaskDelivery,
+  DurableCronTask,
+} from './cronTasksFile.js';
 import {
   addCronTask,
+  annotateCronRunSession,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -89,8 +94,15 @@ export interface CronJob {
    * absent, the task uses the shared model: only the lock owner fires it.
    */
   boundSessionId?: string;
+  /** Whether a daemon-backed consumer should execute this fire in the bound
+   * task session or dispatch it into a fresh child session. */
+  sessionMode?: 'persistent' | 'per_run';
+  /** Human-readable task label used to name a fresh per-run session. */
+  name?: string;
+  delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
+  todoWorkChainId?: string;
 }
 
 /**
@@ -103,6 +115,7 @@ interface SessionWakeup {
   fireAtMs: number;
   prompt: string;
   createdAt: number;
+  todoWorkChainId?: string;
 }
 
 /**
@@ -174,6 +187,23 @@ function computeJitter(
   return 0;
 }
 
+function cronJitterWindowMinutes(jitterMs: number): number {
+  return Math.ceil(Math.abs(jitterMs) / 60_000);
+}
+
+function isCronSlotVisibleToTick(
+  slotMinuteMs: number,
+  currentMs: number,
+  jitterMs: number,
+): boolean {
+  const currentMinute = new Date(currentMs);
+  currentMinute.setSeconds(0, 0);
+  return (
+    Math.abs(currentMinute.getTime() - slotMinuteMs) <=
+    cronJitterWindowMinutes(jitterMs) * 60_000
+  );
+}
+
 // Single id scheme, shared with the daemon's scheduled-tasks route via
 // cronTasksFile so route-created and tool-created durable tasks are
 // indistinguishable on disk.
@@ -201,6 +231,7 @@ function wakeupToJob(wakeup: SessionWakeup): CronJob {
     expiresAt: Infinity,
     fireAtMs: wakeup.fireAtMs,
     jitterMs: 0,
+    todoWorkChainId: wakeup.todoWorkChainId,
   };
 }
 
@@ -259,6 +290,10 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Durable one-shots this continuously-running scheduler loaded while it was
+  // eligible to fire them. Cleared on stop so a later enable still treats
+  // genuinely overdue work as missed.
+  private armedDurableOneShots = new Set<string>();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
@@ -404,6 +439,7 @@ export class CronScheduler {
   scheduleWakeup(
     delaySeconds: number,
     prompt: string,
+    todoWorkChainId?: string,
   ): {
     id: string;
     scheduledFor: string;
@@ -450,7 +486,13 @@ export class CronScheduler {
     if (replacedId) {
       debugLogger.debug(`Replacing pending wakeup ${replacedId}`);
     }
-    this.wakeups.set(id, { id, fireAtMs, prompt, createdAt: now });
+    this.wakeups.set(id, {
+      id,
+      fireAtMs,
+      prompt,
+      createdAt: now,
+      todoWorkChainId,
+    });
     debugLogger.debug(
       `Wakeup ${id} scheduled for ${new Date(fireAtMs).toISOString()} ` +
         `(delay=${clampedDelaySeconds}s)`,
@@ -502,6 +544,13 @@ export class CronScheduler {
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
+      if (
+        !job.recurring &&
+        this.durableEnabled &&
+        this.#shouldFireDurable(job)
+      ) {
+        this.armedDurableOneShots.add(job.id);
+      }
     } catch (error) {
       this.jobs.delete(job.id);
       throw error;
@@ -533,6 +582,7 @@ export class CronScheduler {
         throw error;
       }
     }
+    this.armedDurableOneShots.delete(id);
     return true;
   }
 
@@ -818,6 +868,16 @@ export class CronScheduler {
           : t.createdAt;
         const nextFire = computeNextFireMs(t.cron, anchor, jitter);
         if (nextFire === null || nextFire >= now) continue;
+        // A live scheduler may reload after another one-shot rewrites the shared
+        // tasks file but before this armed job's next 1s tick. Leave that brief
+        // handoff to the tick, but recover it as missed once the slot is stale.
+        if (
+          !t.recurring &&
+          this.timer !== null &&
+          this.armedDurableOneShots.has(t.id) &&
+          isCronSlotVisibleToTick(nextFire - jitter, now, jitter)
+        )
+          continue;
         if (!t.recurring) {
           // Missed one-shots are delivered as one batched confirm-first
           // notification: the task file is project-controlled, and
@@ -859,6 +919,7 @@ export class CronScheduler {
       // existed.
       for (const t of [...missedOneShots, ...finalTasks]) {
         this.pendingRemoval.add(t.id);
+        this.armedDurableOneShots.delete(t.id);
         // A prior non-owner load may have installed this task as a
         // live job — drop it, or the now-owning tick could fire it a
         // second time before the on-disk removal propagates back
@@ -877,6 +938,7 @@ export class CronScheduler {
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
+        this.armedDurableOneShots.delete(job.id);
       }
     }
     for (const id of this.pendingRemoval) {
@@ -906,6 +968,11 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!task.recurring && this.#shouldFireDurable(job)) {
+        this.armedDurableOneShots.add(task.id);
+      } else {
+        this.armedDurableOneShots.delete(task.id);
+      }
       if (!existing) durableJobCount++;
     }
 
@@ -1000,6 +1067,7 @@ export class CronScheduler {
             ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
+            delivery: undefined,
           });
           this.removeMissedFromDisk(runnable.map((t) => t.id));
         }
@@ -1095,7 +1163,9 @@ export class CronScheduler {
             runs: appendCronRun(t.runs, {
               at: stamp,
               kind: 'catch-up',
-              ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+              ...(t.sessionMode !== 'per_run' && this.sessionId
+                ? { sessionId: this.sessionId }
+                : {}),
             }),
           };
         });
@@ -1190,6 +1260,27 @@ export class CronScheduler {
     return true;
   }
 
+  /** Attributes an already-persisted per-run fire to the session it ran in,
+   * and/or marks its fresh-session creation as failed. */
+  async annotateRunSession(
+    taskId: string,
+    firedAt: number,
+    outcome: CronRunSessionOutcome,
+  ): Promise<void> {
+    if (!this.projectRoot) return;
+    // The onFire callback runs before tick() queues its run-history write.
+    // Yield once, then wait for that write so the entry exists before editing it.
+    await Promise.resolve();
+    await this.pendingPersist;
+    await updateCronTasks(this.projectRoot, (tasks) =>
+      tasks.map((task) =>
+        task.id === taskId
+          ? annotateCronRunSession(task, firedAt, outcome)
+          : task,
+      ),
+    );
+  }
+
   /**
    * Starts the scheduler tick. Calls `onFire` when a job is due.
    * Only fires when called — does not auto-fire missed intervals.
@@ -1246,6 +1337,7 @@ export class CronScheduler {
     }
     this.wakeupChainStartedAt = null;
     this.onFire = null;
+    this.armedDurableOneShots.clear();
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).
@@ -1379,7 +1471,10 @@ export class CronScheduler {
     // Persist durable changes in one write so the lastFiredAt update and
     // the removals can't clobber each other's read-modify-write cycle.
     if (this.projectRoot && (firedAt.size > 0 || removedIds.length > 0)) {
-      for (const id of removedIds) this.pendingRemoval.add(id);
+      for (const id of removedIds) {
+        this.pendingRemoval.add(id);
+        this.armedDurableOneShots.delete(id);
+      }
       const removed = new Set(removedIds);
       // Guard the just-fired recurring ids against re-detection by a reload that
       // races this async write (removed one-shots are already covered by
@@ -1411,7 +1506,9 @@ export class CronScheduler {
                   kind: 'scheduled',
                   // The owner session that ran this fire — links the run back
                   // to its transcript. Set whenever a durable fire persists.
-                  ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                  ...(t.sessionMode !== 'per_run' && this.sessionId
+                    ? { sessionId: this.sessionId }
+                    : {}),
                 }),
               };
             }),
@@ -1442,8 +1539,7 @@ export class CronScheduler {
     currentDate: Date,
     currentMs: number,
   ): 'fired' | 'fired-final' | 'none' {
-    const absJitter = Math.abs(job.jitterMs);
-    const windowMinutes = Math.ceil(absJitter / 60_000);
+    const windowMinutes = cronJitterWindowMinutes(job.jitterMs);
 
     const nowMinuteStart = new Date(currentDate);
     nowMinuteStart.setSeconds(0, 0);
@@ -1600,6 +1696,9 @@ function durableTaskToJob(
     jitterMs,
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
+    ...(task.sessionMode ? { sessionMode: task.sessionMode } : {}),
+    ...(task.name ? { name: task.name } : {}),
+    ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
 }
 
@@ -1612,6 +1711,9 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
+    ...(job.sessionMode ? { sessionMode: job.sessionMode } : {}),
+    ...(job.name ? { name: job.name } : {}),
+    ...(job.delivery ? { delivery: job.delivery } : {}),
   };
 }
 

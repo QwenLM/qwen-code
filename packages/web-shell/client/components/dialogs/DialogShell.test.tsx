@@ -117,4 +117,105 @@ describe('DialogShell', () => {
 
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('ignores backdrop clicks and Escape when not dismissible', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onClose = vi.fn();
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Locked" onClose={onClose} dismissible={false}>
+              <button type="button" data-testid="locked-focus">
+                locked
+              </button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const backdrop = document.querySelector<HTMLElement>(
+      '[data-slot="dialog-overlay"]',
+    )!;
+    act(() => {
+      backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    const target = document.querySelector<HTMLElement>(
+      '[data-testid="locked-focus"]',
+    )!;
+    act(() =>
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      ),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('sizes the auto dialog to its content instead of a fixed step', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Auto" size="auto" onClose={vi.fn()}>
+              <button type="button">body</button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    )!;
+    // tailwind-merge has to drop DialogContent's base `w-full`, or the panel
+    // stays full-width and never tracks the content.
+    expect(panel.className).toContain('w-max');
+    expect(panel.className).not.toContain('w-full');
+    expect(panel.className).toContain('min-w-[min(100%,560px)]');
+    expect(panel.className).toContain(
+      'sm:max-w-[min(calc(100vw-2rem),1120px)]',
+    );
+    expect(panel.className).not.toContain('sm:max-w-sm');
+  });
+
+  it('keeps fixed sizes full-width up to their cap', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Large" size="lg" onClose={vi.fn()}>
+              <button type="button">body</button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    )!;
+    expect(panel.className).toContain('w-full');
+    expect(panel.className).toContain('sm:max-w-[720px]');
+    expect(panel.className).not.toContain('w-max');
+  });
 });

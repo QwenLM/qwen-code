@@ -9,6 +9,8 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  FindingsResultDisplay,
+  McpAppResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -63,6 +65,17 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).toContain('start-');
     expect(compacted).toContain('-end');
     expect(compacted).toContain('truncated from');
+  });
+
+  it('should preserve the unchanged flag through compaction', () => {
+    const display = {
+      type: 'todo_list' as const,
+      todos: [{ id: '1', content: 'Task', status: 'pending' as const }],
+      changes: { created: [], completed: [] },
+      unchanged: true,
+    };
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect((compacted as TodoResultDisplay).unchanged).toBe(true);
   });
 
   it('uses saved session wording when compacting recording strings', () => {
@@ -355,6 +368,92 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedProgress.message).toContain('truncated from');
   });
 
+  it('compacts findings displays without touching their typed fields', () => {
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          confidence: 'high',
+          file: 'src/foo.ts',
+          line: 42,
+          summary: `summary-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          shortSummary: 'short',
+          failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          outcome: 'skipped',
+          outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+        },
+      ],
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect(compacted.findings[0].direction).toBe('fails-closed');
+    expect(compacted.findings[0].baseline).toBe('new-surface');
+
+    expect(compacted.findings[0].summary).toContain('truncated from');
+    expect(compacted.findings[0].failureScenario).toContain('truncated from');
+    expect(compacted.findings[0].outcomeNote).toContain('truncated from');
+    expect(compacted.findings[0].severity).toBe('Critical');
+    expect(compacted.findings[0].outcome).toBe('skipped');
+    expect(compacted.findings[0].shortSummary).toBe('short');
+    expect(compacted.level).toBe('high');
+    expect(compacted.omittedFindings).toBeUndefined();
+  });
+
+  it('applies an aggregate budget across the list, keeping the most severe prefix', () => {
+    // The schema-maximal shape: 50 findings at the field maxima (summary
+    // 2000 / failureScenario 4000 / outcomeNote 1000). Per-field caps alone
+    // retained ~358 KB through compaction, bypassing the retained-display
+    // budget every other display type obeys. Severities are staggered so
+    // the sort order (most severe first) is observable in the retained
+    // prefix.
+    const severities = ['Critical', 'Suggestion', 'Nice to have'] as const;
+    const findings = Array.from({ length: 50 }, (_, i) => ({
+      id: `R1-${i + 1}`,
+      severity: severities[i % 3],
+      confidence: 'high' as const,
+      file: `src/f${i}.ts`,
+      summary: `s${i}-${'x'.repeat(1996)}`,
+      shortSummary: 'short',
+      failureScenario: `f${i}-${'y'.repeat(3996)}`,
+      outcome: 'skipped' as const,
+      outcomeNote: `n${i}-${'z'.repeat(996)}`,
+    }));
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings,
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    // The retained prefix starts at the most severe entry and stays within
+    // the general retained-display budget; the evicted tail is counted.
+    expect(compacted.findings[0].id).toBe('R1-1');
+    expect(compacted.findings.length).toBeLessThan(50);
+    expect(compacted.findings.length).toBeGreaterThan(0);
+    expect(compacted.omittedFindings).toBe(50 - compacted.findings.length);
+    const retainedChars = compacted.findings.reduce(
+      (total, f) =>
+        total +
+        f.summary.length +
+        f.failureScenario.length +
+        (f.outcomeNote?.length ?? 0),
+      0,
+    );
+    expect(retainedChars).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    // The retained prefix keeps the list's own order, unsorted.
+    expect(compacted.findings.map((f) => f.id)).toEqual(
+      findings.slice(0, compacted.findings.length).map((f) => f.id),
+    );
+  });
+
   it('compacts task list and team result displays', () => {
     const taskDisplay: TaskListResultDisplay = {
       type: 'task_list',
@@ -379,5 +478,104 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTask.tasks[0].subject).toContain('truncated from');
     expect(compactedTask.tasks[0].owner).toContain('truncated from');
     expect(compactedTeam.teamName).toContain('truncated from');
+  });
+
+  it('drops MCP App HTML and tool results from retained displays', () => {
+    const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: `<main>${marker}${'x'.repeat(2000)}</main>`,
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.html).toBe('');
+    expect(compacted.toolResult).toEqual({});
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+    expect(JSON.stringify(compacted)).not.toContain(marker);
+  });
+});
+
+describe('compactString limit', () => {
+  // The compaction marker embeds the original length, so it is 60-80
+  // characters on its own. It used to be appended whatever the limit was,
+  // which meant a small caller-supplied limit got back more than it asked
+  // for -- and sometimes more than the string it was given.
+  it.each([
+    ['recording' as const, 70, 60],
+    ['history' as const, 64, 63],
+    ['history' as const, 100, 50],
+    ['recording' as const, 200, 10],
+    ['history' as const, 40, 0],
+  ])(
+    'keeps %s output within bounds for input %d at limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      // Compacting must never hand back more characters than it was given.
+      expect(compact.length).toBeLessThanOrEqual(value.length);
+    },
+  );
+
+  // Guards against over-correcting: when the limit does leave room for the
+  // marker, the marker must still be there. These pass before and after.
+  it.each([
+    ['recording' as const, 5000, 500],
+    ['history' as const, 5000, 200],
+    ['history' as const, 5000, 120],
+  ])(
+    'still explains the truncation for %s at input %d, limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(compact).toContain('truncated');
+    },
+  );
+
+  // The `marker.length >= limit` path slices without a marker, so it has a
+  // boundary of its own to get right. The two surrogate-aware tests above both
+  // run at the default limit and take the head+marker+tail path, so neither
+  // reaches this one.
+  it.each([
+    ['history' as const, 9],
+    ['history' as const, 8],
+    ['recording' as const, 9],
+    ['recording' as const, 8],
+  ])(
+    'does not split a surrogate pair when the marker does not fit, for %s at limit %d',
+    (purpose, limit) => {
+      const value = '😀'.repeat(40);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(hasUnpairedSurrogate(compact)).toBe(false);
+      // A whole number of pairs survived, so the cut backed off to a boundary
+      // rather than landing between a high and low surrogate.
+      expect(compact.length % 2).toBe(0);
+      // Confirms this really is the marker-does-not-fit path.
+      expect(compact).not.toContain('truncated');
+    },
+  );
+
+  it('returns a short string untouched regardless of the marker length', () => {
+    expect(compactStringForHistory('short', 1000)).toBe('short');
   });
 });

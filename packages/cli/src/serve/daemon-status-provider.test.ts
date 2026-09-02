@@ -48,11 +48,16 @@ function makeWorkspaceServiceWithProvider(
 
   return createDaemonWorkspaceService({
     boundWorkspace: WS_A,
+    isWorkspaceTrusted: () => true,
     contextFilename: 'QWEN.md',
     statusProvider,
     isChannelLive: opts.isChannelLive ?? (() => false),
     persistDisabledTools: async () => {},
     persistDisabledSkills: async () => ({ changed: false, disabled: [] }),
+    persistDisabledSkillsBatch: async () => ({
+      outcomes: [],
+      settingsChanges: [],
+    }),
     queryWorkspaceStatus: opts.queryWorkspaceStatus ?? noopQueryWorkspaceStatus,
     invokeWorkspaceCommand: async () => {
       throw new Error('not wired');

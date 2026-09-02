@@ -1,0 +1,249 @@
+.root {
+  display: grid;
+  gap: 14px;
+  color: var(--foreground);
+}
+
+.summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.eyebrow {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verdict {
+  margin: 4px 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.meta,
+.path {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.metric {
+  display: grid;
+  gap: 2px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.metric strong {
+  font-size: 18px;
+}
+
+.metric span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.caps {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 65%, transparent);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.filters label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.filters select {
+  min-width: 150px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.filters select:focus-visible,
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.findings {
+  display: grid;
+  gap: 10px;
+}
+
+.finding {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.finding h3,
+.detailBlock p {
+  margin: 0;
+}
+
+.finding h3 {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.findingHeader {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.severity {
+  color: var(--foreground);
+  font-weight: 700;
+}
+
+.detailBlock {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.detailBlock strong {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.detailBlock ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.detailBlock p,
+.detailBlock li,
+.detailBlock a,
+.notLinked {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.detailBlock a {
+  color: var(--link-color, #2563eb);
+}
+
+.notLinked {
+  color: var(--muted-foreground);
+}
+
+.primaryButton,
+.secondaryButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.primaryButton {
+  flex: 0 0 auto;
+  background: var(--foreground);
+  color: var(--background);
+}
+
+.secondaryButton {
+  justify-self: start;
+  background: transparent;
+}
+
+.primaryButton:hover,
+.secondaryButton:hover {
+  opacity: 0.82;
+}
+
+.report {
+  display: grid;
+  gap: 12px;
+}
+
+.evidenceImage {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  margin-bottom: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.empty {
+  padding: 16px 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.errorFallback {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.error {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, #dc2626 60%, var(--border));
+  border-radius: 8px;
+  color: var(--foreground);
+  background: color-mix(in srgb, #dc2626 8%, var(--background));
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .summary {
+    display: grid;
+  }
+
+  .primaryButton {
+    justify-self: start;
+  }
+}

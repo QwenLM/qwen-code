@@ -11,8 +11,11 @@ export class InvalidStreamError extends Error {
   readonly type:
     | 'NO_FINISH_REASON'
     | 'NO_RESPONSE_TEXT'
+    | 'NO_TOOL_RESULT_PROGRESS'
+    | 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
     | 'PROTOCOL_TAG_LEAK'
-    | 'MALFORMED_TOOL_CALL';
+    | 'MALFORMED_TOOL_CALL'
+    | 'UPSTREAM_DEGRADED_RESPONSE';
 
   constructor(message: string, type: InvalidStreamError['type']) {
     super(message);

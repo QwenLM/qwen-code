@@ -4,41 +4,180 @@ name: 'Main CI Failure Issue'
 
 on:
   workflow_run:
-    workflows: ['E2E Tests', 'SDK Python']
+    # 'Qwen Code CI' is watched for its SCHEDULED run and its post-merge PUSH
+    # run (see the event filter below — the push arm is not name-scoped, so it
+    # covers this workflow too). The nightly is the macOS and Windows lanes'
+    # only trigger outside a pull request, and a lane nobody is told about is a
+    # lane nobody looks at — which is how those two came to stop running. The
+    # push arm covers ci.yml's post-merge lane on `main`, whose whole point is
+    # to surface a regression as it lands; a failure there files an issue with
+    # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
+    # one per red merge, not per red nightly only.
+    workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']
     types: ['completed']
-
-permissions:
-  contents: 'read'
-  issues: 'write'
+    # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
+    # completes on every pull request, and without this each of those would
+    # raise a workflow_run event here just to skip. The job filter still
+    # enforces main — this only keeps the event log honest.
+    branches: ['main']
 
 defaults:
   run:
     shell: 'bash'
 
 jobs:
-  create_issue:
-    name: 'Create autofix issue'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push' }}"
+  # Split in two so the job holding the bot PAT still checks out nothing and runs
+  # no repository code. This job works out WHICH tests broke — the dedupe key —
+  # from the failed run's logs, using read-only scopes and the workflow token,
+  # and hands the finished title and body to the privileged job as outputs.
+  analyze:
+    name: 'Identify the failing tests'
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI')) }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      # Read the job logs of the triggering run.
+      actions: 'read'
+      contents: 'read'
+      # Find an issue that already tracks this failure.
+      issues: 'read'
+    outputs:
+      issue_number: '${{ steps.plan.outputs.issue_number }}'
+      title: '${{ steps.plan.outputs.title }}'
+      body: '${{ steps.plan.outputs.body }}'
     steps:
-      - name: 'Create autofix-ready issue'
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Download failed job logs'
         env:
-          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+        run: |-
+          log_dir="${RUNNER_TEMP}/failed-logs"
+          mkdir -p "${log_dir}"
+
+          mapfile -t job_ids < <(
+            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
+              --paginate \
+              --jq '.jobs[] | select(.conclusion == "failure") | .id'
+          )
+          echo "Failed jobs: ${#job_ids[@]}"
+
+          for job_id in "${job_ids[@]}"; do
+            if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
+              > "${log_dir}/${job_id}.log"; then
+              # A missing log only costs precision: with no identifiable test the
+              # plan below falls back to the per-commit issue.
+              echo "::warning::Could not download the log of job ${job_id}"
+              rm -f "${log_dir}/${job_id}.log"
+            fi
+          done
+
+      - name: 'Plan the issue'
+        id: 'plan'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_NAME: '${{ github.event.workflow_run.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          # Actions supplies the timestamp; the helper stays free of clock reads
+          # so its output is reproducible under test.
+          WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+        run: |-
+          shopt -s nullglob
+          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
+
+          helper='.github/scripts/ci/main-failure-signature.mjs'
+          analysis="${RUNNER_TEMP}/analysis.json"
+          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" "${logs[@]}" \
+            > "${analysis}"
+          echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
+          jq -r '.tests[].id' "${analysis}"
+
+          plan_args=(
+            --analysis "${analysis}"
+            --sha "${HEAD_SHA}"
+            --run-id "${WORKFLOW_RUN_ID}"
+            --run-url "${WORKFLOW_RUN_URL}"
+            --at "${WORKFLOW_RUN_AT}"
+          )
+          plan="${RUNNER_TEMP}/plan.json"
+          node "${helper}" plan "${plan_args[@]}" > "${plan}"
+
+          # Match on any of this run's failing tests: a failure set that grew
+          # (`[A]` then `[A, B]`) still belongs to the issue that tracks A. With
+          # no identifiable test this is the per-commit marker instead.
+          existing_issue=''
+          while read -r marker; do
+            existing_issue="$(
+              gh issue list \
+                --repo "${REPO}" \
+                --state open \
+                --search "${marker} in:body" \
+                --json number \
+                --jq '.[0].number // ""'
+            )"
+            if [[ -n "${existing_issue}" ]]; then
+              echo "Issue #${existing_issue} already tracks this failure (${marker})."
+              break
+            fi
+          done < <(jq -r '.searchMarkers[]' "${plan}")
+
+          # Re-plan against the existing body so recorded recurrences, extra
+          # markers and hand-written notes survive.
+          if [[ -n "${existing_issue}" ]]; then
+            existing_body="${RUNNER_TEMP}/existing-body.md"
+            gh issue view "${existing_issue}" \
+              --repo "${REPO}" \
+              --json body \
+              --jq '.body' > "${existing_body}"
+            node "${helper}" plan "${plan_args[@]}" --existing "${existing_body}" \
+              > "${plan}"
+          fi
+
+          # A random delimiter keeps issue-body prose from ending the heredoc
+          # early and injecting fresh outputs (GitHub's own hardening guidance).
+          delim="QWEN_MAIN_CI_FAILURE_BODY_$(openssl rand -hex 16)"
+          {
+            echo "issue_number=${existing_issue}"
+            echo "title=$(jq -r '.title' "${plan}")"
+            echo "body<<${delim}"
+            jq -r '.body' "${plan}"
+            echo "${delim}"
+          } >> "${GITHUB_OUTPUT}"
+
+  # Every GitHub write happens here, as the autofix bot. This job deliberately
+  # checks out nothing and runs no repository code: it only consumes the title
+  # and body the job above produced.
+  file_issue:
+    name: 'Create autofix issue'
+    needs: 'analyze'
+    # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
+    # and the pool being the REASON CI broke would queue the report behind
+    # the very failure it documents.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      issues: 'write'
+    steps:
+      - name: 'File or update the autofix issue'
+        env:
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
+          ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
+          ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
         run: |-
-          short_sha="${HEAD_SHA:0:12}"
-          marker="qwen-main-ci-failure:${HEAD_SHA}"
-
           apply_autofix_route() {
             gh issue edit "$1" \
               --repo "${REPO}" \
@@ -46,40 +185,22 @@ jobs:
               --add-assignee "${AUTOFIX_BOT}"
           }
 
-          existing_issue="$(
-            gh issue list \
-              --repo "${REPO}" \
-              --state open \
-              --search "${marker} in:body" \
-              --json number \
-              --jq '.[0].number // ""'
-          )"
+          body_file="${RUNNER_TEMP}/issue-body.md"
+          printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
-          if [[ -n "${existing_issue}" ]]; then
-            echo "Issue #${existing_issue} already tracks CI failure for ${HEAD_SHA}."
-            apply_autofix_route "${existing_issue}"
+          if [[ -n "${EXISTING_ISSUE}" ]]; then
+            gh issue edit "${EXISTING_ISSUE}" \
+              --repo "${REPO}" \
+              --body-file "${body_file}"
+            echo "Recorded this run on issue #${EXISTING_ISSUE}."
+            apply_autofix_route "${EXISTING_ISSUE}"
             exit 0
           fi
-
-          body_file="$(mktemp)"
-          {
-            echo "<!-- ${marker} -->"
-            echo
-            echo "A main-branch CI run failed on \`${HEAD_BRANCH}\`."
-            echo
-            echo "- Workflow: ${WORKFLOW_NAME}"
-            echo "- Run: ${WORKFLOW_RUN_URL}"
-            echo "- Run ID: ${WORKFLOW_RUN_ID}"
-            echo "- Commit: ${HEAD_SHA}"
-            echo
-            echo "This issue is labeled for autofix so the existing agent can create a repair PR."
-          } > "${body_file}"
 
           issue_url="$(
             gh issue create \
               --repo "${REPO}" \
-              --title "Main CI failed: ${WORKFLOW_NAME} on ${short_sha}" \
+              --title "${ISSUE_TITLE}" \
               --body-file "${body_file}"
           )"
-
           apply_autofix_route "${issue_url}"

@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isApiError, isStructuredError } from './quotaErrorDetection.js';
-import { AuthType } from '../core/contentGenerator.js';
+import {
+  isApiError,
+  isStructuredError,
+  QUOTA_EXHAUSTED_PREFIX,
+} from './quotaErrorDetection.js';
+import { AuthType } from './auth-type.js';
+import { getErrorMessage } from './errors.js';
 
 const RATE_LIMIT_MESSAGE_BY_AUTH = {
   [AuthType.USE_GEMINI]:
@@ -33,13 +38,17 @@ function getRateLimitMessage(authType?: AuthType): string {
 const API_ERROR_PREFIX = '[API Error: ';
 
 /**
- * Returns true when `value` already looks like the output of
- * parseAndFormatApiError.
+ * Returns true when `value` is already in final user-facing form and must not
+ * be re-wrapped by parseAndFormatApiError.
  *
  * Accepts:
  * 1) base format: "[API Error: ...]"
  * 2) 429 format: "[API Error: ...]" followed by one of the known quota
  *    guidance suffixes.
+ * 3) friendly quota-exhaustion messages ("Quota exhausted: ...") built by
+ *    formatQuotaExhaustedMessage — these live here rather than in the
+ *    Qwen-OAuth prefix list because they also arrive via the plain-string
+ *    path (a StreamContentError whose .message is the formatted text).
  *
  * Used as an idempotency guard: when an upstream caller has already passed an
  * Error through parseAndFormatApiError, stuffed the formatted string into
@@ -48,6 +57,13 @@ const API_ERROR_PREFIX = '[API Error: ';
  */
 function isAlreadyFormatted(value: string): boolean {
   const trimmed = value.trimEnd();
+
+  // Friendly quota-exhaustion messages built by formatQuotaExhaustedMessage
+  // are already in final form — surface them verbatim, do not wrap.
+  if (trimmed.startsWith(QUOTA_EXHAUSTED_PREFIX)) {
+    return true;
+  }
+
   if (!trimmed.startsWith(API_ERROR_PREFIX)) {
     return false;
   }
@@ -80,7 +96,9 @@ export function parseAndFormatApiError(
       return error.message;
     }
 
-    let text = `[API Error: ${error.message}]`;
+    const message =
+      error instanceof Error ? getErrorMessage(error) : error.message;
+    let text = `[API Error: ${message}]`;
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
     }

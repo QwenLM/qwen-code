@@ -61,6 +61,9 @@ export async function downloadMedia(
     const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
     const contentLength = resp.headers.get('content-length');
     if (contentLength && parseInt(contentLength, 10) > MAX_DOWNLOAD_BYTES) {
+      // Release the connection instead of letting the unread body pin it
+      // until GC.
+      await resp.body?.cancel();
       process.stderr.write(
         `[Feishu] downloadMedia rejected: size ${contentLength} exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
       );
@@ -82,7 +85,10 @@ export async function downloadMedia(
       if (done) break;
       totalSize += value.byteLength;
       if (totalSize > MAX_DOWNLOAD_BYTES) {
-        reader.cancel();
+        // Await the cancel so a stream error during teardown surfaces here
+        // instead of becoming an unhandled rejection (matches the body.cancel
+        // above).
+        await reader.cancel();
         process.stderr.write(
           `[Feishu] downloadMedia rejected: actual size exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
         );

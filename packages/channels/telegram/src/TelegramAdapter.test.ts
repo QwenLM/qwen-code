@@ -14,7 +14,7 @@ type LifecycleBase = Omit<
 
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
-  chat: { id: number; type: string };
+  chat: { id: number; type: string; title?: string };
   message_thread_id?: number;
   reply_to_message?: { from?: { id: number }; text?: string };
 };
@@ -22,6 +22,19 @@ type TestTelegramMessage = {
 type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
+  inboundErrorLabel?: string;
+  readonly inboundPreparations: Array<{
+    envelope: Envelope;
+    prepare: () => Promise<boolean | void>;
+  }> = [];
+
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    this.inboundPreparations.push({ envelope, prepare });
+  }
+
   beginTyping(chatId: string): void {
     this.onPromptStart(chatId);
   }
@@ -49,11 +62,63 @@ class TestTelegramChannel extends TelegramChannel {
   pushTestProactive(
     target: { chatId: string; threadId?: string },
     text: string,
+    sourceLabel?: string,
   ) {
     return this.pushProactive(
       { channelName: 'telegram', senderId: '1', ...target },
       text,
+      sourceLabel,
     );
+  }
+
+  sendTestResponse(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ) {
+    return this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+  }
+
+  sendTestResponseFromThread(
+    threadId: string | undefined,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ) {
+    const inboundRoute = (
+      this as unknown as {
+        inboundRoute: {
+          run<T>(store: { threadId?: string }, callback: () => T): T;
+        };
+      }
+    ).inboundRoute;
+    const route = threadId === undefined ? {} : { threadId };
+    return inboundRoute.run(route, () =>
+      this.sendResponseMessage(chatId, text, sessionId),
+    );
+  }
+
+  reportInboundErrorForTest(
+    inbound: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    (
+      this as unknown as {
+        reportInboundError(
+          inbound: Envelope,
+          error: unknown,
+          reply: () => Promise<unknown>,
+        ): void;
+      }
+    ).reportInboundError(inbound, error, reply);
+  }
+
+  protected override getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorLabel;
   }
 }
 
@@ -71,7 +136,7 @@ const config: ChannelConfig = {
 
 function createChannel(
   configOverrides: Partial<ChannelConfig> = {},
-  router: unknown = {},
+  router: unknown = { getTarget: vi.fn() },
 ): TestTelegramChannel {
   return new TestTelegramChannel(
     'telegram',
@@ -101,6 +166,7 @@ function installFakeBot(channel: TelegramChannel): {
   token: string;
   api: {
     getMe: ReturnType<typeof vi.fn>;
+    getFile: ReturnType<typeof vi.fn>;
     setMyCommands: ReturnType<typeof vi.fn>;
     sendChatAction: ReturnType<typeof vi.fn>;
     sendMessage: ReturnType<typeof vi.fn>;
@@ -113,6 +179,7 @@ function installFakeBot(channel: TelegramChannel): {
     token: 'token',
     api: {
       getMe: vi.fn().mockResolvedValue({ id: 123, username: 'qwen_bot' }),
+      getFile: vi.fn().mockRejectedValue(new Error('download unavailable')),
       setMyCommands: vi.fn().mockResolvedValue(true),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -324,6 +391,58 @@ describe('TelegramChannel', () => {
     );
   });
 
+  it('routes attributed inbound failures through the originating topic', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const reply = vi.fn().mockResolvedValue(undefined);
+    channel.inboundErrorLabel = '[review]';
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    channel.reportInboundErrorForTest(
+      envelope({ chatId: '2', threadId: '42' }),
+      new Error('agent unavailable'),
+      reply,
+    );
+    await Promise.resolve();
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      '[review] Sorry, something went wrong processing your message.',
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('enters inbound routing before downloading a photo', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await channel.connect();
+    const photoHandler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((context: unknown) => Promise<void>) | undefined;
+    expect(photoHandler).toBeDefined();
+
+    await photoHandler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'private' },
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(channel.inboundPreparations).toHaveLength(1);
+    expect(bot.api.getFile).not.toHaveBeenCalled();
+    const prepare = channel.inboundPreparations[0]?.prepare;
+    expect(prepare).toEqual(expect.any(Function));
+    await prepare?.();
+    expect(bot.api.getFile).toHaveBeenCalledWith('photo-1');
+  });
+
   it('handles /start locally', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
@@ -333,6 +452,215 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendMessage).toHaveBeenCalledWith(
       'chat-1',
       expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  it('sends command replies back to the Telegram forum topic', async () => {
+    const channel = createChannel({
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    });
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(
+      envelope({
+        chatId: '2',
+        threadId: '42',
+        text: '/start',
+        isGroup: true,
+      }),
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+  });
+
+  it('sends agent responses back to their routed Telegram forum topic', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponse('2', 'topic response', 'session-1');
+
+    expect(router.getTarget).toHaveBeenCalledWith('session-1');
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('escapes and repeats the source label on every bounded HTML chunk', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const sourceLabel = '[review_*<&>]';
+    const text = Array.from(
+      { length: 80 },
+      (_, index) => `paragraph ${index}: ${'x'.repeat(80)}`,
+    ).join('\n');
+
+    await channel.sendTestResponse('2', text, 'session-1', sourceLabel);
+
+    const chunks = bot.api.sendMessage.mock.calls.map((call) => call[1]);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toMatch(/^\[review_\*&lt;&amp;&gt;\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it('keeps a near-limit labeled response as bounded HTML', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = 'x'.repeat(4090);
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replaceAll('[review] ', ''),
+    ).toBe(text);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('keeps a labeled code block with one oversized line as bounded HTML', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `\`\`\`text\n${'x'.repeat(5000)}\n\`\`\``;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(
+      calls
+        .map((call) => call[1].replace(/^\[review\] /u, ''))
+        .join('')
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`${'x'.repeat(5000)}\n`);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves safe HTML when a later labeled chunk needs splitting', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(4090)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls[0]).toEqual([
+      '2',
+      '[review] <b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    ]);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves unlabeled HTML when a later chunk is oversized', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(5000)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      '<b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    );
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`bold first\n\n${'x'.repeat(5000)}`);
+    for (const [, chunk, options] of calls) {
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('restores the plain source label when an HTML send falls back', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendMessage
+      .mockRejectedValueOnce(new Error('HTML rejected'))
+      .mockResolvedValueOnce(undefined);
+
+    await channel.sendTestResponse('2', 'result', 'session-1', '[review_*<&>]');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      '[review_*<&>] result',
+      undefined,
+    );
+  });
+
+  it('prefers the current inbound topic over a stale session route', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponseFromThread(
+      '43',
+      '2',
+      'new topic response',
+      'session-1',
+    );
+    await channel.sendTestResponseFromThread(
+      undefined,
+      '2',
+      'general response',
+      'session-1',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML', message_thread_id: 43 },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      expect.any(String),
       { parse_mode: 'HTML' },
     );
   });
@@ -385,6 +713,36 @@ describe('TelegramChannel', () => {
     );
 
     expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('preserves group and supergroup display names in envelopes', () => {
+    const channel = createChannel();
+
+    const groupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group', title: 'Project Group' },
+      },
+      'group message',
+    );
+    const supergroupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 3, type: 'supergroup', title: 'Project Supergroup' },
+      },
+      'supergroup message',
+    );
+    const privateMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private', title: 'Ignored Title' },
+      },
+      'direct message',
+    );
+
+    expect(groupMessage.chatName).toBe('Project Group');
+    expect(supergroupMessage.chatName).toBe('Project Supergroup');
+    expect(privateMessage.chatName).toBeUndefined();
   });
 
   it('sends proactive messages back to the Telegram forum topic', async () => {

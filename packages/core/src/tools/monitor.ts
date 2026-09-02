@@ -51,11 +51,12 @@ import {
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
-  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
-import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -170,9 +171,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const command = normalizeMonitorShellCommand(
-      this.params.command,
-    ).safetyCommand;
+    const normalized = normalizeMonitorShellCommand(this.params.command);
+    const command = normalized.safetyCommand;
+    const cwd =
+      this.params.directory || this.config.getTargetDir?.() || process.cwd();
 
     // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
     // it falls through to 'ask' along with every other non-read-only
@@ -187,7 +189,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Bash(...) — see comment in getConfirmationDetails); only the
     // substitution-deny half is removed.
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
+        command,
+        cwd,
+      );
       if (isReadOnly) {
         return 'allow';
       }
@@ -202,6 +207,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const normalized = normalizeMonitorShellCommand(this.params.command);
+    const cwd =
+      this.params.directory || this.config.getTargetDir?.() || process.cwd();
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
@@ -215,7 +222,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
@@ -365,7 +372,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
         env: {
-          ...process.env,
+          ...sanitizeChildEnv(process.env),
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
           ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {

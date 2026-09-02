@@ -54,7 +54,7 @@ interface MockConfigInstanceShape {
   getFullContext: Mock<() => boolean>;
   getUserAgent: Mock<() => string>;
   getUserMemory: Mock<() => string>;
-  getGeminiMdFileCount: Mock<() => number>;
+  getMemoryFileCount: Mock<() => number>;
   getToolRegistry: Mock<() => { discoverTools: Mock<() => void> }>;
 }
 
@@ -110,7 +110,7 @@ describe('useAutoAcceptIndicator', () => {
           () => string
         >,
         getUserMemory: vi.fn().mockReturnValue('') as Mock<() => string>,
-        getGeminiMdFileCount: vi.fn().mockReturnValue(0) as Mock<() => number>,
+        getMemoryFileCount: vi.fn().mockReturnValue(0) as Mock<() => number>,
         getToolRegistry: vi
           .fn()
           .mockReturnValue({ discoverTools: vi.fn() }) as Mock<
@@ -245,6 +245,29 @@ describe('useAutoAcceptIndicator', () => {
     expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
       ApprovalMode.DEFAULT,
     );
+    expect(result.current).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('should not cycle approval modes when Ctrl+Shift+Tab is pressed', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+    const { result } = renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: vi.fn(),
+      }),
+    );
+
+    // Ctrl+Shift+Tab is a completion-category navigation binding (#8069); it
+    // must not also cycle the approval mode in Kitty-protocol terminals that
+    // report the ctrl modifier on Shift+Tab.
+    act(() => {
+      capturedUseKeypressHandler({
+        name: 'tab',
+        shift: true,
+        ctrl: true,
+      } as Key);
+    });
+    expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
     expect(result.current).toBe(ApprovalMode.DEFAULT);
   });
 

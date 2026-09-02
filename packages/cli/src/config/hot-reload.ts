@@ -22,6 +22,9 @@ import {
 import { appEvents, AppEvent } from '../utils/events.js';
 
 const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
+const modelProvidersDebugLogger = createDebugLogger(
+  'MODEL_PROVIDERS_HOT_RELOAD',
+);
 
 /**
  * The three connection-admission lists discovery consults to decide whether a
@@ -140,19 +143,37 @@ export function registerMcpHotReload(
     const cwd = config.getTargetDir();
     // Rebuild exactly the way Config boot did — including top-tier
     // (CLI / session-injected) servers layered above settings + `.mcp.json`.
-    const next = assembleMcpServers(
-      settings.merged.mcpServers,
-      cwd,
-      topTierMcpServers,
-    );
+    // Bare/safe mode: mirror loadCliConfig's own guard (config.ts) — a live
+    // settings.json edit must not smuggle local/ambient MCP servers into an
+    // already-running bare/safe-mode session; only the top-tier servers this
+    // session started with (explicit, per-invocation, not ambient state)
+    // survive.
+    const next =
+      config.getBareMode() || config.isSafeMode()
+        ? { ...topTierMcpServers }
+        : assembleMcpServers(
+            settings.merged.mcpServers,
+            cwd,
+            topTierMcpServers,
+          );
     const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
-    const nextGating = recomputeMcpGating(
-      settings,
-      next,
-      cwd,
-      config.getCliAllowedMcpServerNames(),
-      isYolo,
-    );
+    // Same bare/safe guard as `next` above, applied to the admission lists:
+    // `recomputeMcpGating` reads settings.merged.mcp.allowed/excluded
+    // unconditionally, with no bare/safe check of its own — a live
+    // settings.json edit during an already-running bare/safe session would
+    // otherwise smuggle a local-state-sourced allow-list back in, silently
+    // filtering the caller's own top-tier server out of `getMcpServers()`
+    // mid-session (the same stranded-server class of bug this PR fixes at
+    // boot, just reached through the gating list's SOURCE instead of the
+    // mcpServers map). Only the CLI `--allowed-mcp-server-names` bound
+    // (explicit, per-invocation, not ambient state) still applies, mirroring
+    // topTierMcpServers' own treatment; `excluded`/`pending` are irrelevant
+    // once nothing but the never-gated top-tier servers can be present.
+    const bootAllowed = config.getCliAllowedMcpServerNames();
+    const nextGating: McpGating =
+      config.getBareMode() || config.isSafeMode()
+        ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
+        : recomputeMcpGating(settings, next, cwd, bootAllowed, isYolo);
 
     const prevServers = config.getSettingsMcpServers();
     const prevGating = config.getMcpGating();
@@ -242,4 +263,102 @@ export function registerMcpHotReload(
       appEvents.emit(AppEvent.McpPendingApprovalChanged);
     }
   });
+}
+
+/**
+ * Subscribe the running {@link Config} to settings changes so `modelProviders`
+ * edits take effect without a session restart (issue #10568). Mirrors
+ * {@link registerMcpHotReload}: the watcher already debounces and filters out
+ * restart-required keys, so this listener only diffs the merged
+ * `modelProviders` against the registry's APPLIED config (same design as the
+ * MCP listener diffing against `getSettingsMcpServers()`) and calls the
+ * existing reload primitive. The diff gate keeps unrelated settings edits
+ * (theme, …) from rebuilding the model registry. Called once at startup,
+ * after `settingsWatcher.startWatching()`; returns a disposer that
+ * unsubscribes.
+ *
+ * Diffing against applied state (not a listener-local snapshot) keeps the
+ * gate correct when other paths rewrite the registry without a watcher event
+ * (provider-template updates, ACP session reloads), and means a throwing
+ * reload retries on the next event — applied state never advanced. A
+ * rejected `refreshAuth` is the one exception: the registry reload has
+ * already advanced applied state by then, so a listener-local flag retries
+ * only the auth refresh on subsequent events (never the registry reload).
+ *
+ * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
+ * schema, so this listener does not pass it to the reload primitive.
+ */
+export function registerModelProvidersHotReload(
+  watcher: SettingsWatcher,
+  settings: LoadedSettings,
+  config: Config,
+): () => void {
+  modelProvidersDebugLogger.debug(
+    'registered modelProviders hot-reload listener on SettingsWatcher',
+  );
+  // Pending refreshAuth retry after a successful registry reload: the reload
+  // already advanced applied state, so the modelProviders gate below would
+  // skip every later unchanged event — re-attempt ONLY refreshAuth on
+  // subsequent events (never the registry reload) until it succeeds.
+  let refreshAuthRetryPending = false;
+  const reconcile = async () => {
+    const next = settings.merged.modelProviders;
+    const providersUnchanged = equal(
+      config.getModelProvidersConfig() ?? {},
+      next ?? {},
+    );
+    if (providersUnchanged && !refreshAuthRetryPending) {
+      return;
+    }
+    if (!providersUnchanged) {
+      modelProvidersDebugLogger.debug(
+        'modelProviders changed — reloading model registry',
+      );
+      try {
+        config.reloadModelProvidersConfig(next);
+      } catch (err) {
+        // Applied state is unchanged, so the next event retries.
+        modelProvidersDebugLogger.error(
+          `reloadModelProvidersConfig threw: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        return;
+      }
+    }
+
+    const authType = config.getAuthType();
+    if (!authType) {
+      return;
+    }
+    try {
+      // `isInitialAuth=true` keeps a watcher-triggered refresh
+      // non-interactive: with it, a QWEN_OAUTH session whose cached
+      // credentials are unavailable (expired/rotated refresh token,
+      // transient network error) rejects with "credentials expired" into the
+      // catch below instead of falling through to `authWithQwenDeviceFlow` —
+      // an unrequested device-auth prompt mid-session that also stalls
+      // ACP/headless runs, where there is no terminal to answer it. Mirrors
+      // boot (`performInitialAuth`, packages/cli/src/core/auth.ts).
+      await config.refreshAuth(authType, true);
+      refreshAuthRetryPending = false;
+    } catch (err) {
+      // The registry reload above already advanced applied state, so the
+      // providers gate skips every later unchanged event — without a retry
+      // flag the half-applied state (registry reloaded, active client stale)
+      // would persist until another modelProviders edit or a restart.
+      refreshAuthRetryPending = true;
+      modelProvidersDebugLogger.error(
+        `refreshAuth after modelProviders reload threw: ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+    }
+  };
+  // Reconcile once at registration: the watcher is armed before
+  // loadCliConfig resolves, so an edit that lands in that window has
+  // already refreshed settings.merged with no listener attached — without
+  // this the registry would silently keep the pre-edit boot value.
+  void reconcile();
+  return watcher.addChangeListener(reconcile);
 }

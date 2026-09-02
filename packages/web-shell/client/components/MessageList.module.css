@@ -29,6 +29,28 @@
   border-radius: 3px;
 }
 
+.historyStatus {
+  color: var(--muted-foreground);
+  text-align: center;
+  padding: 4px 0 12px;
+}
+
+.historyRetryButton {
+  margin-left: 8px;
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.historyRetryButton:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
 .list > * {
   width: min(
     100%,
@@ -161,32 +183,15 @@
   max-width: 100%;
 }
 .turnStatusRow {
-  margin-bottom: 4px;
+  padding-bottom: 4px;
 }
 
 .turnAnswerRow {
-  margin-top: 10px;
+  padding-top: 10px;
 }
 
 .turnContentRow {
   min-width: 0;
-}
-
-.turnContentClip {
-  display: grid;
-  grid-template-rows: 1fr;
-  min-height: 0;
-  overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.turnContentCollapsed {
-  grid-template-rows: 0fr;
-}
-
-.turnContentInner {
-  min-height: 0;
-  overflow: hidden;
 }
 
 .sessionTimelineLayer {

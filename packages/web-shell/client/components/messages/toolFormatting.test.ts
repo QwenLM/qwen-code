@@ -48,6 +48,15 @@ describe('toolFormatting', () => {
       );
       expect(sanitizeControlChars('a\tb\nc')).toBe('a\tb\nc');
     });
+
+    it('escapes Unicode bidi embedding/isolate controls', () => {
+      // RLO/LRE (U+202A–202E) and LRI/PDI (U+2066–2069) can visually reorder
+      // a filename to spoof its extension (mirrors the CLI-side coverage).
+      expect(sanitizeControlChars('a\u202eb')).toBe('a\\u202eb');
+      expect(sanitizeControlChars('a\u202ab')).toBe('a\\u202ab');
+      expect(sanitizeControlChars('a\u2066b')).toBe('a\\u2066b');
+      expect(sanitizeControlChars('a\u2069b')).toBe('a\\u2069b');
+    });
   });
 
   it('normalizes web fetch display names', () => {
@@ -371,12 +380,11 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
       expect(localizeToolDisplayName('run_shell_command', t)).toBe('运行命令');
       expect(localizeToolDisplayName('read_file', t)).toBe('读取文件');
+      expect(localizeToolDisplayName('agent', t)).toBe('智能体');
     });
 
-    it('keeps proper tool names / acronyms in English', () => {
+    it('keeps acronyms in English', () => {
       const t = getTranslator('zh-CN');
-      expect(localizeToolDisplayName('agent', t)).toBe('Agent');
-      expect(localizeToolDisplayName('glob', t)).toBe('Glob');
       expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
     });
 
@@ -385,6 +393,7 @@ describe('toolFormatting', () => {
       expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
       expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('glob', t)).toBe('查找文件');
     });
 
     it('falls back to the English display name when the locale has no entry', () => {
@@ -401,11 +410,8 @@ describe('toolFormatting', () => {
 
     it('has a zh translation for every tool in the display-name map', () => {
       const tZh = getTranslator('zh-CN');
-      // Tools intentionally shown in English (proper names / acronyms).
-      const keepEnglish = new Set(['agent', 'glob']);
       const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
         (wire) =>
-          !keepEnglish.has(wire) &&
           localizeToolDisplayName(wire, tZh) === formatToolDisplayName(wire),
       );
       expect(untranslated).toEqual([]);

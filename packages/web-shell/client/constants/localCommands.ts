@@ -9,7 +9,10 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * 'interactive' mode only). These are merged with ACP-provided commands,
  * with ACP taking precedence on duplicates.
  */
-export function getLocalCommands(t: Translate): CommandInfo[] {
+export function getLocalCommands(
+  t: Translate,
+  options: { sideTaskAvailable?: boolean } = {},
+): CommandInfo[] {
   const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
     {
@@ -28,7 +31,9 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'btw',
       description: t('local.btw'),
-      argumentHint: '<your question>',
+      argumentHint: options.sideTaskAvailable
+        ? '[side] <your question>'
+        : '<your question>',
     },
     {
       name: 'copy',
@@ -89,6 +94,9 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.branch'),
       argumentHint: '[<name>]',
     },
+    { name: 'diff', description: t('local.diff') },
+    { name: 'log', description: t('local.log') },
+    { name: 'prs', description: t('local.prs') },
     {
       name: 'fork',
       description: t('local.fork'),
@@ -172,6 +180,7 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   batch: 'skilldesc.batch',
   dataviz: 'skilldesc.dataviz',
   'extension-creator': 'skilldesc.extensionCreator',
+  'goal-draft': 'skilldesc.goalDraft',
   loop: 'skilldesc.loop',
   'new-app': 'skilldesc.newApp',
   'qc-helper': 'skilldesc.qcHelper',
@@ -185,13 +194,11 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   bugfix: 'skilldesc.bugfix',
   codegraph: 'skilldesc.codegraph',
   'create-issue': 'skilldesc.createIssue',
-  'desktop-pet': 'skilldesc.desktopPet',
   'docs-audit-and-refresh': 'skilldesc.docsAuditAndRefresh',
   'docs-update-from-diff': 'skilldesc.docsUpdateFromDiff',
   'e2e-testing': 'skilldesc.e2eTesting',
   'feat-dev': 'skilldesc.featDev',
   'memory-leak-debug': 'skilldesc.memoryLeakDebug',
-  'openwork-desktop-sync': 'skilldesc.openworkDesktopSync',
   'prepare-pr': 'skilldesc.preparePr',
   'qwen-code-claw': 'skilldesc.qwenCodeClaw',
   'structured-debugging': 'skilldesc.structuredDebugging',

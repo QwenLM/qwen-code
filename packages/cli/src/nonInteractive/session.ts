@@ -38,7 +38,10 @@ import {
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
 import type { LoadedSettings } from '../config/settings.js';
-import { runNonInteractive } from '../nonInteractiveCli.js';
+import {
+  runNonInteractive,
+  TurnInterruptedError,
+} from '../nonInteractiveCli.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
@@ -46,7 +49,7 @@ import {
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from '../utils/chat-recording-failure.js';
+} from './chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -72,7 +75,8 @@ class Session {
   private monitorQueue: MonitorQueueItem[] = [];
   private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
-  private abortController: AbortController;
+  private readonly sessionAbortController: AbortController;
+  private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
   private promptIdCounter: number = 0;
@@ -106,7 +110,7 @@ class Session {
     this.config = config;
     this.settings = settings;
     this.sessionId = config.getSessionId();
-    this.abortController = new AbortController();
+    this.sessionAbortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
 
     this.inputReader = new StreamJsonInputReader();
@@ -155,8 +159,12 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // llm.tsx has already emitted warnings known before stream-json
+      // initialization starts. Keep that snapshot so only warnings produced
+      // by the deferred initialize() call are written here.
+      const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
-      // the non-stream-json branch in `gemini.tsx` uses so the
+      // the non-stream-json branch in `llm.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
       // startup profiles. `profileCheckpoint` is a no-op when
       // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
@@ -166,12 +174,17 @@ class Session {
       profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
       profileCheckpoint('config_initialize_end');
+      for (const warning of this.config.getWarnings()) {
+        if (emittedWarnings.has(warning)) continue;
+        emittedWarnings.add(warning);
+        process.stderr.write(`${warning}\n`);
+      }
       // Stream-json sessions feed prompts straight to the model after init.
       // Under progressive MCP availability `initialize()` returns before
       // MCP servers settle, so we must explicitly await discovery here —
       // otherwise the first prompt would see only built-in tools.
       await this.config.waitForMcpReady();
-      // Surface MCP failures on stderr — same rationale as gemini.tsx's
+      // Surface MCP failures on stderr — same rationale as llm.tsx's
       // non-interactive branch: per-server errors are caught inside
       // `discoverAllMcpToolsIncremental` and never reach a TTY otherwise,
       // so a script using stream-json with broken MCP config would
@@ -190,7 +203,7 @@ class Session {
       }
       // Finalize the startup profile here so `config_initialize_*` and the
       // MCP discovery events captured during init/discovery make it into
-      // the on-disk profile. gemini.tsx's stream-json branch deliberately
+      // the on-disk profile. llm.tsx's stream-json branch deliberately
       // skips finalize because the profiler's `finalized` guard would
       // otherwise suppress every event emitted during the
       // `Session.ensureConfigInitialized` flow above.
@@ -211,7 +224,7 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
       if (meta.status === 'running' && typeof registry.get === 'function') {
@@ -238,7 +251,7 @@ class Session {
 
     const registry = this.config.getMonitorRegistry();
     registry.setRegisterCallback((entry) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
       this.enqueueMonitorStarted({
@@ -292,7 +305,8 @@ class Session {
       config: this.config,
       streamJson: this.outputAdapter,
       sessionId: this.sessionId,
-      abortSignal: this.abortController.signal,
+      abortSignal: this.sessionAbortController.signal,
+      getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
@@ -464,17 +478,21 @@ class Session {
     await this.waitForInitialization();
 
     const promptId = this.getNextPromptId();
+    const turnAbortController = this.startTurn();
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
-        abortController: this.abortController,
+        abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
+        recoverableCancellation: true,
       });
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
+    } finally {
+      this.finishTurn(turnAbortController);
     }
   }
 
@@ -487,22 +505,22 @@ class Session {
   private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
     await this.waitForInitialization();
 
-    if (this.isShuttingDown || this.abortController.signal.aborted) {
+    if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: session is shutting down',
       );
       return { accepted: false, interruption: 'none' };
     }
 
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       debugLogger.debug(
         '[Session] continue_last_turn rejected: gemini client is not ready',
       );
       return { accepted: false, interruption: 'none' };
     }
 
-    const chat = geminiClient.getChat();
+    const chat = llmClient.getChat();
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
@@ -550,17 +568,20 @@ class Session {
   private async processContinueTurn(): Promise<void> {
     this.continueTurnInProgress = true;
     let resultAlreadyEmitted = false;
+    let turnAbortController: AbortController | null = null;
     try {
       await this.waitForInitialization();
 
       const promptId = this.getNextPromptId();
+      turnAbortController = this.startTurn();
       await runNonInteractive(this.config, this.settings, '', promptId, {
-        abortController: this.abortController,
+        abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
+        recoverableCancellation: true,
         onResultEmitted: () => {
           resultAlreadyEmitted = true;
         },
@@ -580,6 +601,9 @@ class Session {
       }
       throw new Error(`Continue turn failed: ${message}`, { cause: error });
     } finally {
+      if (turnAbortController) {
+        this.finishTurn(turnAbortController);
+      }
       this.continueTurnInProgress = false;
     }
   }
@@ -588,6 +612,19 @@ class Session {
     batch: MonitorQueueItem[],
   ): Promise<void> {
     await this.waitForInitialization();
+
+    batch = batch.filter((item) => {
+      if (item.sdkNotification.status !== 'running') {
+        return true;
+      }
+      return (
+        this.config.getMonitorRegistry().get(item.sdkNotification.task_id)
+          ?.status !== 'cancelled'
+      );
+    });
+    if (batch.length === 0) {
+      return;
+    }
 
     for (const item of batch) {
       this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
@@ -601,25 +638,31 @@ class Session {
     const combinedDisplayText = batch.map((n) => n.displayText).join('; ');
 
     const promptId = this.getNextPromptId();
-    await runNonInteractive(
-      this.config,
-      this.settings,
-      combinedModelText,
-      promptId,
-      {
-        abortController: this.abortController,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-        sendMessageType: SendMessageType.Notification,
-        notificationDisplayText: combinedDisplayText,
-        captureMonitorNotifications: false,
-        captureMonitorRegistrations: false,
-      },
-    );
+    const turnAbortController = this.startTurn();
+    try {
+      await runNonInteractive(
+        this.config,
+        this.settings,
+        combinedModelText,
+        promptId,
+        {
+          abortController: turnAbortController,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+          sendMessageType: SendMessageType.Notification,
+          notificationDisplayText: combinedDisplayText,
+          captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
+          recoverableCancellation: true,
+        },
+      );
+    } finally {
+      this.finishTurn(turnAbortController);
+    }
   }
 
   private async processPendingWork(): Promise<void> {
-    if (this.isShuttingDown || this.abortController.signal.aborted) {
+    if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
       return;
     }
 
@@ -629,7 +672,7 @@ class Session {
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
-      !this.abortController.signal.aborted
+      !this.sessionAbortController.signal.aborted
     ) {
       if (this.pendingContinueTurn) {
         this.pendingContinueTurn = false;
@@ -703,7 +746,7 @@ class Session {
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
-        !this.abortController.signal.aborted
+        !this.sessionAbortController.signal.aborted
       ) {
         this.ensureProcessingStarted();
       }
@@ -730,16 +773,34 @@ class Session {
 
   private handleInterrupt(): void {
     debugLogger.info('[Session] Interrupt requested');
-    this.abortController.abort();
-    // Do not create a new AbortController to prevent listener leaks.
-    // Subsequent queries will check signal.aborted and fail immediately.
+    this.activeTurnAbortController?.abort(new TurnInterruptedError());
+  }
+
+  private startTurn(): AbortController {
+    const controller = new AbortController();
+    if (this.sessionAbortController.signal.aborted) {
+      controller.abort(this.sessionAbortController.signal.reason);
+    }
+    this.activeTurnAbortController = controller;
+    return controller;
+  }
+
+  private finishTurn(controller: AbortController): void {
+    if (this.activeTurnAbortController === controller) {
+      this.activeTurnAbortController = null;
+    }
+  }
+
+  private abortSession(): void {
+    this.activeTurnAbortController?.abort();
+    this.sessionAbortController.abort();
   }
 
   private setupSignalHandlers(): void {
     this.shutdownHandler = () => {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
-      this.abortController.abort();
+      this.abortSession();
     };
 
     process.on('SIGINT', this.shutdownHandler);
@@ -797,6 +858,7 @@ class Session {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
+    this.abortSession();
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
 
@@ -827,6 +889,7 @@ class Session {
   }
 
   private finishShutdown(): void {
+    this.abortSession();
     this.dispatcher?.shutdown();
     this.cleanupSignalHandlers();
   }
@@ -888,7 +951,7 @@ class Session {
 
       try {
         for await (const message of this.inputReader.read()) {
-          if (this.abortController.signal.aborted) {
+          if (this.sessionAbortController.signal.aborted) {
             break;
           }
 

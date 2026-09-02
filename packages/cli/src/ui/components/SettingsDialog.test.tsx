@@ -33,8 +33,8 @@ import {
   getSettingDefinition,
   saveModifiedSettings,
   TEST_ONLY,
-} from '../../utils/settingsUtils.js';
-import { OUTPUT_LANGUAGE_AUTO } from '../../utils/languageUtils.js';
+} from '../../config/settingsUtils.js';
+import { OUTPUT_LANGUAGE_AUTO } from '../../i18n/languageUtils.js';
 
 // Mock the VimModeContext
 const mockToggleVimEnabled = vi.fn();
@@ -130,16 +130,16 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   };
 });
 
-vi.mock('../../utils/settingsUtils.js', async () => {
-  const actual = await vi.importActual('../../utils/settingsUtils.js');
+vi.mock('../../config/settingsUtils.js', async () => {
+  const actual = await vi.importActual('../../config/settingsUtils.js');
   return {
     ...actual,
     saveModifiedSettings: vi.fn(),
   };
 });
 
-vi.mock('../../utils/languageUtils.js', async () => {
-  const actual = await vi.importActual('../../utils/languageUtils.js');
+vi.mock('../../i18n/languageUtils.js', async () => {
+  const actual = await vi.importActual('../../i18n/languageUtils.js');
   return {
     ...actual,
     updateOutputLanguageFile: vi.fn(),
@@ -307,7 +307,7 @@ describe('SettingsDialog', () => {
       const secondLabel = secondKey
         ? (getSettingDefinition(secondKey)?.label ?? secondKey)
         : '';
-      expect(lastFrame()).toContain(`● ${secondLabel}`);
+      expect(lastFrame()).toContain(`●\uFE0E ${secondLabel}`);
 
       // The active index should have changed (tested indirectly through behavior)
       unmount();
@@ -367,7 +367,7 @@ describe('SettingsDialog', () => {
         : '';
 
       // The first item is highlighted while the list is focused.
-      expect(lastFrame()).toContain(`● ${firstLabel}`);
+      expect(lastFrame()).toContain(`●\uFE0E ${firstLabel}`);
 
       // ↑ from the first item moves focus to the search box: the list highlight
       // disappears and the tab bar is not yet focused.
@@ -375,7 +375,7 @@ describe('SettingsDialog', () => {
         stdin.write(TerminalKeys.UP_ARROW);
       });
       await wait();
-      expect(lastFrame()).not.toContain(`● ${firstLabel}`);
+      expect(lastFrame()).not.toContain(`●\uFE0E ${firstLabel}`);
       expect(lastFrame()).not.toContain('↓ to return');
 
       // ↑ again moves up to the tab bar (which shows its focused hint).
@@ -405,7 +405,7 @@ describe('SettingsDialog', () => {
 
       // Wait for initial render and verify we're on Tool Approval Mode (first setting)
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Tool Approval Mode');
+        expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
       });
 
       const dialogKeys = getDialogSettingKeys();
@@ -420,7 +420,7 @@ describe('SettingsDialog', () => {
         await wait();
       }
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Vim Mode');
+        expect(lastFrame()).toContain('●\uFE0E Vim Mode');
       });
 
       // Toggle the setting
@@ -520,7 +520,7 @@ describe('SettingsDialog', () => {
 
         // Verify we're on Tool Approval Mode (first setting, an enum)
         await waitFor(() => {
-          expect(lastFrame()).toContain('● Tool Approval Mode');
+          expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
         });
 
         // Press Enter to cycle the enum value
@@ -566,7 +566,7 @@ describe('SettingsDialog', () => {
 
         // Verify we're on Tool Approval Mode (first setting)
         await waitFor(() => {
-          expect(lastFrame()).toContain('● Tool Approval Mode');
+          expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
         });
 
         // Press Enter to cycle - should loop back to first value (Plan)
@@ -669,7 +669,7 @@ describe('SettingsDialog', () => {
       });
 
       // The UI should show settings mode is active (scope is in separate view)
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Settings section active
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Settings section active
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view
 
       // This test validates the initial state - scope selection is now
@@ -1137,7 +1137,7 @@ describe('SettingsDialog', () => {
       });
 
       // Verify initial state: settings mode active (scope is in separate view)
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Settings mode active
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Settings mode active
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view
 
       // This test validates the rendered UI structure for tab navigation
@@ -1200,7 +1200,7 @@ describe('SettingsDialog', () => {
 
       // Verify the complete UI is rendered (scope is in separate view)
       expect(lastFrame()).toContain('Settings'); // Title
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Active setting
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Active setting
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view (Tab to access)
       expect(lastFrame()).toContain(
         '(Use Enter to select, Tab to configure scope)',
@@ -1340,9 +1340,16 @@ describe('SettingsDialog', () => {
 
       // Press Escape to exit
       stdin.write('\u001B');
-      await wait();
-
-      expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      await waitFor(
+        () => {
+          expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+        },
+        {
+          timeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+            ? 10_000
+            : 1_000,
+        },
+      );
 
       unmount();
     });

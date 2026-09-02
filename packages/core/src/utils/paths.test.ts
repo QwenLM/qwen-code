@@ -18,6 +18,7 @@ import {
 } from 'vitest';
 import {
   escapePath,
+  formatDisplayPath,
   resolvePath,
   validatePath,
   resolveAndValidatePath,
@@ -27,6 +28,8 @@ import {
   tildeifyPath,
   expandHomeDir,
   getProjectHash,
+  realpathNearestExisting,
+  realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
 } from './paths.js';
 import type { Config } from '../config/config.js';
@@ -709,6 +712,205 @@ describe('tildeifyPath', () => {
     // Should not replace home dir in the middle
     expect(result).toBe(`/mnt/backup${homeDir}/data`);
   });
+});
+
+describe('formatDisplayPath', () => {
+  const root = path.resolve(path.sep, 'projects', 'my-app');
+
+  it('renders project-internal paths relative to the root', () => {
+    const target = path.join(root, 'src', 'index.ts');
+    expect(formatDisplayPath(target, root)).toBe(path.join('src', 'index.ts'));
+  });
+
+  it('renders the project root itself as .', () => {
+    expect(formatDisplayPath(root, root)).toBe('.');
+  });
+
+  it('resolves relative input against the root before formatting', () => {
+    expect(formatDisplayPath(path.join('src', 'app'), root)).toBe(
+      path.join('src', 'app'),
+    );
+    expect(formatDisplayPath('.', root)).toBe('.');
+  });
+
+  it('keeps paths outside the project absolute', () => {
+    const outside = path.resolve(path.sep, 'other', 'place', 'file.txt');
+    expect(formatDisplayPath(outside, root)).toBe(outside);
+  });
+
+  it('shortens the home directory to ~ for paths outside the project', () => {
+    const homeDir = os.homedir();
+    const target = path.join(homeDir, 'elsewhere', 'file.txt');
+    expect(formatDisplayPath(target, root)).toBe(
+      `~${path.sep}elsewhere${path.sep}file.txt`,
+    );
+  });
+
+  it('does not tildeify project-internal paths when the project is under home', () => {
+    const homeRoot = path.join(os.homedir(), 'work', 'proj');
+    const target = path.join(homeRoot, 'src', 'main.ts');
+    expect(formatDisplayPath(target, homeRoot)).toBe(
+      path.join('src', 'main.ts'),
+    );
+  });
+
+  it('expands a tilde-prefixed input like other tool paths', () => {
+    expect(formatDisplayPath(path.join('~', 'data'), root)).toBe(
+      `~${path.sep}data`,
+    );
+  });
+
+  it('compresses overlong paths with shortenPath semantics', () => {
+    const target = path.join(
+      root,
+      'very',
+      'deeply',
+      'nested',
+      'directory',
+      'structure',
+      'file.ts',
+    );
+    const result = formatDisplayPath(target, root, 25);
+    expect(result.length).toBeLessThanOrEqual(25);
+    expect(result).toContain('...');
+    expect(result).toContain('file.ts');
+  });
+});
+
+describe('realpathNearestExisting', () => {
+  let root: string;
+
+  beforeAll(() => {
+    // realpathSync the base itself so assertions do not trip over macOS's
+    // /var -> /private/var symlink.
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-')),
+    );
+    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns an existing path canonicalized', () => {
+    const target = path.join(root, 'real', 'file.txt');
+    expect(realpathNearestExisting(target)).toBe(target);
+  });
+
+  it('appends segments that do not exist yet to the resolved prefix', () => {
+    expect(realpathNearestExisting(path.join(root, 'real', 'a', 'b.txt'))).toBe(
+      path.join(root, 'real', 'a', 'b.txt'),
+    );
+  });
+
+  it('returns the lexical path when no ancestor can be resolved', () => {
+    const absent = path.resolve(path.sep, 'no', 'such', 'ancestor', 'x');
+    expect(realpathNearestExisting(absent)).toBe(absent);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a symlink to its target',
+    () => {
+      const link = path.join(root, 'link-to-file');
+      fs.symlinkSync(path.join(root, 'real', 'file.txt'), link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a dangling symlink to its non-existent target',
+    () => {
+      // fs.existsSync() follows links and reports a dangling one as missing,
+      // so a naive nearest-existing walk would classify this by where the
+      // link sits rather than where it points.
+      const link = path.join(root, 'dangling');
+      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves an intermediate directory symlink',
+    () => {
+      const dirLink = path.join(root, 'dirlink');
+      fs.symlinkSync(path.join(root, 'real'), dirLink, 'dir');
+      expect(realpathNearestExisting(path.join(dirLink, 'file.txt'))).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+      expect(realpathNearestExisting(path.join(dirLink, 'absent.txt'))).toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves a relative symlink target against the real parent of the link',
+    () => {
+      const link = path.join(root, 'real', 'rel-link');
+      fs.symlinkSync('file.txt', link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'gives up safely on a symlink cycle instead of looping forever',
+    () => {
+      const a = path.join(root, 'cycle-a');
+      const b = path.join(root, 'cycle-b');
+      fs.symlinkSync(b, a);
+      fs.symlinkSync(a, b);
+      // Bounded by SYMLOOP_MAX hops; the caller still range-checks the result.
+      expect(() => realpathNearestExisting(a)).not.toThrow();
+    },
+  );
+});
+
+describe('realpathNearestExistingAsync', () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-async-')),
+    );
+    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('matches the sync variant across the canonicalization cases', async () => {
+    const cases = [
+      path.join(root, 'real', 'file.txt'),
+      path.join(root, 'real', 'a', 'b.txt'),
+      path.resolve(path.sep, 'no', 'such', 'ancestor', 'x'),
+    ];
+    for (const target of cases) {
+      await expect(realpathNearestExistingAsync(target)).resolves.toBe(
+        realpathNearestExisting(target),
+      );
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a dangling symlink to its non-existent target',
+    async () => {
+      const link = path.join(root, 'dangling-async');
+      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
+      await expect(realpathNearestExistingAsync(link)).resolves.toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
 });
 
 describe('shortenPath', () => {

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, cast
+import json
+import re
+from pathlib import Path
+from typing import Any, cast, get_args
 
 import pytest
 from qwen_code_sdk.errors import ValidationError
-from qwen_code_sdk.types import QueryOptions, TimeoutOptions
+from qwen_code_sdk.types import PermissionMode, QueryOptions, TimeoutOptions
 from qwen_code_sdk.validation import validate_query_options
 
 VALID_UUID = "123e4567-e89b-12d3-a456-426614174000"
@@ -40,8 +43,65 @@ def test_rejects_invalid_resume() -> None:
         validate_query_options(QueryOptions(resume="not-a-uuid"))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{12345678-1234-4234-8234-123456781234}",
+        "urn:uuid:12345678-1234-4234-8234-123456781234",
+        "12345678123442348234123456781234",
+    ],
+)
+def test_rejects_non_canonical_session_id(value: str) -> None:
+    # uuid.UUID() accepts these spellings, but the value is passed to the CLI
+    # verbatim as --session-id, so only the canonical 8-4-4-4-12 form works.
+    with pytest.raises(ValidationError, match="canonical"):
+        validate_query_options(QueryOptions(session_id=value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{12345678-1234-4234-8234-123456781234}",
+        "urn:uuid:12345678-1234-4234-8234-123456781234",
+        "12345678123442348234123456781234",
+    ],
+)
+def test_rejects_non_canonical_resume(value: str) -> None:
+    with pytest.raises(ValidationError, match="canonical"):
+        validate_query_options(QueryOptions(resume=value))
+
+
+def test_accepts_canonical_session_id_in_either_case() -> None:
+    # Case is not part of canonical form; an uppercase UUID is valid input.
+    validate_query_options(QueryOptions(session_id=VALID_UUID))
+    validate_query_options(QueryOptions(session_id=VALID_UUID.upper()))
+
+
+@pytest.mark.parametrize(
+    "mode",
+    get_args(PermissionMode),
+)
+def test_accepts_valid_permission_modes(mode: str) -> None:
+    validate_query_options(QueryOptions.from_mapping({"permission_mode": mode}))
+
+
+def test_permission_modes_match_core_contract() -> None:
+    contract_path = (
+        Path(__file__).parents[3] / "core" / "src" / "config" / "approval-modes.json"
+    )
+    expected = set(json.loads(contract_path.read_text(encoding="utf-8")))
+
+    assert set(get_args(PermissionMode)) == expected
+
+
 def test_rejects_invalid_permission_mode() -> None:
-    with pytest.raises(ValidationError, match="Invalid permission_mode"):
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Invalid permission_mode: 'unsafe-mode'. "
+            "Expected one of: default, plan, auto-edit, auto, yolo."
+        ),
+    ):
         validate_query_options(
             QueryOptions.from_mapping({"permission_mode": "unsafe-mode"})
         )
@@ -186,6 +246,31 @@ def test_rejects_invalid_max_tool_calls() -> None:
 def test_rejects_invalid_max_subagent_depth() -> None:
     with pytest.raises(ValidationError, match="max_subagent_depth"):
         validate_query_options(QueryOptions(max_subagent_depth=0))
+
+
+@pytest.mark.parametrize("value", [True, False, 0.5])
+def test_rejects_non_integer_max_tool_calls(value: object) -> None:
+    # The error message promises "-1 or a non-negative integer", and the value
+    # is stringified straight onto the CLI, so `True` would become
+    # `--max-tool-calls True`.
+    with pytest.raises(ValidationError, match="max_tool_calls"):
+        validate_query_options(QueryOptions(max_tool_calls=cast(Any, value)))
+
+
+@pytest.mark.parametrize("value", [True, False, 2.5])
+def test_rejects_non_integer_max_subagent_depth(value: object) -> None:
+    with pytest.raises(ValidationError, match="max_subagent_depth"):
+        validate_query_options(QueryOptions(max_subagent_depth=cast(Any, value)))
+
+
+def test_accepts_valid_integer_limits() -> None:
+    # The in-range integers these options are documented to take must survive.
+    validate_query_options(
+        QueryOptions(max_tool_calls=-1, max_session_turns=-1, max_subagent_depth=1)
+    )
+    validate_query_options(
+        QueryOptions(max_tool_calls=0, max_session_turns=0, max_subagent_depth=100)
+    )
 
 
 def test_rejects_agents_missing_required_fields() -> None:

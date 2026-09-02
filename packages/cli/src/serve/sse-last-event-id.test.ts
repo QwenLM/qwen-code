@@ -14,7 +14,9 @@ vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: stdioMocks.writeStderrLine,
 }));
 
-const { parseLastEventId } = await import('./sse-last-event-id.js');
+const { parseLastEventId, parseEventEpochHeader } = await import(
+  './sse-last-event-id.js'
+);
 
 /** The single line `parseLastEventId` logged, or `undefined` if it was silent. */
 function loggedLine(): string | undefined {
@@ -66,6 +68,56 @@ describe('parseLastEventId', () => {
 
   it('threads the logPrefix into the rejection log', () => {
     parseLastEventId('nope', '/acp ');
+    expect(loggedLine()).toContain('/acp ');
+  });
+});
+
+describe('parseEventEpochHeader', () => {
+  beforeEach(() => {
+    stdioMocks.writeStderrLine.mockClear();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('accepts a randomUUID-shaped token', () => {
+    const uuid = '3b241101-e2bb-4255-8caf-4136c566a962';
+    expect(parseEventEpochHeader(uuid)).toBe(uuid);
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('accepts underscores and a 64-char token (boundary)', () => {
+    const raw = '_'.repeat(64);
+    expect(parseEventEpochHeader(raw)).toBe(raw);
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 65-char token with a log', () => {
+    expect(parseEventEpochHeader('a'.repeat(65))).toBeUndefined();
+    expect(loggedLine()).toContain('rejected X-Qwen-Event-Epoch');
+  });
+
+  it.each(['has space', 'semi;colon', 'new\nline', 'päth', 'époch'])(
+    'rejects %j (outside [A-Za-z0-9_-]) with a log',
+    (raw) => {
+      expect(parseEventEpochHeader(raw)).toBeUndefined();
+      expect(loggedLine()).toContain('rejected X-Qwen-Event-Epoch');
+    },
+  );
+
+  it('treats a missing header (undefined / non-string) as not provided, silently', () => {
+    expect(parseEventEpochHeader(undefined)).toBeUndefined();
+    expect(parseEventEpochHeader(42)).toBeUndefined();
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('treats the empty string as not provided, silently', () => {
+    expect(parseEventEpochHeader('')).toBeUndefined();
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
+  });
+
+  it('threads the logPrefix into the rejection log', () => {
+    parseEventEpochHeader('bad value', '/acp ');
     expect(loggedLine()).toContain('/acp ');
   });
 });

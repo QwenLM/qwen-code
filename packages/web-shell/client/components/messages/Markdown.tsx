@@ -10,11 +10,19 @@ import {
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components } from 'react-markdown';
+import type { Components, Options } from 'react-markdown';
+import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import {
   getCachedHtml,
   getCodeHighlighter,
@@ -22,6 +30,7 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -29,6 +38,11 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import {
+  DEFAULT_WEB_SHELL_MARKDOWN_CHART,
+  WebShellMarkdownChartProvider,
+  createWebShellMarkdownChartPre,
+} from './MarkdownChartRenderer';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
@@ -42,6 +56,10 @@ interface MarkdownProps {
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
 }
+
+// Keep the cost of repeatedly parsing a growing stream bounded. Short streams
+// retain live Markdown; large ones settle into full Markdown once at the end.
+const STREAMING_MARKDOWN_PARSE_LIMIT = 32_000;
 
 const SUPPORTED_LANGUAGES = new Set([
   'javascript',
@@ -142,7 +160,7 @@ export function resolveFenceLanguage(
 }
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
-const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,/i;
+const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -175,7 +193,7 @@ function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -302,13 +320,11 @@ function MermaidBlock({ code }: { code: string }) {
   }, [code, mermaidTheme]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+    void writeClipboardText(code)
+      .then(() => {
+        flashCopied();
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
   if (error) {
@@ -416,7 +432,7 @@ function CodeBlock({
   const { t } = useI18n();
   const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
 
   const { label, lang, resolvedLang } = resolveFenceLanguage(
     extractRawFenceLanguage(className),
@@ -426,9 +442,11 @@ function CodeBlock({
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
-    // Don't highlight unsupported languages or blocks too large to tokenize
-    // without freezing the main thread — render them as plain text.
+    // Stream code as plain text. Highlighting a growing fence on every chunk
+    // repeatedly tokenizes its entire contents and can dominate rendering for
+    // long responses; the settled render below highlights the final text once.
     if (
+      isStreaming ||
       lang === 'mermaid' ||
       resolvedLang === 'text' ||
       isTooLargeToHighlight(code)
@@ -445,21 +463,7 @@ function CodeBlock({
       return;
     }
 
-    // Re-highlight synchronously on every code change. With the Oniguruma
-    // engine a normal-sized block tokenizes in ~1–7ms, so there's no need to
-    // throttle or keep a stale snapshot around: `html` always matches the
-    // current `code`, so no streamed text is ever hidden and there's no flicker.
-    // `isTooLargeToHighlight` above bounds the worst-case per-chunk cost.
-    //
-    // Don't persist streaming intermediates: the growing block produces a new
-    // cache key every chunk and would otherwise evict other blocks from the LRU.
-    const persist = !isStreaming;
-    const warmHtml = highlightToHtmlSync(
-      code,
-      resolvedLang,
-      shikiTheme,
-      persist,
-    );
+    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
     if (warmHtml !== null) {
       setHtml(warmHtml);
       return;
@@ -470,19 +474,13 @@ function CodeBlock({
     // not-yet-loaded language on regeneration) so we render the current code as
     // plain text — not the prior block's stale highlight — until the load
     // resolves. Then re-check cancellation *before* the synchronous tokenization
-    // so superseded streaming snapshots that queued behind the same load don't
-    // each run codeToHtml.
+    // so a superseded settled block does not run codeToHtml.
     setHtml(null);
     let cancelled = false;
     getCodeHighlighter(resolvedLang)
       .then(() => {
         if (cancelled) return;
-        const cold = highlightToHtmlSync(
-          code,
-          resolvedLang,
-          shikiTheme,
-          persist,
-        );
+        const cold = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
         if (cold !== null) setHtml(cold);
       })
       .catch((err) => {
@@ -501,22 +499,17 @@ function CodeBlock({
   }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      },
-      () => {},
-    );
+    void writeClipboardText(code)
+      .then(() => {
+        flashCopied();
+      })
+      .catch(warnClipboardWriteFailure);
   };
 
   if (lang === 'mermaid' && !isStreaming) {
     return <MermaidBlock code={code} />;
   }
 
-  // `html` is always the highlight of the *current* `code` (re-highlighted
-  // synchronously per chunk), so it can be rendered directly — no prefix gate
-  // is needed to guard against showing a stale/previous block's HTML.
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
@@ -525,7 +518,7 @@ function CodeBlock({
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {html !== null ? (
+      {!isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -569,22 +562,52 @@ const IsStreamingContext = createContext(false);
 const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
   undefined,
 );
+const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+
+interface PositionedCodeNode {
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
+}
+
+function isIncompleteTailFence(
+  document: string | undefined,
+  node: PositionedCodeNode | undefined,
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming || document === undefined) return false;
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
+  return (
+    !isMarkdownFenceClosed(document.slice(start, end)) &&
+    document.slice(end).trim().length === 0
+  );
+}
 
 function MarkdownCode({
   className,
   children,
+  node,
 }: {
   className?: string;
   children?: ReactNode;
+  node?: PositionedCodeNode;
 }) {
   const isStreaming = useContext(IsStreamingContext);
+  const document = useContext(MarkdownDocumentContext);
   const isBlock =
     className?.startsWith('language-') ||
     (typeof children === 'string' && children.includes('\n'));
 
   if (isBlock) {
     return (
-      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+      <MarkdownFencedCode
+        className={className}
+        isStreaming={isStreaming}
+        isIncomplete={isIncompleteTailFence(document, node, isStreaming)}
+      >
         {children}
       </MarkdownFencedCode>
     );
@@ -596,10 +619,12 @@ function MarkdownFencedCode({
   className,
   children,
   isStreaming,
+  isIncomplete,
 }: {
   className?: string;
   children?: ReactNode;
   isStreaming?: boolean;
+  isIncomplete?: boolean;
 }) {
   const source = useContext(MarkdownSourceContext);
   const appTheme = useTheme();
@@ -623,6 +648,7 @@ function MarkdownFencedCode({
         className,
         code,
         isStreaming: !!isStreaming,
+        isIncomplete: !!isIncomplete,
         source,
         theme: appTheme,
       });
@@ -636,6 +662,7 @@ function MarkdownFencedCode({
               source,
               appTheme,
               isStreaming ? 'streaming' : 'settled',
+              isIncomplete ? 'incomplete' : 'complete',
               code,
             ]}
           >
@@ -687,7 +714,12 @@ function MarkdownLink({
   href?: string;
   children?: ReactNode;
 }) {
+  const renderMode = useTranscriptRenderMode();
+  const openExternalLink = useExternalLinkOpener();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
+    if (renderMode === 'readonly') {
+      return <span className={styles.link}>{children}</span>;
+    }
     const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
     return (
       <a
@@ -713,6 +745,7 @@ function MarkdownLink({
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
+      onClick={(event) => openExternalLink(event, safeHref)}
     >
       {children}
     </a>
@@ -722,6 +755,74 @@ function MarkdownLink({
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const safeSrc = isSafeImageSrc(src) ? src : undefined;
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+}
+
+/**
+ * Throttles a rapidly changing value (like a streaming string) to prevent
+ * O(n²) re-parsing of the entire Markdown AST on every token.
+ */
+function useThrottledValue(
+  value: string,
+  isStreaming: boolean | undefined,
+  intervalMs: number = 80,
+): string {
+  const [throttled, setThrottled] = useState(value);
+  const throttledRef = useRef(throttled);
+  throttledRef.current = throttled;
+  const lastRunRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      // Flush immediately when streaming stops
+      if (throttledRef.current !== value) {
+        setThrottled(value);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastRunRef.current;
+
+    if (elapsed >= intervalMs) {
+      lastRunRef.current = now;
+      setThrottled(valueRef.current);
+    } else if (!timeoutRef.current) {
+      timeoutRef.current = setTimeout(() => {
+        lastRunRef.current = Date.now();
+        timeoutRef.current = null;
+        setThrottled(valueRef.current);
+      }, intervalMs - elapsed);
+    }
+  }, [value, isStreaming, intervalMs]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isStreaming) return value;
+
+  // Bypass throttle for non-monotonic changes
+  if (
+    typeof value === 'string' &&
+    typeof throttled === 'string' &&
+    !value.startsWith(throttled)
+  ) {
+    return value;
+  }
+
+  return throttled;
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
@@ -759,6 +860,35 @@ function createComponents(
 
 const COMPONENTS_DEFAULT = createComponents();
 
+/**
+ * Isolated memoized renderer. This ensures react-markdown ONLY re-parses
+ * when the throttled content or plugin references actually change.
+ */
+const MemoizedMarkdownRenderer = memo(function MemoizedMarkdownRenderer({
+  content,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: {
+  content: string;
+  components: Options['components'];
+  remarkPlugins: Options['remarkPlugins'];
+  rehypePlugins: Options['rehypePlugins'];
+  urlTransform: Options['urlTransform'];
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 export const Markdown = memo(function Markdown({
   content,
   source,
@@ -766,20 +896,33 @@ export const Markdown = memo(function Markdown({
   tableMode,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
+  const theme = useTheme();
   const sourceMarkdown = source ? markdown : undefined;
-  const renderedContent =
-    content && source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(content, { source })
-      : content;
+
+  const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderStreamingPlainText =
+    isStreaming === true &&
+    throttledContent.length > STREAMING_MARKDOWN_PARSE_LIMIT;
+  const renderedContent = useMemo(
+    () =>
+      throttledContent && source && sourceMarkdown?.transformMarkdown
+        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        : throttledContent,
+    [source, sourceMarkdown, throttledContent],
+  );
+
   const effectiveTableMode = isStreaming
     ? 'basic'
     : (tableMode ?? markdownTableMode ?? 'basic');
+
+  // Memoize components so references stay stable during throttle window
   const components = useMemo(() => {
     if (effectiveTableMode === 'advanced') {
       return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
   }, [effectiveTableMode, renderedContent]);
+
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
@@ -789,14 +932,87 @@ export const Markdown = memo(function Markdown({
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
   }, [components, effectiveTableMode, sourceComponents]);
+  const chart =
+    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+      ? (sourceMarkdown?.chart ??
+        (sourceMarkdown?.renderCodeBlock
+          ? undefined
+          : DEFAULT_WEB_SHELL_MARKDOWN_CHART))
+      : undefined;
+  const chartPre = useMemo(
+    () =>
+      chart
+        ? createWebShellMarkdownChartPre(chart.registry, {
+            chartClassName: chart.chartClassName,
+            chartStyle: { minHeight: 360, ...chart.chartStyle },
+          })
+        : undefined,
+    [chart],
+  );
+  const componentsWithCharts = useMemo(
+    () =>
+      chartPre
+        ? {
+            ...renderedComponents,
+            pre: chartPre,
+          }
+        : renderedComponents,
+    [chartPre, renderedComponents],
+  );
+
+  // Memoize plugins so their array references remain stable.
+  const remarkPlugins = useMemo(() => {
+    return sourceMarkdown?.remarkPlugins
+      ? [
+          remarkGfm,
+          remarkMath,
+          remarkCjkFriendly,
+          ...sourceMarkdown.remarkPlugins,
+        ]
+      : [remarkGfm, remarkMath, remarkCjkFriendly];
+  }, [sourceMarkdown?.remarkPlugins]);
+
+  const rehypePlugins = useMemo(() => {
+    return sourceMarkdown?.rehypePlugins
+      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+      : [rehypeKatex];
+  }, [sourceMarkdown?.rehypePlugins]);
 
   if (!content) return null;
-  const remarkPlugins = sourceMarkdown?.remarkPlugins
-    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-    : [remarkGfm, remarkMath];
-  const rehypePlugins = sourceMarkdown?.rehypePlugins
-    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-    : [rehypeKatex];
+
+  if (renderStreamingPlainText) {
+    return (
+      <div
+        className={source !== 'thinking' ? styles.content : undefined}
+        data-markdown-source={source}
+        data-markdown-streaming-plain-text="true"
+      >
+        <pre className={styles.streamingPlainText}>{renderedContent}</pre>
+      </div>
+    );
+  }
+
+  const renderedMarkdown = (
+    <MemoizedMarkdownRenderer
+      content={renderedContent}
+      components={componentsWithCharts}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={markdownUrlTransform}
+    />
+  );
+  const chartAwareMarkdown = chart ? (
+    <WebShellMarkdownChartProvider
+      customization={chart}
+      source={renderedContent}
+      streaming={!!isStreaming}
+      theme={theme}
+    >
+      {renderedMarkdown}
+    </WebShellMarkdownChartProvider>
+  ) : (
+    renderedMarkdown
+  );
 
   return (
     <div
@@ -805,14 +1021,9 @@ export const Markdown = memo(function Markdown({
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>
-          <ReactMarkdown
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={rehypePlugins}
-            components={renderedComponents}
-            urlTransform={markdownUrlTransform}
-          >
-            {renderedContent}
-          </ReactMarkdown>
+          <MarkdownDocumentContext.Provider value={renderedContent}>
+            {chartAwareMarkdown}
+          </MarkdownDocumentContext.Provider>
         </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>

@@ -11,7 +11,10 @@ const DISPOSE_WAIT_MS = 5_000;
 
 export class VoiceLeaseAbortError extends Error {
   constructor(
-    readonly kind: 'daemon_shutdown' | 'workspace_removed',
+    readonly kind:
+      | 'daemon_shutdown'
+      | 'workspace_removed'
+      | 'trust_reconfigured',
     message: string,
   ) {
     super(message);
@@ -105,7 +108,7 @@ export class WorkspaceVoiceCoordinator {
 
   async disposeRuntime(
     runtime: WorkspaceRuntime,
-    reason: 'daemon_shutdown' | 'workspace_removed',
+    reason: 'daemon_shutdown' | 'workspace_removed' | 'trust_reconfigured',
   ): Promise<void> {
     this.disposed.add(runtime);
     const state = this.states.get(runtime);
@@ -114,9 +117,11 @@ export class WorkspaceVoiceCoordinator {
     state.completed = true;
     const abortReason = new VoiceLeaseAbortError(
       reason,
-      reason === 'workspace_removed'
-        ? 'Workspace runtime was removed'
-        : 'Daemon is shutting down',
+      reason === 'daemon_shutdown'
+        ? 'Daemon is shutting down'
+        : reason === 'workspace_removed'
+          ? 'Workspace runtime was removed'
+          : 'Workspace trust was reconfigured',
     );
     for (const lease of state.leases) lease.abort(abortReason);
     if (state.leases.size === 0) {

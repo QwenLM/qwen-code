@@ -9,15 +9,17 @@
  * handles daemon discovery and first-use pairing before framing the Web Shell.
  *
  * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
- * (which the bundled service worker uses) to stay standalone.
+ * (which the bundled service worker uses). The capability model is loaded from
+ * sidepanel/capability-status.js via a script tag in sidepanel.html.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, crypto, TextEncoder, btoa */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, crypto, TextEncoder, btoa, QwenCapabilityStatus, console */
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
 const FRAMED_MISS_LIMIT = 2;
+const MCP_POLL_EVERY = 5;
 const SHELL_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DAEMON_READY_MESSAGE_TYPE = 'qwen-daemon-ready';
 const OFFICIAL_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
@@ -45,6 +47,7 @@ const els = {
   pairSubmit: document.getElementById('pair-submit'),
   pairMessage: document.getElementById('pair-message'),
   statusText: document.querySelector('.status__text'),
+  warning: document.getElementById('capability-warning'),
 };
 
 /** Whether a URL points at the local loopback interface. */
@@ -85,6 +88,8 @@ async function readConfig() {
 }
 
 /** GET a daemon endpoint with a short timeout; returns parsed JSON or null. */
+// A non-JSON body returns null (not {}) so callers treat it as unreachable
+// rather than as a valid-but-empty response.
 async function probeJson(url, token, options = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
@@ -98,7 +103,7 @@ async function probeJson(url, token, options = {}) {
       signal: ctrl.signal,
     });
     if (!res.ok) return null;
-    return await res.json().catch(() => ({}));
+    return await res.json();
   } catch {
     return null;
   } finally {
@@ -182,7 +187,45 @@ function notifyDaemonReady() {
 
 let pendingPairingNonce = null;
 
-/** Probe the daemon and reduce it to one onboarding state. */
+/** MCP snapshot polling state for the legacy external-adapter warning banner. */
+let mcpProbeCounter = 0;
+let cachedMcpSnapshot;
+let lastProbedBaseUrl;
+
+/**
+ * Compute the browser-automation warning banner. Only the legacy external
+ * adapter path (`browser_automation_mcp`) has a discoverable adapter status;
+ * the native tool catalog needs no banner, so return null when it is absent.
+ */
+async function deriveWarning(baseUrl, token, features) {
+  const { deriveCapabilityStatus } = QwenCapabilityStatus;
+  if (baseUrl !== lastProbedBaseUrl) {
+    lastProbedBaseUrl = baseUrl;
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+  }
+  if (!features.includes('browser_automation_mcp')) {
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+    return null;
+  }
+  // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
+  // is live, so refresh it on a slower cadence than health/capabilities and
+  // reuse the last snapshot in between. The banner content changes rarely and
+  // need not contend with an in-flight generation on every 2s tick.
+  let mcpSnapshot;
+  if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
+    const fresh = await probeJson(`${baseUrl}/workspace/mcp`, token);
+    // A transient failure after a successful probe keeps the previous snapshot
+    // instead of pinning automation-unavailable for MCP_POLL_EVERY ticks.
+    if (fresh !== null || !cachedMcpSnapshot) cachedMcpSnapshot = fresh;
+  }
+  mcpProbeCounter += 1;
+  mcpSnapshot = cachedMcpSnapshot;
+  return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl).warning;
+}
+
+/** Probe the daemon and reduce it to one onboarding state plus a warning. */
 async function probeState(baseUrl, token, extensionPairingCredential) {
   if (await verifyPairing(baseUrl, extensionPairingCredential)) {
     pendingPairingNonce = null;
@@ -193,7 +236,7 @@ async function probeState(baseUrl, token, extensionPairingCredential) {
     const status = await probeJson(`${baseUrl}/extension/pairing`, undefined);
     if (status?.paired === true) {
       pendingPairingNonce = null;
-      return 'needs-restart';
+      return { state: 'needs-restart', warning: null };
     }
     if (
       status?.paired === false &&
@@ -201,53 +244,61 @@ async function probeState(baseUrl, token, extensionPairingCredential) {
       /^[A-Za-z0-9_-]{22}$/.test(status.pairingNonce)
     ) {
       pendingPairingNonce = status.pairingNonce;
-      return 'needs-pairing';
+      return { state: 'needs-pairing', warning: null };
     }
     pendingPairingNonce = null;
     // This carries no credential. A successful health probe with no pairing
     // route identifies an older daemon, so the panel can show the right fix.
     const legacyHealth = await probeJson(`${baseUrl}/health`, undefined);
-    return legacyHealth ? 'needs-upgrade' : 'down';
+    return { state: legacyHealth ? 'needs-upgrade' : 'down', warning: null };
   }
 
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) {
-    return 'down';
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+    return { state: 'down', warning: null };
   }
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
-  if (!features.includes('allow_origin')) return 'needs-allow-origin';
-  return 'ready';
+  if (!features.includes('allow_origin')) {
+    return { state: 'needs-allow-origin', warning: null };
+  }
+  return {
+    state: 'ready',
+    warning: await deriveWarning(baseUrl, token, features),
+  };
 }
 
 /** Render the welcome screen for a non-ready state. */
-function showWelcome(state, command) {
+function showWelcome(status, command) {
   framedUrl = null;
   els.iframe.removeAttribute('src');
   els.iframe.classList.add('hidden');
+  els.warning.classList.add('hidden');
   els.welcome.classList.remove('hidden');
-  els.pairForm.classList.toggle('hidden', state !== 'needs-pairing');
+  els.pairForm.classList.toggle('hidden', status.state !== 'needs-pairing');
   els.cmd.textContent = command;
-  if (state === 'down') {
+  if (status.state === 'down') {
     els.title.textContent = 'Start qwen serve';
     els.desc.textContent =
       'No local qwen serve daemon is reachable. Run this in a terminal and ' +
       'leave it running, then this panel connects automatically.';
     els.statusText.textContent = 'Listening for the daemon...';
-  } else if (state === 'needs-allow-origin') {
+  } else if (status.state === 'needs-allow-origin') {
     els.title.textContent = 'Allow this extension';
     els.desc.textContent =
       'qwen serve is running but is not allowed to load its UI here. Restart ' +
       'it with the flag below (it names this extension), then this panel ' +
       'connects automatically.';
     els.statusText.textContent = 'Waiting for an allowed daemon...';
-  } else if (state === 'needs-upgrade') {
+  } else if (status.state === 'needs-upgrade') {
     els.title.textContent = 'Update Qwen Code';
     els.desc.textContent =
       'The local daemon is running but does not support secure Chrome ' +
       'extension pairing. Update Qwen Code, then restart qwen serve.';
     els.statusText.textContent = 'Waiting for an updated daemon...';
-  } else if (state === 'needs-restart') {
+  } else if (status.state === 'needs-restart') {
     els.title.textContent = 'Restart qwen serve';
     els.desc.textContent =
       'Chrome pairing data is missing or no longer matches this daemon. Stop ' +
@@ -278,7 +329,7 @@ function postShellAuth(baseUrl, token, extensionPairingCredential) {
 }
 
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
-function showShell(baseUrl, token, extensionPairingCredential) {
+function showShell(baseUrl, token, extensionPairingCredential, status) {
   framedMisses = 0;
   els.welcome.classList.add('hidden');
   els.pairForm.classList.add('hidden');
@@ -292,6 +343,9 @@ function showShell(baseUrl, token, extensionPairingCredential) {
     postShellAuth(baseUrl, token, extensionPairingCredential);
   }
   els.iframe.classList.remove('hidden');
+  const warning = status.warning || '';
+  if (els.warning.textContent !== warning) els.warning.textContent = warning;
+  els.warning.classList.toggle('hidden', !warning);
 }
 
 /**
@@ -300,17 +354,17 @@ function showShell(baseUrl, token, extensionPairingCredential) {
  */
 let ticking = false;
 async function tick() {
-  // Reentrancy guard: probeState runs two sequential fetches (up to ~4s) but
-  // setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
+  // Reentrancy guard: probeState can run several sequential fetches (up to ~6s),
+  // but setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
   // burning the FRAMED_MISS_LIMIT tolerance at ~2× and flashing the welcome
   // screen (clearing the user's in-flight chat) while the daemon is just slow.
   if (ticking) return;
   ticking = true;
   try {
     const { baseUrl, token, extensionPairingCredential } = await readConfig();
-    const state = await probeState(baseUrl, token, extensionPairingCredential);
-    if (state === 'ready') {
-      showShell(baseUrl, token, extensionPairingCredential);
+    const status = await probeState(baseUrl, token, extensionPairingCredential);
+    if (status.state === 'ready') {
+      showShell(baseUrl, token, extensionPairingCredential, status);
     } else {
       if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
         framedMisses += 1;
@@ -318,12 +372,26 @@ async function tick() {
       }
       framedMisses = 0;
       showWelcome(
-        state,
-        state === 'needs-upgrade'
+        status,
+        status.state === 'needs-upgrade'
           ? 'npm install -g @qwen-code/qwen-code@latest'
           : allowOriginCommand(chrome.runtime.id),
       );
     }
+  } catch (err) {
+    console.error('sidepanel probe failed:', err);
+    if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
+      framedMisses += 1;
+      return;
+    }
+    framedMisses = 0;
+    showWelcome(
+      { state: 'down', warning: null },
+      allowOriginCommand(chrome.runtime.id),
+    );
+    els.desc.textContent =
+      'The side panel hit an internal error. Reload the panel or ' +
+      'reinstall the extension if this persists.';
   } finally {
     ticking = false;
   }

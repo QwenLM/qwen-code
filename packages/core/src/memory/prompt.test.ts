@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  appendManagedAutoMemoryToUserMemory,
   buildManagedAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
   CONDENSED_TEAM_GUIDANCE,
@@ -54,21 +53,8 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('live tool definitions are authoritative');
   });
 
-  it('appends managed auto-memory after existing hierarchical memory', () => {
-    const result = appendManagedAutoMemoryToUserMemory(
-      '--- Context from: QWEN.md ---\nProject rules',
-      '/tmp/project/.qwen/memory',
-      '- [Project Memory](project/release-freeze.md) — Release freeze starts Friday.',
-    );
-
-    expect(result).toContain('Project rules');
-    expect(result).toContain('\n\n---\n\n');
-    expect(result).toContain('# auto memory');
-  });
-
-  it('returns only managed auto-memory when hierarchical memory is empty', () => {
-    const result = appendManagedAutoMemoryToUserMemory(
-      '   ',
+  it('builds a standalone managed auto-memory section', () => {
+    const result = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
       '- [Reference](reference/grafana.md) — Grafana dashboard link.',
     );
@@ -242,17 +228,15 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).not.toContain('## Saving to team memory');
   });
 
-  it('appendManagedAutoMemoryToUserMemory passes through options', () => {
-    const withOptions = appendManagedAutoMemoryToUserMemory(
-      '',
+  it('buildManagedAutoMemoryPrompt passes through options', () => {
+    const withOptions = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
       null,
       undefined,
       undefined,
       { forceFullProtocol: true },
     );
-    const without = appendManagedAutoMemoryToUserMemory(
-      '',
+    const without = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
       null,
     );

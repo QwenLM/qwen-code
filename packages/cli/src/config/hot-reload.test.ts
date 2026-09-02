@@ -18,8 +18,10 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
   ApprovalMode,
+  AuthType,
   type Config,
   type MCPServerConfig,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, Settings } from './settings.js';
 import type {
@@ -28,6 +30,7 @@ import type {
 } from './settingsWatcher.js';
 import {
   registerMcpHotReload,
+  registerModelProvidersHotReload,
   mcpServersEqual,
   mcpGatingEqual,
 } from './hot-reload.js';
@@ -111,6 +114,8 @@ interface FakeConfigState {
   /** Startup `--allowed-mcp-server-names` upper bound (K); default undefined. */
   bootAllowed?: string[];
   approvalMode?: ApprovalMode;
+  bareMode?: boolean;
+  safeMode?: boolean;
 }
 
 function makeFakeConfig(cwd: string, state: FakeConfigState) {
@@ -126,6 +131,8 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
   });
   const config = {
     getApprovalMode: () => state.approvalMode ?? ApprovalMode.DEFAULT,
+    getBareMode: () => state.bareMode ?? false,
+    isSafeMode: () => state.safeMode ?? false,
     getTargetDir: () => cwd,
     getSettingsMcpServers: () => state.settingsMcp,
     // Stand-in for the effective (settings + extensions + runtime) map; the
@@ -211,6 +218,88 @@ describe('registerMcpHotReload', () => {
       a: { command: 'a' },
       cliSrv: { command: 'cli' },
     });
+  });
+
+  it('safe mode: a settings.mcpServers change does NOT smuggle local servers into the live session, only top-tier survives', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: {},
+      safeMode: true,
+    });
+    const topTier = { cliSrv: { command: 'cli' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    // A local settings.json edit fires while the safe-mode session is live.
+    merged.mcpServers = { local: { command: 'should-not-leak-in' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
+      cliSrv: { command: 'cli' },
+    });
+  });
+
+  it('bare mode: a settings.mcpServers change does NOT smuggle local servers into the live session', async () => {
+    // Non-empty initial state so the bare-mode-forced `{}` below is a real,
+    // detectable diff (a `{} -> {}` no-op wouldn't exercise the reconcile
+    // path at all).
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { stale: { command: 'stale' } },
+      gating: {},
+      bareMode: true,
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { local: { command: 'should-not-leak-in' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({});
+  });
+
+  it('safe mode: a settings.json mcp.allowed edit does NOT leak in and filter the caller-supplied top-tier server mid-session', async () => {
+    // recomputeMcpGating reads settings.merged.mcp.allowed/excluded
+    // unconditionally, with no bare/safe guard of its own — before the fix,
+    // registerMcpHotReload's own bare/safe guard only covered `next` (the
+    // servers map), not the gating lists computed right after it. A live
+    // settings.json edit narrowing mcp.allowed during an already-running
+    // safe-mode session would flow straight into setAllowedMcpServers and
+    // silently filter the caller's top-tier server out of getMcpServers()
+    // mid-session — the same stranded-server class of bug this PR already
+    // fixes at boot, reached through the gating list's SOURCE instead of the
+    // mcpServers map. Initial gating.allowed is non-empty so the edit below
+    // is a real, detectable change regardless of which branch runs (bug or
+    // fix) — otherwise a same-value no-op would short-circuit before either
+    // branch's result is ever applied.
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { allowed: ['probe'] },
+      safeMode: true,
+    });
+    const topTier = { probe: { command: 'probe' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    merged.mcp = { allowed: ['some-other-server'] };
+    await listener([]);
+
+    // No --allowed-mcp-server-names flag at startup (bootAllowed undefined)
+    // ⇒ the fixed path applies `undefined` (allow-all, i.e. only the
+    // never-gated top-tier map matters); the buggy path would instead pass
+    // through the settings-sourced ['some-other-server'], excluding `probe`.
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(undefined);
+  });
+
+  it('bare mode: a settings.json mcp.allowed edit does NOT leak in and filter the caller-supplied top-tier server mid-session', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { allowed: ['probe'] },
+      bareMode: true,
+    });
+    const topTier = { probe: { command: 'probe' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    merged.mcp = { allowed: ['some-other-server'] };
+    await listener([]);
+
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(undefined);
   });
 
   it('reconciles on an admission-list-only change (mcp.excluded), servers unchanged', async () => {
@@ -490,5 +579,207 @@ describe('registerMcpHotReload', () => {
     } finally {
       appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
     }
+  });
+});
+
+// ── modelProviders hot-reload (#10568) ────────────────────────────────
+
+describe('registerModelProvidersHotReload', () => {
+  let listener: SettingsChangeListener;
+  let watcher: SettingsWatcher;
+  let unsubscribe: Mock;
+  let settings: LoadedSettings;
+  let merged: Settings;
+  let reloadModelProvidersConfig: Mock;
+  let refreshAuth: Mock;
+  let config: Config;
+  /** The registry's APPLIED providers config (what the gate diffs against). */
+  let applied: ModelProvidersConfig | undefined;
+  function makeModelConfig(initialApplied?: ModelProvidersConfig): void {
+    applied = initialApplied;
+    reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
+      applied = next;
+    });
+    refreshAuth = vi.fn(async () => {});
+    config = {
+      reloadModelProvidersConfig,
+      refreshAuth,
+      getAuthType: () => AuthType.USE_OPENAI,
+      getModelProvidersConfig: () => applied,
+    } as unknown as Config;
+  }
+
+  beforeEach(() => {
+    unsubscribe = vi.fn();
+    watcher = {
+      addChangeListener: vi.fn((l: SettingsChangeListener) => {
+        listener = l;
+        return unsubscribe;
+      }),
+    } as unknown as SettingsWatcher;
+
+    merged = {} as Settings;
+    settings = { merged } as LoadedSettings;
+    makeModelConfig(undefined);
+  });
+
+  it('returns the watcher unsubscribe fn', () => {
+    const dispose = registerModelProvidersHotReload(watcher, settings, config);
+    expect(watcher.addChangeListener).toHaveBeenCalledOnce();
+    dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('reloads the registry with the merged modelProviders on change', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-new', baseUrl: 'https://example.com' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    // providerProtocol is boot-frozen (requiresRestart), so it must NOT be
+    // passed — reloadModels preserves the existing protocol map.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
+    // Watcher-triggered refresh must never start an interactive auth flow:
+    // the second argument makes QWEN_OAUTH require cached credentials, so
+    // unavailable credentials reject into the listener's catch (debug-logged,
+    // retried on later events) instead of prompting a device-auth mid-session.
+    expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
+  });
+
+  it('skips the reload when an unrelated settings key changed', async () => {
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    // Boot already applied the boot-time providers.
+    makeModelConfig(merged.modelProviders);
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    (merged as Settings & { theme?: string }).theme = 'dark';
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('treats absent and {} modelProviders as unchanged', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {} as ModelProvidersConfig;
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('does not re-reload the same snapshot on repeat events', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('retries a throwing reload on the next event', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    reloadModelProvidersConfig.mockImplementationOnce(() => {
+      throw new Error('rebuild failed');
+    });
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('retries only refreshAuth on later unchanged events after it failed once', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    refreshAuth
+      .mockRejectedValueOnce(new Error('transient token blip'))
+      .mockRejectedValueOnce(new Error('still flaky'));
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
+
+    // Same snapshot again: retry only refreshAuth, never the registry reload.
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(2);
+
+    // A successful retry clears the flag.
+    await listener([]);
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(3);
+  });
+
+  it('reloads after an out-of-band registry rewrite desynced applied state', async () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    merged.modelProviders = bootProviders;
+    makeModelConfig(bootProviders);
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    // Provider-template / ACP flow: settings.setValue updates merged without
+    // a watcher event (self-write), then reloads the registry out-of-band.
+    const outOfBand = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
+    } as ModelProvidersConfig;
+    merged.modelProviders = outOfBand;
+    applied = outOfBand;
+
+    // User hand-edits settings.json back to the boot value.
+    merged.modelProviders = bootProviders;
+    await listener([]);
+
+    // The gate diffs against APPLIED state, so the edit is not skipped even
+    // though it equals an earlier value.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(bootProviders);
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles once at registration for edits that landed before the listener attached', async () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    makeModelConfig(bootProviders);
+    // An edit refreshed settings.merged during the loadCliConfig window,
+    // before any listener existed.
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
+    } as ModelProvidersConfig;
+
+    registerModelProvidersHotReload(watcher, settings, config);
+    await Promise.resolve();
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 });

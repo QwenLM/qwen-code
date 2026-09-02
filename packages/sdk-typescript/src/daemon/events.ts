@@ -5,12 +5,17 @@
  */
 
 import type {
+  DaemonBranchPoint,
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSessionPrInfo,
+  DaemonSkillToggleMutation,
   PermissionOutcome,
+  PromptContentBlock,
 } from './types.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
 // validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
@@ -144,6 +149,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // consumers silently drop this event via `asKnownDaemonEvent`
   // returning undefined (no protocol bump required).
   'followup_suggestion',
+  'channel_delivery_result',
   'user_shell_command',
   'user_shell_result',
   'turn_complete',
@@ -156,6 +162,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // clients can seed their reducer without an extra round-trip.
   'session_snapshot',
   'git_branch_changed',
+  // Enriched working-tree summary push: the daemon recomputes `git status`
+  // in the background (stale-while-revalidate on `GET …/git`) and publishes
+  // this only when the summary changed. `data` is a DaemonWorkspaceGitStatus.
+  // Old SDK consumers silently drop it via `asKnownDaemonEvent`.
+  'git_status_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -287,6 +298,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
 
@@ -299,33 +311,24 @@ export interface DaemonArtifactChangedData {
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
- * drain). It is a transient dedupe signal, not a transcript item: consumers
- * move these messages out of their pending queue so they aren't resent as the
- * next turn. They are not rendered from this event — the message already reached
- * the model mid-turn, and the persisted transcript shows it on reload.
+ * drain). Consumers move these messages out of their pending queue so they
+ * aren't resent as the next turn; UI adapters may also render the attached
+ * text/media as the immediate mid-turn echo.
  */
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
+  messageIds?: string[];
   /**
-   * Trusted client id that queued these messages, so a consumer dedupes only its
-   * OWN pending queue — a peer attached to the same session must not drop a
-   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
-   *
-   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
-   * its own client id and skip frames originated by a different client. The
-   * daemon broadcasts the frame to every SSE subscriber on the session and does
-   * NOT route by originator, so a consumer that dedupes unconditionally will drop
-   * another client's coincidentally-equal pending message (double delivery).
-   *
-   * IMPORTANT — wire location: unlike the permission/settings events (which the
-   * session reducer's `mergeOriginator` step copies from the envelope INTO
-   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
-   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
-   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
-   * is filled in only by a consumer that lifts it off the envelope itself (the
-   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
-   * this shape so that lifted representation is well-typed.
+   * Parallel array to `messages` — one entry per drained message. Each entry
+   * may carry image content blocks the daemon attached to the
+   * original queued payload, so the browser echo renderer can show them
+   * alongside the message text. Older daemons omit this field.
+   */
+  items?: Array<{ content?: PromptContentBlock[] }>;
+  /**
+   * Present only on events from older daemons. New daemons publish one
+   * session-wide batch and clients reconcile it by message id.
    */
   originatorClientId?: string;
   [key: string]: unknown;
@@ -389,12 +392,22 @@ export interface DaemonStateResyncRequiredData {
    * Machine-readable resync reason. One of:
    * - `'ring_evicted'`: consumer's `Last-Event-ID` fell behind the ring's
    *   earliest surviving id (same-epoch gap).
-   * - `'epoch_reset'`: consumer's `Last-Event-ID` is past the bus
-   *   high-water — its cursor is from a previous bus epoch (daemon
-   *   restart rebuilt the EventBus). The whole fresh ring is replayed.
+   * - `'epoch_reset'`: consumer's cursor is from a previous bus epoch
+   *   (daemon restart rebuilt the EventBus). Triggered either by the
+   *   numeric heuristic (`Last-Event-ID` past the bus high-water) or by
+   *   an epoch token comparison (`X-Qwen-Event-Epoch` header does not
+   *   match the bus's current epoch — see `detail`). The whole fresh
+   *   ring is replayed.
    * Reserved for future causes (e.g. `'schema_version_bump'`).
    */
   reason: string;
+  /**
+   * Optional trigger discriminator on the wire. `'epoch_mismatch'` marks an
+   * `'epoch_reset'` produced by the epoch token comparison rather than the
+   * numeric heuristic. Operational/wire-level field — UI consumers key on
+   * `reason` alone.
+   */
+  detail?: string;
   /** Consumer's `Last-Event-ID` at reconnect time. */
   lastDeliveredId: number;
   /**
@@ -408,10 +421,22 @@ export interface DaemonStateResyncRequiredData {
 
 export interface DaemonHistoryTruncatedData {
   reason: 'replay_window_exceeded';
+  scope?: 'live_journal' | (string & {});
   truncatedEvents: number;
   retainedEvents: number;
   maxBytes: number;
+  maxEvents?: number;
   truncatedTurns?: number;
+  /**
+   * Pagination anchor: the last `qwen.session.recordId` observed by the
+   * daemon's compaction engine before the truncation point. Present when
+   * at least one recordId-bearing `session_update` was ingested or seeded
+   * during the engine's lifetime; omitted otherwise. Clients use this as
+   * the `beforeRecordId` for `GET /session/:id/transcript` pagination
+   * when the retained replay window lost every turn-boundary event
+   * (e.g. live-journal truncation during one long in-flight turn).
+   */
+  recordId?: string;
   fullTranscriptAvailable: boolean;
   [key: string]: unknown;
 }
@@ -650,6 +675,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonSettingsChangedData {
+  key: string;
+  value?: unknown;
+  scope?: string;
+  mutation?: DaemonSkillToggleMutation;
+  [key: string]: unknown;
+}
+
 export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
@@ -769,10 +802,39 @@ export interface DaemonFollowupSuggestionData {
   [key: string]: unknown;
 }
 
+// Independent copy — see CHANNEL_DELIVERY_ERROR_CODES below and the
+// daemonEvents test suite for the cross-check.
+export type DaemonChannelDeliveryErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_delivery_timeout'
+  | 'channel_delivery_invalid'
+  | 'channel_delivery_rejected'
+  | 'channel_delivery_queue_full'
+  | 'channel_delivery_failed';
+
+type DeliveryResultSource =
+  | { source: 'prompt'; promptId: string }
+  | { source: 'scheduled'; taskId: string; firedAt: number };
+
+export type DaemonChannelDeliveryResultData =
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'delivered' | 'skipped';
+    } & DeliveryResultSource)
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'failed';
+      code: DaemonChannelDeliveryErrorCode;
+      error: string;
+    } & DeliveryResultSource);
+
 export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -781,6 +843,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }
@@ -1029,7 +1092,7 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
 >;
 export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
-  Record<string, unknown>
+  DaemonSettingsChangedData
 >;
 export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
   'trust_change_requested',
@@ -1059,6 +1122,7 @@ export interface DaemonSettingsReloadedData {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
   [key: string]: unknown;
 }
 export type DaemonSettingsReloadedEvent = DaemonEventEnvelope<
@@ -1090,6 +1154,11 @@ export type DaemonAuthDeviceFlowCancelledEvent = DaemonEventEnvelope<
 export type DaemonFollowupSuggestionEvent = DaemonEventEnvelope<
   'followup_suggestion',
   DaemonFollowupSuggestionData
+>;
+
+export type DaemonChannelDeliveryResultEvent = DaemonEventEnvelope<
+  'channel_delivery_result',
+  DaemonChannelDeliveryResultData
 >;
 
 export type DaemonTurnCompleteEvent = DaemonEventEnvelope<
@@ -1135,6 +1204,7 @@ export type DaemonSessionEvent =
   | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
+  | DaemonChannelDeliveryResultEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1607,10 +1677,12 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
-    case MID_TURN_MESSAGE_INJECTED_EVENT:
-      return isMidTurnMessageInjectedData(event.data)
-        ? (event as DaemonMidTurnMessageInjectedEvent)
+    case MID_TURN_MESSAGE_INJECTED_EVENT: {
+      const data = asMidTurnMessageInjectedData(event.data);
+      return data
+        ? ({ ...event, data } as DaemonMidTurnMessageInjectedEvent)
         : undefined;
+    }
     case PENDING_PROMPT_ADDED_EVENT:
       return isPendingPromptAddedData(event.data)
         ? (event as DaemonPendingPromptAddedEvent)
@@ -1688,11 +1760,8 @@ export function asKnownDaemonEvent(
         ? (event as DaemonToolToggledEvent)
         : undefined;
     case 'settings_changed':
-      return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<
-            'settings_changed',
-            Record<string, unknown>
-          >)
+      return isSettingsChangedData(event.data)
+        ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
       return isTrustChangeRequestedData(event.data)
@@ -1725,6 +1794,10 @@ export function asKnownDaemonEvent(
     case 'followup_suggestion':
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
+        : undefined;
+    case 'channel_delivery_result':
+      return isChannelDeliveryResultData(event.data)
+        ? (event as DaemonChannelDeliveryResultEvent)
         : undefined;
     case 'mcp_server_added':
       return isMcpServerAddedData(event.data)
@@ -2146,6 +2219,7 @@ export function reduceDaemonSessionEvent(
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
     case PENDING_PROMPT_COMPLETED_EVENT:
+    case 'channel_delivery_result':
       return base;
     case 'session_rewound':
       return {
@@ -2579,10 +2653,17 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isOptionalStringOrNull(value['displayName'])
+  ) {
+    return false;
+  }
+  const prs = value['prs'];
   return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    isOptionalStringOrNull(value['displayName'])
+    prs === undefined ||
+    (Array.isArray(prs) && prs.every(isDaemonSessionPrInfo))
   );
 }
 
@@ -2602,15 +2683,37 @@ function isArtifactChangedData(
   );
 }
 
-function isMidTurnMessageInjectedData(
+function asMidTurnMessageInjectedData(
   value: unknown,
-): value is DaemonMidTurnMessageInjectedData {
-  return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    Array.isArray(value['messages']) &&
-    value['messages'].every((message) => typeof message === 'string')
-  );
+): DaemonMidTurnMessageInjectedData | undefined {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !Array.isArray(value['messages']) ||
+    !value['messages'].every((message) => typeof message === 'string')
+  ) {
+    return undefined;
+  }
+  const messageIds = value['messageIds'];
+  // `messageIds` is an optional enrichment: a misaligned or malformed batch is
+  // dropped (mirroring `parseSidechannelMidTurnInjected`) rather than rejecting
+  // the whole event, so a buggy daemon can't silently lose the injection signal.
+  const alignedMessageIds =
+    Array.isArray(messageIds) &&
+    messageIds.length === value['messages'].length &&
+    messageIds.every(isNonEmptyString)
+      ? (messageIds as string[])
+      : undefined;
+  // Strip the raw `messageIds` before spreading so a malformed batch OMITS the
+  // key (matching `parseSidechannelMidTurnInjected`) instead of leaving a
+  // present `undefined` that breaks `'messageIds' in data` checks.
+  const { messageIds: _rawMessageIds, ...rest } =
+    value as DaemonMidTurnMessageInjectedData;
+  return {
+    ...rest,
+    messages: value['messages'] as string[],
+    ...(alignedMessageIds ? { messageIds: alignedMessageIds } : {}),
+  };
 }
 
 function isPendingPromptAddedData(
@@ -2685,10 +2788,14 @@ function isHistoryTruncatedData(
     return false;
   }
   const truncatedTurns = value['truncatedTurns'];
+  const scope = value['scope'];
+  const maxEvents = value['maxEvents'];
   return (
     isNonNegativeInteger(value['truncatedEvents']) &&
     isNonNegativeInteger(value['retainedEvents']) &&
     isNonNegativeInteger(value['maxBytes']) &&
+    (scope === undefined || isNonEmptyString(scope)) &&
+    (maxEvents === undefined || isNonNegativeInteger(maxEvents)) &&
     (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
   );
 }
@@ -2916,6 +3023,43 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
   );
 }
 
+function isDaemonSkillToggleMutation(
+  value: unknown,
+): value is DaemonSkillToggleMutation {
+  if (!isRecord(value)) return false;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  return (
+    isNonEmptyString(value['id']) &&
+    value['kind'] === 'skill_toggle' &&
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    skills.every(
+      (skill) =>
+        isRecord(skill) &&
+        isNonEmptyString(skill['name']) &&
+        typeof skill['enabled'] === 'boolean',
+    ) &&
+    (activation === 'applied' ||
+      activation === 'deferred' ||
+      activation === 'partial') &&
+    isFiniteNumber(value['sessionsRefreshed']) &&
+    isFiniteNumber(value['sessionsFailed'])
+  );
+}
+
+export function isSettingsChangedData(
+  value: unknown,
+): value is DaemonSettingsChangedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    (value['scope'] === undefined || typeof value['scope'] === 'string') &&
+    (value['mutation'] === undefined ||
+      isDaemonSkillToggleMutation(value['mutation']))
+  );
+}
+
 function isTrustChangeRequestedData(
   value: unknown,
 ): value is DaemonTrustChangeRequestedData {
@@ -3023,6 +3167,63 @@ function isFollowupSuggestionData(
     isNonEmptyString(value['suggestion']) &&
     isNonEmptyString(value['promptId'])
   );
+}
+
+// Independent copy of the canonical set in acp-bridge bridgeOptions.ts;
+// cross-checked by the daemonEvents test suite.
+const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_delivery_timeout',
+  'channel_delivery_invalid',
+  'channel_delivery_rejected',
+  'channel_delivery_queue_full',
+  'channel_delivery_failed',
+]);
+
+function isChannelDeliveryResultData(
+  value: unknown,
+): value is DaemonChannelDeliveryResultData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isNonEmptyString(value['deliveryId']) ||
+    (value['status'] !== 'delivered' &&
+      value['status'] !== 'failed' &&
+      value['status'] !== 'skipped') ||
+    !Object.keys(value).every((key) =>
+      [
+        'sessionId',
+        'deliveryId',
+        'source',
+        'status',
+        'promptId',
+        'taskId',
+        'firedAt',
+        'code',
+        'error',
+      ].includes(key),
+    )
+  ) {
+    return false;
+  }
+  const correlationValid =
+    (value['source'] === 'prompt' &&
+      isNonEmptyString(value['promptId']) &&
+      value['taskId'] === undefined &&
+      value['firedAt'] === undefined) ||
+    (value['source'] === 'scheduled' &&
+      isNonEmptyString(value['taskId']) &&
+      isFiniteNumber(value['firedAt']) &&
+      value['promptId'] === undefined);
+  if (!correlationValid) return false;
+  if (value['status'] === 'failed') {
+    return (
+      typeof value['code'] === 'string' &&
+      CHANNEL_DELIVERY_ERROR_CODES.has(value['code']) &&
+      isNonEmptyString(value['error'])
+    );
+  }
+  return value['code'] === undefined && value['error'] === undefined;
 }
 
 function isMcpServerAddedData(

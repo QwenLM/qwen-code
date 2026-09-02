@@ -12,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
   resolvePath,
   isSubpath,
   unescapePath,
@@ -22,7 +23,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   type FileFilteringOptions,
-} from '../config/constants.js';
+} from '../utils/file-filtering-options.js';
 import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -106,7 +107,11 @@ class GlobToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
     if (this.params.path) {
-      description += ` in path '${this.params.path}'`;
+      const displayPath = formatDisplayPath(
+        this.params.path,
+        this.config.getTargetDir(),
+      );
+      description += ` in ${displayPath}`;
     }
 
     return description;

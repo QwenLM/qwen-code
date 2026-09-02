@@ -8,7 +8,6 @@ import type { SlashCommand, MessageActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-import { expandCollapsedHistory } from '../utils/resumeHistoryUtils.js';
 
 const collapseOnResumeCommand: SlashCommand = {
   name: 'collapse-on-resume',
@@ -61,7 +60,7 @@ const expandNowCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
-  action: (context): MessageActionReturn | void => {
+  action: async (context): Promise<MessageActionReturn | void> => {
     const { history, loadHistory, refreshStatic } = context.ui;
 
     const hasSuppressed = history.some(
@@ -77,6 +76,9 @@ const expandNowCommand: SlashCommand = {
     }
 
     // Remove suppressOnRestore from all items and drop collapse summary items.
+    const { expandCollapsedHistory } = await import(
+      '../utils/resumeHistoryUtils.js'
+    );
     const updated = expandCollapsedHistory(history);
     loadHistory(updated);
     refreshStatic();

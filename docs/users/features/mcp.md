@@ -261,6 +261,28 @@ The existing `timeout` field is **tool-call** timeout (used for each
 `discoveryTimeoutMs` — a long-running tool invocation is not a startup
 pathology.
 
+### Automatic stdio negotiation
+
+Stdio servers use the single-process legacy initialize flow by default. To
+connect to a modern-only stdio server, opt into automatic protocol negotiation:
+
+```jsonc
+{
+  "mcpServers": {
+    "modern-server": {
+      "command": "node",
+      "args": ["./server.js"],
+      "versionNegotiation": "auto",
+    },
+  },
+}
+```
+
+Automatic negotiation runs a short-lived copy of the configured server before
+starting the session process and can use up to five seconds of the discovery
+budget. Keep the default legacy policy for servers with non-idempotent startup
+side effects, single-owner locks or PID files, or slow initialize handshakes.
+
 ### Rolling back progressive MCP
 
 If you need the old synchronous behavior (cli waits for every MCP server
@@ -271,7 +293,15 @@ environment. This is kept as an escape hatch for at least one release.
 
 ### Trust (skip confirmations)
 
-- **Server trust** (`trust: true`): bypasses confirmation prompts for that server (use sparingly).
+- **Server trust** (`trust: true`): bypasses confirmation prompts for that server only in a trusted workspace (use sparingly).
+
+### Connection-loss replay
+
+Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+
+Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
+
+Annotations are server-provided behavior hints, not permissions or an authorization boundary. Only configure `trust: true` for servers you control and whose annotations you have verified.
 
 ### OAuth authentication
 
@@ -295,13 +325,21 @@ The OAuth flow requires a redirect URI where the authorization provider sends th
 
 - **Local development**: By default, Qwen Code uses `http://localhost:7777/oauth/callback`. This works when running Qwen Code on your local machine with a local browser.
 
-- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. You MUST configure `--oauth-redirect-uri` to point to a publicly accessible URL that can receive the OAuth callback.
+- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. Configure `--oauth-redirect-uri` with a public URL ending in `/oauth/callback`, then reverse-proxy that path to `http://127.0.0.1:7777/oauth/callback` on the machine running Qwen Code. Qwen Code does not terminate TLS; the proxy must do so.
 
 Example for remote servers:
 
 ```bash
 qwen mcp add --transport sse remote-server https://api.example.com/sse/ \
   --oauth-redirect-uri https://your-remote-server.example.com/oauth/callback
+```
+
+For example, a reverse proxy can forward only this callback path to the local listener:
+
+```nginx
+location = /oauth/callback {
+  proxy_pass http://127.0.0.1:7777;
+}
 ```
 
 #### Manual configuration via settings.json
@@ -438,18 +476,19 @@ Required (one of the following):
 
 Optional:
 
-| Property               | Type/Default                 | Description                                                                                                                                                                                                                                                       |
-| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `args`                 | array                        | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
-| `headers`              | object                       | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
-| `env`                  | object                       | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
-| `cwd`                  | string                       | Working directory for Stdio transport                                                                                                                                                                                                                             |
-| `timeout`              | number<br>(default: 600,000) | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
-| `trust`                | boolean<br>(default: false)  | When `true`, bypasses all tool call confirmations for this server (default: `false`)                                                                                                                                                                              |
-| `includeTools`         | array                        | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
-| `excludeTools`         | array                        | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
-| `targetAudience`       | string                       | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
-| `targetServiceAccount` | string                       | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
+| Property               | Type/Default                                  | Description                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `args`                 | array                                         | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
+| `headers`              | object                                        | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
+| `env`                  | object                                        | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
+| `cwd`                  | string                                        | Working directory for Stdio transport                                                                                                                                                                                                                             |
+| `timeout`              | number<br>(default: 600,000)                  | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
+| `versionNegotiation`   | `"auto" \| "legacy"`<br>(default: `"legacy"`) | For Stdio servers, `"auto"` opts into protocol negotiation on a disposable sibling process. The default `"legacy"` starts only the session process.                                                                                                               |
+| `trust`                | boolean<br>(default: false)                   | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
+| `includeTools`         | array                                         | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
+| `excludeTools`         | array                                         | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
+| `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
+| `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
 
 <a id="qwen-mcp-cli"></a>
 
@@ -473,7 +512,7 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
 | `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
 | `--timeout`                 | Set connection timeout in milliseconds.                             | —                                      | `--timeout 30000`                                                  |
-| `--trust`                   | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)                            | `--trust`                                                          |
+| `--trust`                   | Trust the server; skip confirmations in trusted workspaces.         | — (`false`)                            | `--trust`                                                          |
 | `--description`             | Set the description for the server.                                 | —                                      | `--description "Local tools"`                                      |
 | `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
 | `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |

@@ -17,7 +17,12 @@
 // than the thing doing the launching. These tests pin that derivation.
 
 import { describe, it, expect } from 'vitest';
-import { requiredAgents, reviewMode, isTerritoryFanOut } from './roster.js';
+import {
+  requiredAgents,
+  reviewMode,
+  isTerritoryFanOut,
+  hasExecutableScript,
+} from './roster.js';
 
 /** A same-repo PR: a worktree to build in, a PR number to check an issue against. */
 const PR = {
@@ -69,7 +74,9 @@ describe('requiredAgents — Step 3A', () => {
         '1a',
         '1c',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
         '6a',
@@ -80,6 +87,27 @@ describe('requiredAgents — Step 3A', () => {
     );
     // And no territory agents: there are none at this size.
     expect(keys(PR).filter((k) => k.startsWith('chunk-'))).toEqual([]);
+  });
+
+  it('drops the adversarial personas when the plan records medium effort, but keeps every other dimension', () => {
+    // The personas (6a/6b/6c) are a high-only dimension; a balanced (medium)
+    // review deliberately does not launch them, so they must not be *required*
+    // — otherwise check-coverage flags them missing and exits 3, halting every
+    // small-diff medium review. The effort is read from the plan itself
+    // (`plan.effort`, written by the capturing command), never from a caller
+    // argument — a roster the caller could shrink is a roster that gets shrunk.
+    const med = keys({ ...PR, effort: 'medium' });
+    expect(med).not.toContain('6a');
+    expect(med).not.toContain('6b');
+    expect(med).not.toContain('6c');
+    expect(med).toEqual(
+      expect.arrayContaining(['0', '1a', '2', '3a', '3b', '3c', '4', '5', '7']),
+    );
+    // High, and the default (no effort recorded), still demand them.
+    expect(keys({ ...PR, effort: 'high' })).toEqual(
+      expect.arrayContaining(['6a', '6b', '6c']),
+    );
+    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c']));
   });
 
   it('skips the removed-behavior audit on a diff that removes nothing', () => {
@@ -137,6 +165,228 @@ describe('requiredAgents — Step 3A', () => {
     // But there IS a tree, so the tracer and the build still run.
     expect(keys(local)).toEqual(expect.arrayContaining(['1c', '7']));
   });
+
+  it('requires existing roles recorded by validated repository context without duplicates', () => {
+    const context = {
+      version: 1,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: ['runtime'],
+      relatedPaths: ['src/runtime.ts'],
+      recommendedTests: ['test:runtime'],
+      requiredConfigurations: ['linux-x64'],
+      requiredAgents: ['1a', '1b'],
+      unverifiedDimensions: ['Alternate runtime was not exercised'],
+      verificationNotes: ['Use the repository native test runner'],
+    };
+    // 1b is policy-permitted but data-gated away here (the diff deletes
+    // nothing); a context may require it back. 1a is already required and
+    // must not duplicate.
+    const roster = keys({ ...PR, repositoryContext: context });
+    expect(roster).toContain('1b');
+    expect(roster.filter((role) => role === '1a')).toHaveLength(1);
+  });
+
+  it('does not let repository context override the effort, topology, or mode gates', () => {
+    // A manifest may require agents the policy already runs; it may not
+    // inflate or wedge the run by re-adding roles the policy excludes.
+    const context = (requiredAgents: string[]) => ({
+      version: 1,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents,
+      unverifiedDimensions: [],
+      verificationNotes: [],
+    });
+
+    // The adversarial personas are a high-effort dimension: a medium review
+    // stays medium even when the repository names them.
+    const medium = keys({
+      ...PR,
+      effort: 'medium',
+      repositoryContext: context(['6a', '6b', '6c']),
+    });
+    expect(medium).not.toContain('6a');
+    expect(medium).not.toContain('6b');
+    expect(medium).not.toContain('6c');
+    // At high effort the same requirement is honoured (and deduplicated).
+    expect(
+      keys({ ...PR, repositoryContext: context(['6a']) }).filter(
+        (role) => role === '6a',
+      ),
+    ).toHaveLength(1);
+
+    // A lightweight review has no tree to grep: 1c cannot be required back.
+    const light = {
+      ...PR,
+      worktreePath: undefined,
+      prNumber: undefined,
+      repositoryContext: context(['1c']),
+    };
+    expect(keys(light)).not.toContain('1c');
+
+    // test-matrix is a fan-out role: a manifest cannot require it into a
+    // whole-diff (Step 3A) review, whose flow is not built around it — the
+    // denial half of the gate, which a `return fanOut` → `return true`
+    // regression would silently drop.
+    expect(
+      keys({ ...PR, repositoryContext: context(['test-matrix']) }),
+    ).not.toContain('test-matrix');
+
+    // A Step 3B fan-out keeps its topology: whole-diff dimension walkers and
+    // the high-effort personas stay out, while 3B's own roles are honoured.
+    const big = { ...PR, srcDiffLines: 5000, diffLines: 6000 };
+    const fanOut = keys({
+      ...big,
+      repositoryContext: context(['1b', '2', '6a', 'test-matrix']),
+    });
+    expect(fanOut).not.toContain('2');
+    expect(fanOut).not.toContain('6a');
+    expect(fanOut.filter((role) => role === 'test-matrix')).toHaveLength(1);
+    expect(fanOut).toContain('1b');
+  });
+
+  it('fails closed on a present-but-invalid repository context', () => {
+    // Full wire shape but version 2: the exact-keys check passes, the
+    // version gate throws. A try/catch-return-null wrapper around
+    // repositoryContextOf would silently drop every context-required role
+    // from the roster AND the coverage certification — certifying a run
+    // where the agents the repository required never launched.
+    const future = {
+      version: 2,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents: [],
+      unverifiedDimensions: [],
+      verificationNotes: [],
+    };
+    expect(() => keys({ ...PR, repositoryContext: future })).toThrow(
+      'unsupported repositoryContext version',
+    );
+  });
+
+  it('keeps the generic roster when repository context is absent', () => {
+    expect(keys(PR)).not.toContain('test-matrix');
+  });
+});
+
+describe('requiredAgents — the angles promoted out of Agent 1a (#9788)', () => {
+  it('requires the language-pitfall scan at high effort, like the personas', () => {
+    expect(keys(PR)).toContain('1d');
+    expect(keys({ ...PR, effort: 'high' })).toContain('1d');
+    // Not knowing the effort fails safe to the full roster.
+    expect(keys({ ...PR, effort: undefined })).toContain('1d');
+  });
+
+  it('drops both angles when the plan records medium effort', () => {
+    // They are a high-effort dimension, exactly like the personas: a balanced
+    // review deliberately skips them, so requiring them would halt every
+    // medium review of a small diff at check-coverage.
+    const med = keys({ ...PR, effort: 'medium' });
+    expect(med).not.toContain('1d');
+    expect(med).not.toContain('1e');
+  });
+
+  it('requires the wrapper/proxy check unless the plan explicitly says no wrapping type', () => {
+    // No signal recorded — a plan an older CLI wrote — is not "no wrappers",
+    // it is "we do not know", and the safe answer is to run the check: this
+    // change removes the clause from 1a, so a miss here leaves the class
+    // owned by nobody.
+    expect(keys(PR)).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: true })).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: 'nope' })).toContain('1e');
+    expect(keys({ ...PR, wrapperSignal: false })).not.toContain('1e');
+    // The explicit false drops ONLY 1e: 1d is unconditional at high effort,
+    // so a refactor nesting `add('1d')` inside the wrapper gate must fail
+    // here — every other fixture omits the field, which reads as true.
+    expect(keys({ ...PR, wrapperSignal: false })).toContain('1d');
+  });
+
+  it('does not demand either in a Step 3B fan-out — a chunk agent owns the dimensions for its lines', () => {
+    const big = { ...PR, srcDiffLines: 5000, diffLines: 6000 };
+    expect(keys(big)).not.toContain('1d');
+    expect(keys(big)).not.toContain('1e');
+  });
+});
+
+describe('hasExecutableScript — the script-lint gate predicate', () => {
+  // No longer an agent requirement: the orchestrator runs `qwen review
+  // script-lint` and compose-review reads its report. This predicate is what
+  // both share to decide whether the lint was OWED — detected by path, the same
+  // `pathTool` the command dispatches on, so the two cannot disagree.
+  it('is never in the agent roster', () => {
+    const plan = { ...PR, files: [{ path: 'deploy.sh', kind: 'source' }] };
+    expect(keys(plan)).not.toContain('script-lint');
+  });
+
+  it.each([
+    ['deploy.sh', true],
+    ['scripts/build.bash', true],
+    ['.github/workflows/ci.yml', true],
+    ['Dockerfile', true],
+    ['docker/api.Dockerfile', true],
+    ['src/pay.ts', false], // production TS: nothing a shell linter owns
+    ['README.md', false],
+    ['config.yml', false], // yaml, but not a workflow
+  ])('a diff touching %s is an executable script: %s', (path, owed) => {
+    expect(hasExecutableScript({ files: [{ path }] })).toBe(owed);
+  });
+
+  it('is true when any one file among many is an executable script', () => {
+    expect(
+      hasExecutableScript({
+        files: [
+          { path: 'src/a.ts' },
+          { path: 'src/b.ts' },
+          { path: '.husky/pre-commit.sh' },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it('trusts fileLines only in pr-worktree — a true deletion is exempt there, but never in local/diff-only', () => {
+    const wt = { worktreePath: '.qwen/tmp/review-pr-1' }; // pr-worktree mode
+    // pr-worktree: fileLines is a real post-image count, so 0 is a TRUE deletion
+    // (no file to lint) and is exempt...
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'gone.sh', fileLines: 0 }],
+      }),
+    ).toBe(false);
+    // ...while a surviving file (fileLines > 0) with addedLines 0 — a removed `fi`
+    // that breaks a `.sh` — is still owed.
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'broke.sh', addedLines: 0, fileLines: 12 }],
+      }),
+    ).toBe(true);
+    // local/diff-only: the report builder writes fileLines 0 for EVERY file (no
+    // post-image), so 0 is "unknown", NOT "deleted" — a surviving script must still
+    // be owed, or a missing report would pass uncapped. This is the fail-open fix.
+    expect(
+      hasExecutableScript({
+        untrackedFiles: [], // local mode
+        files: [{ path: 'deploy.sh', fileLines: 0 }],
+      }),
+    ).toBe(true);
+    // Absent fileLines fails safe to owed.
+    expect(
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'kept.sh', addedLines: 3 }],
+      }),
+    ).toBe(true);
+  });
 });
 
 describe('requiredAgents — Step 3B', () => {
@@ -166,7 +416,18 @@ describe('requiredAgents — Step 3B', () => {
   });
 
   it('does not demand the dimension agents — a chunk agent owns them for its lines', () => {
-    for (const dim of ['1a', '2', '3', '4', '5', '6a', '6b', '6c']) {
+    for (const dim of [
+      '1a',
+      '2',
+      '3a',
+      '3b',
+      '3c',
+      '4',
+      '5',
+      '6a',
+      '6b',
+      '6c',
+    ]) {
       expect(keys(BIG)).not.toContain(dim);
     }
   });
@@ -189,6 +450,40 @@ describe('requiredAgents — Step 3B', () => {
       ]),
     );
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
+  });
+
+  it('a heavy INTERACTION file KEEPS its invariant agents', () => {
+    // The skip that used to live here rested on the merge base holding still
+    // between rounds: an interaction file's full-range slice is only "already
+    // cleared" while the base it is measured against has not moved. Nothing
+    // enforces that — a backward base move (retargeting the PR to an older
+    // base) is accepted by the anchor gate — and then the file's slice
+    // carries hunks no round has read, with these three the only agents that
+    // would walk them. Its chunk agent is briefed for the seam alone.
+    const base = {
+      ...BIG,
+      files: [
+        { path: 'src/delta.ts', kind: 'source', removedLines: 9, heavy: true },
+        { path: 'src/seam.ts', kind: 'source', removedLines: 9, heavy: true },
+      ],
+    };
+    const incremental = {
+      ...base,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/delta.ts'],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
+      },
+    };
+    const k = keys(incremental as typeof base);
+    expect(k).toContain('invariant-a--src/delta.ts');
+    expect(k).toContain('invariant-a--src/seam.ts');
+    expect(k).toContain('invariant-b--src/seam.ts');
+    expect(k).toContain('invariant-c--src/seam.ts');
   });
 });
 

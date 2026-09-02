@@ -19,12 +19,48 @@ permissions:
   issues: 'write'
   pull-requests: 'write'
 
+concurrency:
+  # One scan per comment, keyed on whichever id this event carries. The scan
+  # reads the comment's CURRENT body, so when an edit lands while an earlier
+  # scan is queued the earlier result is already stale — cancelling it loses
+  # nothing. (Contrast the verify lane, where cancel-in-progress is false
+  # because a cancelled run destroys evidence.) Falling back to run_id keeps
+  # unexpected payloads on their own group instead of serialising them all
+  # into one.
+  group: >-
+    attachment-guard-${{
+      github.event.comment.id || github.event.review.id || github.run_id
+    }}
+  cancel-in-progress: true
+
 jobs:
   remove-suspicious-attachments:
     timeout-minutes: 2
-    if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
-    runs-on: 'ubuntu-latest'
+    # The trust check used to live inside the script, which means a runner was
+    # queued, allocated and started before the job could decide it had nothing
+    # to do. Measured over the 200 most recent comments on this repo: 184 from
+    # trusted associations and 9 from bots — 96.5% of runs existed only to
+    # print "Trusted author; skipping". On a saturated hosted pool those waited
+    # up to 629s each for 2-5s of work.
+    #
+    # Hoisted here because GitHub evaluates `if:` BEFORE allocating a runner.
+    # The script keeps its own copy of these checks: this is an optimisation,
+    # not the control, and the two must be able to disagree without becoming
+    # unsafe. Every ambiguity therefore resolves toward RUNNING the scan — an
+    # unknown payload yields an empty association, which is not in the trusted
+    # list, so the job runs.
+    if: >-
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event.sender.type != 'Bot' &&
+      !contains(
+        fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+        github.event.comment.author_association ||
+        github.event.review.author_association
+      )
+    # Checks out nothing and runs no repository code (comment/review events
+    # use base-repo YAML), so the persistent ECS pool is safe and skips the
+    # saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
       - name: 'Remove suspicious attachment comments'
         uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0

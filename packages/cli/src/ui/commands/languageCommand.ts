@@ -26,16 +26,16 @@ import {
 import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
-  resolveOutputLanguage,
+  resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageAndRegisterPath,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LANGUAGE_COMMAND');
 
 /**
- * Gets the current LLM output language setting and its resolved value.
- * Returns an object with both the raw setting and the resolved language.
+ * Gets the current LLM output language setting and its display value.
+ * Returns an object with both the raw setting and the display language.
  */
 function getCurrentOutputLanguage(context?: CommandContext): {
   setting: string;
@@ -44,7 +44,7 @@ function getCurrentOutputLanguage(context?: CommandContext): {
   const settingValue =
     context?.services?.settings?.merged?.general?.outputLanguage ||
     OUTPUT_LANGUAGE_AUTO;
-  const resolved = resolveOutputLanguage(settingValue);
+  const resolved = resolveOutputLanguageOrPreserveAuto(settingValue);
   return { setting: settingValue, resolved };
 }
 
@@ -96,6 +96,53 @@ function parseUiScopeFlags(input: string): {
 }
 
 /**
+ * Validates parsed `--project` / `--global` scope flags for a UI-language
+ * change, returning an error message when the flags are inconsistent or the
+ * target scope is not writable. Shared by the `/language ui` action and the
+ * nested per-language subcommands so both accept the same scope flags.
+ */
+function validateUiScopeFlags(
+  context: CommandContext,
+  parsed: ReturnType<typeof parseUiScopeFlags>,
+): MessageActionReturn | undefined {
+  if (parsed.hasProject && parsed.hasGlobal) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'Cannot use both --project and --global. Choose one scope flag.',
+      ),
+    };
+  }
+  // Workspace settings are ignored on merge when untrusted, so a
+  // --project save would silently not take effect — reject it up front.
+  if (
+    parsed.scope === SettingScope.Workspace &&
+    context.executionPolicy?.allowWorkspaceSettingsWrite === false
+  ) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'Project language settings are not available in this session.',
+      ),
+    };
+  }
+  if (
+    parsed.scope === SettingScope.Workspace &&
+    context.services.settings &&
+    !context.services.settings.isTrusted
+  ) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Workspace is untrusted; run /trust first or use --global.'),
+    };
+  }
+  return undefined;
+}
+
+/**
  * Sets the UI language and persists it to the given scope (user settings by
  * default).
  */
@@ -114,15 +161,25 @@ async function setUiLanguage(
     };
   }
 
-  await setLanguageAsync(lang);
-
   if (services.settings?.setValue) {
     try {
-      services.settings.setValue(scope, 'general.language', lang);
+      services.settings.setValue(scope, 'general.language', lang, undefined, {
+        throwOnWriteFailure: true,
+      });
     } catch (error) {
       debugLogger.warn('Failed to save language setting:', error);
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Failed to set "{{key}}": {{error}}', {
+          key: 'general.language',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      };
     }
   }
+
+  await setLanguageAsync(lang);
 
   // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
   context.ui.reloadCommands();
@@ -138,7 +195,7 @@ async function setUiLanguage(
 
 /**
  * Handles the /language output command, updating both the setting and the rule file.
- * 'auto' is preserved in settings but resolved to the detected language for the rule file.
+ * 'auto' is preserved in settings and written as a dynamic same-language rule.
  *
  * After persisting the change, hierarchical memory is reloaded so `output-language.md`
  * flows back into `userMemory`, and the live chat's system instruction is rebuilt
@@ -151,7 +208,7 @@ async function setOutputLanguage(
 ): Promise<MessageActionReturn> {
   try {
     const isAuto = isAutoLanguage(language);
-    const resolved = resolveOutputLanguage(language);
+    const resolved = resolveOutputLanguageOrPreserveAuto(language);
     // Save 'auto' as-is to settings, or normalize other values
     const settingValue = isAuto ? OUTPUT_LANGUAGE_AUTO : resolved;
 
@@ -176,7 +233,7 @@ async function setOutputLanguage(
     if (config) {
       try {
         await config.refreshHierarchicalMemory();
-        await config.getGeminiClient().refreshSystemInstruction();
+        await config.getLlmClient().refreshSystemInstruction();
       } catch (error) {
         debugLogger.warn(
           'Failed to apply output language to running session:',
@@ -185,9 +242,7 @@ async function setOutputLanguage(
       }
     }
 
-    const displayLang = isAuto
-      ? `${t('Auto (detect from system)')} → ${resolved}`
-      : resolved;
+    const displayLang = isAuto ? t('Auto (follow user input)') : resolved;
 
     return {
       type: 'message',
@@ -272,9 +327,9 @@ export const languageCommand: SlashCommand = {
     const { setting: outputSetting, resolved: outputResolved } =
       getCurrentOutputLanguage(context);
 
-    // Format output language display: show "Auto → English" or just "English"
+    // Format output language display: show auto mode or the fixed language.
     const outputLangDisplay = isAutoLanguage(outputSetting)
-      ? `${t('Auto (detect from system)')} → ${outputResolved}`
+      ? t('Auto (follow user input)')
       : outputResolved;
 
     return {
@@ -307,34 +362,12 @@ export const languageCommand: SlashCommand = {
         context: CommandContext,
         args: string,
       ): Promise<MessageActionReturn> => {
-        const { scope, remaining, hasProject, hasGlobal } = parseUiScopeFlags(
-          args.trim(),
-        );
-        if (hasProject && hasGlobal) {
-          return {
-            type: 'message',
-            messageType: 'error',
-            content: t(
-              'Cannot use both --project and --global. Choose one scope flag.',
-            ),
-          };
+        const parsed = parseUiScopeFlags(args.trim());
+        const scopeError = validateUiScopeFlags(context, parsed);
+        if (scopeError) {
+          return scopeError;
         }
-        // Workspace settings are ignored on merge when untrusted, so a
-        // --project save would silently not take effect — reject it up front.
-        if (
-          scope === SettingScope.Workspace &&
-          context.services.settings &&
-          !context.services.settings.isTrusted
-        ) {
-          return {
-            type: 'message',
-            messageType: 'error',
-            content: t(
-              'Workspace is untrusted; run /trust first or use --global.',
-            ),
-          };
-        }
-        const trimmedArgs = remaining;
+        const trimmedArgs = parsed.remaining;
 
         if (!trimmedArgs) {
           return {
@@ -370,7 +403,7 @@ export const languageCommand: SlashCommand = {
           };
         }
 
-        return setUiLanguage(context, targetLang, scope);
+        return setUiLanguage(context, targetLang, parsed.scope);
       },
 
       // Nested subcommands for each supported language (e.g., /language ui zh-CN)
@@ -385,7 +418,16 @@ export const languageCommand: SlashCommand = {
           kind: CommandKind.BUILT_IN,
           supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
           action: async (context, args) => {
-            if (args.trim()) {
+            // The web-shell settings panel switches language through
+            // `/language ui <id> --global|--project`, and the command router
+            // descends into this nested subcommand — so scope flags must be
+            // accepted here exactly like in the `ui` action above.
+            const parsed = parseUiScopeFlags(args.trim());
+            const scopeError = validateUiScopeFlags(context, parsed);
+            if (scopeError) {
+              return scopeError;
+            }
+            if (parsed.remaining) {
               return {
                 type: 'message',
                 messageType: 'error',
@@ -394,7 +436,7 @@ export const languageCommand: SlashCommand = {
                 ),
               };
             }
-            return setUiLanguage(context, lang.code);
+            return setUiLanguage(context, lang.code, parsed.scope);
           },
         }),
       ),

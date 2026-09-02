@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { useActions } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useActions,
+  useDaemonSessionOwnerGuard,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
+import { isSessionDisconnectedError } from '../utils/sessionErrors';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
@@ -13,50 +17,54 @@ function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
 }
 
 export function useBackgroundTasks(
+  sessionId: string | undefined,
   taskActivityKey: string,
   connected: boolean,
   refreshTrigger = 0,
 ): DaemonSessionTaskStatus[] {
   const actions = useActions();
+  const ownerGuard = useDaemonSessionOwnerGuard();
+  const ownerRef = useRef(ownerGuard.capture());
+  if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
+  const owner = ownerRef.current;
   const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
+  const tasksOwnerRef = useRef(owner);
   const [pollingActive, setPollingActive] = useState(false);
   const [tasksPanelActive, setTasksPanelActive] = useState(false);
   const emptyPollsRef = useRef(0);
-  const tasksRefreshInFlightRef = useRef(false);
+  const tasksRefreshInFlightRef = useRef<typeof owner | null>(null);
 
   useEffect(() => {
-    if (!connected) {
-      setTasks([]);
-      setPollingActive(false);
-      emptyPollsRef.current = 0;
+    tasksOwnerRef.current = owner;
+    setTasks([]);
+    setPollingActive(false);
+    emptyPollsRef.current = 0;
+  }, [connected, owner, sessionId]);
+
+  useEffect(() => {
+    if (!connected || !sessionId || (!taskActivityKey && refreshTrigger === 0))
       return;
-    }
-  }, [connected]);
-
-  useEffect(() => {
-    if (!connected || !taskActivityKey) return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, taskActivityKey]);
-
-  useEffect(() => {
-    if (!connected || refreshTrigger === 0) return;
-    emptyPollsRef.current = 0;
-    setPollingActive(true);
-  }, [connected, refreshTrigger]);
+  }, [connected, owner, refreshTrigger, sessionId, taskActivityKey]);
 
   useEffect(() => {
     if (tasksPanelActive) return;
-    if (!connected || !pollingActive) return;
+    if (!connected || !sessionId || !pollingActive) return;
 
     let disposed = false;
     const refresh = () => {
-      if (tasksRefreshInFlightRef.current) return;
-      tasksRefreshInFlightRef.current = true;
+      if (tasksRefreshInFlightRef.current === owner) return;
+      tasksRefreshInFlightRef.current = owner;
       actions
-        .getTasks()
+        .getTasks({ silent: true })
         .then((snapshot) => {
-          if (disposed) return;
+          if (
+            disposed ||
+            !owner.isCurrent() ||
+            snapshot.sessionId !== sessionId
+          )
+            return;
           setTasks(snapshot.tasks);
           if (snapshot.tasks.length === 0) {
             emptyPollsRef.current += 1;
@@ -71,11 +79,17 @@ export function useBackgroundTasks(
           }
         })
         .catch((error: unknown) => {
-          if (disposed) return;
+          if (disposed || !owner.isCurrent()) return;
+          if (isSessionDisconnectedError(error)) {
+            setPollingActive(false);
+            return;
+          }
           console.warn('[web-shell] failed to refresh tasks:', error);
         })
         .finally(() => {
-          tasksRefreshInFlightRef.current = false;
+          if (tasksRefreshInFlightRef.current === owner) {
+            tasksRefreshInFlightRef.current = null;
+          }
         });
     };
 
@@ -85,7 +99,7 @@ export function useBackgroundTasks(
       disposed = true;
       clearInterval(id);
     };
-  }, [actions, connected, pollingActive, tasksPanelActive]);
+  }, [actions, connected, owner, pollingActive, sessionId, tasksPanelActive]);
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
@@ -104,5 +118,5 @@ export function useBackgroundTasks(
       window.removeEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
   }, []);
 
-  return tasks;
+  return tasksOwnerRef.current === owner ? tasks : [];
 }

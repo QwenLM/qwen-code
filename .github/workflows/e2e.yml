@@ -1,5 +1,8 @@
 name: 'E2E Tests'
 
+permissions:
+  contents: 'read'
+
 on:
   # E2E is slow and currently flaky, so it is NOT in the merge queue (gating the
   # serial queue on it would stall every merge). It runs post-merge on `main`,
@@ -14,45 +17,126 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Scope the group by event so back-to-back pushes to `main` cancel superseded
-  # runs (no pile-up when PRs merge in quick succession), without ever cancelling
-  # the nightly schedule or a manual dispatch — they share the ref but not the
-  # event. feat/e2e/** pushes still cancel their own superseded runs.
+  # Scope the group by event so pushes to `main` coalesce with each other without
+  # ever touching the nightly schedule or a manual dispatch — they share the ref
+  # but not the event. feat/e2e/** pushes coalesce within their own branch.
   group: |-
     ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  # Cancel superseded pushes (main included now — only the latest tree matters,
-  # and it covers every merged change). The nightly run always finishes, so a
-  # busy merge window that keeps cancelling the push run still gets a signal.
+  # Do NOT cancel in-progress runs on `main`: a full run takes ~40min while
+  # merges land every ~18min (median), so cancelling on every merge starved the
+  # suite — over 100 push runs, 67 were cancelled and only 25 ever reported.
+  # With cancellation off, GitHub keeps at most ONE pending run per group and
+  # cancels the previously pending one, so the queue collapses to the newest
+  # tree on its own: the in-flight run always finishes, and each result covers
+  # the batch of commits merged since the last one (bisect that range when it
+  # goes red). Dev branches keep cancelling superseded runs — nobody bisects
+  # those, and the latest push is the only tree of interest.
   cancel-in-progress: |-
-    ${{ github.event_name == 'push' }}
+    ${{ github.event_name == 'push' && github.ref_name != 'main' }}
 
 jobs:
   e2e-test-linux:
-    name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
-    runs-on: 'ubuntu-latest'
+    name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
+    # Persistent ECS pool with hosted fallback: every trigger here is a
+    # trusted context (push to in-repo branches, the nightly schedule, and
+    # manual dispatch — no pull_request trigger), and the six-shard matrix
+    # at ~16 minutes each was one of the largest remaining hosted consumers.
+    # The pool ships docker (measured by qwen-autofix's sandboxed jobs; see
+    # the runtime preflight below, per #9556).
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # A wedged shard must free the pool runner well before GitHub's
+    # 360-minute default; 60 matches ci.yml's pool jobs.
+    timeout-minutes: 60
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
     # and show misleading red status. Same-repo PRs run normally.
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
+      # One failing shard must not cancel the others: a partial matrix hides the
+      # rest of the suite and reports an incomplete failure set.
+      fail-fast: false
       matrix:
         sandbox:
           - 'sandbox:none'
           - 'sandbox:docker'
+        # The suite is ~16min of wall clock on one runner, dominated by a long
+        # tail of sdk-typescript files. vitest assigns files to shards by path
+        # hash, so those spread out instead of clustering in one shard.
+        shard:
+          - '1/3'
+          - '2/3'
+          - '3/3'
         node-version:
           - '22.x'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+      # The sandbox:none retry gate below budgets against the whole 60-minute
+      # job, not just the test step — setup spent ~29 of those minutes on two
+      # of the runners that motivated the retry. Recording the start here is
+      # what lets the gate see that spend.
+      - name: 'Record job start epoch'
+        run: 'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"'
 
-      - name: 'Set up Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+      # Fail-fast capability preflight (#9556): the docker leg needs a live
+      # daemon, and without this check a missing one surfaces only after
+      # npm ci + build. Runs on hosted and pool runners alike — both are
+      # expected to answer.
+      - name: 'Check container runtime'
+        if: |-
+          ${{ matrix.sandbox == 'sandbox:docker' }}
+        run: |-
+          set -uo pipefail
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on ${RUNNER_NAME:-this runner}; the sandbox:docker leg cannot run here."
+            exit 1
+          fi
+
+      # Pre-checkout heal, mirroring ci.yml: the docker leg's containers can
+      # leave root-owned files in the reused pool workspace, and the next
+      # checkout's clean would die on EACCES. Hosted runners are ephemeral
+      # and never take this branch.
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      # Hosted-only, mirroring ci.yml: on the pool, nodejs.org may be
+      # unreachable through the egress proxy, and the action's post step
+      # uploads the npm cache to GitHub — a save that ran 14+ minutes over
+      # the pool's slow egress on security-checks' first pool run
+      # (2026-08-26). The pool reuses the machine's Node and its persistent
+      # npm cache instead.
+      - name: 'Set up Node.js ${{ matrix.node-version }} (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
         run: |-
@@ -62,6 +146,13 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # `npm ci` runs the `prepare` script, which builds and bundles the
+          # whole workspace — and the two steps below then do it a second time.
+          # Skip it so the install only installs; `prepare` still generates
+          # git-commit.ts, which the build needs. (The web-shell job below has
+          # no build step of its own, so it keeps building during install.)
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -75,7 +166,7 @@ jobs:
 
       - name: 'Set up Docker'
         if: |-
-          ${{ matrix.sandbox == 'sandbox:docker' }}
+          ${{ matrix.sandbox == 'sandbox:docker' && runner.environment == 'github-hosted' }}
         uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
 
       - name: 'Set up Podman'
@@ -94,25 +185,152 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
+          # Mapped for integration-tests/vitest.config.ts, which caps each
+          # shared-pool shard at one fork and exempts pressure-flake unhandled
+          # errors.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
+          BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
         run: |-
+          set -euo pipefail
+
+          if [ '${{ matrix.sandbox }}' = 'sandbox:docker' ]; then
+            sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-e2e-${GITHUB_SHA}"
+
+            build_image() {
+              npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            }
+
+            acquire_daemon_write_lock() {
+              lock_deadline=$((SECONDS + 1800))
+              until flock --nonblock 9; do
+                if (( SECONDS >= lock_deadline )); then
+                  echo "::error::docker daemon write lock not acquired within 30 minutes"
+                  exit 1
+                fi
+                sleep 1
+              done
+            }
+
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              mkdir -p "${HOME}/.cache/qwen-code-ci"
+              exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
+              if ! flock --wait 1800 8; then
+                echo "::error::docker build coordinator lock not acquired within 30 minutes"
+                exit 1
+              fi
+              exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+              if ! flock --shared --wait 1800 9; then
+                echo "::error::docker daemon read lock not acquired within 30 minutes"
+                exit 1
+              fi
+            fi
+
+            if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
+              if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+                flock --unlock 9
+                acquire_daemon_write_lock
+              fi
+              docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+              if ! build_image; then
+                echo "::warning::sandbox image build failed; retrying once"
+                build_image
+              fi
+            else
+              echo "Reusing sandbox image for ${GITHUB_SHA}"
+            fi
+
+            sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+            export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --shared 9
+              flock --unlock 8
+            fi
+          fi
+
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          # The docker leg runs vitest directly instead of through
+          # test:integration:sandbox:docker: that script would rebuild the image
+          # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npm run test:integration:sandbox:docker -- --exclude '**/interactive/cron-interactive.test.ts'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts'
+            run_shard() {
+              npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            }
+            # One bounded retry: pool runners' sandbox:none shards die under
+            # shared-host pressure with every test green and no vitest FAIL
+            # line — runs 33293739505, 33302550436 and 33317457036 failed
+            # this leg on three different hosts while sibling shards of the
+            # same runs passed, and the shard passes on re-run. The same
+            # transient class the sandbox-image build retry above covers
+            # (#10355). A deterministic test failure fails both attempts and
+            # keeps the shard red. The retry is budget-gated on job-elapsed
+            # time: two of those three runs died with ~10-12 of the 60 job
+            # minutes left, less than one shard-time, where a retry can only
+            # be cancelled mid-flight by timeout-minutes. The docker leg
+            # keeps no retry: two ~30min attempts would outrun the job's
+            # timeout-minutes.
+            run_shard || {
+              elapsed=$(( $(date +%s) - ${E2E_JOB_START_EPOCH:-0} ))
+              # Budget gate: a retry needs a full shard-time inside the job's
+              # timeout-minutes. 3600s minus a 25-minute reserve — the worst
+              # measured shard is ~21min under shared-host pressure — leaves
+              # 2100s; past that, GitHub cancels the retry mid-flight, burns
+              # pool time, and the failure degrades to a timeout signature.
+              if (( elapsed > 2100 )); then
+                echo "::error::sandbox:none shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s of the 3600s job budget — not enough left for a retry"
+                exit 1
+              fi
+              echo "::warning::sandbox:none shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s; retrying once (transient shared-host pressure class)"
+              run_shard
+            }
+          fi
+
+      # Commit-qualified CI images are pruned under the exclusive daemon lock
+      # once they are older than a day. The cleanup is non-blocking so a shard
+      # finishing early cannot queue a writer ahead of another shard's reader.
+      - name: 'Prune dangling docker images'
+        if: |-
+          ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
+        run: |-
+          mkdir -p "${HOME}/.cache/qwen-code-ci"
+          exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+          if flock --nonblock 9; then
+            docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+            docker image prune --force --filter 'until=24h' || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
+          else
+            echo "Docker cleanup skipped because the shared daemon is active"
           fi
 
   e2e-test-macos:
-    name: 'E2E Test - macOS'
+    name: 'E2E Test - macOS - shard ${{ matrix.shard }}'
     runs-on: 'macos-latest'
     # Skip on fork PRs (no secrets) — see e2e-test-linux above.
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two shards, not three: the macOS runner is the slowest to install and
+        # build, so a third shard would add more fixed cost than it removes.
+        shard:
+          - '1/2'
+          - '2/2'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -127,6 +345,10 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # See e2e-test-linux: the install must not build, the two steps
+          # below do it explicitly.
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -143,23 +365,28 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts"'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
 
-  cron-interactive-nightly:
-    name: 'cron-interactive E2E (nightly)'
+  isolated-nightly:
+    name: '${{ matrix.label }} (nightly)'
     runs-on: 'ubuntu-latest'
     if: |-
       ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    # This test is inherently timing-flaky (wall-clock cron fire + real model
-    # latency). Run it nightly only so flakes do not turn push CI red.
-    # continue-on-error prevents this job from marking the workflow as failed.
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'cron-interactive E2E'
+            test_file: 'interactive/cron-interactive.test.ts'
+          - label: 'channel-plugin E2E'
+            test_file: 'channel-plugin.test.ts'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -174,6 +401,10 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # See e2e-test-linux: the install must not build, the two steps
+          # below do it explicitly.
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -185,14 +416,14 @@ jobs:
         run: |-
           npm run bundle
 
-      - name: 'Run cron-interactive E2E tests'
+      - name: 'Run ${{ matrix.label }} tests'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive/cron-interactive.test.ts'
+        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests "${{ matrix.test_file }}"'
 
   web-shell-browser-regression:
     name: 'web-shell Browser Regression'

@@ -5,10 +5,16 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  normalizeMcpToolName,
+  sanitizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -69,6 +75,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadFileTool: 'read_file',
   Read: 'read_file',
 
+  // Zoom Image tool — also matched by "Read" meta-category rules
+  zoom_image: 'zoom_image',
+  ZoomImage: 'zoom_image',
+  ZoomImageTool: 'zoom_image',
+
   // Grep tool — also matched by "Read" meta-category rules
   grep_search: 'grep_search',
   Grep: 'grep_search',
@@ -99,6 +110,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   web_fetch: 'web_fetch',
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
+
+  // WebSearch tool
+  web_search: 'web_search',
+  WebSearch: 'web_search',
+  WebSearchTool: 'web_search',
 
   // ReadMcpResource tool
   read_mcp_resource: 'read_mcp_resource',
@@ -140,6 +156,112 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Monitor: 'monitor',
   MonitorTool: 'monitor',
 
+  // Send Message tool (teams)
+  send_message: 'send_message',
+  SendMessage: 'send_message',
+  SendMessageTool: 'send_message',
+
+  // Goal tools — the display name of get_goal is "Goal" (see ToolDisplayNames)
+  get_goal: 'get_goal',
+  Goal: 'get_goal',
+  GetGoal: 'get_goal',
+  update_goal: 'update_goal',
+  UpdateGoal: 'update_goal',
+  UpdateGoalTool: 'update_goal',
+  propose_goal: 'propose_goal',
+  ProposeGoal: 'propose_goal',
+  ProposeGoalTool: 'propose_goal',
+
+  // Save Memory tool
+  save_memory: 'save_memory',
+  SaveMemory: 'save_memory',
+  SaveMemoryTool: 'save_memory',
+
+  // Ask User Question tool
+  ask_user_question: 'ask_user_question',
+  AskUserQuestion: 'ask_user_question',
+  AskUserQuestionTool: 'ask_user_question',
+
+  // Cron tools
+  cron_create: 'cron_create',
+  CronCreate: 'cron_create',
+  cron_list: 'cron_list',
+  CronList: 'cron_list',
+  cron_delete: 'cron_delete',
+  CronDelete: 'cron_delete',
+
+  // Loop wakeup tool
+  loop_wakeup: 'loop_wakeup',
+  LoopWakeup: 'loop_wakeup',
+  LoopWakeupTool: 'loop_wakeup',
+
+  // Create Sub Session tool
+  create_sub_session: 'create_sub_session',
+  CreateSubSession: 'create_sub_session',
+  CreateSubSessionTool: 'create_sub_session',
+
+  // List Agents tool
+  list_agents: 'list_agents',
+  ListAgents: 'list_agents',
+  ListAgentsTool: 'list_agents',
+
+  // Task lifecycle tools (teams)
+  task_stop: 'task_stop',
+  TaskStop: 'task_stop',
+  task_create: 'task_create',
+  TaskCreate: 'task_create',
+  task_update: 'task_update',
+  TaskUpdate: 'task_update',
+  task_list: 'task_list',
+  TaskList: 'task_list',
+
+  // Team tools
+  team_create: 'team_create',
+  TeamCreate: 'team_create',
+  team_delete: 'team_delete',
+  TeamDelete: 'team_delete',
+  team_plan_approval: 'team_plan_approval',
+  TeamPlanApproval: 'team_plan_approval',
+
+  // Image generation tool
+  image_gen: 'image_gen',
+  ImageGen: 'image_gen',
+  ImageGenTool: 'image_gen',
+
+  // Tool search tool
+  tool_search: 'tool_search',
+  ToolSearch: 'tool_search',
+  ToolSearchTool: 'tool_search',
+
+  // Structured output (synthetic --json-schema contract)
+  structured_output: 'structured_output',
+  StructuredOutput: 'structured_output',
+
+  // Worktree tools
+  enter_worktree: 'enter_worktree',
+  EnterWorktree: 'enter_worktree',
+  exit_worktree: 'exit_worktree',
+  ExitWorktree: 'exit_worktree',
+
+  // Workflow / artifact tools
+  workflow: 'workflow',
+  Workflow: 'workflow',
+  artifact: 'artifact',
+  Artifact: 'artifact',
+  record_artifact: 'record_artifact',
+  RecordArtifact: 'record_artifact',
+
+  // Report Findings tool
+  report_findings: 'report_findings',
+  ReportFindings: 'report_findings',
+
+  request_shutdown: 'request_shutdown',
+  RequestShutdown: 'request_shutdown',
+
+  // Display image tool
+  display_image: 'display_image',
+  DisplayImage: 'display_image',
+
   // Legacy edit tool name
   replace: 'edit',
 };
@@ -160,6 +282,7 @@ export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const READ_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'grep_search',
   'glob',
   'list_directory',
@@ -187,7 +310,9 @@ const WEBFETCH_TOOLS = new Set(['web_fetch']);
  * (e.g. MCP tool names are kept as-is).
  */
 export function resolveToolName(rawName: string): string {
-  return TOOL_NAME_ALIASES[rawName] ?? rawName;
+  return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
+    ? TOOL_NAME_ALIASES[rawName]!
+    : rawName;
 }
 
 /**
@@ -211,7 +336,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  * Check whether a given tool (by canonical name) is covered by a rule's tool name,
  * taking meta-categories into account.
  *
- * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
+ * "Read" → resolves to "read_file", but also covers zoom_image, grep_search,
+ * glob, and list_directory
  * "Edit" → resolves to "edit", but also covers write_file
  * "Bash" → resolves to "run_shell_command", but also covers monitor
  * "Monitor" → resolves to "monitor" only; it does not cover shell
@@ -382,13 +508,14 @@ export function parseRules(raws: string[]): PermissionRule[] {
  * permission rule strings.
  *
  * Read tools all map to "Read" (meta-category) so a single rule covers the
- * entire family (read_file, grep_search, glob, list_directory).
+ * entire family (read_file, zoom_image, grep_search, glob, list_directory).
  * Edit tools map to "Edit" (meta-category) covering edit + write_file.
  * Other tools use their individual display alias.
  */
 const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Read meta-category
   read_file: 'Read',
+  zoom_image: 'Read',
   grep_search: 'Read',
   glob: 'Read',
   list_directory: 'Read',
@@ -402,6 +529,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  web_search: 'WebSearch',
   read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
@@ -429,13 +557,14 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  *
  * For these tools the minimum-scope rule uses `path.dirname()` so the rule
  * covers the containing directory rather than a single file — e.g.
- *   read_file("/Users/alice/.secrets") → `Read(//Users/alice)`
+ *   zoom_image("/Users/alice/chart.png") → `Read(//Users/alice)`
  *
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
 const FILE_TARGETED_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'edit',
   'write_file',
   'notebook_edit',
@@ -451,8 +580,9 @@ const FILE_TARGETED_TOOLS = new Set([
  *
  * Specifier selection by tool category:
  *   - **path** tools (Read/Edit):
- *       File-targeted tools (read_file, edit, write_file) use the **parent
- *       directory** so the rule covers the whole directory, not a single file.
+ *       File-targeted tools (read_file, zoom_image, edit, write_file) use the
+ *       **parent directory** so the rule covers the whole directory, not a
+ *       single file.
  *       Directory-targeted tools (grep, glob, ls) use the directory as-is.
  *       The `//` prefix denotes an absolute filesystem path in the rule grammar.
  *   - **domain** tools (WebFetch): `WebFetch(example.com)`
@@ -546,6 +676,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Bash: 'run commands',
   Monitor: 'monitor commands',
   WebFetch: 'fetch from',
+  WebSearch: 'search the web',
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
@@ -649,27 +780,88 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
- * Split a compound shell command into its individual simple commands
- * by splitting on unquoted shell operators (&&, ||, ;, |, etc.).
+ * Count the consecutive backslashes immediately before `index`.
  *
- * Returns an array of trimmed simple command strings.
- * For simple commands (no operators), returns a single-element array.
- *
- * Examples:
- *   "git status && rm -rf /"  → ["git status", "rm -rf /"]
- *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
- *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
- *   "a && b || c"            → ["a", "b", "c"]
+ * An odd count means the character at `index` is itself escaped, so it is a
+ * literal rather than a shell metacharacter.
  */
-export function splitCompoundCommand(command: string): string[] {
-  const commands: string[] = [];
+function precedingBackslashCount(command: string, index: number): number {
+  let count = 0;
+  for (let k = index - 1; k >= 0 && command[k] === '\\'; k--) {
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Whether the `&` at `index` is the async (background) operator rather than
+ * part of a redirection.
+ *
+ * `&&` and `|&` never reach here — they are longer, so they match first — which
+ * leaves three forms to exclude: `&>` and `&>>` redirect both streams, and
+ * `>&` / `<&` duplicate a descriptor (`2>&1`, `>&2`). Confirmed against bash:
+ * `echo hi &> out` writes the file and backgrounds nothing, while
+ * `echo one & echo two` really does run two commands.
+ *
+ * The backward scan is escape-aware, and has to be: `\>` is a literal `>`
+ * argument, not a redirection, so `echo a \> & rm -rf /` really does background
+ * the `echo` and then run the `rm`. Reading that `\>` as a redirection would
+ * keep both halves in one segment and let the `echo`'s allow rule cover the
+ * `rm`.
+ */
+function isAsyncOperator(command: string, index: number): boolean {
+  if (command[index + 1] === '>') {
+    return false;
+  }
+  for (let j = index - 1; j >= 0; j--) {
+    const ch = command[j]!;
+    if (/\s/.test(ch)) {
+      continue;
+    }
+    if (ch === '>' || ch === '<') {
+      // Escaped, so a literal argument and the `&` still backgrounds.
+      return precedingBackslashCount(command, j) % 2 === 1;
+    }
+    return true;
+  }
+  return true;
+}
+
+/**
+ * One segment of a compound command, together with the operator that ended it.
+ */
+export interface CompoundCommandSegment {
+  /** The trimmed simple command. */
+  command: string;
+  /**
+   * The operator that terminated this segment, or `''` when the segment ran to
+   * the end of the input. Lets callers tell a foreground segment from one the
+   * shell runs in a subshell (`&`).
+   */
+  terminator: string;
+}
+
+/**
+ * Split a compound shell command into its individual simple commands, keeping
+ * the operator that terminated each one.
+ *
+ * See {@link splitCompoundCommand} for the string-only form and for examples;
+ * this is the same split, and that function is a projection of this one.
+ */
+export function splitCompoundCommandSegments(
+  command: string,
+): CompoundCommandSegment[] {
+  const segments: CompoundCommandSegment[] = [];
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
   let lastSplit = 0;
+  // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
+  // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
+  let arithmeticDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -694,26 +886,67 @@ export function splitCompoundCommand(command: string): string[] {
       continue;
     }
 
+    if (ch === '(' && command[i + 1] === '(') {
+      arithmeticDepth++;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 && ch === ')' && command[i + 1] === ')') {
+      arithmeticDepth--;
+      i++;
+      continue;
+    }
+
     // Check for shell operators (longest match first)
     for (const op of SHELL_OPERATORS) {
-      if (command.substring(i, i + op.length) === op) {
-        const segment = command.substring(lastSplit, i).trim();
-        if (segment) {
-          commands.push(segment);
-        }
-        lastSplit = i + op.length;
-        i = lastSplit - 1; // -1 because the loop will i++
-        break;
+      if (command.substring(i, i + op.length) !== op) {
+        continue;
       }
+      // A bare `&` bounds a command only when it is the async operator; its
+      // other spellings belong to a redirection or to arithmetic, and stay in
+      // the segment.
+      if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
+        continue;
+      }
+      const segment = command.substring(lastSplit, i).trim();
+      if (segment) {
+        segments.push({ command: segment, terminator: op });
+      }
+      lastSplit = i + op.length;
+      i = lastSplit - 1; // -1 because the loop will i++
+      break;
     }
   }
 
   // Add the last segment
   const lastSegment = command.substring(lastSplit).trim();
   if (lastSegment) {
-    commands.push(lastSegment);
+    segments.push({ command: lastSegment, terminator: '' });
   }
 
+  return segments;
+}
+
+/**
+ * Split a compound shell command into its individual simple commands
+ * by splitting on unquoted shell operators (&&, ||, ;, |, etc.).
+ *
+ * Returns an array of trimmed simple command strings.
+ * For simple commands (no operators), returns a single-element array.
+ *
+ * Examples:
+ *   "git status && rm -rf /"  → ["git status", "rm -rf /"]
+ *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
+ *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
+ *   "a && b || c"            → ["a", "b", "c"]
+ *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
+ *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
+ *   "x=$(( a & b ))"         → ["x=$(( a & b ))"]  (arithmetic, not async)
+ */
+export function splitCompoundCommand(command: string): string[] {
+  const commands = splitCompoundCommandSegments(command).map(
+    (segment) => segment.command,
+  );
   return commands.length > 0 ? commands : [command];
 }
 
@@ -1009,11 +1242,15 @@ export function resolvePathPattern(
  * Uses picomatch for the actual glob matching, following gitignore semantics:
  *   - `*` matches files in a single directory (does not cross `/`)
  *   - `**` matches recursively across directories
+ * When `matchMode` is `'canonical'`, both the lexical absolute path and its
+ * canonical filesystem destination are considered. For new files, the closest
+ * existing ancestor is canonicalized.
  *
  * @param specifier - The raw specifier from the rule (e.g. "./secrets/**")
  * @param filePath - The absolute path of the file being accessed
  * @param projectRoot - The project root directory (absolute)
  * @param cwd - The current working directory (absolute)
+ * @param matchMode - Whether to also match the canonical filesystem destination
  * @returns True if the file path matches the pattern
  */
 export function matchesPathPattern(
@@ -1021,22 +1258,106 @@ export function matchesPathPattern(
   filePath: string,
   projectRoot: string,
   cwd: string,
+  matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+  const patterns =
+    matchMode === 'canonical'
+      ? getCanonicalPatternCandidates(resolvedPattern)
+      : [resolvedPattern];
+  const matchers = patterns.map((pattern) =>
+    picomatch(pattern, {
+      dot: true,
+      nocase: false,
+    }),
+  );
+  const paths =
+    matchMode === 'canonical'
+      ? getCanonicalPathMatchCandidates(filePath, cwd)
+      : [toPosixPath(filePath)];
 
-  // Normalize filePath to forward slashes for cross-platform picomatch compatibility.
-  // On Windows, incoming paths may use backslashes; picomatch expects forward slashes.
-  const normalizedFilePath = toPosixPath(filePath);
+  return paths.some((candidate) =>
+    matchers.some((isMatch) => isMatch(candidate)),
+  );
+}
 
-  // Use picomatch for gitignore-style matching
-  const isMatch = picomatch(resolvedPattern, {
-    dot: true, // Match dotfiles (e.g. .env)
-    nocase: false, // Case-sensitive (filesystem convention)
-    // Note: do NOT set bash: true — it makes `*` match across directories.
-    // Default picomatch behavior is gitignore-style: `*` = single dir, `**` = recursive.
-  });
+function getCanonicalPatternCandidates(resolvedPattern: string): string[] {
+  const candidates = new Set([resolvedPattern]);
+  const { base } = picomatch.scan(resolvedPattern);
+  const canonicalBase = realpathNearestExisting(base);
+  if (canonicalBase !== undefined) {
+    candidates.add(
+      `${toPosixPath(canonicalBase)}${resolvedPattern.slice(base.length)}`,
+    );
+  }
+  return [...candidates];
+}
 
-  return isMatch(normalizedFilePath);
+function getCanonicalPathMatchCandidates(
+  filePath: string,
+  cwd: string,
+): string[] {
+  const candidates = new Set([toPosixPath(filePath)]);
+  const absolutePath = resolveWithoutNormalizing(cwd, filePath);
+  const canonicalPath = realpathNearestExisting(absolutePath);
+  if (canonicalPath !== undefined) {
+    candidates.add(toPosixPath(canonicalPath));
+  }
+  return [...candidates];
+}
+
+function resolveWithoutNormalizing(base: string, filePath: string): string {
+  // Preserve `..` until realpathNearestExisting resolves symlinks on disk.
+  return path.isAbsolute(filePath)
+    ? filePath
+    : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
+}
+
+function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        current = resolveWithoutNormalizing(parent, target);
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1100,12 +1421,22 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
+  // Exact rules persisted before provider-safe MCP names were introduced
+  // should continue matching their deterministic normalized registration.
+  if (
+    !pattern.endsWith('*') &&
+    pattern.split('__').length >= 3 &&
+    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+  ) {
+    return true;
+  }
+
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = pattern.slice(0, -1); // strip trailing "*"
-    return toolName.startsWith(prefix);
+    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
+    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1116,7 +1447,8 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
     patternParts[0] === toolParts[0] &&
-    patternParts[1] === toolParts[1]
+    sanitizeToolNameForProvider(patternParts[1]) ===
+      sanitizeToolNameForProvider(toolParts[1])
   ) {
     return true;
   }
@@ -1163,6 +1495,7 @@ export interface PathMatchContext {
  * @param filePath - Absolute file path (for Read/Edit rules)
  * @param domain - Domain (for WebFetch rules)
  * @param pathContext - Project root and cwd for resolving relative path patterns
+ * @param pathMatchMode - Whether path rules also match canonical destinations
  */
 export function matchesRule(
   rule: PermissionRule,
@@ -1173,6 +1506,8 @@ export function matchesRule(
   pathContext?: PathMatchContext,
   specifier?: string,
   toolParams?: Record<string, unknown>,
+  toolAliases?: readonly string[],
+  pathMatchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1186,7 +1521,16 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    if (!matchesMcpPattern(rule.toolName, canonicalCtxToolName)) {
+    const matchesLegacyExactName =
+      !rule.toolName.endsWith('*') &&
+      rule.toolName.split('__').length >= 3 &&
+      (toolAliases ?? []).some(
+        (alias) => rule.toolName === resolveToolName(alias),
+      );
+    const matchesMcpName =
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesLegacyExactName;
+    if (!matchesMcpName) {
       return false;
     }
 
@@ -1250,6 +1594,7 @@ export function matchesRule(
           filePath,
           ctx.projectRoot,
           ctx.cwd,
+          pathMatchMode,
         );
         break;
       }

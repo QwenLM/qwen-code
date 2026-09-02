@@ -60,7 +60,7 @@ function makeSettings(opts: {
         )
       : empty,
     isTrusted: opts.isTrusted ?? true,
-    migratedInMemorScopes: new Set(),
+    migratedInMemoryScopes: new Set(),
     migrationWarnings: [],
     merged,
   } as unknown as LoadedSettings;

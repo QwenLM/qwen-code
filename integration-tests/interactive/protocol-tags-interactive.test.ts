@@ -10,89 +10,64 @@ import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
-import { TestRig, type } from '../test-helper.js';
-
-const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
-const IS_CONTAINER_SANDBOX =
-  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+import {
+  TestRig,
+  type,
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 describe('Interactive protocol tag retry guard', () => {
   let fakeServer: FakeOpenAIServer | undefined;
   let rig: TestRig;
-  let savedNoProxy: string | undefined;
-  let savedNoProxyLower: string | undefined;
+  let restoreNoProxy: () => void;
 
   beforeEach(() => {
     rig = new TestRig();
-    if (IS_CONTAINER_SANDBOX) {
-      savedNoProxy = process.env['NO_PROXY'];
-      savedNoProxyLower = process.env['no_proxy'];
-      const noProxy = '127.0.0.1,localhost,host.docker.internal';
-      process.env['NO_PROXY'] = noProxy;
-      process.env['no_proxy'] = noProxy;
-    }
+    restoreNoProxy = applyContainerSandboxNoProxy();
   });
 
   afterEach(async () => {
     await fakeServer?.close();
     fakeServer = undefined;
-    if (IS_CONTAINER_SANDBOX) {
-      if (savedNoProxy !== undefined) {
-        process.env['NO_PROXY'] = savedNoProxy;
-      } else {
-        delete process.env['NO_PROXY'];
-      }
-      if (savedNoProxyLower !== undefined) {
-        process.env['no_proxy'] = savedNoProxyLower;
-      } else {
-        delete process.env['no_proxy'];
-      }
-    }
+    restoreNoProxy();
     await rig.cleanup();
   });
 
   it.skipIf(process.platform === 'win32')(
     'retries protocol leaks across SSE disconnect and completed streams',
     async () => {
-      fakeServer = await startFakeOpenAIServer(
-        ({ requestIndex }) => {
-          if (requestIndex === 0) {
-            return {
-              contentChunks: [
-                '<analysis>hidden before disconnect',
-                '</analysis><summary>WRONG_FIRST_ATTEMPT</summary>',
-              ],
-              disconnectAfterContentChunks: 1,
-            };
-          }
-
-          if (requestIndex === 1) {
-            return {
-              contentChunks: [
-                '<ana',
-                'lysis>hidden completed attempt</analysis>',
-                '<sum',
-                'mary>WRONG_COMPLETED_SUMMARY</summary>',
-              ],
-            };
-          }
-
+      fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 0) {
           return {
-            contentChunks: ['VISIBLE_TMUX_RETRY_RESPONSE_DONE'],
-            usage: {
-              prompt_tokens: 20,
-              completion_tokens: 8,
-              total_tokens: 28,
-            },
+            contentChunks: [
+              '<analysis>hidden before disconnect',
+              '</analysis><summary>WRONG_FIRST_ATTEMPT</summary>',
+            ],
+            disconnectAfterContentChunks: 1,
           };
-        },
-        IS_CONTAINER_SANDBOX
-          ? {
-              listenHost: '0.0.0.0',
-              baseUrlHost: 'host.docker.internal',
-            }
-          : undefined,
-      );
+        }
+
+        if (requestIndex === 1) {
+          return {
+            contentChunks: [
+              '<ana',
+              'lysis>hidden completed attempt</analysis>',
+              '<sum',
+              'mary>WRONG_COMPLETED_SUMMARY</summary>',
+            ],
+          };
+        }
+
+        return {
+          contentChunks: ['VISIBLE_TMUX_RETRY_RESPONSE_DONE'],
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 8,
+            total_tokens: 28,
+          },
+        };
+      }, fakeServerHostOptions());
 
       await rig.setup('interactive-protocol-tag-filtering-http-retry', {
         settings: {

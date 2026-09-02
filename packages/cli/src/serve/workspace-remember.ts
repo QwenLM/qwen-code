@@ -13,6 +13,7 @@ import type {
   BridgeWorkspaceMemoryDreamResult,
   BridgeWorkspaceMemoryForgetResult,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
@@ -21,12 +22,12 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from './workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+} from '../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 import {
   formatWorkspaceMemoryDreamSummary,
   formatWorkspaceMemoryForgetSummary,
-} from './workspace-memory-summaries.js';
+} from '../runtime/workspace-memory-summaries.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 
@@ -56,11 +57,13 @@ interface WorkspaceMemoryTaskBaseSnapshot {
 export interface WorkspaceMemoryRememberTaskSnapshot
   extends WorkspaceMemoryTaskBaseSnapshot {
   contextMode: BridgeWorkspaceMemoryRememberContextMode;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
   result?: BridgeWorkspaceMemoryRememberResult;
 }
 
 export interface WorkspaceMemoryForgetTaskSnapshot
   extends WorkspaceMemoryTaskBaseSnapshot {
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
   result?: BridgeWorkspaceMemoryForgetResult;
 }
 
@@ -83,6 +86,42 @@ export interface WorkspaceRememberRouteDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+type WorkspaceRememberResolvedRouteDeps = Omit<
+  WorkspaceRememberRouteDeps,
+  'mutate'
+>;
+
+function requireTrustedWorkspace(
+  deps: WorkspaceRememberResolvedRouteDeps,
+  res: Response,
+): boolean {
+  if (deps.isWorkspaceTrusted?.() !== false) return true;
+  res.status(403).json({
+    error: 'Workspace is not trusted.',
+    code: 'untrusted_workspace',
+  });
+  return false;
+}
+
+function requireOpenGeneration(
+  assertGenerationOpen: (() => void) | undefined,
+  res: Response,
+): boolean {
+  try {
+    assertGenerationOpen?.();
+    return true;
+  } catch {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+    });
+    return false;
+  }
 }
 
 function nowIso(): string {
@@ -120,6 +159,7 @@ function cloneTask(
     return {
       ...base,
       contextMode: task.contextMode,
+      ...(task.scope ? { scope: task.scope } : {}),
       result: task.result
         ? {
             ...task.result,
@@ -132,6 +172,7 @@ function cloneTask(
   if (task.kind === 'forget') {
     return {
       ...base,
+      ...(task.scope ? { scope: task.scope } : {}),
       result: task.result
         ? {
             ...task.result,
@@ -164,6 +205,12 @@ export function publicErrorMessage(
   }
   if (code === 'remember_path_escape') {
     return 'Remember agent touched a path outside managed memory.';
+  }
+  if (code === 'remember_scope_mismatch') {
+    return 'Remember agent wrote outside the requested memory scope.';
+  }
+  if (code === 'remember_no_update') {
+    return 'Remember agent did not update any memory.';
   }
   if (code === 'remember_queue_full') {
     return kind === 'remember'
@@ -380,7 +427,9 @@ export class WorkspaceRememberTaskLane {
   enqueue(params: {
     content: string;
     contextMode: BridgeWorkspaceMemoryRememberContextMode;
+    scope?: BridgeWorkspaceMemoryRememberTargetScope;
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryRememberTaskSnapshot {
     this.assertCapacity('remember');
     const task: WorkspaceMemoryTaskRecord = {
@@ -388,6 +437,7 @@ export class WorkspaceRememberTaskLane {
       taskId: createMemoryTaskId('remember'),
       status: 'queued',
       contextMode: params.contextMode,
+      ...(params.scope ? { scope: params.scope } : {}),
       createdAt: nowIso(),
       updatedAt: nowIso(),
       ...(params.originatorClientId
@@ -398,17 +448,23 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryRemember({
           content: params.content,
           contextMode: params.contextMode,
+          ...(params.scope ? { scope: params.scope } : {}),
         });
+        params.assertGenerationOpen?.();
+        if (result.filesTouched.length === 0) {
+          throw Object.assign(
+            new Error('Remember agent did not update any memory'),
+            { code: 'remember_no_update' },
+          );
+        }
         if (!this.disposed) {
           task.status = 'completed';
           task.result = {
-            summary:
-              result.filesTouched.length > 0
-                ? 'Memory update completed.'
-                : 'No memory files updated.',
+            summary: 'Memory update completed.',
             filesTouched: result.filesTouched,
             touchedScopes: result.touchedScopes,
           };
@@ -456,13 +512,16 @@ export class WorkspaceRememberTaskLane {
 
   enqueueForget(params: {
     query: string;
+    scope?: BridgeWorkspaceMemoryRememberTargetScope;
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryForgetTaskSnapshot {
     this.assertCapacity('forget');
     const task: WorkspaceMemoryTaskRecord = {
       kind: 'forget',
       taskId: createMemoryTaskId('forget'),
       status: 'queued',
+      ...(params.scope ? { scope: params.scope } : {}),
       createdAt: nowIso(),
       updatedAt: nowIso(),
       ...(params.originatorClientId
@@ -474,9 +533,12 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryForget({
           query: params.query,
+          ...(params.scope ? { scope: params.scope } : {}),
         });
+        params.assertGenerationOpen?.();
         if (!this.disposed) {
           task.status = 'completed';
           task.result = {
@@ -531,6 +593,7 @@ export class WorkspaceRememberTaskLane {
 
   enqueueDream(params: {
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryDreamTaskSnapshot {
     this.assertCapacity('dream');
     const task: WorkspaceMemoryTaskRecord = {
@@ -548,7 +611,9 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryDream();
+        params.assertGenerationOpen?.();
         if (!this.disposed) {
           task.status = 'completed';
           task.result = {
@@ -622,7 +687,7 @@ export class WorkspaceRememberTaskLane {
 }
 
 function validateOriginatorClientId(
-  deps: WorkspaceRememberRouteDeps,
+  deps: WorkspaceRememberResolvedRouteDeps,
   req: Request,
   res: Response,
 ): string | undefined | null {
@@ -642,9 +707,10 @@ function validateOriginatorClientId(
 }
 
 async function validateManagedMemoryAvailable(
-  deps: WorkspaceRememberRouteDeps,
+  deps: WorkspaceRememberResolvedRouteDeps,
   res: Response,
   kind: WorkspaceMemoryTaskKind,
+  assertGenerationOpen?: () => void,
 ): Promise<boolean> {
   try {
     const available = await deps.bridge.isWorkspaceMemoryRememberAvailable();
@@ -657,6 +723,7 @@ async function validateManagedMemoryAvailable(
     }
     return true;
   } catch (err) {
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return false;
     debugLogger.error('Availability check failed:', err);
     const code = `${kind}_failed`;
     res.status(500).json({
@@ -667,14 +734,36 @@ async function validateManagedMemoryAvailable(
   }
 }
 
-export function mountWorkspaceMemoryRememberRoutes(
+interface WorkspaceRememberRouteResolveOptions {
+  /** POST routes create a lane on demand; GET routes must not allocate. */
+  creating: boolean;
+  kind: WorkspaceMemoryTaskKind;
+}
+
+type WorkspaceRememberRouteDepsResolver = (
+  req: Request,
+  res: Response,
+  options: WorkspaceRememberRouteResolveOptions,
+) => WorkspaceRememberResolvedRouteDeps | null;
+
+function mountWorkspaceMemoryRememberRoutesAt(
   app: Application,
-  deps: WorkspaceRememberRouteDeps,
+  basePath: string,
+  mutate: WorkspaceRememberRouteDeps['mutate'],
+  resolveRouteDeps: WorkspaceRememberRouteDepsResolver,
 ): void {
   app.post(
-    '/workspace/memory/remember',
-    deps.mutate({ strict: true }),
+    `${basePath}/remember`,
+    mutate({ strict: true }),
     async (req, res) => {
+      const deps = resolveRouteDeps(req, res, {
+        creating: true,
+        kind: 'remember',
+      });
+      if (!deps) return;
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const body = deps.safeBody(req);
       const content = body['content'];
       const trimmedContent = typeof content === 'string' ? content.trim() : '';
@@ -704,19 +793,42 @@ export function mountWorkspaceMemoryRememberRoutes(
         return;
       }
 
+      const scopeRaw = body['scope'];
+      if (
+        scopeRaw !== undefined &&
+        scopeRaw !== 'project' &&
+        scopeRaw !== 'user'
+      ) {
+        res.status(400).json({
+          error: '`scope` must be "project", "user", or omitted',
+          code: 'invalid_scope',
+        });
+        return;
+      }
+
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
 
-      if (!(await validateManagedMemoryAvailable(deps, res, 'remember'))) {
+      if (
+        !(await validateManagedMemoryAvailable(
+          deps,
+          res,
+          'remember',
+          assertGenerationOpen,
+        ))
+      ) {
         return;
       }
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
       let task: WorkspaceMemoryRememberTaskSnapshot;
       try {
         task = deps.lane.enqueue({
           content: trimmedContent,
           contextMode: contextModeRaw,
+          ...(scopeRaw ? { scope: scopeRaw } : {}),
           ...(originatorClientId ? { originatorClientId } : {}),
+          ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
         });
       } catch (err) {
         const code = workspaceMemoryFailureCode(
@@ -735,9 +847,17 @@ export function mountWorkspaceMemoryRememberRoutes(
   );
 
   app.get(
-    '/workspace/memory/remember/:taskId',
-    deps.mutate({ strict: true }),
+    `${basePath}/remember/:taskId`,
+    mutate({ strict: true }),
     (req, res) => {
+      const deps = resolveRouteDeps(req, res, {
+        creating: false,
+        kind: 'remember',
+      });
+      if (!deps) return;
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
       const task = deps.lane.get(
@@ -756,58 +876,91 @@ export function mountWorkspaceMemoryRememberRoutes(
     },
   );
 
-  app.post(
-    '/workspace/memory/forget',
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const body = deps.safeBody(req);
-      const query = body['query'];
-      const trimmedQuery = typeof query === 'string' ? query.trim() : '';
-      if (!trimmedQuery) {
-        res.status(400).json({
-          error: '`query` must be a non-empty string',
-          code: 'invalid_query',
-        });
-        return;
-      }
-      if (
-        Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
-      ) {
-        res.status(400).json({
-          error: `\`query\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
-          code: 'invalid_query',
-        });
-        return;
-      }
+  app.post(`${basePath}/forget`, mutate({ strict: true }), async (req, res) => {
+    const deps = resolveRouteDeps(req, res, {
+      creating: true,
+      kind: 'forget',
+    });
+    if (!deps) return;
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+    if (!requireTrustedWorkspace(deps, res)) return;
+    const body = deps.safeBody(req);
+    const query = body['query'];
+    const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+    if (!trimmedQuery) {
+      res.status(400).json({
+        error: '`query` must be a non-empty string',
+        code: 'invalid_query',
+      });
+      return;
+    }
+    if (Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES) {
+      res.status(400).json({
+        error: `\`query\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
+        code: 'invalid_query',
+      });
+      return;
+    }
+    const scopeRaw = body['scope'];
+    if (
+      scopeRaw !== undefined &&
+      scopeRaw !== 'project' &&
+      scopeRaw !== 'user'
+    ) {
+      res.status(400).json({
+        error: '`scope` must be "project", "user", or omitted',
+        code: 'invalid_scope',
+      });
+      return;
+    }
 
-      const originatorClientId = validateOriginatorClientId(deps, req, res);
-      if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res, 'forget'))) return;
+    const originatorClientId = validateOriginatorClientId(deps, req, res);
+    if (originatorClientId === null) return;
+    if (
+      !(await validateManagedMemoryAvailable(
+        deps,
+        res,
+        'forget',
+        assertGenerationOpen,
+      ))
+    )
+      return;
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
-      try {
-        const task = deps.lane.enqueueForget({
-          query: trimmedQuery,
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        res.status(202).json(task);
-      } catch (err) {
-        const code = workspaceMemoryFailureCode(
-          err,
-          'forget_failed',
-          logWorkspaceMemoryExtractionError,
-        );
-        res.status(publicErrorStatus(code)).json({
-          error: publicErrorMessage(code, 'forget'),
-          code,
-        });
-      }
-    },
-  );
+    try {
+      const task = deps.lane.enqueueForget({
+        query: trimmedQuery,
+        ...(scopeRaw ? { scope: scopeRaw } : {}),
+        ...(originatorClientId ? { originatorClientId } : {}),
+        ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
+      });
+      res.status(202).json(task);
+    } catch (err) {
+      const code = workspaceMemoryFailureCode(
+        err,
+        'forget_failed',
+        logWorkspaceMemoryExtractionError,
+      );
+      res.status(publicErrorStatus(code)).json({
+        error: publicErrorMessage(code, 'forget'),
+        code,
+      });
+    }
+  });
 
   app.get(
-    '/workspace/memory/forget/:taskId',
-    deps.mutate({ strict: true }),
+    `${basePath}/forget/:taskId`,
+    mutate({ strict: true }),
     (req, res) => {
+      const deps = resolveRouteDeps(req, res, {
+        creating: false,
+        kind: 'forget',
+      });
+      if (!deps) return;
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
       const task = deps.lane.get(
@@ -826,52 +979,97 @@ export function mountWorkspaceMemoryRememberRoutes(
     },
   );
 
-  app.post(
-    '/workspace/memory/dream',
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const originatorClientId = validateOriginatorClientId(deps, req, res);
-      if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res, 'dream'))) return;
-
-      try {
-        const task = deps.lane.enqueueDream({
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        res.status(202).json(task);
-      } catch (err) {
-        const code = workspaceMemoryFailureCode(
-          err,
-          'dream_failed',
-          logWorkspaceMemoryExtractionError,
-        );
-        res.status(publicErrorStatus(code)).json({
-          error: publicErrorMessage(code, 'dream'),
-          code,
-        });
-      }
-    },
-  );
-
-  app.get(
-    '/workspace/memory/dream/:taskId',
-    deps.mutate({ strict: true }),
-    (req, res) => {
-      const requesterClientId = validateOriginatorClientId(deps, req, res);
-      if (requesterClientId === null) return;
-      const task = deps.lane.get(
-        req.params['taskId'],
-        requesterClientId,
+  app.post(`${basePath}/dream`, mutate({ strict: true }), async (req, res) => {
+    const deps = resolveRouteDeps(req, res, {
+      creating: true,
+      kind: 'dream',
+    });
+    if (!deps) return;
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+    if (!requireTrustedWorkspace(deps, res)) return;
+    const originatorClientId = validateOriginatorClientId(deps, req, res);
+    if (originatorClientId === null) return;
+    if (
+      !(await validateManagedMemoryAvailable(
+        deps,
+        res,
         'dream',
+        assertGenerationOpen,
+      ))
+    )
+      return;
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+
+    try {
+      const task = deps.lane.enqueueDream({
+        ...(originatorClientId ? { originatorClientId } : {}),
+        ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
+      });
+      res.status(202).json(task);
+    } catch (err) {
+      const code = workspaceMemoryFailureCode(
+        err,
+        'dream_failed',
+        logWorkspaceMemoryExtractionError,
       );
-      if (!task) {
-        res.status(404).json({
-          error: 'Workspace memory dream task not found',
-          code: 'dream_task_not_found',
-        });
-        return;
-      }
-      res.status(200).json(task);
-    },
+      res.status(publicErrorStatus(code)).json({
+        error: publicErrorMessage(code, 'dream'),
+        code,
+      });
+    }
+  });
+
+  app.get(`${basePath}/dream/:taskId`, mutate({ strict: true }), (req, res) => {
+    const deps = resolveRouteDeps(req, res, {
+      creating: false,
+      kind: 'dream',
+    });
+    if (!deps) return;
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+    if (!requireTrustedWorkspace(deps, res)) return;
+    const requesterClientId = validateOriginatorClientId(deps, req, res);
+    if (requesterClientId === null) return;
+    const task = deps.lane.get(
+      req.params['taskId'],
+      requesterClientId,
+      'dream',
+    );
+    if (!task) {
+      res.status(404).json({
+        error: 'Workspace memory dream task not found',
+        code: 'dream_task_not_found',
+      });
+      return;
+    }
+    res.status(200).json(task);
+  });
+}
+
+export function mountWorkspaceMemoryRememberRoutes(
+  app: Application,
+  deps: WorkspaceRememberRouteDeps,
+): void {
+  mountWorkspaceMemoryRememberRoutesAt(
+    app,
+    '/workspace/memory',
+    deps.mutate,
+    () => deps,
+  );
+}
+
+export function mountWorkspaceQualifiedMemoryRememberRoutes(
+  app: Application,
+  deps: {
+    mutate: WorkspaceRememberRouteDeps['mutate'];
+    resolveRouteDeps: WorkspaceRememberRouteDepsResolver;
+  },
+): void {
+  mountWorkspaceMemoryRememberRoutesAt(
+    app,
+    '/workspaces/:workspace/memory',
+    deps.mutate,
+    deps.resolveRouteDeps,
   );
 }

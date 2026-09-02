@@ -27,11 +27,16 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import {
+  buildModelReasoningConfigPreview,
+  resolvePersistedReasoningConfigState,
+} from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
@@ -44,6 +49,7 @@ export type WorkspaceProvidersStatusProvider = (
 export interface WorkspaceProvidersStatusProviderOptions {
   argv?: Partial<CliGenerationConfigInputs['argv']>;
   env?: Record<string, string | undefined>;
+  workspaceTrusted?: boolean;
 }
 
 export function createWorkspaceProvidersStatusProvider(
@@ -61,7 +67,18 @@ function buildWorkspaceProvidersStatus(
   try {
     const loaded = loadSettings(
       workspaceCwd,
-      options.env ? { skipLoadEnvironment: true } : true,
+      options.env
+        ? {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
+          }
+        : {
+            consumeCorruptionEnvVars: true,
+            skipLoadEnvironment: options.workspaceTrusted === false,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
+          },
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
@@ -149,6 +166,20 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
+      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+        ? undefined
+        : buildModelReasoningConfigPreview(
+            model.id,
+            resolvePersistedReasoningConfigState(
+              model.id,
+              settings.model?.reasoningEffort,
+              modelsConfig.getResolvedModel(
+                model.authType,
+                model.id,
+                model.registryBaseUrl ?? model.baseUrl,
+              )?.generationConfig.thinkingMandatory === true,
+            ),
+          );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -166,6 +197,7 @@ function buildWorkspaceProvidersStatus(
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         isCurrent,
         isRuntime: false,
+        ...(configOptions ? { configOptions } : {}),
       };
       provider.models.push(providerModel);
       if (isCurrent) provider.current = true;

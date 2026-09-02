@@ -14,7 +14,11 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
-import { WriteFileTool } from './write-file.js';
+import {
+  WriteFileTool,
+  buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
+} from './write-file.js';
 import { ToolErrorType } from './tool-error.js';
 import type { FileDiff, ToolEditConfirmationDetails } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -25,18 +29,21 @@ import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
-const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
+// A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
+// previous run by another user (e.g. a sandboxed root run on a shared CI
+// runner) leaves the directory behind, EACCES-ing every write into it.
+const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-test-root-'));
 
 // --- MOCKS ---
 vi.mock('../core/client.js');
 
-let mockGeminiClientInstance: Mocked<GeminiClient>;
+let mockLlmClientInstance: Mocked<LlmClient>;
 
 // Mock Config
 const fsService = new StandardFileSystemService();
@@ -47,7 +54,7 @@ const mockConfigInternal = {
   getProjectRoot: () => rootDir,
   getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
   setApprovalMode: vi.fn(),
-  getGeminiClient: vi.fn(), // Initialize as a plain mock function
+  getLlmClient: vi.fn(), // Initialize as a plain mock function
   getBaseLlmClient: vi.fn(), // Initialize as a plain mock function
   getFileSystemService: () => fsService,
   getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
@@ -64,8 +71,8 @@ const mockConfigInternal = {
   getUserAgent: () => 'test-agent',
   getUserMemory: () => '',
   setUserMemory: vi.fn(),
-  getGeminiMdFileCount: () => 0,
-  setGeminiMdFileCount: vi.fn(),
+  getMemoryFileCount: () => 0,
+  setMemoryFileCount: vi.fn(),
   getToolRegistry: () =>
     ({
       registerTool: vi.fn(),
@@ -75,6 +82,7 @@ const mockConfigInternal = {
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
   getFileHistoryService: () => mockFileHistoryService,
+  isRecordArtifactEnabled: vi.fn(() => false),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -105,22 +113,21 @@ describe('WriteFileTool', () => {
       fs.mkdirSync(rootDir, { recursive: true });
     }
 
-    // Setup GeminiClient mock
-    mockGeminiClientInstance = new (vi.mocked(GeminiClient))(
+    // Setup LlmClient mock
+    mockLlmClientInstance = new (vi.mocked(LlmClient))(
       mockConfig,
-    ) as Mocked<GeminiClient>;
-    vi.mocked(GeminiClient).mockImplementation(() => mockGeminiClientInstance);
+    ) as Mocked<LlmClient>;
+    vi.mocked(LlmClient).mockImplementation(() => mockLlmClientInstance);
 
-    // Now that mockGeminiClientInstance is initialized, set the mock implementation for getGeminiClient
-    mockConfigInternal.getGeminiClient.mockReturnValue(
-      mockGeminiClientInstance,
-    );
+    // Now that mockLlmClientInstance is initialized, set the mock implementation for getLlmClient
+    mockConfigInternal.getLlmClient.mockReturnValue(mockLlmClientInstance);
 
     tool = new WriteFileTool(mockConfig);
 
     // Reset mocks before each test
     mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
     mockConfigInternal.setApprovalMode.mockClear();
+    mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -146,6 +153,26 @@ describe('WriteFileTool', () => {
       cacheable: true,
     });
   }
+
+  describe('description', () => {
+    it('requires uncertain targets to be read before writing', () => {
+      const description = tool.schema.description;
+
+      expect(description).toContain(
+        'A request to create or generate a file does not establish that the target path is new.',
+      );
+      expect(description).toContain(
+        "Unless the target's absence or current text contents have already been established in this session",
+      );
+      expect(description).toContain('MUST use the read_file tool first');
+      expect(description).toContain(
+        'if the file does not exist, then create it',
+      );
+      expect(description).toContain(
+        'With prior-read enforcement enabled, blind overwrites are rejected.',
+      );
+    });
+  });
 
   describe('build', () => {
     it('should return an invocation for a valid absolute path within root', () => {
@@ -445,6 +472,264 @@ describe('WriteFileTool', () => {
       );
     });
 
+    it('records artifact-like workspace files in the tool result', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const content = '<!doctype html><html><body>Weather</body></html>';
+      const params = {
+        file_path: filePath,
+        content,
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('automatically recorded');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/weather.html"',
+      );
+      expect(result.artifacts).toEqual([
+        {
+          title: 'weather.html',
+          kind: 'html',
+          storage: 'workspace',
+          workspacePath: 'reports/weather.html',
+          mimeType: 'text/html',
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ]);
+    });
+
+    it('records case-insensitive artifact extensions', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'dashboard.HTML');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Dashboard</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('automatically recorded');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/dashboard.HTML"',
+      );
+      expect(result.artifacts?.[0]).toMatchObject({
+        title: 'dashboard.HTML',
+        kind: 'html',
+        storage: 'workspace',
+        workspacePath: 'reports/dashboard.HTML',
+        mimeType: 'text/html',
+      });
+    });
+
+    it.each([
+      ['page.htm', 'html'],
+      ['notebook.ipynb', 'notebook'],
+      ['paper.pdf', 'pdf'],
+      ['photo.png', 'image'],
+      ['photo.jpeg', 'image'],
+      ['photo.jpg', 'image'],
+      ['diagram.svg', 'image'],
+      ['photo.webp', 'image'],
+      ['table.csv', 'file'],
+      ['table.xlsx', 'document'],
+      ['brief.docx', 'document'],
+      ['deck.pptx', 'document'],
+    ])('infers artifact kind for %s as %s', async (fileName, expectedKind) => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', fileName);
+      const params = {
+        file_path: filePath,
+        content: 'artifact content',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.artifacts?.[0]).toMatchObject({
+        title: fileName,
+        kind: expectedKind,
+        storage: 'workspace',
+        workspacePath: `reports/${fileName}`,
+      });
+    });
+
+    it('sets application/x-ipynb+json mimeType for notebooks', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'notes', 'analysis.ipynb');
+      const params = {
+        file_path: filePath,
+        content: '{"cells":[]}',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.artifacts?.[0]).toMatchObject({
+        kind: 'notebook',
+        mimeType: 'application/x-ipynb+json',
+      });
+    });
+
+    it('does not record intermediate files when record_as_artifact is false', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+        record_as_artifact: false,
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record intermediate files written under .qwen/tmp', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, '.qwen', 'tmp', 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifact-like files when artifact recording is disabled', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
+      const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Weather</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose filename contains unsafe markup', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(
+        rootDir,
+        'reports',
+        'chart onerror=alert(1).html',
+      );
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>XSS</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose title exceeds 200 characters', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const longName = 'a'.repeat(196) + '.html';
+      const filePath = path.join(rootDir, 'reports', longName);
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Long</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose workspace path contains unsafe markup', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const dir = path.join(rootDir, 'Q&amp;A');
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'summary.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Summary</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record ordinary source files as artifacts', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'src', 'index.ts');
+      const params = {
+        file_path: filePath,
+        content: 'export const value = 1;\n',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record files outside the workspace as artifacts', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(tempDir, 'outside.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Outside</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('records workspace-root-relative path inside a worktree', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const worktreeDir = path.join(
+        rootDir,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      fs.mkdirSync(worktreeDir, { recursive: true });
+      const originalGetTargetDir = mockConfigInternal.getTargetDir;
+      mockConfigInternal.getTargetDir = () => worktreeDir;
+      try {
+        const filePath = path.join(worktreeDir, 'report.html');
+        const params = {
+          file_path: filePath,
+          content: '<!doctype html><html><body>Report</body></html>',
+        };
+
+        const result = await tool.build(params).execute(abortSignal);
+
+        expect(result.llmContent).toContain('automatically recorded');
+        expect(result.llmContent).toContain(
+          'workspacePath ".qwen/worktrees/my-feature/report.html"',
+        );
+        expect(result.artifacts?.[0]).toMatchObject({
+          title: 'report.html',
+          kind: 'html',
+          storage: 'workspace',
+          workspacePath: '.qwen/worktrees/my-feature/report.html',
+          mimeType: 'text/html',
+        });
+      } finally {
+        mockConfigInternal.getTargetDir = originalGetTargetDir;
+      }
+    });
+
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
     // permissions, corrupted state) must never break the write_file tool.
     it('completes the write even when trackEdit throws', async () => {
@@ -604,6 +889,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: proposedContent,
+        toolWriteOrigin: 'write_file',
         _meta: {
           bom: false,
           encoding: undefined,
@@ -922,6 +1208,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: true, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
@@ -951,6 +1238,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
@@ -980,6 +1268,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: false, encoding: undefined },
       });
 
@@ -1014,6 +1303,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: true, encoding: undefined },
       });
 
@@ -1153,6 +1443,43 @@ describe('WriteFileTool', () => {
 
       readSpy.mockRestore();
       fs.unlinkSync(filePath);
+    });
+
+    it('rejects an overwrite terminally when the filesystem reports ino 0', async () => {
+      // Same reasoning as the EditTool case: `ino: 0` means the cache
+      // cannot prove which file was read, and no amount of re-reading
+      // changes that, so the rejection must be terminal rather than an
+      // instruction to re-read.
+      const filePath = path.join(rootDir, 'enforce-zero-inode.txt');
+      fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({ file_path: filePath, content: 'clobber attempt' })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/overwrite this file/);
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+      } finally {
+        stat.mockRestore();
+        fs.unlinkSync(filePath);
+      }
     });
 
     it('allows a write after a ranged (offset/limit) read', async () => {
@@ -1397,5 +1724,109 @@ describe('WriteFileTool', () => {
         fs.unlinkSync(filePath);
       }
     });
+  });
+});
+
+describe('workspace artifact metadata guard', () => {
+  beforeEach(() => {
+    mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+  });
+
+  // Pins the delegation: buildRecordArtifactReminder must agree with
+  // buildWorkspaceArtifactMetadata. If the reminder is reverted to compute the
+  // path independently (without the safety guard), it would still emit a hint
+  // for this markup-bearing filename while the artifact is correctly skipped,
+  // reintroducing the false "automatically recorded" claim.
+  it('keeps the reminder and the artifact in lockstep when the guard rejects', () => {
+    const rejected = path.resolve(
+      rootDir,
+      'reports',
+      'chart onerror=alert(1).html',
+    );
+    expect(buildWorkspaceArtifactMetadata(mockConfig, rejected)).toBeNull();
+    expect(buildRecordArtifactReminder(mockConfig, rejected)).toBeNull();
+  });
+
+  it('skips artifacts whose workspace path exceeds the store limit', () => {
+    // A short filename buried in a deep directory: the workspace path blows
+    // past the 500-char store limit while the title stays well under its own,
+    // so this exercises the path-length clause on its own.
+    const deepDir = 'a'.repeat(510);
+    const filePath = path.resolve(rootDir, deepDir, 'x.html');
+    expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+  });
+
+  it('derives auto-record identity from the realpath target', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'report.csv');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('infers kind from the realpath target, not the link name', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'preview.png');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('skips auto-record when the realpath target is not a whitelisted kind', () => {
+    const target = path.join(rootDir, 'dropped.bin');
+    const link = path.join(rootDir, 'report.csv');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(target, 'bin');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toBeNull();
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(target, { force: true });
+    }
+  });
+
+  it('does not auto-record a file whose realpath is outside the workspace', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'write-file-out-'));
+    const linkDir = path.join(rootDir, 'output');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.symlinkSync(outside, linkDir);
+    const filePath = path.join(linkDir, 'report.csv');
+    fs.writeFileSync(filePath, 'a,b\n');
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+    } finally {
+      fs.rmSync(linkDir, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('skips artifacts whose workspace path contains a control character', () => {
+    // The control character sits in a directory segment, not the basename: the
+    // title is path.basename(filePath), so a control character in the title
+    // would also appear in the path and could not prove the path-side check on
+    // its own.
+    const filePath = path.resolve(rootDir, 'reports\u000b', 'chart.html');
+    expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
   });
 });

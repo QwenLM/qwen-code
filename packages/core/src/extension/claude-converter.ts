@@ -131,7 +131,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Task: 'Task',
   TodoWrite: 'TodoList',
   WebFetch: 'WebFetch',
-  WebSearch: 'None',
+  WebSearch: 'WebSearch',
   Write: 'WriteFile',
   LS: 'ListFiles',
 };
@@ -453,7 +453,11 @@ export async function convertClaudePluginPackage(
   pluginName: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   signal?: AbortSignal,
-): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+): Promise<{
+  config: ExtensionConfig;
+  convertedDir: string;
+  externalContent: boolean;
+}> {
   signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
@@ -493,7 +497,7 @@ export async function convertClaudePluginPackage(
   );
   await fs.promises.mkdir(pluginDir, { recursive: true });
 
-  const pluginSource = await resolvePluginSource(
+  const { pluginSource, externalContent } = await resolvePluginSource(
     marketplacePlugin,
     extensionDir,
     pluginDir,
@@ -544,7 +548,11 @@ export async function convertClaudePluginPackage(
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
   }
 
-  return buildQwenExtensionFromPlugin(pluginSource, mergedConfig);
+  const converted = await buildQwenExtensionFromPlugin(
+    pluginSource,
+    mergedConfig,
+  );
+  return { ...converted, externalContent };
 }
 
 /**
@@ -554,7 +562,7 @@ export async function convertClaudePluginPackage(
  * could otherwise make the converter read sensitive files outside the plugin.
  * Returns the confined absolute path, or null when the reference is unsafe.
  */
-function resolvePluginRelativeFile(
+export function resolvePluginRelativeFile(
   pluginSource: string,
   relativePath: string,
 ): string | null {
@@ -591,7 +599,7 @@ function resolvePluginRelativeFile(
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
  * conversion paths.
  */
-async function buildQwenExtensionFromPlugin(
+export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
@@ -1014,7 +1022,10 @@ export function isClaudePluginConfig(
 
 /**
  * Resolve plugin source from marketplace plugin configuration.
- * Returns the absolute path to the plugin source directory.
+ * Returns the absolute path to the plugin source directory and whether the
+ * plugin content was fetched from a source external to the marketplace
+ * repository (in which case the marketplace clone's commit does not describe
+ * the installed content).
  */
 async function resolvePluginSource(
   pluginConfig: ClaudeMarketplacePluginConfig,
@@ -1022,7 +1033,7 @@ async function resolvePluginSource(
   pluginDir: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ pluginSource: string; externalContent: boolean }> {
   signal?.throwIfAborted();
   const source = pluginConfig.source;
 
@@ -1047,7 +1058,7 @@ async function resolvePluginSource(
         signal?.throwIfAborted();
         await cloneFromGit(installMetadata, pluginDir, signal);
       }
-      return pluginDir;
+      return { pluginSource: pluginDir, externalContent: true };
     }
 
     // Relative path within marketplace. Confine it: a manifest source like
@@ -1082,12 +1093,12 @@ async function resolvePluginSource(
     // If source path equals marketplace dir (source is '.' or ''),
     // return marketplaceDir directly to avoid copying to subdirectory of self
     if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
-      return marketplaceDir;
+      return { pluginSource: marketplaceDir, externalContent: false };
     }
 
     // Copy to plugin directory
     await fs.promises.cp(sourcePath, pluginDir, { recursive: true });
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: false };
   }
 
   // Handle object source (github or url)
@@ -1103,7 +1114,7 @@ async function resolvePluginSource(
       signal?.throwIfAborted();
       await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'url') {
@@ -1118,7 +1129,7 @@ async function resolvePluginSource(
       signal?.throwIfAborted();
       await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'git-subdir') {
@@ -1162,7 +1173,7 @@ async function resolvePluginSource(
         `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
-    return subDir;
+    return { pluginSource: subDir, externalContent: true };
   }
 
   throw new Error(`Unsupported plugin source type: ${JSON.stringify(source)}`);

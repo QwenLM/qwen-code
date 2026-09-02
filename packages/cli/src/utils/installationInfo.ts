@@ -8,6 +8,7 @@ import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
+import { promisify } from 'node:util';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -20,6 +21,53 @@ export enum PackageManager {
   STANDALONE = 'standalone',
   NPX = 'npx',
   UNKNOWN = 'unknown',
+}
+
+export function getNpmCliPath(
+  nodePath = process.execPath,
+  platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    return path.win32.join(
+      path.win32.dirname(nodePath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+  }
+  // Prefer the npm symlink that sits next to the node binary and resolve it to
+  // the real npm-cli.js. On split layouts where npm is not adjacent to node,
+  // fall back to the conventional `<prefix>/lib/node_modules/npm` location
+  // instead of throwing synchronously — getNpmCliPath is called from a
+  // non-async site (handleAutoUpdate), and a returned best-effort path lets the
+  // downstream spawn surface any failure through its 'error' handler.
+  //
+  // Node version managers (mise, asdf, proto) may replace bin/npm with a shell
+  // wrapper instead of a symlink to npm-cli.js. Validate the resolved path is a
+  // .js file before returning it; otherwise use the conventional fallback.
+  //
+  // This branch is POSIX-only; pin path.posix (not the host-default path) so the
+  // separator stays correct even when a caller passes an explicit `platform`
+  // that differs from the host, e.g. getNpmCliPath('/usr/bin/node', 'linux') on
+  // a Windows host.
+  const npmCliJs = path.posix.join(
+    path.posix.dirname(nodePath),
+    '..',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  const adjacentNpm = path.posix.join(path.posix.dirname(nodePath), 'npm');
+  try {
+    const resolved = fs.realpathSync(adjacentNpm);
+    if (resolved.endsWith('.js')) return resolved;
+    return npmCliJs;
+  } catch {
+    return npmCliJs;
+  }
 }
 
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
@@ -94,6 +142,44 @@ export interface InstallationInfo {
   standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
+}
+
+const execFileAsync = promisify(childProcess.execFile);
+
+// Slow hosts must not hang startup on this lookup.
+const HOMEBREW_INFO_TIMEOUT_MS = 5000;
+
+/**
+ * Best-effort lookup of the newest formula version visible in local Homebrew
+ * metadata. While the homebrew-core formula lags the npm `latest` tag,
+ * `brew upgrade` is a no-op, and an npm-based "update available"
+ * notification would repeat on every startup with no way to clear it
+ * (#9493). Callers use this to decide whether a Homebrew install can
+ * actually be updated before notifying.
+ *
+ * Returns null when the version cannot be determined (brew missing,
+ * timeout, unexpected output); callers keep the legacy notify behavior in
+ * that case rather than silently hiding a real update.
+ */
+export async function getHomebrewLatestVersion(
+  formula = 'qwen-code',
+  run: typeof execFileAsync = execFileAsync,
+): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      'brew',
+      ['info', '--json=v2', '--formula', formula],
+      { encoding: 'utf8', timeout: HOMEBREW_INFO_TIMEOUT_MS },
+    );
+    const parsed = JSON.parse(String(stdout)) as {
+      formulae?: Array<{ versions?: { stable?: unknown } }>;
+    };
+    const stable = parsed.formulae?.[0]?.versions?.stable;
+    return typeof stable === 'string' && stable.length > 0 ? stable : null;
+  } catch (error) {
+    debugLogger.warn('Failed to query Homebrew formula version:', error);
+    return null;
+  }
 }
 
 export function getInstallationInfo(

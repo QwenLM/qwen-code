@@ -8,8 +8,9 @@ It does two things:
 
 - **Side panel** — handles daemon discovery and pairing, then frames the
   daemon's Web Shell (chat + tools).
-- **Service worker** — hosts Qwen's browser MCP tools and executes them through
-  `chrome.debugger`. Tool calls travel over the daemon's reverse MCP WebSocket.
+- **Service worker** — hosts Qwen's native browser MCP tools and executes them
+  through `chrome.debugger`. Tool calls travel over the daemon's reverse MCP
+  WebSocket.
 
 ## Build
 
@@ -50,6 +51,11 @@ before sending it over `/acp`. Pairing endpoints intentionally precede bearer
 authentication so an unknown process never receives a stored bearer token. The
 pairing code is time-limited and failed attempts are bounded.
 
+Do not replace this command with `--open-with-auth`. That mode delivers its
+generated bearer only to the tab it opens; the extension cannot discover it. To
+protect a daemon used by the extension, set `QWEN_SERVER_TOKEN` explicitly and
+configure the same stable token in every authorized client.
+
 ## Browser Automation Tools
 
 Browser debugging tools are implemented in and bundled with this Chrome
@@ -74,6 +80,10 @@ Relevant `/capabilities` tags:
 - `client_mcp_over_ws` means extension-hosted tools can register over `/acp`.
 - `browser_automation_mcp` means the legacy external adapter is configured.
 
+When browser automation is configured, the panel also checks `/workspace/mcp`.
+It warns when the adapter has not connected or when an existing user-defined
+`chrome-devtools` server takes precedence over the extension tunnel.
+
 ## Onboarding states
 
 The side panel probes `GET /health` and `GET /capabilities` and shows one of:
@@ -87,16 +97,49 @@ The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 | `needs-pairing`      | daemon reachable, credential not trusted | pairing-code form                |
 | `ready`              | daemon reachable and paired              | the Web Shell (chat)             |
 
+## Automated real-Chrome acceptance
+
+With Chrome running and the unpacked extension loaded, the acceptance runner
+starts an isolated daemon and fixture page, exercises DOM snapshots, console
+messages, network requests, button clicks, link navigation, restores the
+original page, restarts the daemon, and verifies a cold restart:
+
+```bash
+QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
+  npm -w packages/chrome-extension run test:e2e:chrome
+```
+
+The command exits successfully only after printing `DEGRADED-MODE: PASS`,
+`RUNTIME-MCP: PASS`, `RUNTIME-MCP-COLD-RESTART: PASS`, `FULL-CDP-SMOKE: PASS`,
+and `REAL-CHROME-E2E: PASS`. It does not read or modify the user's Qwen settings.
+
 ## Packaging for the Chrome Web Store
+
+Packaging (`npm run package`) and the release test require the POSIX `zip`
+utility.
 
 ```bash
 npm run package      # -> chrome-extension.zip (manifest at the zip root)
 ```
 
-Upload the zip to the Chrome Web Store Developer Dashboard. The `debugger`
-permission will draw manual review; explain that it is used only after a paired
-local Qwen Code daemon requests a browser debugging action. Host permissions
-are limited to the loopback daemon.
+Run the complete release check from the repository root. It builds the main npm
+payload, runs the extension tests and typecheck, packages the zip, and scans both
+generated payloads for external Chrome DevTools MCP source signatures:
+
+```bash
+npm run test:chrome-extension:release
+```
+
+The generated manifest version follows this package's version. Upload the zip
+to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
+Developer Dashboard for managed distribution. The `debugger` permission will
+draw manual review and must be justified in the store listing.
+
+**Version note:** the manifest version is derived from this package's semver
+(e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`
+alpha. Chrome refuses to update an extension to a lower version, so testers
+upgrading from the `1.0.0` build must remove it in `chrome://extensions`
+before loading this package.
 
 Release the matching Qwen Code CLI before publishing the extension update. The
 pairing handshake intentionally does not downgrade for older daemons; the side

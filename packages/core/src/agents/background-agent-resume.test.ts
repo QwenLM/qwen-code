@@ -8,8 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { BackgroundTaskRegistry } from './background-tasks.js';
+import {
+  BackgroundTaskRegistry,
+  MAX_RETAINED_TERMINAL_AGENTS,
+} from './background-tasks.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
@@ -17,10 +21,16 @@ import {
   readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import { getCurrentAgentDepth } from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
 import {
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
@@ -48,6 +58,22 @@ describe('BackgroundAgentResumeService', () => {
   function createService(
     options: {
       stopHookBlockingCap?: number;
+      currentForkRuntime?: {
+        systemInstruction: string | Content;
+        advertisedTools: FunctionDeclaration[];
+        registeredTools?: FunctionDeclaration[];
+      };
+      // Optional capability context used to exercise the non-empty branches of
+      // buildForkResumeCapabilityReminder (MCP instructions, skills, and
+      // deferred tools). Defaults keep the reminder minimal for other tests.
+      mcpServerInstructions?: Map<string, string>;
+      overrideMcpServerInstructions?: Map<string, string>;
+      deferredToolSummary?: Array<{
+        name: string;
+        description: string;
+        serverName?: string;
+      }>;
+      skillManager?: unknown;
       hookSystem?:
         | {
             fireSubagentStartEvent: ReturnType<typeof vi.fn>;
@@ -62,6 +88,8 @@ describe('BackgroundAgentResumeService', () => {
           ? {
               name: 'researcher',
               color: 'cyan',
+              model: undefined as string | undefined,
+              approvalMode: undefined as string | undefined,
             }
           : null,
       ),
@@ -81,13 +109,52 @@ describe('BackgroundAgentResumeService', () => {
     // mocks the override helper throws and every resume test fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue(
+          (
+            options.currentForkRuntime?.registeredTools ??
+            options.currentForkRuntime?.advertisedTools ??
+            []
+          )
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
+      getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
-      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      getDeferredToolSummary: vi
+        .fn()
+        .mockReturnValue(options.deferredToolSummary ?? []),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
-      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getMcpServerInstructions: vi
+        .fn()
+        .mockReturnValue(options.mcpServerInstructions ?? new Map()),
+      getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
+        (
+          options.currentForkRuntime?.registeredTools ??
+          options.currentForkRuntime?.advertisedTools ??
+          []
+        ).filter(
+          (declaration) =>
+            declaration.name !== undefined && names.includes(declaration.name),
+        ),
+      ),
+    };
+    const overrideToolRegistry =
+      options.overrideMcpServerInstructions === undefined
+        ? stubToolRegistry
+        : {
+            ...stubToolRegistry,
+            getMcpServerInstructions: vi
+              .fn()
+              .mockReturnValue(options.overrideMcpServerInstructions),
+          };
+    const permissionManager = {
+      stripDangerousRulesForAutoMode: vi.fn(),
+      restoreDangerousRules: vi.fn(),
     };
     const monitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
@@ -112,14 +179,35 @@ describe('BackgroundAgentResumeService', () => {
       getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
       isInteractive: () => false,
+      getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
-      getGeminiClient: () => undefined,
-      getSkillManager: () => undefined,
+      getLlmClient: () =>
+        options.currentForkRuntime
+          ? {
+              getChat: () => ({
+                getGenerationConfig: () => ({
+                  systemInstruction:
+                    options.currentForkRuntime!.systemInstruction,
+                  tools: [
+                    {
+                      functionDeclarations:
+                        options.currentForkRuntime!.advertisedTools,
+                    },
+                  ],
+                }),
+              }),
+            }
+          : undefined,
+      getSkillManager: () => options.skillManager,
+      getDisabledSkillNames: () => new Set<string>(),
+      isSkillEnabled: () => true,
+      getModelInvocableCommandsProvider: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
-      createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
+      createToolRegistry: vi.fn().mockResolvedValue(overrideToolRegistry),
+      getPermissionManager: () => permissionManager,
     } as unknown as Config;
 
     return {
@@ -127,10 +215,13 @@ describe('BackgroundAgentResumeService', () => {
       subagentManager,
       hookSystem,
       monitorRegistry,
+      config,
+      permissionManager,
+      stubToolRegistry,
     };
   }
 
-  it('loads only interrupted running background agents as paused entries', async () => {
+  it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';
     const completedAgentId = 'agent-completed';
@@ -154,6 +245,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
     });
@@ -165,8 +257,21 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'completed',
+      isBackgrounded: true,
+      sessionWorkflow: true,
+      lastUpdatedAt: '2026-04-20T00:00:02.000Z',
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
     });
 
     fs.writeFileSync(
@@ -196,14 +301,24 @@ describe('BackgroundAgentResumeService', () => {
     );
     fs.writeFileSync(
       getAgentJsonlPath(tempDir, sessionId, completedAgentId),
-      '',
+      JSON.stringify({
+        uuid: 'c1',
+        parentUuid: null,
+        sessionId,
+        agentId: completedAgentId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Already done' }] },
+      }) + '\n',
       'utf8',
     );
 
     const { service, subagentManager } = createService();
+    const onNotification = vi.fn();
+    registry.setNotificationCallback(onNotification);
     const recovered = await service.loadPausedBackgroundAgents(sessionId);
 
-    expect(recovered).toHaveLength(1);
+    expect(recovered).toHaveLength(2);
     expect(recovered[0]).toMatchObject({
       agentId: runningAgentId,
       status: 'paused',
@@ -213,10 +328,178 @@ describe('BackgroundAgentResumeService', () => {
       metaPath: runningMetaPath,
       outputFile: getAgentJsonlPath(tempDir, sessionId, runningAgentId),
     });
+    expect(recovered[1]).toMatchObject({
+      agentId: completedAgentId,
+      status: 'completed',
+      notified: true,
+      description: 'Already done',
+      outputFile: getAgentJsonlPath(tempDir, sessionId, completedAgentId),
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
+    });
     expect(registry.get(runningAgentId)?.status).toBe('paused');
-    expect(registry.get(completedAgentId)).toBeUndefined();
-    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(1);
+    expect(registry.get(completedAgentId)?.status).toBe('completed');
+    expect(onNotification).not.toHaveBeenCalled();
+    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(2);
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('excludes foreground, legacy completed, and wrong-owner sidecars', async () => {
+    const sessionId = 'session-owned';
+    const cases = [
+      {
+        agentId: 'foreground',
+        isBackgrounded: false,
+        parentSessionId: sessionId,
+      },
+      { agentId: 'legacy-completed', parentSessionId: sessionId },
+      {
+        agentId: 'wrong-owner',
+        isBackgrounded: true,
+        parentSessionId: 'other',
+      },
+    ];
+
+    for (const item of cases) {
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, item.agentId), {
+        agentId: item.agentId,
+        agentType: 'researcher',
+        description: item.agentId,
+        parentSessionId: item.parentSessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: item.isBackgrounded,
+        subagentName: 'researcher',
+      });
+    }
+
+    const { service, subagentManager } = createService();
+    expect(await service.loadPausedBackgroundAgents(sessionId)).toEqual([]);
+    expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
+  });
+
+  it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
+    const sessionId = 'session-unsafe';
+    const missingId = 'missing-transcript';
+    const wrongCwdId = 'wrong-cwd';
+    const worktreeId = 'worktree-agent';
+    for (const agentId of [missingId, wrongCwdId, worktreeId]) {
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: agentId,
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: true,
+        ...(agentId === worktreeId ? { isolation: 'worktree' as const } : {}),
+        subagentName: 'researcher',
+      });
+    }
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, wrongCwdId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        agentId: wrongCwdId,
+        cwd: path.join(tempDir, 'another-workspace'),
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Unsafe cwd' }] },
+      }) + '\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, worktreeId),
+      JSON.stringify({
+        uuid: 'w1',
+        parentUuid: null,
+        sessionId,
+        agentId: worktreeId,
+        cwd: tempDir,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Worktree task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(3);
+    expect(registry.get(missingId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task transcript is missing or unreadable.',
+    });
+    expect(registry.get(wrongCwdId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task working directory does not match the restored session.',
+    });
+    expect(registry.get(worktreeId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task worktree isolation cannot be reconstructed after session restore.',
+    });
+    expect(
+      await service.reviveCompletedBackgroundAgent(missingId, 'continue'),
+    ).toBeUndefined();
+  });
+
+  it('preserves model on recovered paused agents for per-model caps', async () => {
+    const sessionId = 'session-model';
+    const agentId = 'agent-model';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Model-aware recovery test',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      model: 'qwen3-max',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Model-aware recovery test' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      agentId,
+      status: 'paused',
+      model: 'qwen3-max',
+    });
   });
 
   it('keeps interrupted fork tasks visible as paused entries', async () => {
@@ -262,6 +545,45 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Implicit fork background task',
     });
     expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
+  });
+
+  it('restores the model from the meta sidecar for per-model cap accounting', async () => {
+    const sessionId = 'session-model-resume';
+    const agentId = 'agent-model-resume';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Model-capped background task',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      model: 'gemini-2.5-pro',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Model-capped background task' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(registry.get(agentId)?.model).toBe('gemini-2.5-pro');
   });
 
   it('keeps missing subagents visible so they can be abandoned later', async () => {
@@ -394,6 +716,187 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
   });
 
+  it('stamps the resumed prompt-avoidance policy where nested launches inherit it', async () => {
+    // The policy must sit on the config the rebuilt tool registry binds to
+    // (the createToolRegistry receiver) — not on a wrapper above it — so a
+    // nested AgentTool launched by the resumed agent inherits it through its
+    // own config prototype chain. Mirrors the launch path in agent.ts.
+    const sessionId = 'session-policy';
+    const agentId = 'agent-policy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume policy stamp',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume policy stamp' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume policy stamp',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume policy stamp',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    const contexts = vi.mocked(bgConfig.createToolRegistry).mock.contexts;
+    // The runtime config IS the createToolRegistry receiver — the config
+    // whose rebuilt registry a nested AgentTool binds to. A wrapper-only
+    // stamp would leave these two distinct objects.
+    expect(contexts[contexts.length - 1]).toBe(bgConfig);
+    // Non-interactive harness → auto-deny, visible on the tool-bound config
+    // itself and through any derived config's prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('keeps prompts allowed through the chain for a resumed bubble-mode agent in an interactive session', async () => {
+    // Mirror of the launch-path bubble test (agent.ts): a resumed agent of
+    // a `bubble` definition in an INTERACTIVE session surfaces
+    // confirmations to the Background-tasks dialog instead of auto-denying
+    // them, and nested launches under it must inherit the same policy
+    // through their config prototype chains.
+    const sessionId = 'session-bubble';
+    const agentId = 'agent-bubble';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume bubble policy',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume bubble policy' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume bubble policy',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume bubble policy',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager, config } = createService();
+    config.isInteractive = () => true;
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: undefined,
+      approvalMode: 'bubble',
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    // Bubbling: prompts stay allowed (they park on the entry), and nested
+    // launches inherit the same policy through the prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(false);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
   it('fires SubagentStart hooks when resuming and injects hook context', async () => {
     const sessionId = 'session-resume';
     const agentId = 'agent-resume';
@@ -437,8 +940,11 @@ describe('BackgroundAgentResumeService', () => {
       metaPath,
     });
 
+    let resumedInvocation: InvocationContextV1 | undefined;
     const execute = vi.fn(
-      async (_context: { get: (key: string) => unknown }) => undefined,
+      async (_context: { get: (key: string) => unknown }) => {
+        resumedInvocation = getInvocationContext();
+      },
     );
     const setExternalMessageProvider = vi.fn();
     const subagent = {
@@ -463,9 +969,25 @@ describe('BackgroundAgentResumeService', () => {
       getAdditionalContext: () => 'resume-context',
     });
 
-    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    const resumed = await runWithInvocationContext(
+      {
+        version: 1,
+        sessionId,
+        promptId: 'stale-daemon-prompt',
+        originatorClientId: 'stale-client',
+      },
+      () => service.resumeBackgroundAgent(agentId, 'continue'),
+    );
 
     expect(resumed).toBeDefined();
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        taskName: 'Resume with hooks',
+        subagentId: agentId,
+      }),
+    );
     expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
       agentId,
       'researcher',
@@ -482,6 +1004,7 @@ describe('BackgroundAgentResumeService', () => {
     }
     expect(contextArg.get('hook_context')).toBe('resume-context');
     expect(contextArg.get('task_prompt')).toBe('continue');
+    expect(resumedInvocation).toBeUndefined();
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
@@ -1148,6 +1671,8 @@ describe('BackgroundAgentResumeService', () => {
         sandbox: { command: 'docker', image: 'qwen-code-sandbox' },
         screenReader: true,
         model: 'agent-model',
+        authType: 'anthropic',
+        baseUrl: 'https://launch-provider.example.com',
         maxSessionTurns: 7,
         maxToolCalls: 11,
         // Deliberately out of range: the resume path must re-normalize
@@ -1199,13 +1724,21 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     const { service, subagentManager } = createService();
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: 'configured-model',
+      approvalMode: undefined,
+    });
     subagentManager.createAgentHeadless = createAgentHeadless;
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
     expect(resumed).toBeDefined();
     expect(createAgentHeadless).toHaveBeenCalledTimes(1);
-    const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+    const [resumeConfig, overriddenConfig, createOptions] =
+      createAgentHeadless.mock.calls[0]!;
+    expect(resumeConfig.model).toBe('inherit');
     expect(overriddenConfig.getApprovalMode()).toBe('auto-edit');
     expect(overriddenConfig.getBareMode()).toBe(true);
     expect(overriddenConfig.getSandbox()).toEqual({
@@ -1214,6 +1747,13 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(overriddenConfig.getScreenReader()).toBe(true);
     expect(overriddenConfig.getModel()).toBe('agent-model');
+    expect(createOptions.modelConfigOverrides).toEqual({
+      model: 'agent-model',
+    });
+    expect(createOptions.runtimeAuthOverrides).toEqual({
+      authType: 'anthropic',
+      baseUrl: 'https://launch-provider.example.com',
+    });
     expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
     expect(overriddenConfig.getMaxToolCalls()).toBe(11);
     expect(overriddenConfig.getMaxSubagentDepth()).toBe(100);
@@ -1436,8 +1976,10 @@ describe('BackgroundAgentResumeService', () => {
           releaseExecute = resolve;
         }),
     );
+    const executeExternalInputs = vi.fn().mockResolvedValue(undefined);
     const subagent = {
       execute,
+      executeExternalInputs,
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
@@ -1472,7 +2014,12 @@ describe('BackgroundAgentResumeService', () => {
       | (() => string[])
       | undefined;
     expect(provider).toBeDefined();
-    expect(provider?.()).toEqual(['second message']);
+    expect(executeExternalInputs).toHaveBeenCalledWith(
+      ['second message'],
+      expect.any(AbortSignal),
+      { resetStats: false },
+    );
+    expect(provider?.()).toEqual([]);
   });
 
   it('routes owned monitor notifications into a resumed agent queue', async () => {
@@ -1575,6 +2122,10 @@ describe('BackgroundAgentResumeService', () => {
     releaseExecute?.();
     await resume;
     await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.disposeResidentAgent(agentId)).toBe(true);
+    await vi.waitFor(() => {
       expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
         agentId,
         undefined,
@@ -1653,10 +2204,12 @@ describe('BackgroundAgentResumeService', () => {
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
-    const { service, subagentManager, monitorRegistry } = createService();
+    const { service, subagentManager, monitorRegistry, stubToolRegistry } =
+      createService();
+    const dispose = vi.fn().mockResolvedValue(undefined);
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
+      dispose,
     });
 
     await expect(
@@ -1664,6 +2217,9 @@ describe('BackgroundAgentResumeService', () => {
     ).resolves.toBeUndefined();
 
     expect(subagent.execute).not.toHaveBeenCalled();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(stubToolRegistry.stop).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
     expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
       agentId,
       expect.any(Function),
@@ -1688,147 +2244,269 @@ describe('BackgroundAgentResumeService', () => {
     );
   });
 
-  it('resumes fork agents from transcript bootstrap instead of current parent config', async () => {
-    const sessionId = 'session-fork-resume';
-    const agentId = 'agent-fork-resume';
-    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
-    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
-    const launchPrompt = 'Investigate the retry loop and patch it';
-
-    writeAgentMeta(metaPath, {
-      agentId,
-      agentType: FORK_SUBAGENT_TYPE,
-      description: launchPrompt,
-      parentSessionId: sessionId,
-      parentAgentId: null,
-      createdAt: '2026-04-20T00:00:00.000Z',
-      status: 'running',
-      subagentName: FORK_SUBAGENT_TYPE,
-      resolvedApprovalMode: 'default',
-    });
-    fs.writeFileSync(
-      outputFile,
-      [
-        JSON.stringify({
-          uuid: 'sys1',
-          parentUuid: null,
-          sessionId,
-          timestamp: '2026-04-20T00:00:00.000Z',
-          type: 'system',
-          subtype: 'agent_bootstrap',
-          systemPayload: {
-            kind: 'fork',
-            history: [
-              { role: 'user', parts: [{ text: 'bootstrap env' }] },
-              { role: 'model', parts: [{ text: 'bootstrap ack' }] },
-            ],
-            systemInstruction: {
-              role: 'system',
-              parts: [{ text: 'persisted system instruction' }],
-            },
-            tools: [{ name: 'Bash' }, { name: 'Read' }],
-          },
-        }),
-        JSON.stringify({
-          uuid: 'u1',
-          parentUuid: 'sys1',
-          sessionId,
-          timestamp: '2026-04-20T00:00:00.100Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: launchPrompt }] },
-        }),
-        JSON.stringify({
-          uuid: 'sys2',
-          parentUuid: 'u1',
-          sessionId,
-          timestamp: '2026-04-20T00:00:00.200Z',
-          type: 'system',
-          subtype: 'agent_launch_prompt',
-          systemPayload: {
-            displayText: buildChildMessage(launchPrompt),
-          },
-        }),
-        JSON.stringify({
-          uuid: 'a1',
-          parentUuid: 'sys2',
-          sessionId,
-          timestamp: '2026-04-20T00:00:01.000Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Working silently' }] },
-        }),
-      ].join('\n') + '\n',
-      'utf8',
-    );
-
-    registry.register({
-      agentId,
-      description: launchPrompt,
-      subagentType: FORK_SUBAGENT_TYPE,
-      status: 'paused',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      prompt: launchPrompt,
-      outputFile,
-      metaPath,
-      isBackgrounded: true,
-    });
-
-    const execute = vi.fn(async (_context: unknown) => undefined);
-    const subagent = {
-      execute,
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        outputTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
-    };
-
-    const createSpy = vi
-      .spyOn(AgentHeadless, 'create')
-      .mockResolvedValue(subagent as unknown as AgentHeadless);
-    const { service, subagentManager } = createService();
-    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
-
-    expect(resumed).toBeDefined();
-    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
-    expect(createSpy).toHaveBeenCalledTimes(1);
-    const createArgs = createSpy.mock.calls[0];
-    expect(createArgs).toBeDefined();
-    expect(createArgs![2]).toMatchObject({
-      renderedSystemPrompt: {
-        role: 'system',
-        parts: [{ text: 'persisted system instruction' }],
+  it.each([
+    {
+      format: 'legacy capability snapshots',
+      legacyCapabilities: {
+        systemInstruction: {
+          role: 'system' as const,
+          parts: [{ text: 'persisted system instruction' }],
+        },
+        tools: [{ name: 'Bash' }, { name: 'mcp__removed__search' }],
       },
-      initialMessages: [
-        { role: 'user', parts: [{ text: 'bootstrap env' }] },
-        { role: 'model', parts: [{ text: 'bootstrap ack' }] },
-        { role: 'user', parts: [{ text: buildChildMessage(launchPrompt) }] },
-        { role: 'model', parts: [{ text: 'Working silently' }] },
-      ],
-    });
-    expect(createArgs?.[4]).toEqual({
-      max_turns: FORK_DEFAULT_MAX_TURNS,
-    });
-    expect(createArgs?.[5]).toEqual({
-      tools: [{ name: 'Bash' }, { name: 'Read' }],
-    });
-    expect(execute).toHaveBeenCalledTimes(1);
-    const executeCall = execute.mock.calls[0];
-    expect(executeCall).toBeDefined();
-    const contextArg = executeCall?.[0] as
-      | { get(key: string): unknown }
-      | undefined;
-    expect(contextArg).toBeDefined();
-    if (!contextArg) {
-      throw new Error('Expected resume execute context');
-    }
-    expect(contextArg.get('task_prompt')).toBe('continue');
-    createSpy.mockRestore();
-  });
+      executionAllowedTools: ['Read', ToolNames.ASK_USER_QUESTION] as
+        | string[]
+        | undefined,
+      includeDisplayImage: false,
+      deniedTool: 'Edit',
+      expectedExecutionAllowedTools: ['Read'],
+    },
+    {
+      format: 'history-only bootstrap',
+      legacyCapabilities: {},
+      executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: false,
+      deniedTool: ToolNames.ASK_USER_QUESTION,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
+    },
+    {
+      format: 'legacy fork without a persisted display policy',
+      legacyCapabilities: {},
+      executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: true,
+      deniedTool: ToolNames.DISPLAY_IMAGE,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
+    },
+  ])(
+    'resumes fork agents with the current parent prompt and live tool registry ($format)',
+    async ({
+      legacyCapabilities,
+      executionAllowedTools,
+      includeDisplayImage,
+      deniedTool,
+      expectedExecutionAllowedTools,
+    }) => {
+      const sessionId = 'session-fork-resume';
+      const agentId = 'agent-fork-resume';
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+      const launchPrompt = 'Investigate the retry loop and patch it';
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: FORK_SUBAGENT_TYPE,
+        description: launchPrompt,
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: FORK_SUBAGENT_TYPE,
+        resolvedApprovalMode: 'default',
+        ...(executionAllowedTools !== undefined
+          ? { executionAllowedTools }
+          : {}),
+      });
+      fs.writeFileSync(
+        outputFile,
+        [
+          JSON.stringify({
+            uuid: 'sys1',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-04-20T00:00:00.000Z',
+            type: 'system',
+            subtype: 'agent_bootstrap',
+            systemPayload: {
+              kind: 'fork',
+              history: [
+                { role: 'user', parts: [{ text: 'bootstrap env' }] },
+                { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+              ],
+              ...legacyCapabilities,
+            },
+          }),
+          JSON.stringify({
+            uuid: 'u1',
+            parentUuid: 'sys1',
+            sessionId,
+            timestamp: '2026-04-20T00:00:00.100Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: launchPrompt }] },
+          }),
+          JSON.stringify({
+            uuid: 'sys2',
+            parentUuid: 'u1',
+            sessionId,
+            timestamp: '2026-04-20T00:00:00.200Z',
+            type: 'system',
+            subtype: 'agent_launch_prompt',
+            systemPayload: {
+              displayText: buildChildMessage(launchPrompt),
+            },
+          }),
+          JSON.stringify({
+            uuid: 'a1',
+            parentUuid: 'sys2',
+            sessionId,
+            timestamp: '2026-04-20T00:00:01.000Z',
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'Working silently' }] },
+          }),
+        ].join('\n') + '\n',
+        'utf8',
+      );
+
+      registry.register({
+        agentId,
+        description: launchPrompt,
+        subagentType: FORK_SUBAGENT_TYPE,
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: launchPrompt,
+        outputFile,
+        metaPath,
+        isBackgrounded: true,
+      });
+
+      const originalCreate = AgentHeadless.create;
+      let executeContext: unknown;
+      let deniedError: unknown;
+      const createSpy = vi
+        .spyOn(AgentHeadless, 'create')
+        .mockImplementation(async (...args) => {
+          const subagent = await originalCreate(...args);
+          vi.spyOn(subagent, 'execute').mockImplementation(async (context) => {
+            executeContext = context;
+            const denial = await subagent
+              .getCore()
+              .processFunctionCalls(
+                [{ id: 'call-denied', name: deniedTool, args: {} }],
+                new AbortController(),
+                'resume-policy-test',
+                1,
+                [
+                  { name: 'Read' },
+                  ...(includeDisplayImage
+                    ? [{ name: ToolNames.DISPLAY_IMAGE }]
+                    : []),
+                  { name: 'Edit' },
+                  { name: ToolNames.ASK_USER_QUESTION },
+                ],
+              );
+            deniedError =
+              denial.messages[0]?.parts?.[0]?.functionResponse?.response?.[
+                'error'
+              ];
+          });
+          vi.spyOn(subagent, 'getTerminateMode').mockReturnValue(
+            AgentTerminateMode.GOAL,
+          );
+          vi.spyOn(subagent, 'getFinalText').mockReturnValue('done');
+          return subagent;
+        });
+      const currentSystemInstruction: Content = {
+        role: 'system',
+        parts: [{ text: 'current parent system instruction' }],
+      };
+      const { service, subagentManager, stubToolRegistry } = createService({
+        currentForkRuntime: {
+          systemInstruction: currentSystemInstruction,
+          advertisedTools: [
+            { name: 'Read', description: 'advertised current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'advertised display schema',
+                  },
+                ]
+              : []),
+            { name: 'Edit', description: 'advertised edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'advertised interactive question schema',
+            },
+            { name: 'mcp__removed__search' },
+          ],
+          registeredTools: [
+            { name: 'Read', description: 'registered current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'registered display schema',
+                  },
+                ]
+              : []),
+            { name: 'Edit', description: 'registered edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'registered interactive question schema',
+            },
+          ],
+        },
+      });
+      const deniedBuild = vi.fn();
+      stubToolRegistry.getTool.mockReturnValue({
+        name: 'Edit',
+        build: deniedBuild,
+      });
+      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+      expect(resumed).toBeDefined();
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      const createArgs = createSpy.mock.calls[0];
+      expect(createArgs).toBeDefined();
+      expect(createArgs![2]).toMatchObject({
+        renderedSystemPrompt: currentSystemInstruction,
+        initialMessages: [
+          { role: 'user', parts: [{ text: 'bootstrap env' }] },
+          { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+          { role: 'user', parts: [{ text: buildChildMessage(launchPrompt) }] },
+          { role: 'model', parts: [{ text: 'Working silently' }] },
+        ],
+      });
+      expect(createArgs?.[4]).toEqual({
+        max_turns: FORK_DEFAULT_MAX_TURNS,
+      });
+      expect(createArgs?.[5]).toEqual({
+        tools: [
+          'Read',
+          ...(includeDisplayImage ? [ToolNames.DISPLAY_IMAGE] : []),
+          'Edit',
+          ToolNames.ASK_USER_QUESTION,
+        ],
+        executionAllowedTools: expectedExecutionAllowedTools,
+      });
+      expect(createArgs?.[9]).toBe(launchPrompt);
+      expect(createArgs?.[10]).toBe(agentId);
+      expect(executeContext).toBeDefined();
+      const contextArg = executeContext as
+        | { get(key: string): unknown }
+        | undefined;
+      expect(contextArg).toBeDefined();
+      if (!contextArg) {
+        throw new Error('Expected resume execute context');
+      }
+      expect(contextArg.get('task_prompt')).toContain(
+        'Earlier capability listings in the conversation history are obsolete',
+      );
+      expect(contextArg.get('task_prompt')).toContain('continue');
+      expect(deniedError).toContain('execution allowlist');
+      expect(deniedError).not.toContain('not found');
+      expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
+      expect(deniedBuild).not.toHaveBeenCalled();
+      if (includeDisplayImage) {
+        expect(stubToolRegistry.registerFactory).toHaveBeenCalledWith(
+          ToolNames.DISPLAY_IMAGE,
+          expect.any(Function),
+        );
+      }
+      createSpy.mockRestore();
+    },
+  );
 
   it('keeps legacy fork tasks paused when transcript bootstrap is missing', async () => {
     const sessionId = 'session-fork-legacy';
@@ -1845,7 +2523,7 @@ describe('BackgroundAgentResumeService', () => {
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
       subagentName: FORK_SUBAGENT_TYPE,
-      resolvedApprovalMode: 'default',
+      resolvedApprovalMode: 'auto',
     });
     fs.writeFileSync(
       outputFile,
@@ -1874,7 +2552,12 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     const createSpy = vi.spyOn(AgentHeadless, 'create');
-    const { service } = createService();
+    const { service, permissionManager, stubToolRegistry } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        advertisedTools: [{ name: 'Read' }],
+      },
+    });
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
     expect(resumed).toBeUndefined();
@@ -1884,10 +2567,15 @@ describe('BackgroundAgentResumeService', () => {
     );
     expect(registry.get(agentId)?.error).toBeUndefined();
     expect(createSpy).not.toHaveBeenCalled();
+    expect(stubToolRegistry.stop).toHaveBeenCalledTimes(1);
+    expect(
+      permissionManager.stripDangerousRulesForAutoMode,
+    ).toHaveBeenCalledTimes(1);
+    expect(permissionManager.restoreDangerousRules).toHaveBeenCalledTimes(1);
     createSpy.mockRestore();
   });
 
-  it('keeps fork tasks paused when bootstrap capabilities are missing', async () => {
+  it('keeps fork tasks paused when the current parent runtime is unavailable', async () => {
     const sessionId = 'session-fork-cap-legacy';
     const agentId = 'agent-fork-cap-legacy';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1962,9 +2650,220 @@ describe('BackgroundAgentResumeService', () => {
     expect(resumed).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('paused');
     expect(registry.get(agentId)?.resumeBlockedReason).toContain(
-      'runtime constraints are missing',
+      'current parent system prompt or tool surface is unavailable',
     );
     expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  // Seeds a resumable fork task with a complete bootstrap transcript so
+  // resumeBackgroundAgent reaches resolveCurrentForkRuntime — the branch under
+  // test — rather than short-circuiting earlier on a missing transcript.
+  function seedResumableForkTask(sessionId: string, agentId: string) {
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: 'Fork task pending capability rebind',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'sys1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'fork',
+            history: [{ role: 'user', parts: [{ text: 'bootstrap env' }] }],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'sys1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fork task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'sys2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'system',
+          subtype: 'agent_launch_prompt',
+          systemPayload: {
+            displayText: buildChildMessage('Fork task'),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Fork task pending capability rebind',
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Fork task',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    return { metaPath, outputFile };
+  }
+
+  it('keeps fork tasks paused when every advertised parent tool is excluded from subagents', async () => {
+    const sessionId = 'session-fork-cap-excluded';
+    const agentId = 'agent-fork-cap-excluded';
+    seedResumableForkTask(sessionId, agentId);
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        // Every advertised tool is in EXCLUDED_TOOLS_FOR_SUBAGENTS, so the
+        // filtered advertised-name set collapses to empty and the fork must
+        // stay paused instead of resuming with no tools.
+        advertisedTools: [
+          { name: ToolNames.WORKFLOW },
+          { name: ToolNames.AGENT },
+        ],
+      },
+    });
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+      'current parent system prompt or tool surface is unavailable',
+    );
+    expect(registry.get(agentId)?.error).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  it('keeps fork tasks paused when no advertised parent tool is still registered', async () => {
+    const sessionId = 'session-fork-cap-unregistered';
+    const agentId = 'agent-fork-cap-unregistered';
+    seedResumableForkTask(sessionId, agentId);
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        advertisedTools: [{ name: 'mcp__removed__search' }],
+        // The advertised tool is no longer in the live registry, so the
+        // registry filter yields no resolvable tool and the fork stays paused.
+        registeredTools: [],
+      },
+    });
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+      'current parent system prompt or tool surface is unavailable',
+    );
+    expect(registry.get(agentId)?.error).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  it('injects live MCP, skill, and deferred-tool reminders into the resumed fork prompt', async () => {
+    const sessionId = 'session-fork-cap-reminders';
+    const agentId = 'agent-fork-cap-reminders';
+    seedResumableForkTask(sessionId, agentId);
+
+    const execute = vi.fn(async (_context: unknown) => undefined);
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockResolvedValue(subagent as unknown as AgentHeadless);
+
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        // SKILL must be in the resolved tool surface so the skills branch of
+        // buildForkResumeCapabilityReminder runs.
+        advertisedTools: [{ name: ToolNames.SKILL }, { name: 'Read' }],
+        registeredTools: [{ name: ToolNames.SKILL }, { name: 'Read' }],
+      },
+      mcpServerInstructions: new Map([
+        ['docs-server', 'Use ISO-8601 dates when calling docs tools.'],
+      ]),
+      // The resumed fork override owns a fresh registry whose MCP client
+      // manager has no connected clients. Capability reminders must still
+      // read instructions from the live parent registry above.
+      overrideMcpServerInstructions: new Map(),
+      deferredToolSummary: [
+        { name: 'web_search', description: 'Search the web.' },
+      ],
+      skillManager: {
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'auto-skill-demo',
+            description: 'Demo project skill',
+            level: 'project',
+            disableModelInvocation: false,
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]?.[0] as
+      | { get(key: string): unknown }
+      | undefined;
+    if (!contextArg) {
+      throw new Error('Expected resume execute context');
+    }
+    const taskPrompt = String(contextArg.get('task_prompt'));
+
+    // MCP server-instructions reminder branch.
+    expect(taskPrompt).toContain('The text below was supplied by the MCP');
+    expect(taskPrompt).toContain('docs-server');
+    expect(taskPrompt).toContain('Use ISO-8601 dates when calling docs tools.');
+    // Skills reminder branch (gated on ToolNames.SKILL being present).
+    expect(taskPrompt).toContain(
+      'The following skills are available for use with the Skill tool',
+    );
+    expect(taskPrompt).toContain('auto-skill-demo');
+    // Deferred-tools reminder branch.
+    expect(taskPrompt).toContain('web_search');
+    expect(taskPrompt).toContain(ToolNames.TOOL_SEARCH);
+
     createSpy.mockRestore();
   });
 
@@ -2160,7 +3059,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('preserves pending trailing user text in history and sends continuation as the new turn', async () => {
+  it('drops usage-only assistant records while preserving tool history and pending user text', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2189,10 +3088,57 @@ describe('BackgroundAgentResumeService', () => {
           message: { role: 'user', parts: [{ text: 'original task' }] },
         }),
         JSON.stringify({
-          uuid: 'a1',
+          uuid: 'usage-only',
           parentUuid: 'u1',
           sessionId,
           timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [] },
+          usageMetadata: { totalTokenCount: 42 },
+        }),
+        JSON.stringify({
+          uuid: 'call-1',
+          parentUuid: 'usage-only',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  args: { file_path: '/tmp/input.txt' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'result-1',
+          parentUuid: 'call-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.300Z',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'result-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.400Z',
           type: 'assistant',
           message: { role: 'model', parts: [{ text: 'working' }] },
         }),
@@ -2200,7 +3146,7 @@ describe('BackgroundAgentResumeService', () => {
           uuid: 'u2',
           parentUuid: 'a1',
           sessionId,
-          timestamp: '2026-04-20T00:00:00.200Z',
+          timestamp: '2026-04-20T00:00:00.500Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
         }),
@@ -2258,6 +3204,30 @@ describe('BackgroundAgentResumeService', () => {
         promptConfigOverrides: {
           initialMessages: [
             { role: 'user', parts: [{ text: 'original task' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    args: { file_path: '/tmp/input.txt' },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    response: { output: 'contents' },
+                  },
+                },
+              ],
+            },
             { role: 'model', parts: [{ text: 'working' }] },
             { role: 'user', parts: [{ text: 'and another thing' }] },
           ],
@@ -2266,7 +3236,7 @@ describe('BackgroundAgentResumeService', () => {
     );
   });
 
-  it('revives a completed background agent from its transcript and bumps resumeCount', async () => {
+  it('reconstructs a completed agent once, then reuses and disposes its resident runtime', async () => {
     const sessionId = 'session-revive';
     const agentId = 'agent-revive';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2341,10 +3311,11 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'iterated',
     };
 
+    const dispose = vi.fn().mockResolvedValue(undefined);
     const { service, subagentManager } = createService();
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
+      dispose,
     });
 
     const revived = await service.reviveCompletedBackgroundAgent(
@@ -2366,6 +3337,331 @@ describe('BackgroundAgentResumeService', () => {
     expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
       oldSessionMtime.getTime(),
     );
+
+    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
+      true,
+    );
+    expect(registry.get(agentId)?.status).toBe('running');
+    await vi.waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    const hotContextArg = execute.mock.calls[1]?.[0];
+    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
+    expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
+    expect(dispose).not.toHaveBeenCalled();
+
+    registry.reset();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+  });
+
+  it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
+    const sessionId = 'session-revive-clear';
+    const agentId = 'agent-revive-clear';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      resumeCount: 0,
+      sessionWorkflow: true,
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Finished research' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'All done' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Finished research',
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+
+    // Hold the first continuation turn open so the restarted run's
+    // intermediate meta is observable.
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const subagent = {
+      execute: vi.fn(() => turnGate),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'iterated',
+    };
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const revivePromise = service.reviveCompletedBackgroundAgent(
+      agentId,
+      'continue',
+    );
+
+    // The restarted run must not carry the completed run's terminal summary:
+    // a crash in this window would otherwise let discovery restore run N-1's
+    // stats/activities as the interrupted run's live state.
+    await vi.waitFor(() => {
+      expect(readAgentMeta(metaPath)?.status).toBe('running');
+    });
+    const meta = readAgentMeta(metaPath);
+    expect(meta).not.toHaveProperty('stats');
+    expect(meta).not.toHaveProperty('recentActivities');
+
+    releaseTurn();
+    await revivePromise;
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    registry.reset();
+  });
+
+  // The resume attach recomputes the transcript path instead of reusing the
+  // registered outputFile; the recomputed path must follow
+  // meta.parentSessionId, not the current session (the divergence a CLI
+  // restart produces, reachable via send-message revive). The registered
+  // outputFile is a decoy the attach must NOT write to — seeded with the
+  // same chain, so a regression back to attaching the registered
+  // outputFile would land the resumed record in the decoy and fail here.
+  it('appends resumed records to the launch-session transcript when the current session differs', async () => {
+    const launchSessionId = 'session-launch'; // config.getSessionId() is 'session-1'
+    const agentId = 'agent-cross-session';
+    const metaPath = getAgentMetaPath(tempDir, launchSessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, launchSessionId, agentId);
+    // Diverges from the recomputed path the way a future registration path
+    // could when it builds outputFile under a session dir other than
+    // meta.parentSessionId.
+    const decoyOutputFile = getAgentJsonlPath(
+      tempDir,
+      'session-registry-decoy',
+      agentId,
+    );
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Cross-session resume',
+      parentSessionId: launchSessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    const seedRecords =
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'partial answer' }] },
+        }),
+      ].join('\n') + '\n';
+    fs.writeFileSync(outputFile, seedRecords, 'utf8');
+    // The revive gate and the recovery read the registered outputFile, so
+    // the decoy carries the same seed chain.
+    fs.mkdirSync(path.dirname(decoyOutputFile), { recursive: true });
+    fs.writeFileSync(decoyOutputFile, seedRecords, 'utf8');
+
+    registry.register({
+      agentId,
+      description: 'Cross-session resume',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original task',
+      outputFile: decoyOutputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'partial answer');
+
+    const subagent = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'continued',
+    };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose,
+    });
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+
+    // Resumed records land in the LAUNCH session's transcript, chained onto
+    // its last stable record — the current session's dir stays untouched and
+    // the decoy keeps exactly its seed records.
+    const records = fs
+      .readFileSync(outputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(3);
+    expect(records[2]).toMatchObject({
+      type: 'user',
+      sessionId: launchSessionId,
+      parentUuid: 'a1',
+      message: { role: 'user', parts: [{ text: 'keep going' }] },
+    });
+    const decoyRecords = fs
+      .readFileSync(decoyOutputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim());
+    expect(decoyRecords).toHaveLength(2);
+    expect(
+      fs.existsSync(getAgentJsonlPath(tempDir, 'session-1', agentId)),
+    ).toBe(false);
+  });
+
+  it('cold-revives a completed worktree-isolated agent without retaining it', async () => {
+    const agentId = 'completed-isolated';
+    const metaPath = path.join(tempDir, `${agentId}.meta.json`);
+    const outputFile = path.join(tempDir, `${agentId}.jsonl`);
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Isolated result',
+      parentSessionId: 'session-isolated-revive',
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      isolation: 'worktree',
+      subagentName: 'researcher',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'isolated-result',
+        parentUuid: null,
+        sessionId: 'session-isolated-revive',
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Isolated result' }] },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Isolated result',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'done');
+
+    const subagent = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      executeExternalInputs: vi.fn().mockResolvedValue(undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'continued from transcript',
+    };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose,
+    });
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'continue'),
+    ).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it('does not revive non-completed or transcript-less entries', async () => {
@@ -2524,6 +3820,16 @@ describe('BackgroundAgentResumeService', () => {
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
 
+    const stats = {
+      totalTokens: 42,
+      outputTokens: 17,
+      toolUses: 3,
+      durationMs: 1200,
+    };
+    const recentActivities = [
+      { name: 'Read', description: 'read src/index.ts', at: 1 },
+      { name: 'Bash', description: 'npm test', at: 2 },
+    ];
     writeAgentMeta(metaPath, {
       agentId,
       agentType: 'researcher',
@@ -2534,6 +3840,9 @@ describe('BackgroundAgentResumeService', () => {
       status: 'completed',
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
+      sessionWorkflow: true,
+      stats,
+      recentActivities,
     });
     fs.writeFileSync(
       outputFile,
@@ -2558,8 +3867,10 @@ describe('BackgroundAgentResumeService', () => {
       abortController: new AbortController(),
       outputFile,
       metaPath,
+      stats,
+      recentActivities,
     });
-    registry.complete(agentId, 'All done');
+    registry.complete(agentId, 'All done', stats);
     const original = registry.get(agentId);
     expect(original?.notified).toBe(true);
 
@@ -2577,11 +3888,25 @@ describe('BackgroundAgentResumeService', () => {
         });
       }
     });
-
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockRejectedValue(
-      new Error('setup failed'),
-    );
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent: {
+        execute: vi.fn(),
+        setExternalMessageProvider: vi.fn(() => {
+          throw new Error('setup failed');
+        }),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'iterated',
+      },
+      dispose,
+    });
 
     await expect(
       service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
@@ -2599,6 +3924,8 @@ describe('BackgroundAgentResumeService', () => {
     const restoredMeta = readAgentMeta(metaPath);
     expect(restoredMeta?.lastError).toBeUndefined();
     expect(restoredMeta?.status).toBe('completed');
+    expect(restoredMeta?.stats).toEqual(stats);
+    expect(restoredMeta?.recentActivities).toEqual(recentActivities);
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {
@@ -2751,6 +4078,137 @@ describe('BackgroundAgentResumeService', () => {
     expect(revived).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('completed');
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('preserves pre-revive activity state when a completed revive fails', async () => {
+    const sessionId = 'session-revive-rollback-state';
+    const agentId = 'agent-revive-rollback-state';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    const stats = {
+      totalTokens: 42,
+      outputTokens: 17,
+      toolUses: 3,
+      durationMs: 1200,
+    };
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done', stats);
+    // Populate the pre-revive UI state that must survive a failed revive.
+    const activities = [
+      { name: 'Read', description: 'read src/index.ts', at: 1 },
+      { name: 'Bash', description: 'npm test', at: 2 },
+    ];
+    registry.get(agentId)!.recentActivities = activities;
+
+    const { service, subagentManager } = createService();
+    // Force the revive to fail after the entry has been transitioned to paused
+    // (which resets `recentActivities` to []), exercising the rollback path.
+    subagentManager.createAgentHeadless.mockRejectedValue(
+      new Error('setup failed'),
+    );
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeUndefined();
+
+    const restored = registry.get(agentId);
+    expect(restored?.status).toBe('completed');
+    // Regression guard: a `??` fallback would keep the paused entry's empty
+    // `recentActivities`, silently dropping the retained activities. The
+    // completed snapshot must be restored instead.
+    expect(restored?.recentActivities).toEqual(activities);
+    expect(restored?.stats).toEqual(stats);
+    const restoredMeta = readAgentMeta(metaPath);
+    expect(restoredMeta).not.toHaveProperty('stats');
+    expect(restoredMeta).not.toHaveProperty('recentActivities');
+  });
+
+  it('does not restore more completed agents than the terminal-agent cap', async () => {
+    const sessionId = 'session-terminal-cap';
+    const extra = 3;
+    const total = MAX_RETAINED_TERMINAL_AGENTS + extra;
+    const ids: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const agentId = `cap-agent-${String(i).padStart(3, '0')}`;
+      ids.push(agentId);
+      // Higher index → newer recovery timestamp, so the newest `cap` entries
+      // (by `lastUpdatedAt`) are the ones that must survive the cap.
+      const lastUpdatedAt = `2026-04-20T00:00:${String(i).padStart(2, '0')}.000Z`;
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: agentId,
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: true,
+        lastUpdatedAt,
+        subagentName: 'researcher',
+      });
+      fs.writeFileSync(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        JSON.stringify({
+          uuid: `u-${agentId}`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: agentId }] },
+        }) + '\n',
+        'utf8',
+      );
+    }
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    // Only the cap's worth of completed agents are admitted...
+    expect(recovered).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+    expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+    // ...and they are the most recent by recovery timestamp; the oldest
+    // `extra` sidecars are dropped rather than admitted over the cap.
+    for (const id of ids.slice(extra)) {
+      expect(registry.get(id)?.status).toBe('completed');
+    }
+    for (const id of ids.slice(0, extra)) {
+      expect(registry.get(id)).toBeUndefined();
+    }
   });
 });
 

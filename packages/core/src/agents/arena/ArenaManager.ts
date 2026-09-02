@@ -13,7 +13,10 @@ import {
   type ApprovalMode,
   type Config,
 } from '../../config/config.js';
-import { getCoreSystemPrompt } from '../../core/prompts.js';
+import {
+  assembleSystemPrompt,
+  getCoreSystemPrompt,
+} from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -46,6 +49,7 @@ import {
   isTerminalStatus,
   isSettledStatus,
   isSuccessStatus,
+  lastVisibleAnswer,
 } from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
@@ -1075,10 +1079,21 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
-              model.modelId,
-            ),
+            // Stable base + context only. The volatile auto-memory section is
+            // appended once by AgentCore.buildChatSystemPrompt when the
+            // in-process worker builds its system instruction; classifying it
+            // here too would duplicate the section (the per-agent Config
+            // inherits a non-empty getAutoMemoryPrompt() from this base).
+            systemPrompt: assembleSystemPrompt({
+              base: getCoreSystemPrompt(
+                undefined,
+                model.modelId,
+                undefined,
+                'headless',
+                this.config.getOutputStyle(),
+              ),
+              contextFiles: this.config.getUserMemory(),
+            }),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
@@ -1660,19 +1675,9 @@ export class ArenaManager {
     transcript: ArenaTranscriptEntry[] | undefined,
   ): string | undefined {
     if (!transcript) return undefined;
-
-    for (let i = transcript.length - 1; i >= 0; i--) {
-      const message = transcript[i]!;
-      if (
-        message.role === 'assistant' &&
-        !message.thought &&
-        message.content.trim()
-      ) {
-        return message.content.trim();
-      }
-    }
-
-    return undefined;
+    // Shared with TeamManager's pre-attach recovery: the most recent
+    // non-empty, non-thought assistant message wins.
+    return lastVisibleAnswer(transcript);
   }
 
   private async addApproachSummaries(

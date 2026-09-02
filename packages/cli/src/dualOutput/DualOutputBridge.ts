@@ -13,14 +13,15 @@ import {
 } from 'node:fs';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
+import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
-import { reportChatRecordingFailureToAdapter } from '../utils/chat-recording-failure.js';
+import { reportChatRecordingFailureToAdapter } from '../nonInteractive/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
@@ -50,8 +51,9 @@ export const SUPPORTED_EVENTS = [
  *
  * History:
  *   1 — initial release (session_start, session_end, full stream-json).
+ *   2 — textual tool_result content is bounded for transport.
  */
-export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
+export const DUAL_OUTPUT_PROTOCOL_VERSION = 2;
 
 /**
  * Maximum bytes buffered in the Node.js WriteStream before the bridge
@@ -203,7 +205,7 @@ export class DualOutputBridge {
     }
   }
 
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
     if (!this.active) return;
@@ -291,6 +293,7 @@ export class DualOutputBridge {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
@@ -302,6 +305,7 @@ export class DualOutputBridge {
         toolUseId,
         input,
         blockedPath,
+        permissionSuggestions,
       );
     } catch (err) {
       debugLogger.error('DualOutput emitPermissionRequest error:', err);

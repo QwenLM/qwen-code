@@ -36,6 +36,22 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
 const codePointsCache = new Map<string, string[]>();
 const MAX_STRING_LENGTH_TO_CACHE = 1000;
 
+/** Max entries in each text cache before eviction */
+export const TEXT_CACHE_MAX_ENTRIES = 500;
+
+/**
+ * Evict oldest entry if a cache reaches the soft cap.
+ * Map iteration order is insertion order, so the first key is the oldest.
+ */
+function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+}
+
 export function toCodePoints(str: string): string[] {
   // ASCII fast path - check if all chars are ASCII (0-127)
   let isAscii = true;
@@ -59,8 +75,9 @@ export function toCodePoints(str: string): string[] {
 
   const result = Array.from(str);
 
-  // Cache result (unlimited like Ink)
+  // Cache result (bounded; oldest entry evicted at the cap)
   if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    evictOldestTextCacheEntry(codePointsCache);
     codePointsCache.set(str, result);
   }
 
@@ -127,8 +144,9 @@ export function stripUnsafeCharacters(str: string): string {
 const stringWidthCache = new Map<string, number>();
 
 /**
- * Cached version of stringWidth function for better performance
- * Follows Ink's approach with unlimited cache (no eviction)
+ * Cached version of stringWidth function for better performance.
+ * Bounded with oldest-entry eviction so long sessions cannot grow it
+ * without limit.
  */
 export const getCachedStringWidth = (str: string): number => {
   // ASCII printable chars have width 1
@@ -136,15 +154,52 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
+  evictOldestTextCacheEntry(stringWidthCache);
   stringWidthCache.set(str, width);
 
   return width;
 };
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
 
 export interface VisualHeightSlice {
   text: string;
@@ -244,50 +299,23 @@ export function sliceTextByVisualHeight(
 }
 
 /**
- * Wrap text into the visual rows it occupies at `width` columns, accounting
- * for both explicit newlines and code-point-width-aware soft wrapping. Unlike
- * `sliceTextByVisualHeight` (which keeps only a head/tail window), this returns
- * every visual row, so callers that scroll an arbitrary offset can slice the
- * rows the user actually sees.
- */
-export function wrapToVisualLines(text: string, width: number): string[] {
-  if (width <= 0) {
-    return [''];
-  }
-  const visualLines: string[] = [];
-  for (const logicalLine of text.split('\n')) {
-    if (logicalLine === '') {
-      visualLines.push('');
-      continue;
-    }
-    let currentLine = '';
-    let currentWidth = 0;
-    for (const char of logicalLine) {
-      const charWidth = getCachedStringWidth(char);
-      if (currentWidth + charWidth > width && currentWidth > 0) {
-        visualLines.push(currentLine);
-        currentLine = '';
-        currentWidth = 0;
-      }
-      currentLine += char;
-      currentWidth += charWidth;
-    }
-    if (currentLine) {
-      visualLines.push(currentLine);
-    }
-  }
-  if (visualLines.length === 0) {
-    visualLines.push('');
-  }
-  return visualLines;
-}
-
-/**
  * Clear the string width cache
  */
 export const clearStringWidthCache = (): void => {
   stringWidthCache.clear();
 };
+
+/**
+ * Report current sizes of the module-level text caches.
+ * @internal — only used in tests to verify cache bounds.
+ */
+export const __getTextUtilsCacheSizes = (): {
+  codePoints: number;
+  stringWidth: number;
+} => ({
+  codePoints: codePointsCache.size,
+  stringWidth: stringWidthCache.size,
+});
 
 const regex = ansiRegex();
 
@@ -344,6 +372,16 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
   }
 
   if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  const record = obj as Record<string, unknown>;
+  if (
+    !Array.isArray(obj) &&
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
+  ) {
     return obj;
   }
 
@@ -459,13 +497,19 @@ export function sanitizeSensitiveText(
 // `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
 // bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
 // inject terminal effects when rendered as part of a git-supplied filename.
-// eslint-disable-next-line no-control-regex
-const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
+// The Unicode bidi embedding/isolate controls (U+202A–202E, U+2066–2069) are
+// also stripped so a crafted filename can't visually spoof its extension.
+/* eslint-disable no-control-regex */
+const FILENAME_CONTROL_CHARS_REGEX =
+  /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 // Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
 // (benign indentation), which multi-line display treats as layout.
-// eslint-disable-next-line no-control-regex
-const MULTILINE_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 function escapeControlChar(ch: string): string {
   switch (ch) {

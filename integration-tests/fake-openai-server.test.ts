@@ -89,6 +89,115 @@ describe('fake OpenAI server', () => {
     expect(server.requests).toHaveLength(2);
   });
 
+  it('streams errorContent as a single error_finish chunk', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      errorContent: '{"error":{"message":"overloaded"}}',
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const streamText = await response.text();
+    expect(streamText).toContain('"finish_reason":"error_finish"');
+    expect(streamText).toContain('overloaded');
+    expect(streamText).toContain('data: [DONE]');
+    // The error body and finish reason must ride the SAME chunk: the CLI
+    // pipeline reads delta.content off the chunk that carries
+    // finish_reason === 'error_finish'.
+    const errorFrame = streamText
+      .split('\n\n')
+      .find((frame) => frame.includes('error_finish'));
+    expect(errorFrame).toBeDefined();
+    const payload = JSON.parse(
+      errorFrame!.replace(/^data: /, ''),
+    ) as unknown as {
+      choices: Array<{ delta: { content?: string } }>;
+    };
+    expect(payload.choices[0]?.delta.content).toBe(
+      '{"error":{"message":"overloaded"}}',
+    );
+  });
+
+  it('can close response connections for isolated latency measurements', async () => {
+    server = await startFakeOpenAIServer(
+      () => ({ content: 'no connection reuse' }),
+      { keepAlive: false },
+    );
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('closes non-streaming response connections when keepAlive is disabled', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'no reuse' }), {
+      keepAlive: false,
+    });
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('preserves a caller-requested close for default non-streaming responses', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'closed' }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        connection: 'close',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('closes idempotently', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
+
+    const firstClose = server.close();
+    const secondClose = server.close();
+
+    expect(secondClose).toBe(firstClose);
+    await Promise.all([firstClose, secondClose]);
+  });
+
   it('serves non-streaming tool calls with null content', async () => {
     server = await startFakeOpenAIServer(() => ({
       toolCalls: [

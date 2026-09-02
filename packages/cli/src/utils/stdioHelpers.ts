@@ -33,9 +33,67 @@ export const writeStderrLine = (message: string): void => {
 };
 
 /**
+ * `writeStdoutLine` that cannot throw.
+ *
+ * Same contract as `writeStderrLineSafe`: use it where the write is
+ * incidental to the work in hand — an informational block whose reader
+ * going away (`qwen … | head`) must not fail the command.
+ */
+export const writeStdoutLineSafe = (message: string): void => {
+  try {
+    writeStdoutLine(message);
+  } catch {
+    // stdout is gone. Whatever this line had to say, its reader left.
+  }
+};
+
+/**
+ * `writeStderrLine` that cannot throw.
+ *
+ * `process.stderr.write` throws on EPIPE or a closed fd — reachable whenever
+ * the reader goes away (`qwen … | head`) or a daemon redirects its stderr. Most
+ * of the CLI *wants* that to be loud, so this is not the default.
+ *
+ * Use it only where the write is incidental to the work in hand and failing it
+ * would destroy something real: a diagnostic emitted mid-way through replaying
+ * a transcript, say, where a throw would abandon the remaining records.
+ */
+export const writeStderrLineSafe = (message: string): void => {
+  try {
+    writeStderrLine(message);
+  } catch {
+    // stderr is gone. There is, definitionally, nowhere to report that.
+  }
+};
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */
 export const clearScreen = (): void => {
   console.clear();
+};
+
+/**
+ * Ignore a broken output pipe (`qwen … | head`, a daemon's closed redirect)
+ * for the rest of this process.
+ *
+ * EPIPE arrives two ways when the reader goes away: a synchronous throw out
+ * of the write (the `…Safe` writers above catch that) and an asynchronous
+ * `'error'` event on the stream, which crashes the process as an unhandled
+ * error unless a listener is present. This destroys the stream on the async
+ * path — the convention `cost-ledger` and `nonInteractiveCli` use. Call it
+ * once at the top of a command handler whose stdout IS its result, so a
+ * reader that leaves cannot crash the process AFTER the work is done (for a
+ * command that has already mutated state, that turns a completed action into
+ * a crash-class exit). Idempotent listeners are fine — a CLI handler runs
+ * once and the process then exits, so nothing detaches them.
+ */
+export const ignoreBrokenPipe = (): void => {
+  process.stdout.on('error', (err: NodeJS.ErrnoException): void => {
+    if (err.code === 'EPIPE') process.stdout.destroy();
+  });
+  process.stderr.on('error', (err: NodeJS.ErrnoException): void => {
+    if (err.code === 'EPIPE') process.stderr.destroy();
+  });
 };

@@ -15,6 +15,11 @@ import {
 import type { Request, Response } from 'express';
 import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import {
+  detectSystemLanguage,
+  resolveLanguageSetting,
+} from '../../i18n/index.js';
+import { resolveSupportedLanguage } from '../../i18n/languages.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -38,6 +43,7 @@ const sanitizeDaemonMessage = (message: string): string =>
 
 export const redactExtensionDisplaySource = (source: string): string => {
   const redacted = redactUrlCredentials(source);
+  if (redacted.startsWith('upload:')) return redacted;
   if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
   try {
     const url = new URL(redacted);
@@ -52,6 +58,27 @@ export const redactExtensionDisplaySource = (source: string): string => {
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
+
+const resolveExtensionLocale = (
+  workspaceDir: string,
+  workspaceTrusted?: boolean,
+): string => {
+  const configuredLanguage = loadSettings(
+    workspaceDir,
+    workspaceTrusted === undefined
+      ? true
+      : {
+          skipWorkspaceSettings: !workspaceTrusted,
+          workspaceTrusted,
+        },
+  ).merged.general?.language as string | undefined;
+  const requestedLocale = resolveLanguageSetting(configuredLanguage);
+  if (requestedLocale === 'auto') {
+    return detectSystemLanguage();
+  }
+
+  return resolveSupportedLanguage(requestedLocale) ?? requestedLocale;
+};
 
 /**
  * Thrown by the per-workspace install queue when it is saturated, and matched
@@ -72,9 +99,32 @@ export type ExtensionMutationEvent = {
   source?: string;
   name?: string;
   version?: string;
+  credentialPersistence?: 'stored' | 'one_time';
+  credentialStorage?: 'keychain' | 'encrypted_file';
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  resourceStates?: {
+    skills: Array<{
+      name: string;
+      defaultEnabled: boolean;
+      workspaceEnabled: boolean | null;
+      effectiveEnabled: boolean;
+      disabledReason?: 'hard' | 'default' | 'inactive_extension';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>;
+  };
+  results?: Array<
+    | {
+        name: string;
+        defaultActivation: 'enabled' | 'disabled';
+      }
+    | {
+        name: string;
+        workspaceActivation: 'enabled' | 'disabled' | null;
+        effectiveActivation: 'enabled' | 'disabled';
+      }
+  >;
 };
 
 export type ExtensionPendingInteraction =
@@ -162,6 +212,8 @@ export interface CreateExtensionsControllerDeps {
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
   maxExtensionOperationHistory?: number;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -214,11 +266,13 @@ export interface ExtensionsController {
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     },
   ): void;
 }
@@ -256,15 +310,16 @@ export function createExtensionsController(
     workspaceDir = boundWorkspace,
     trustedOverride?: boolean,
     interactions?: ExtensionInteractionHandlers,
-  ) =>
-    new ExtensionManager({
+  ) => {
+    const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    return new ExtensionManager({
       workspaceDir,
+      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
-        trustedOverride ??
+        workspaceTrusted ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
-      networkPolicy: 'public',
       requestSetting:
         interactions?.requestSetting ??
         (async (setting: ExtensionSetting) => {
@@ -280,6 +335,7 @@ export function createExtensionsController(
           );
         }),
     });
+  };
 
   const validateExtensionMutationClient = (
     req: Request,
@@ -364,7 +420,11 @@ export function createExtensionsController(
   };
 
   let extensionsStatusCache:
-    | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
+    | {
+        locale: string;
+        expiresAt: number;
+        value: ServeWorkspaceExtensionsStatus;
+      }
     | undefined;
 
   const refreshExtensionsForAllSessions = async (): Promise<{
@@ -422,13 +482,18 @@ export function createExtensionsController(
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     } = {},
   ): void => {
+    const assertGenerationOpen =
+      options.assertGenerationOpen ?? deps.captureGenerationAssertion?.();
+    assertGenerationOpen?.();
     const releaseOperationSlot = acquireOperationSlot(res);
     if (!releaseOperationSlot) return;
     const operationId = crypto.randomUUID();
@@ -475,6 +540,7 @@ export function createExtensionsController(
         return reservation ? await reservation.run(task) : await task();
       };
       try {
+        assertGenerationOpen?.();
         updateExtensionOperation(operationId, {
           status: 'running',
           phase: 'preparing',
@@ -525,6 +591,7 @@ export function createExtensionsController(
               const prepared = await preparationQueue.run(
                 async () => {
                   try {
+                    assertGenerationOpen?.();
                     return await task(deadlineController.signal);
                   } finally {
                     activePreparations -= 1;
@@ -563,18 +630,21 @@ export function createExtensionsController(
           >(
             task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
+            assertGenerationOpen?.();
             updateExtensionOperation(operationId, {
               status: 'running',
               phase: 'committing',
             });
             const result = await commitQueue.runUntilReleased(
-              async (release) =>
-                await task((generation) => {
+              async (release) => {
+                assertGenerationOpen?.();
+                return await task((generation) => {
                   reconciliationReservation ??=
                     options.reserveRuntimeReconciliation?.();
                   committedGeneration = generation;
                   release();
-                }),
+                });
+              },
             );
             if (committedGeneration === undefined) {
               reconciliationReservation ??=
@@ -638,14 +708,21 @@ export function createExtensionsController(
                   const startedAt = Date.now();
                   try {
                     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                    return {
-                      status: 'fulfilled' as const,
-                      result:
-                        await runtime.bridge.refreshExtensionsForAllSessions(
-                          bridgeMutationEvent(event),
-                        ),
-                      elapsedMs: Date.now() - startedAt,
-                    };
+                    try {
+                      return {
+                        status: 'fulfilled' as const,
+                        result:
+                          await runtime.bridge.refreshExtensionsForAllSessions(
+                            bridgeMutationEvent(event),
+                            ...(options.skillsOnly
+                              ? [{ skillsOnly: true }]
+                              : []),
+                          ),
+                        elapsedMs: Date.now() - startedAt,
+                      };
+                    } finally {
+                      runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                    }
                   } catch (reason) {
                     return {
                       status: 'rejected' as const,
@@ -726,10 +803,15 @@ export function createExtensionsController(
             const { result, elapsedMs } = await runReconciliation(async () => {
               workspace.invalidateWorkspaceSkillsStatus();
               const startedAt = Date.now();
-              const result = await bridge.refreshExtensionsForAllSessions(
-                bridgeMutationEvent(event),
-              );
-              return { result, elapsedMs: Date.now() - startedAt };
+              try {
+                const result = await bridge.refreshExtensionsForAllSessions(
+                  bridgeMutationEvent(event),
+                  ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
+                );
+                return { result, elapsedMs: Date.now() - startedAt };
+              } finally {
+                workspace.invalidateWorkspaceSkillsStatus();
+              }
             });
             const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
               [...commitWarnings];
@@ -927,8 +1009,12 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
+      const locale = resolveExtensionLocale(boundWorkspace);
       const now = Date.now();
-      if (extensionsStatusCache && extensionsStatusCache.expiresAt > now) {
+      if (
+        extensionsStatusCache?.locale === locale &&
+        extensionsStatusCache.expiresAt > now
+      ) {
         return extensionsStatusCache.value;
       }
       const extensionManager = createExtensionManager();
@@ -964,7 +1050,8 @@ export function createExtensionsController(
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
-            ...(ext.installMetadata?.source
+            ...(ext.installMetadata?.source &&
+            ext.installMetadata.type !== 'snapshot'
               ? {
                   source: redactExtensionDisplaySource(
                     ext.installMetadata.source,
@@ -983,7 +1070,17 @@ export function createExtensionsController(
             ...(ext.installMetadata?.autoUpdate !== undefined
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
-            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            ...(ext.installMetadata?.type === 'snapshot'
+              ? { credentialPersistence: 'one_time' as const }
+              : ext.installMetadata?.credentialPersistence === 'stored'
+                ? { credentialPersistence: 'stored' as const }
+                : {}),
+            updateState:
+              ext.installMetadata?.type === 'snapshot'
+                ? 'not updatable'
+                : ext.installMetadata
+                  ? 'unknown'
+                  : 'not updatable',
             capabilities,
             details: {
               mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
@@ -1003,6 +1100,7 @@ export function createExtensionsController(
         extensions: entries,
       };
       extensionsStatusCache = {
+        locale,
         expiresAt: Date.now() + 2_000,
         value: status,
       };

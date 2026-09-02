@@ -9,8 +9,14 @@ import { join } from 'node:path';
 
 const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
 
-export function registerCleanup(fn: (() => void) | (() => Promise<void>)) {
+export function registerCleanup(
+  fn: (() => void) | (() => Promise<void>),
+): () => void {
   cleanupFunctions.push(fn);
+  return () => {
+    const index = cleanupFunctions.indexOf(fn);
+    if (index !== -1) cleanupFunctions.splice(index, 1);
+  };
 }
 
 /**
@@ -103,7 +109,7 @@ export function _resetCleanupFunctionsForTest(): void {
 }
 
 export async function cleanupCheckpoints() {
-  const { Storage } = await import('@qwen-code/qwen-code-core');
+  const { Storage } = await import('./deferred-core-runtime.js');
   const storage = new Storage(process.cwd());
   const tempDir = storage.getProjectTempDir();
   const checkpointsDir = join(tempDir, 'checkpoints');

@@ -57,6 +57,25 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('POST /session maps sessionId into ACP metadata', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const params = result.mapping.extractParams(
+      result.segments,
+      {
+        sessionId: '550E8400-E29B-41D4-A716-446655440000',
+        sessionScope: 'single',
+        _meta: { existing: true },
+      },
+      'POST',
+    );
+    expect(params).toEqual({
+      _meta: {
+        existing: true,
+        'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+      },
+    });
+  });
+
   it('POST /session with non-record body returns empty params', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(
@@ -441,6 +460,48 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('includeWorkflows=true'),
+    );
+    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'workflow' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      kind: 'workflow',
+    });
+  });
+
+  it('POST /session/:id/tasks/:taskId/workflow-action maps to _qwen/session/tasks/workflow_action', () => {
+    const result = matchRoute(
+      '/session/s17/tasks/workflow%201/workflow-action',
+      'POST',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/workflow_action');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { action: 'retry' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'workflow 1',
+      action: 'retry',
+    });
   });
 
   it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
@@ -957,9 +1018,9 @@ describe('acpRouteTable – query param coercion', () => {
     };
   }
 
-  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+  it('GET /file forwards typed range and cursor params', () => {
     const { method, params } = extract(
-      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10&cursor=next%201',
       'GET',
     );
     expect(method).toBe('_qwen/file/read');
@@ -968,6 +1029,7 @@ describe('acpRouteTable – query param coercion', () => {
       maxBytes: 123,
       line: 4,
       limit: 10,
+      cursor: 'next 1',
     });
     // The daemon requires real numbers — a regression to strings would break it.
     expect(typeof params['maxBytes']).toBe('number');

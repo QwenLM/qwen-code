@@ -73,6 +73,7 @@ export default {
   'Type your message or @path/to/file':
     'Tapez votre message ou @chemin/vers/fichier',
   '? for shortcuts': '? pour les raccourcis',
+  'Pasting…': 'Collage…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Appuyez sur 'i' pour le mode INSERTION et 'Esc' pour le mode NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -255,9 +256,6 @@ export default {
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
   Transcript: 'Transcription',
-  'to close': 'pour fermer',
-  'to scroll': 'pour défiler',
-  'Failed to render transcript.': 'Échec du rendu de la transcription.',
   'Read {{count}} file': 'Lu {{count}} fichier',
   'Read {{count}} files': 'Lu {{count}} fichiers',
   'Reading {{count}} file': 'Lecture de {{count}} fichier',
@@ -522,7 +520,9 @@ export default {
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
+  Unset: 'Non défini',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
   Text: 'Texte',
   JSON: 'JSON',
@@ -661,7 +661,7 @@ export default {
     "Veuillez inclure le nom de l'extension à désinstaller comme argument positionnel.",
   'Enables an extension.': 'Active une extension.',
   'The name of the extension to enable.': "Le nom de l'extension à activer.",
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     "La portée dans laquelle activer l'extension. Si non définie, sera activée dans toutes les portées.",
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" activée avec succès pour la portée "{{scope}}".',
@@ -672,7 +672,7 @@ export default {
   'Disables an extension.': 'Désactive une extension.',
   'The name of the extension to disable.':
     "Le nom de l'extension à désactiver.",
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     "La portée dans laquelle désactiver l'extension.",
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" désactivée avec succès pour la portée "{{scope}}".',
@@ -866,8 +866,8 @@ export default {
     "L'entrée de la commande est du JSON avec tool_name, tool_input, tool_use_id, error, error_type, is_interrupt et is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
-  'Input to command is JSON with original user prompt text.':
-    "L'entrée de la commande est du JSON avec le texte d'invite original de l'utilisateur.",
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'L’entrée de la commande est un JSON avec "prompt" (l’invite actuelle liée au modèle) et, facultativement, "submitted_prompt" (la projection textuelle de l’interface TUI interactive prise en charge).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':
@@ -1124,6 +1124,14 @@ export default {
     'Génération de résumé déjà en cours, attendez que la demande précédente se termine',
   'No conversation found to summarize.':
     'Aucune conversation trouvée à résumer.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    "Le chemin du résumé existe déjà et n'est pas un résumé généré : {{path}}",
+  'Summary path must be within the project root.':
+    'Le chemin du résumé doit se trouver dans la racine du projet.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Le chemin du résumé correspond à un répertoire existant : {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Le chemin du résumé se termine par un séparateur mais est un fichier existant : {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Échec de la génération du résumé du contexte du projet : {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1179,6 +1187,12 @@ export default {
     "La compression de l'historique du chat n'a pas réduit la taille. Cela peut indiquer des problèmes avec l'invite de compression.",
   'Could not compress chat history due to a token counting error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur de comptage de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression était vide.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
+  'Could not compress chat history due to an API error.':
+    "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================
@@ -1513,6 +1527,11 @@ export default {
   reviewed: 'révisé',
   'Code Changes:': 'Modifications du code :',
   Performance: 'Performance',
+  'Generation Metrics': 'Métriques de génération',
+  'Latest Request': 'Dernière requête',
+  'Generation Time': 'Temps de génération',
+  'Average TTFT': 'TTFT moyen',
+  'Session TPS': 'TPS de la session',
   'Wall Time:': 'Temps réel :',
   'Agent Active:': 'Agent actif :',
   'API Time:': 'Temps API :',
@@ -1588,10 +1607,20 @@ export default {
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
+  'from nested agent': "de l'agent imbriqué",
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',
+  Pausing: 'Mise en pause',
   Paused: 'En pause',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pause est coopérative ; le travail en cours peut se terminer avant que le workflow ne soit mis en pause. Un appel d'agent en attente d'une approbation d'outil maintient l'exécution dans cet état et continue de compter dans la limite de temps actif tant que l'approbation n'a pas été traitée.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pause : aucun nouvel agent ne démarrera ; le code du script entre les appels d'agents continue de s'exécuter. Appuyez sur p pour reprendre. /clear, /branch et le changement de session annulent les exécutions en pause.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La mise en pause ou la reprise a été refusée ; l'état du workflow a changé. Réessayez.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Astuce : utilisez `/workflows p <runId>` ou Tâches en arrière-plan + p pour mettre en pause/reprendre de façon coopérative ; utilisez `/workflows <runId>` pour les détails.',
   Completed: 'Terminé',
   Failed: 'Échec',
   Stopped: 'Arrêté',
@@ -1980,6 +2009,19 @@ export default {
   'Manage extension settings': 'Gérer les paramètres de l’extension',
   'Ask a quick side question without affecting the main conversation':
     'Poser rapidement une question annexe sans affecter la conversation principale',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtenir un deuxième avis sur la conversation actuelle auprès d'un modèle examinateur",
+  'Consulting advisor...': "Consultation de l'advisor...",
+  'Advisor review failed: {{error}}':
+    "Échec de la revue de l'advisor : {{error}}",
+  'No conversation context available for /advisor':
+    'Aucun contexte de conversation disponible pour /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Focus trop long (max {{max}} caractères)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Une autre opération est en cours, attendez qu'elle se termine avant d'exécuter /advisor",
+  'No response received.': 'Aucune réponse reçue.',
+  'No model configured.': 'Aucun modèle configuré.',
   'Manage Arena sessions': 'Gérer les sessions Arena',
   'Start an Arena session with multiple models competing on the same task':
     "Démarrer une session Arena où plusieurs modèles s'affrontent sur la même tâche",
@@ -2038,7 +2080,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to view transcript': 'pour voir la transcription',
+  'to expand details': 'pour développer les détails',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
@@ -2147,8 +2189,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour ({{reason}}). Vérifiez votre réseau ou la configuration du registre.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Vérification des mises à jour ignorée ({{reason}}) — exécutez /update pour réessayer.',
+  'registry did not respond within {{seconds}}s':
+    "le registre n'a pas répondu en {{seconds}}s",
+  'registry unreachable': 'registre inaccessible',
+  'registry error': 'erreur du registre',
   'Unable to check for updates: {{reason}}':
     'Impossible de vérifier les mises à jour : {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2231,4 +2279,68 @@ export default {
     "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis démarrez une nouvelle session pour reprendre l'enregistrement. Consultez le journal de débogage pour plus de détails.",
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis exécutez `/clear` pour démarrer une nouvelle session enregistrée. Consultez le journal de débogage pour plus de détails.",
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Gérer les compétences automatiques du projet selon leur utilisation récente.',
+  'Show project auto-skill lifecycle status.':
+    'Afficher l’état du cycle de vie des compétences automatiques du projet.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Exécuter la maintenance du cycle de vie des compétences automatiques du projet.',
+  'Restore an archived project auto-skill.':
+    'Restaurer une compétence automatique du projet archivée.',
+  'Auto-skill curator': 'Gestionnaire de compétences automatiques',
+  'Last run: {{time}}': 'Dernière exécution : {{time}}',
+  'Active: {{count}}': 'Actives : {{count}}',
+  'Stale: {{count}}': 'Obsolètes : {{count}}',
+  'Archived: {{count}}': 'Archivées : {{count}}',
+  'Stale skills:': 'Compétences obsolètes :',
+  'Pinned skills:': 'Compétences épinglées :',
+  'Archived skills:': 'Compétences archivées :',
+  'Dry run complete.': 'Simulation terminée.',
+  'Curator run complete.': 'Exécution du gestionnaire terminée.',
+  'Checked: {{count}}': 'Vérifiées : {{count}}',
+  'First observed: {{count}}': 'Observées pour la première fois : {{count}}',
+  'Marked stale: {{count}}': 'Marquées comme obsolètes : {{count}}',
+  'Reactivated: {{count}}': 'Réactivées : {{count}}',
+  'Skipped archive collisions: {{count}}':
+    "Collisions d'archivage ignorées : {{count}}",
+  'Archive candidates:': "Candidates à l'archivage :",
+  'Skipped archive collisions:': "Collisions d'archivage ignorées :",
+  'Skipped rename errors: {{count}}':
+    'Erreurs de renommage ignorées : {{count}}',
+  'Skipped rename errors:': 'Erreurs de renommage ignorées :',
+  '{{verb}}: {{count}}': '{{verb}} : {{count}}',
+  'Would archive': 'Seraient archivées',
+  Archived: 'Archivées',
+  'Failed to read auto-skill curator status: {{message}}':
+    "Impossible de lire l'état du gestionnaire de compétences automatiques : {{message}}",
+  'Usage: /curator run [--dry-run]': 'Utilisation : /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    "Impossible d'exécuter le gestionnaire de compétences automatiques : {{message}}",
+  'Usage: /curator restore <directory>':
+    'Utilisation : /curator restore <répertoire>',
+  'Restored auto-skill: {{name}}':
+    'Compétence automatique restaurée : {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Échec de la restauration de la compétence automatique : {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclure une compétence automatique de la maintenance automatique.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Réintégrer une compétence automatique épinglée à la maintenance automatique.',
+  'Usage: /curator pin <directory>': 'Utilisation : /curator pin <répertoire>',
+  'Usage: /curator unpin <directory>':
+    'Utilisation : /curator unpin <répertoire>',
+  'Pinned auto-skill: {{name}}': 'Compétence automatique épinglée : {{name}}',
+  'Unpinned auto-skill: {{name}}':
+    'Compétence automatique désépinglée : {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    "Impossible de modifier l'épinglage de la compétence automatique : {{message}}",
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Les modifications du gestionnaire de compétences automatiques sont désactivées en mode sécurisé.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
+  'Kept model as {{model}}': 'Modèle conservé : {{model}}',
 };

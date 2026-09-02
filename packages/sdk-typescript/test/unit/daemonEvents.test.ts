@@ -20,7 +20,10 @@ import {
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
-import type { DaemonGithubSetupCompletedData } from '../../src/daemon/events.js';
+import type {
+  DaemonGithubSetupCompletedData,
+  DaemonMidTurnMessageInjectedEvent,
+} from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
@@ -36,6 +39,143 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
 });
 
 describe('daemon event schema', () => {
+  it('recognizes sanitized channel delivery result events', () => {
+    const delivered: DaemonEvent = {
+      id: 1,
+      v: 1,
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+    const failed: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
+      },
+    };
+    const skipped: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:456',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 456,
+      },
+    };
+
+    expect(asKnownDaemonEvent(delivered)).toBe(delivered);
+    expect(asKnownDaemonEvent(failed)).toBe(failed);
+    expect(asKnownDaemonEvent(skipped)).toBe(skipped);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('channel_delivery_result');
+  });
+
+  it('rejects malformed or unsanitized channel delivery results', () => {
+    const base = {
+      id: 1,
+      v: 1 as const,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, target: { id: 'secret' } },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, text: 'secret final answer' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, status: 'failed' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, source: 'scheduled' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts every canonical channel delivery error code', () => {
+    // Canonical set from acp-bridge bridgeOptions.ts — the SDK carries an
+    // independent copy, so this test catches drift.
+    const canonicalCodes = [
+      'channel_worker_unavailable',
+      'channel_delivery_timeout',
+      'channel_delivery_invalid',
+      'channel_delivery_rejected',
+      'channel_delivery_queue_full',
+      'channel_delivery_failed',
+    ];
+    for (const code of canonicalCodes) {
+      const event: DaemonEvent = {
+        id: 1,
+        v: 1,
+        type: 'channel_delivery_result',
+        data: {
+          sessionId: 'session-1',
+          deliveryId: 'task-1:123',
+          source: 'scheduled',
+          status: 'failed',
+          taskId: 'task-1',
+          firedAt: 123,
+          code,
+          error: 'Something went wrong.',
+        },
+      };
+      expect(asKnownDaemonEvent(event), `code ${code} rejected`).toBe(event);
+    }
+    // A code outside the canonical set is rejected.
+    const unknown: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_exploded',
+        error: 'Not a real code.',
+      },
+    };
+    expect(asKnownDaemonEvent(unknown)).toBeUndefined();
+  });
+
   it('recognizes pending prompt queue events', () => {
     const added: DaemonEvent = {
       id: 10,
@@ -256,7 +396,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 2,
         v: 1,
         type: 'permission_request',
         data: {
@@ -269,7 +409,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 3,
         v: 1,
         type: 'permission_request',
         data: {
@@ -337,6 +477,69 @@ describe('daemon event schema', () => {
         data: {
           requestId: 'req-1',
           outcome: { outcome: 'cancelled' },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates settings_changed optional fields', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled' },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          scope: 'workspace',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            skills: [{ name: 'review', enabled: false }],
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled', scope: 1 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          mutation: {
+            id: 'mutation-1',
+            kind: 'skill_toggle',
+            activation: 'applied',
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          },
         },
       }),
     ).toBeUndefined();
@@ -738,7 +941,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 2,
+        id: 3,
         v: 1,
         type: 'session_closed',
         data: { sessionId: 's-1' },
@@ -747,7 +950,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 4,
         v: 1,
         type: 'session_closed',
         data: { reason: 'client_close' },
@@ -794,6 +997,20 @@ describe('daemon event schema', () => {
       }),
     ).toBeDefined();
 
+    const aligned = asKnownDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a', 'mid-b'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(aligned).toBeDefined();
+    expect(aligned?.data.messages).toEqual(['a', 'b']);
+    expect(aligned?.data.messageIds).toEqual(['mid-a', 'mid-b']);
+
     // Empty array is structurally valid (the guard only requires a string[]).
     expect(
       asKnownDaemonEvent({
@@ -815,7 +1032,7 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 5,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { sessionId: 's-1', messages: ['ok', 42] },
@@ -823,12 +1040,44 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 5,
+        id: 6,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { messages: ['x'] },
       }),
     ).toBeUndefined();
+    // A misaligned or malformed `messageIds` is an optional enrichment: it is
+    // stripped rather than rejecting the whole event (mirroring the sidechannel
+    // parser), so a buggy daemon can't silently lose the injection signal.
+    const misaligned = asKnownDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a', 'b'],
+        messageIds: ['mid-a'],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(misaligned).toBeDefined();
+    expect(misaligned?.data.messages).toEqual(['a', 'b']);
+    expect(misaligned?.data.messageIds).toBeUndefined();
+    // The malformed enrichment is OMITTED, not left as a present `undefined`.
+    expect(misaligned?.data).not.toHaveProperty('messageIds');
+
+    const emptyId = asKnownDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's-1',
+        messages: ['a'],
+        messageIds: [''],
+      },
+    }) as DaemonMidTurnMessageInjectedEvent | undefined;
+    expect(emptyId).toBeDefined();
+    expect(emptyId?.data.messageIds).toBeUndefined();
+    expect(emptyId?.data).not.toHaveProperty('messageIds');
   });
 
   it('reduces session_closed as terminal and clears pending permissions', () => {
@@ -901,6 +1150,25 @@ describe('daemon event schema', () => {
       },
     ]);
     expect(cleared.displayName).toBeUndefined();
+  });
+
+  it('keeps displayName on a pr-binding metadata event that echoes the name', () => {
+    // The bridge echoes the current displayName on pr-binding events because
+    // the fold treats an absent name as "cleared" — a pr event without the
+    // echo would blank the title until the next rename.
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's-1',
+          displayName: 'My Session',
+          prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+        },
+      },
+    ]);
+    expect(state.displayName).toBe('My Session');
   });
 
   it('recognizes slow_client_warning frames as known events', () => {
@@ -2666,6 +2934,8 @@ describe('PR 21 — auth device-flow events', () => {
           truncatedEvents: 4,
           retainedEvents: 2,
           maxBytes: 512,
+          scope: 'live_journal',
+          maxEvents: 10_000,
           truncatedTurns: 2,
           fullTranscriptAvailable: true,
         },
@@ -2705,6 +2975,27 @@ describe('PR 21 — auth device-flow events', () => {
           },
         }),
       ).toBeUndefined();
+      for (const extra of [
+        { scope: '' },
+        { scope: 42 },
+        { maxEvents: -1 },
+        { maxEvents: 1.5 },
+      ]) {
+        expect(
+          asKnownDaemonEvent({
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+              ...extra,
+            },
+          }),
+        ).toBeUndefined();
+      }
       expect(
         asKnownDaemonEvent({
           v: 1,

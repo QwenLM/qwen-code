@@ -21,12 +21,19 @@ export function workspaceReadTools(state: BridgeState): any[] {
         max_bytes: z.number().optional().describe('Maximum bytes to read.'),
         line: z.number().optional().describe('Starting line number.'),
         limit: z.number().optional().describe('Number of lines to read.'),
+        cursor: z
+          .string()
+          .optional()
+          .describe(
+            "Resume token from a previous read's nextCursor. Reaches any point in the file in constant time, unlike a large `line` offset.",
+          ),
       },
       handler(async (args) => {
         const result = await state.client.readWorkspaceFile(args.path, {
           maxBytes: args.max_bytes,
           line: args.line,
           limit: args.limit,
+          cursor: args.cursor,
         });
         return formatJsonResult(result);
       }),

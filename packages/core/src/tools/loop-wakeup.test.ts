@@ -12,6 +12,7 @@ import { Storage } from '../config/storage.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import type { Config } from '../config/config.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 // The scheduling math (clamp / wasClamped / second-precise fire time) is
 // covered in cronScheduler.test.ts `session wakeups`. These tests cover the
@@ -103,7 +104,9 @@ describe('LoopWakeupTool', () => {
       reason: 'CI is still running',
     });
 
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await todoWorkChainContext.run('work-chain-1', () =>
+      invocation.execute(new AbortController().signal),
+    );
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Session-only one-shot');
@@ -114,6 +117,7 @@ describe('LoopWakeupTool', () => {
     expect(scheduler.list()[0]).toMatchObject({
       cronExpr: '@wakeup',
       prompt: 'continue loop',
+      todoWorkChainId: 'work-chain-1',
     });
     expect(scheduler.size).toBe(1);
   });

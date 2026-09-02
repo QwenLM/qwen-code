@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },
@@ -41,8 +42,28 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  // Aggregate persisted session counts via
+  // `GET /workspace/:id/session-info` (and the plural
+  // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
+  // local JSONL files — advertised so clients can discover it, but the
+  // response itself marks `expensive: true` / `cost: "disk_scan"` and
+  // must not be polled in a tight loop.
+  session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
+  session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_turn_status: { since: 'v1' },
+  // Prompts and mid-turn messages reference session-scoped image and file
+  // attachments by their stored filename.
+  session_attachments: { since: 'v1' },
+  session_mid_turn_message_mutation: { since: 'v1' },
+  // Daemon-owned reconciliation surface for mid-turn messages:
+  // `GET /session/:id/mid-turn-messages` returns the messages still waiting
+  // in the queue plus bounded settled/promoted id rings. Clients pre-flight
+  // this tag before calling the route; an
+  // older daemon without it leaves them on the legacy client-fallback
+  // behavior. Client-generated message ids make retries idempotent.
+  session_mid_turn_message_query: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -65,6 +86,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  workspace_acp_preheat: { since: 'v1' },
+  workspace_acp_status: { since: 'v1' },
   auth_provider_install: { since: 'v1' },
   // Workspace memory CRUD (`GET/POST /workspace/memory`). Daemon exposes
   // hierarchical QWEN.md state and accepts append/replace writes scoped
@@ -74,7 +97,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  // Explicit remember targets and scoped forget (`scope` parameter). Old
+  // daemons silently ignore an unknown `scope`, so the SDK pre-flights the
+  // matching tag before sending one. The sibling no-op behavior change — a
+  // zero-write remember now fails `remember_no_update` instead of completing
+  // with 'No memory files updated.' — is deliberately untagged: it changes a
+  // task's terminal outcome, not the surface shape, and every client sees it
+  // as a typed `failed` task status that cannot be mistaken for success.
+  workspace_memory_remember_project_scope: { since: 'v1' },
+  workspace_memory_remember_user_scope: { since: 'v1' },
   workspace_memory_forget: { since: 'v1' },
+  workspace_memory_forget_scope: { since: 'v1' },
   workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
@@ -89,15 +122,20 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  scheduled_task_session_reuse: { since: 'v1' },
+  session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
+  standalone_sessions_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
+  session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -109,6 +147,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `mcp_budget_warning` and `mcp_child_refused_batch`. Always-on;
   // orthogonal to `mcp_guardrails` (the snapshot surface).
   mcp_guardrail_events: { since: 'v1' },
+  // Managed ACP invokes an authenticated external policy provider exactly once
+  // at the final tool-execution boundary. Advertised only after the required
+  // provider completed its startup handshake.
+  external_tool_guard: { since: 'v1', modes: ['required'] },
   // Always-on. Daemon supports runtime MCP server mutation via
   // `POST /workspace/mcp/servers` (add) and
   // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
@@ -124,11 +166,25 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // advertise the text/list/stat/glob surface without byte-window
   // support.
   workspace_file_bytes: { since: 'v1' },
+  // Daemon supports byte-cursor paging on `GET /file`: responses carry
+  // `nextCursor`/`hasMore` and requests accept `cursor`. A separate tag from
+  // `workspace_file_read` because the convention here is that new behavior
+  // gets a new tag — a client that preflighted the old one must not silently
+  // receive a surface it cannot recognise. Same split as
+  // `workspace_file_bytes` from `workspace_file_read`, and
+  // `session_transcript_pagination` from `session_transcript`.
+  workspace_file_read_cursor: { since: 'v1' },
   // Daemon supports hash-aware text mutation routes
   // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // Daemon hosts binary file upload (`POST /file/upload`) behind the strict
+  // mutation gate. Uploads never overwrite; occupied names auto-number. New
+  // route contract = new tag (same split as `workspace_file_bytes` from
+  // `workspace_file_read`). The advertised upload byte cap is surfaced via
+  // `limits.maxWorkspaceFileUploadBytes`.
+  workspace_file_upload: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -144,7 +200,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_settings_toggle: { since: 'v1' },
+  workspace_skill_settings_batch_toggle: { since: 'v1' },
+  extension_batch_activation_v2: { since: 'v1' },
+  workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -157,19 +216,27 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Inspect bound workspace trust and request local operator action.
   // Remote clients cannot directly write trustedFolders.json.
   workspace_trust: { since: 'v1' },
-  // `POST /workspace/init` scaffolds an empty
-  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
-  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // Workspace trust policy changes rebuild the affected runtime generation
+  // without restarting the daemon. V2 trust status exposes convergence.
+  workspace_trust_hot_reload: { since: 'v1' },
+  // `POST /workspace/init` scaffolds an empty `QWEN.md` (or the
+  // workspace `context.fileName` value injected as `contextFilename`)
+  // at the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
-  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
-  // the file, the caller should follow up with
-  // `POST /session/:id/prompt`.
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill the
+  // file, the caller should follow up with `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
   // `POST /workspace/setup-github` installs the fixed
   // qwen-code-action workflow set into the bound workspace after
   // explicit consent. The route reuses the interactive `/setup-github`
   // release lookup, workflow download, and `.gitignore` update logic.
   workspace_github_setup: { since: 'v1' },
+  // `GET /workspaces/:workspace/github/prs` lists the open pull requests
+  // of the workspace's GitHub remote via the `gh` CLI (read-only). The
+  // tag means the route contract exists; runtime availability of `gh`
+  // and its auth is reported per-request through the
+  // `github_cli_unavailable` / `github_prs_failed` error codes.
+  workspace_github_prs: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -193,13 +260,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /session/:id/generate` streams a stateless, tool-free model call.
   // The ACP child prefers fastModel and falls back to the main session model.
   session_generation: { since: 'v1' },
+  // `POST /workspace/generate` runs the same stateless, tool-free generation
+  // protocol against the resolved workspace runtime without a live session.
+  workspace_generation: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
   // Direct daemon-side shell execution for an existing session.
   // Advertised CONDITIONALLY: operators must explicitly enable it and
-  // configure bearer auth. Clients must still send a session-bound
-  // X-Qwen-Client-Id when calling the route.
+  // either configure bearer auth or use trusted-loopback mode. Clients must
+  // still send a session-bound X-Qwen-Client-Id when calling the route.
   session_shell_command: { since: 'v1' },
   // Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
@@ -258,6 +328,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
   session_language: { since: 'v1' },
+  // Sessionless user-level language sync (`POST /language`) for hosts that
+  // switch language before any session exists (issue #10234). Advertised
+  // CONDITIONALLY with `workspace_settings`: the route persists user-scope
+  // settings, so daemons without settings persistence omit the tag and
+  // return 404.
+  user_language_sync: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
@@ -265,6 +341,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Immediate best-effort channel delivery for prompt/scheduled finals and
+  // direct workspace notifications. Presence describes the route/event
+  // contract; current worker availability is reported per delivery.
+  channel_delivery: { since: 'v1' },
   // Daemon supports reloading its daemon-managed channel worker via
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel
@@ -275,6 +355,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Sanitized workspace Channel configuration, lifecycle, and pairing.
+  channel_management: { since: 'v1' },
+  // Read-only workspace graph of recently observed channel contacts.
+  workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -282,11 +366,35 @@ export const SERVE_CAPABILITY_REGISTRY = {
   multi_workspace_session_rewind: { since: 'v1' },
   // Singular session shell routes resolve the owning live workspace runtime.
   multi_workspace_session_shell: { since: 'v1' },
+  dynamic_workspace_registration: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  // Optional presentation-only names and updates to those names for workspace
+  // runtimes. Workspace ids and canonical paths remain the routing identities.
+  workspace_display_name: { since: 'v1' },
+  scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // A native OS directory picker can be opened on the daemon host
+  // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
+  // with a display). Headless hosts omit the tag so clients hide the
+  // Browse affordance instead of surfacing a guaranteed picker failure.
+  native_directory_picker: { since: 'v1' },
+  // Workspace-owned runtime lifecycle status and explicit on-demand startup.
+  workspace_runtime: { since: 'v1' },
+  // The daemon host can open a workspace directory in the host's OS file
+  // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
+  // Windows, xdg-open on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-locally affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_open: { since: 'v1' },
+  // The daemon host can open a terminal window in a workspace directory
+  // (`open -a Terminal` on macOS, wt.exe/cmd.exe on Windows, a common
+  // terminal emulator on a Linux host with a display). Headless hosts omit
+  // the tag so clients hide the Open-in-terminal affordance instead of
+  // surfacing a guaranteed launch failure.
+  workspace_local_terminal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
-  // workspace agent CRUD, and persisted session organization surfaces.
+  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
   // persistence. ACP/WebSocket and auth stay outside this core tag;
@@ -298,10 +406,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // to discover plural modalities because legacy Voice tags describe only
   // the primary runtime and may be absent for a secondary-only setup.
   workspace_qualified_voice: { since: 'v1' },
+  // Workspace-qualified managed-memory routes
+  // (`/workspaces/:workspace/memory/{remember,forget,dream}`). Each
+  // registered workspace gets its own task lane; the primary lane is the
+  // same instance as the singular `/workspace/memory` surface.
+  workspace_qualified_memory: { since: 'v1' },
   // Global extension catalog/mutations plus workspace-qualified activation
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_state: { since: 'v1' },
+  extension_git_credentials: { since: 'v1' },
+  extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.
@@ -314,6 +430,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This remains independent from active export so older daemons cannot ignore
   // archive intent and return an active transcript with the same session id.
   workspace_archived_session_export: { since: 'v1' },
+  // Workspace-qualified, memory-only session live-state snapshot plus the
+  // in-memory catalog version token
+  // (`GET /workspaces/:workspace/sessions/live-state`). Independent from
+  // `workspace_qualified_rest_core`: released daemons can advertise that tag
+  // without implementing this route, so clients must pre-flight it directly.
+  // The route stays subject to the per-workspace trust check even when the
+  // tag is advertised.
+  workspace_session_live_state: { since: 'v1' },
+  // Workspace-qualified metadata updates for active, inactive, and archived
+  // persisted sessions.
+  workspace_session_metadata: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -352,6 +479,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
+  // Process-global Live Voice control plane. Advertisement requires a macOS
+  // WebShell daemon with native Host integration and the hot-applied enabled
+  // gate. `/live/status` remains the dynamic readiness surface for the Host,
+  // permissions, self-checks, and provider reachability.
+  realtime_voice: { since: 'v1' },
+  web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -364,6 +497,7 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
@@ -372,6 +506,8 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  currentSessionSchedulingAvailable?: boolean;
+  workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -380,6 +516,7 @@ export interface AdvertiseFeatureToggles {
    */
   channelReloadAvailable?: boolean;
   channelControlAvailable?: boolean;
+  channelManagementAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -397,13 +534,22 @@ export interface AdvertiseFeatureToggles {
   browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
+  dynamicWorkspaceRegistrationAvailable?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
+  scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable?: boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  realtimeVoiceEnabled?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
+  standaloneSessionsAvailable?: boolean;
 }
 
 /**
@@ -443,8 +589,16 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'standalone_sessions_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  [
+    'external_tool_guard',
+    (toggles) => toggles.externalToolGuardActive === true,
+  ],
   ['allow_origin', (toggles) => toggles.allowOriginActive === true],
   [
     'prompt_absolute_deadline',
@@ -459,6 +613,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',
@@ -476,10 +631,26 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
+  [
+    'scheduled_task_session_reuse',
+    (toggles) => toggles.currentSessionSchedulingAvailable === true,
+  ],
+  [
+    'workspace_generation',
+    (toggles) => toggles.workspaceGenerationAvailable === true,
+  ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    'workspace_trust_hot_reload',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
+  [
+    'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
@@ -495,12 +666,36 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.sessionShellCommandEnabled === true,
   ],
   [
+    'dynamic_workspace_registration',
+    (toggles) => toggles.dynamicWorkspaceRegistrationAvailable === true,
+  ],
+  [
     'persistent_workspace_registration',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
   ],
   [
+    'scratch_workspace_registration',
+    (toggles) => toggles.scratchWorkspaceRegistrationAvailable === true,
+  ],
+  [
     'workspace_runtime_removal',
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
+  ],
+  [
+    'native_directory_picker',
+    (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'workspace_local_open',
+    (toggles) => toggles.localPathOpenAvailable === true,
+  ],
+  [
+    'workspace_local_terminal',
+    (toggles) => toggles.localTerminalOpenAvailable === true,
   ],
   [
     'workspace_qualified_acp',
@@ -520,6 +715,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,
   ],
+  [
+    'workspace_qualified_memory',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
+  ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [
@@ -535,6 +736,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'voice_transcribe',
     (toggles) => toggles.voiceWsAvailable !== false,
   ],
+  [
+    'realtime_voice',
+    (toggles) =>
+      toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
+  ],
+  ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

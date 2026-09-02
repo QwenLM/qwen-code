@@ -12,6 +12,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import sharp from 'sharp';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -104,6 +105,7 @@ describe('ReadFileTool', () => {
         getProjectDir: () => path.join(tempRootDir, '.project'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
+      getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({
@@ -324,6 +326,24 @@ describe('ReadFileTool', () => {
       expect(permission).toBe('allow');
     });
 
+    it('should return allow for saved plan files under the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'plans', 'session-1.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should still return ask for ~/.qwen files outside the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'settings.json'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
     it('should return ask for paths directly under the OS temp directory', async () => {
       const params: ReadFileToolParams = {
         file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
@@ -526,11 +546,16 @@ describe('ReadFileTool', () => {
 
     it('should handle image file and return appropriate content', async () => {
       const imagePath = path.join(tempRootDir, 'image.png');
-      // Minimal PNG header
-      const pngHeader = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
-      await fsp.writeFile(imagePath, pngHeader);
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(imagePath);
       const params: ReadFileToolParams = { file_path: imagePath };
       const invocation = tool.build(params) as ToolInvocation<
         ReadFileToolParams,
@@ -538,13 +563,20 @@ describe('ReadFileTool', () => {
       >;
 
       const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: pngHeader.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'image.png',
+      expect(result.llmContent).toEqual([
+        {
+          text: expect.stringMatching(
+            /Image overview: 20x10; oriented source: 20x10.*tool_search.*zoom_image.*0 to 1000/,
+          ),
         },
-      });
+        {
+          inlineData: {
+            data: expect.any(String),
+            mimeType: 'image/jpeg',
+            displayName: 'image.png',
+          },
+        },
+      ]);
       expect(result.returnDisplay).toBe('Read image file: image.png');
     });
 
@@ -870,20 +902,32 @@ describe('ReadFileTool', () => {
         );
       });
 
-      it('does not send ordinary images to the read_file bridge path', async () => {
+      it('preserves ordinary images for the shared tool-result bridge', async () => {
         const imagePath = path.join(tempRootDir, 'image.png');
-        await fsp.writeFile(
-          imagePath,
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        );
+        await sharp({
+          create: {
+            width: 8,
+            height: 8,
+            channels: 3,
+            background: '#306090',
+          },
+        })
+          .png()
+          .toFile(imagePath);
         const invocation = createTextOnlyTool().build({
           file_path: imagePath,
         }) as ToolInvocation<ReadFileToolParams, ToolResult>;
 
         const result = await invocation.execute(abortSignal);
 
-        expect(result.llmContent).toContain('Unsupported image file');
-        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        // An ordinary decodable image keeps its inline media (the rendered
+        // overview) and never routes through the vision bridge.
+        const parts = result.llmContent as Array<{
+          inlineData?: { mimeType?: string };
+        }>;
+        expect(
+          parts.some((part) => part.inlineData?.mimeType === 'image/jpeg'),
+        ).toBe(true);
         expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
       });
     });
@@ -1507,17 +1551,23 @@ describe('ReadFileTool', () => {
 
       it('does not return the placeholder for image files', async () => {
         const imagePath = path.join(tempRootDir, 'pic.png');
-        const pngHeader = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        ]);
-        await fsp.writeFile(imagePath, pngHeader);
+        await sharp({
+          create: {
+            width: 8,
+            height: 8,
+            channels: 3,
+            background: '#306090',
+          },
+        })
+          .png()
+          .toFile(imagePath);
 
         const first = await read({ file_path: imagePath });
-        // Image returns a Part, not a string.
+        // Image returns Parts, not a string.
         expect(typeof first.llmContent).not.toBe('string');
 
         const second = await read({ file_path: imagePath });
-        // Must remain a Part — never collapsed to a string placeholder.
+        // Must remain Parts — never collapsed to a string placeholder.
         expect(typeof second.llmContent).not.toBe('string');
       });
 

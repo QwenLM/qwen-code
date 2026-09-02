@@ -80,6 +80,56 @@ describe('ClientMcpSenderRegistry', () => {
       },
     ]);
   });
+
+  it('routes session-scoped senders by exact session id', async () => {
+    const reg = new ClientMcpSenderRegistry();
+    const senderA = vi.fn(async () => msg(1));
+    const senderB = vi.fn(async () => msg(2));
+    reg.setSession('channel_loop', 'session-a', senderA, 'worker-a');
+    reg.setSession('channel_loop', 'session-b', senderB, 'worker-a');
+
+    await reg.lookup('channel_loop')!(msg(7), { sessionId: 'session-b' });
+
+    expect(senderA).not.toHaveBeenCalled();
+    expect(senderB).toHaveBeenCalledWith(msg(7));
+  });
+
+  it('keeps session deletion scoped to the current worker owner', async () => {
+    const reg = new ClientMcpSenderRegistry();
+    const senderA = vi.fn(async () => msg(1));
+    const senderB = vi.fn(async () => msg(2));
+    reg.setSession('channel_loop', 'session-a', senderA, 'worker-a');
+    reg.setSession('channel_loop', 'session-a', senderB, 'worker-b');
+
+    expect(reg.deleteSession('channel_loop', 'session-a', 'worker-a')).toBe(
+      false,
+    );
+    await reg.lookup('channel_loop')!(msg(7), { sessionId: 'session-a' });
+    expect(senderB).toHaveBeenCalled();
+    expect(reg.deleteSession('channel_loop', 'session-a', 'worker-b')).toBe(
+      true,
+    );
+  });
+
+  it('never falls back to a global sender for a reserved session server', async () => {
+    const reg = new ClientMcpSenderRegistry();
+    const globalSender = vi.fn(async () => msg(1));
+    reg.set('channel_loop', globalSender, 'browser');
+    reg.setSession(
+      'channel_loop',
+      'session-a',
+      vi.fn(async () => msg(2)),
+      'worker',
+    );
+
+    await expect(
+      reg.lookup('channel_loop')!(msg(7), { sessionId: 'session-b' }),
+    ).rejects.toThrow(/No session-scoped MCP sender/);
+    await expect(reg.lookup('channel_loop')!(msg(8))).rejects.toThrow(
+      /requires a session context/,
+    );
+    expect(globalSender).not.toHaveBeenCalled();
+  });
 });
 
 describe('createClientMcpServerProvider', () => {

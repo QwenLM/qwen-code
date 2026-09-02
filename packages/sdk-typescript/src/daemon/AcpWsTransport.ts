@@ -66,8 +66,9 @@ const INIT_TIMEOUT_MS = 30_000;
  * single WS connection using JSON-RPC 2.0 framing.
  *
  * Lazy-init: the WebSocket connection is established on the first
- * `fetch()` call. An `initialize` JSON-RPC request is sent on
- * connect and its result is cached for `GET /capabilities` requests.
+ * `fetch()` call. An `initialize` JSON-RPC request is sent on connect. Daemon
+ * capabilities use REST discovery, with the initialize result retained only
+ * as a fallback for ACP-only deployments.
  *
  * **Browser limitation**: The browser WebSocket API does not support
  * custom headers on the upgrade request. In Node (>=22), the token
@@ -109,7 +110,7 @@ export class AcpWsTransport implements DaemonTransport {
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
-  readonly restFetch: typeof globalThis.fetch | undefined;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(
     wsUrl: string,
@@ -118,7 +119,10 @@ export class AcpWsTransport implements DaemonTransport {
   ) {
     this.wsUrl = wsUrl;
     this.token = token;
-    this.restFetch = restFetch;
+    // Resolve globalThis.fetch lazily so the transport still constructs in
+    // environments where fetch only exists later (or is injected per call).
+    this.restFetch =
+      restFetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   get connected(): boolean {
@@ -162,9 +166,33 @@ export class AcpWsTransport implements DaemonTransport {
 
     const { mapping, segments } = match;
 
-    // Special handling for capabilities — return cached init result.
+    // The ACP initialize result has a different schema from the daemon
+    // capabilities envelope. Prefer the REST discovery response when this
+    // transport was constructed with a REST fetch (as negotiateTransport
+    // does), and retain the initialize result only as an ACP-only fallback.
+    // The envelope must actually carry a `features` array: a reverse proxy
+    // or SPA can answer 200 with HTML for unknown paths, and accepting that
+    // body would resurface the very `caps.features` TypeError this path
+    // exists to avoid.
     if (mapping.method === '_capabilities') {
-      return synthesizeResponse(200, this.initResult ?? { v: 1 });
+      try {
+        const response = await this.restFetch(url, init);
+        if (!response.ok) {
+          if (response.status !== 404) return response;
+        } else {
+          const envelope: unknown = await response.clone().json();
+          if (isRecord(envelope) && Array.isArray(envelope['features'])) {
+            return response;
+          }
+        }
+      } catch {
+        // ACP-only deployments can still use the initialize fallback.
+      }
+      return synthesizeResponse(200, {
+        ...(isRecord(this.initResult) ? this.initResult : {}),
+        v: 1,
+        features: [],
+      });
     }
 
     // For notifications, send and return 204 immediately.
@@ -238,6 +266,16 @@ export class AcpWsTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
+
+    // NOTE: `opts.epoch` / `opts.onEpoch` do NOT apply to this transport.
+    // The WS stream has no `Last-Event-ID` resume mechanism (it filters a
+    // live shared notification stream, never replays), so there is no
+    // stale-cursor problem for the epoch token to solve and no HTTP
+    // response headers to learn the epoch from. Intentionally ignored
+    // rather than silently mis-applied — same policy as `maxQueued` and the
+    // REST SSE lifecycle fields (`clientId`, `sseConnectReason`,
+    // `previousSseStreamId`, `onSseStreamAccepted`), which are likewise
+    // REST-only and unused here.
 
     await this.ensureConnected();
 

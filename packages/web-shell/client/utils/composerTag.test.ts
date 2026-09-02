@@ -3,6 +3,9 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagViewModel,
+  isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
+  parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from './composerTag';
 
@@ -40,6 +43,20 @@ describe('composer tag icon URLs', () => {
 
   it('falls back to built-in tag icons', () => {
     expect(getComposerTagIconUrl('file')).toBeTruthy();
+  });
+
+  it('recognizes only exact built-in tag icon URLs', () => {
+    for (const kind of ['extension', 'file', 'mcp', 'skill'] as const) {
+      const iconUrl = getComposerTagIconUrl(kind);
+      expect(iconUrl).toMatch(/^data:image\/svg\+xml/);
+      expect(isBuiltinComposerTagIconUrl(iconUrl)).toBe(true);
+    }
+    expect(
+      isBuiltinComposerTagIconUrl(
+        'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" />',
+      ),
+    ).toBe(false);
+    expect(isBuiltinComposerTagIconUrl('javascript:alert(1)')).toBe(false);
   });
 
   it('ignores inherited object properties', () => {
@@ -122,7 +139,112 @@ describe('getComposerTagViewModel', () => {
   });
 });
 
+describe('isPreviewableFileComposerTag', () => {
+  it('accepts files and rejects directories', () => {
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@notes.txt',
+        kind: 'file',
+        value: 'notes.txt',
+        metadata: { fileKind: 'file' },
+      }),
+    ).toBe(true);
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('parseUserMessageContentSafely', () => {
+  it('rejects an empty parser result', () => {
+    expect(
+      parseUserMessageContentSafely('original', () => [], 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a non-array parser result', () => {
+    const parser = (() => 'not an array') as unknown as Parameters<
+      typeof parseUserMessageContentSafely
+    >[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a text part with non-string text', () => {
+    const parser = (() => [{ type: 'text', text: 1 }]) as unknown as Parameters<
+      typeof parseUserMessageContentSafely
+    >[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a tag without an id', () => {
+    const parser = (() => [
+      { type: 'tag', tag: { value: 'orders' } },
+    ]) as unknown as Parameters<typeof parseUserMessageContentSafely>[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('allows valid non-round-tripping parts when source preservation is omitted', () => {
+    const parts = parseUserMessageContentSafely(
+      'original',
+      () => [{ type: 'text', text: 'rewritten' }],
+      'test warning',
+    );
+
+    expect(parts).toEqual([{ type: 'text', text: 'rewritten' }]);
+  });
+
+  it('rejects valid non-round-tripping parts when source preservation is required', () => {
+    const parts = parseUserMessageContentSafely(
+      'original',
+      () => [{ type: 'text', text: 'rewritten' }],
+      'test warning',
+      { requireSourcePreservation: true },
+    );
+
+    expect(parts).toBeNull();
+  });
+});
+
 describe('composer tag input annotations', () => {
+  it('preserves file kinds for replayed tags', () => {
+    const content = '@docs/';
+    const annotations = createInputAnnotationsFromComposerTags(content, [
+      {
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+        serialized: content,
+      },
+    ]);
+
+    expect(annotations[0]?.reference.metadata).toEqual({
+      fileKind: 'directory',
+    });
+    expect(splitComposerTagContentByAnnotations(content, annotations)).toEqual([
+      {
+        type: 'reference',
+        tag: expect.objectContaining({
+          metadata: { fileKind: 'directory' },
+        }),
+      },
+    ]);
+  });
+
   it('creates reference annotations using ranges from final prompt text', () => {
     expect(
       createInputAnnotationsFromComposerTags('@dataset:users\n\nshow rows', [

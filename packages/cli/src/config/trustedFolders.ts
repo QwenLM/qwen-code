@@ -6,23 +6,29 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import {
   atomicWriteFileSync,
+  createDebugLogger,
   FatalConfigError,
   getErrorMessage,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
-import { applyUpdates } from '../utils/commentJson.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
-  isWithinRoot,
 } from './path-comparison.js';
+import {
+  buildTrustPrecedenceRules,
+  resolveTrustDecision,
+  resolveTrustRule,
+} from './trust-precedence.js';
+
+const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -59,6 +65,21 @@ export interface TrustedFoldersFile {
 export interface TrustResult {
   isTrusted: boolean | undefined;
   source: 'ide' | 'file' | undefined;
+}
+
+export type TrustedFoldersChangeListener = () => void;
+
+const trustedFoldersChangeListeners = new Set<TrustedFoldersChangeListener>();
+
+export function onTrustedFoldersChanged(
+  listener: TrustedFoldersChangeListener,
+): () => void {
+  trustedFoldersChangeListeners.add(listener);
+  return () => trustedFoldersChangeListeners.delete(listener);
+}
+
+function notifyTrustedFoldersChanged(): void {
+  for (const listener of trustedFoldersChangeListeners) listener();
 }
 
 export type WorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
@@ -98,55 +119,19 @@ export class LoadedTrustedFolders {
    * @returns
    */
   isPathTrusted(location: string): boolean | undefined {
-    const trustedPaths: string[] = [];
-    const untrustedPaths: string[] = [];
-
-    for (const rule of this.rules) {
-      switch (rule.trustLevel) {
-        case TrustLevel.TRUST_FOLDER:
-          trustedPaths.push(rule.path);
-          break;
-        case TrustLevel.TRUST_PARENT:
-          trustedPaths.push(path.dirname(rule.path));
-          break;
-        case TrustLevel.DO_NOT_TRUST:
-          untrustedPaths.push(rule.path);
-          break;
-        default:
-          // Do nothing for unknown trust levels.
-          break;
-      }
-    }
-
-    const locationVariants = getPathComparisonVariants(location);
-    for (const trustedPath of trustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
-          if (isWithinRoot(locationVariant, trustedVariant)) {
-            return true;
-          }
-        }
-      }
-    }
-
-    for (const untrustedPath of untrustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const untrustedVariant of getPathComparisonVariants(
-          untrustedPath,
-        )) {
-          if (locationVariant === untrustedVariant) {
-            return false;
-          }
-        }
-      }
-    }
-
-    return undefined;
+    return resolveTrustDecision(
+      buildTrustPrecedenceRules(this.rules),
+      getPathComparisonVariants(location),
+    );
   }
 
   setValue(path: string, trustLevel: TrustLevel): void {
-    this.user.config[path] = trustLevel;
-    saveTrustedFolders(this.user);
+    const committedConfig = writeTrustedFolders(
+      this.user.path,
+      (diskConfig) => ({ ...diskConfig, [path]: trustLevel }),
+    );
+    this.user.config = committedConfig;
+    notifyTrustedFoldersChanged();
   }
 }
 
@@ -206,57 +191,75 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
 export function saveTrustedFolders(
   trustedFoldersFile: TrustedFoldersFile,
 ): void {
-  try {
-    // Ensure the directory exists
-    const dirPath = path.dirname(trustedFoldersFile.path);
-    if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
+  writeTrustedFolders(trustedFoldersFile.path, () => ({
+    ...trustedFoldersFile.config,
+  }));
+}
+
+function assertTrustedFoldersConfig(
+  config: Record<string, unknown>,
+): asserts config is Record<string, TrustLevel> {
+  for (const [rulePath, trustLevel] of Object.entries(config)) {
+    if (!Object.values(TrustLevel).includes(trustLevel as TrustLevel)) {
+      throw new FatalConfigError(
+        `Invalid trusted folder rule for ${JSON.stringify(rulePath)}.`,
+      );
     }
+  }
+}
 
-    let content = stringify(trustedFoldersFile.config, null, 2);
-    if (fs.existsSync(trustedFoldersFile.path)) {
-      try {
-        // Intentionally keep the comment-preserving round-trip local here
-        // instead of reusing updateSettingsFilePreservingFormat(), because
-        // trustedFolders.json must continue to use atomicWriteFileSync with
-        // noFollow:true when it is finally written to disk.
-        const originalContent = fs.readFileSync(
-          trustedFoldersFile.path,
-          'utf-8',
-        );
-        const parsed = parse(originalContent);
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          Array.isArray(parsed) ||
-          parsed instanceof String ||
-          parsed instanceof Number ||
-          parsed instanceof Boolean
-        ) {
-          throw new Error('trusted folders file is not a JSON object');
-        }
-        const updated = applyUpdates(
-          parsed as Record<string, unknown>,
-          trustedFoldersFile.config as Record<string, unknown>,
-          true,
-        );
-        const preservedContent = stringify(updated, null, 2);
+function writeTrustedFolders(
+  filePath: string,
+  update: (
+    diskConfig: Record<string, TrustLevel>,
+  ) => Record<string, TrustLevel>,
+): Record<string, TrustLevel> {
+  const dirPath = path.dirname(filePath);
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
 
-        // Validate the serialized output before writing. If the round-trip
-        // fails at any point, fall back to writing a clean normalized file so
-        // a corrupted trustedFolders.json can still self-heal on save.
-        parse(preservedContent);
-        content = preservedContent;
-      } catch (error) {
-        // Fall back to a clean rewrite when comment-preserving round-trip fails.
-        writeStderrLine(
-          `Falling back to clean rewrite for trusted folders: ${error instanceof Error ? error.message : String(error)}`,
+  const release = lockfile.lockSync(filePath, {
+    realpath: false,
+    stale: 10_000,
+    onCompromised: (err) => {
+      debugLogger.warn('trusted folders lock compromised:', err);
+    },
+  });
+  try {
+    let originalContent = '{}';
+    if (fs.existsSync(filePath)) {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new FatalConfigError(
+          'Trusted folders path must be a regular file.',
         );
       }
+      originalContent = fs.readFileSync(filePath, 'utf-8');
     }
 
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseJsoncObject(originalContent);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
+      ) {
+        throw new FatalConfigError(
+          'Trusted folders file is not a valid JSON object.',
+        );
+      }
+      throw error;
+    }
+    const diskConfig = Object.fromEntries(Object.entries(parsed));
+    assertTrustedFoldersConfig(diskConfig);
+    const nextConfig = update({ ...diskConfig });
+    assertTrustedFoldersConfig(nextConfig);
+    const content = updateJsoncContent(originalContent, nextConfig, true);
+
     atomicWriteFileSync(
-      trustedFoldersFile.path,
+      filePath,
       content,
       // noFollow: refuse to follow any pre-placed symlink at the
       // config path — a redirected write could either leak the
@@ -266,9 +269,13 @@ export function saveTrustedFolders(
       // file-token-storage all use noFollow:true).
       { encoding: 'utf-8', mode: 0o600, forceMode: true, noFollow: true },
     );
-  } catch (error) {
-    writeStderrLine('Error saving trusted folders file.');
-    writeStderrLine(error instanceof Error ? error.message : String(error));
+    return nextConfig;
+  } finally {
+    try {
+      release();
+    } catch {
+      // The atomic write is authoritative; stale-lock cleanup is retryable.
+    }
   }
 }
 
@@ -278,44 +285,20 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
-function isWithinRootAcrossVariants(childPath: string, parentPath: string) {
-  for (const childVariant of getPathComparisonVariants(childPath)) {
-    for (const parentVariant of getPathComparisonVariants(parentPath)) {
-      if (isWithinRoot(childVariant, parentVariant)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function getExplicitTrustLevel(
+export function getExplicitTrustLevel(
   trustConfig: Record<string, TrustLevel>,
   workspaceCwd: string,
 ): TrustLevel | null {
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.TRUST_FOLDER &&
-      isWithinRootAcrossVariants(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-    if (
-      trustLevel === TrustLevel.TRUST_PARENT &&
-      isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
-    ) {
-      return trustLevel;
-    }
-  }
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.DO_NOT_TRUST &&
-      arePathsEquivalent(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-  }
-  return null;
+  const winner = resolveTrustRule(
+    buildTrustPrecedenceRules(
+      Object.entries(trustConfig).map(([rulePath, trustLevel]) => ({
+        path: rulePath,
+        trustLevel,
+      })),
+    ),
+    getPathComparisonVariants(workspaceCwd),
+  );
+  return winner?.payload ?? null;
 }
 
 function loadTrustedFoldersWithOverrides(

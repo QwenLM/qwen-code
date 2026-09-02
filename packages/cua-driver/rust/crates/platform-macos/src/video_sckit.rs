@@ -8,7 +8,7 @@
 //!
 //! Requires macOS 15.0+ (SCRecordingOutput introduced in macOS 15). The
 //! Swift impl this is modelled on lives at
-//! `libs/cua-driver/swift/Sources/CuaDriverCore/Recording/VideoRecorder.swift`,
+//! `packages/cua-driver/swift/Sources/CuaDriverCore/Recording/VideoRecorder.swift`,
 //! though that version composes SCStream + AVAssetWriter manually so it
 //! also runs on macOS 14. We use SCRecordingOutput here because the
 //! Rust binding doesn't expose AVAssetWriter and macOS 15 is already

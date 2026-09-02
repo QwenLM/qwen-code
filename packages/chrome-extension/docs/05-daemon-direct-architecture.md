@@ -87,6 +87,27 @@ agent MCP client → SdkControlClientTransport.send
 - `src/background/browser-mcp/debugger-session.ts` owns the active tab debugger
   attachment and CDP command/event lifecycle.
 
+## Legacy CDP tunnel (external adapter)
+
+The service worker also registers as `qwen-cdp-bridge` on `/acp` when an
+external adapter is configured. The daemon's `/cdp` endpoint translates an
+external adapter's browser-level CDP connection into `cdp_*` frames, and the
+extension forwards page-domain commands to the active tab through
+`chrome.debugger`.
+
+`qwen serve --allow-origin chrome-extension://<id>` enables the side panel and
+CDP tunnel. Browser tools additionally require a separately installed stdio MCP
+adapter:
+
+```bash
+QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
+qwen serve --allow-origin chrome-extension://<id>
+```
+
+The main Qwen Code package deliberately does not bundle that adapter. Clients
+must distinguish `cdp_tunnel_over_ws` from `browser_automation_mcp` in the serve
+capability list.
+
 ## Daemon lifecycle (issue #5626 Q3)
 
 The extension can't spawn a process. Options, lightest-first:

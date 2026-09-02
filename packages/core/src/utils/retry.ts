@@ -5,8 +5,12 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
-import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import { AuthType } from './auth-type.js';
+import {
+  isQwenQuotaExceededError,
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
+} from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
 import { isRateLimitError } from './rateLimit.js';
@@ -83,7 +87,12 @@ export interface RetryOptions {
   onRetry?: (info: RetryAttemptInfo) => void;
 }
 
-const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+/**
+ * Default ladder for the normal HTTP retry path. Exported so callers that
+ * must outlast it — the workflow stall watchdog sizes `DEFAULT_STALL_MS`
+ * against it — can derive the ladder rather than hand-copy it.
+ */
+export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxAttempts: 7,
   initialDelayMs: 1500,
   maxDelayMs: 30000, // 30 seconds
@@ -103,9 +112,16 @@ function defaultShouldRetry(
   const status = getErrorStatus(error);
   // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
   // so an explicit `status === 429` check here would be redundant.
-  return (
+  if (
     isRateLimitError(error, extraRetryErrorCodes) ||
     (status !== undefined && status >= 500 && status < 600)
+  ) {
+    return true;
+  }
+  // Transport errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP status and
+  // would otherwise fall through every predicate above.
+  return (
+    classifyRetryError(error, { extraRetryErrorCodes }).kind === 'transport'
   );
 }
 
@@ -353,6 +369,29 @@ export async function retryWithBackoff<T>(
             `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
             `After setting up your API key, run /auth to configure your provider.`,
         );
+      }
+
+      // Permanent quota exhaustion (e.g. Bailian token-plan "1-week quota has
+      // been exhausted, will reset at …"). Unlike transient 429 throttling,
+      // retrying cannot succeed until the reset time — fast-fail and surface a
+      // friendly message so the session does not hang through the full retry
+      // budget with no output. Applies to any auth type since a reset time is
+      // the universal signal of a permanently exhausted quota.
+      if (isQuotaExhaustedError(error)) {
+        debugLogger.error(
+          'Quota exhausted, fast-failing',
+          retryDiagnostics,
+          error,
+        );
+        // Intentionally throws a plain Error with no `.status`: a 429 status
+        // would make isRateLimitError() return true and re-trigger the
+        // stream-side rate-limit retry loop in llm-chat.ts (up to 10 retries
+        // at 1-5 min delays), reintroducing the silent hang this fast-fail
+        // eliminates. This also skips model fallback — quota exhaustion is
+        // provider-scoped and temporary, so the user should retry after the
+        // reset time rather than burning fallback provider quota. `cause`
+        // preserves the original error for diagnostics.
+        throw new Error(formatQuotaExhaustedMessage(error), { cause: error });
       }
 
       // Determine if this error qualifies for persistent retry.

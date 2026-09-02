@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,11 +15,8 @@ import { PNG } from './png';
 import { isScalingAvailable, Image } from './image-utils';
 import { Mobilecli } from './mobilecli';
 import { MobileDevice } from './mobile-device';
-import {
-  validateOutputPath,
-  validateFileExtension,
-  stripUiBounds,
-} from './utils';
+import { validateOutputPath, validateFileExtension } from './utils';
+import { PayloadFilteringTransport } from './payload-filter';
 import {
   isNormalized,
   coordinateScale,
@@ -54,13 +52,23 @@ interface ActiveRecording {
   startedAt: number;
 }
 
+class PayloadFilteredMcpServer extends McpServer {
+  override connect(transport: Transport): Promise<void> {
+    return super.connect(
+      process.env.MCP_MODEL_PAYLOAD_FILTER === '1'
+        ? new PayloadFilteringTransport(transport)
+        : transport,
+    );
+  }
+}
+
 export const getAgentVersion = (): string => {
   const json = require('../package.json');
   return json.version;
 };
 
 export const createMcpServer = (): McpServer => {
-  const server = new McpServer({
+  const server = new PayloadFilteredMcpServer({
     name: 'mobile-mcp',
     version: getAgentVersion(),
     ...(isNormalized()
@@ -1226,7 +1234,7 @@ export const createMcpServer = (): McpServer => {
   tool(
     'mobile_ui_dump',
     'UI Hierarchy Dump',
-    '(Android only) Dump the full UI hierarchy as raw XML using uiautomator. Unlike mobile_list_elements_on_screen which returns a filtered flat list of interactive elements as JSON, this returns the complete unfiltered XML tree preserving parent-child hierarchy and all node attributes (class, resource-id, clickable, scrollable, enabled, etc.). Note: bounds attributes are stripped to reduce output size. Use when you need the full view tree for debugging, or when mobile_list_elements_on_screen misses an element you can see on screen. Supports --compressed to reduce output size.',
+    '(Android only) Dump the full UI hierarchy as raw XML using uiautomator. Unlike mobile_list_elements_on_screen which returns a filtered flat list of interactive elements as JSON, this returns the complete unfiltered XML tree preserving parent-child hierarchy and all node attributes (class, resource-id, absolute bounds in device pixels, clickable, scrollable, enabled, etc.). Use when you need the full view tree for debugging, or when mobile_list_elements_on_screen misses an element you can see on screen. Supports --compressed to reduce output size.',
     {
       device: z
         .string()
@@ -1249,8 +1257,7 @@ export const createMcpServer = (): McpServer => {
     { readOnlyHint: true },
     async ({ device, compressed, output_path }) => {
       const robot = getAndroidRobotFromDevice(device, 'mobile_ui_dump');
-      let xml = await robot.dumpUiHierarchy(compressed ?? false);
-      xml = stripUiBounds(xml);
+      const xml = await robot.dumpUiHierarchy(compressed ?? false);
       if (output_path) {
         validateOutputPath(output_path);
         fs.writeFileSync(output_path, xml, 'utf-8');

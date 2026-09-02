@@ -281,6 +281,31 @@ describe('setupGithub service', () => {
     expect(readGitignore).toHaveBeenCalled();
   });
 
+  it('preserves a closed-generation error from the gitignore commit', async () => {
+    const generationError = Object.assign(new Error('generation closed'), {
+      code: 'workspace_generation_closed',
+    });
+    const fileOps: SetupGithubFileOps = {
+      ensureWorkflowDirectory: vi.fn(async () => {}),
+      writeTextFile: vi.fn(async () => {
+        throw generationError;
+      }),
+      readTextFile: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      setupGithub({
+        cwd: scratchDir,
+        workspaceRoot: scratchDir,
+        fetchImpl: vi.fn(async () =>
+          okResponse('workflow'),
+        ) as unknown as typeof fetch,
+        fileOps,
+      }),
+    ).rejects.toBe(generationError);
+    expect(fileOps.ensureWorkflowDirectory).not.toHaveBeenCalled();
+  });
+
   it('updates gitignore idempotently', async () => {
     const gitignorePath = path.join(scratchDir, '.gitignore');
     await fsp.writeFile(gitignorePath, '.qwen/\nnode_modules/\n');

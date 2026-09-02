@@ -39,9 +39,12 @@ export enum Command {
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
+  QUEUE_MESSAGE = 'queueMessage',
   NEWLINE = 'newline',
   VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
@@ -78,9 +81,6 @@ export enum Command {
 
   // Thinking expansion
   TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
-
-  // Transcript full-detail screen (Ctrl+O)
-  TOGGLE_TRANSCRIPT = 'toggleTranscript',
 
   // Scroll commands
   SCROLL_UP = 'scrollUp',
@@ -133,7 +133,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Text deletion
   [Command.KILL_LINE_RIGHT]: [{ key: 'k', ctrl: true }],
   [Command.KILL_LINE_LEFT]: [{ key: 'u', ctrl: true }],
-  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true }],
+  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true, shift: false }],
   // Added command (meta/alt/option) for mac compatibility
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
@@ -171,7 +171,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   ],
 
   // Auto-completion
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
   // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
   [Command.COMPLETION_UP]: [
     { key: 'up', shift: false },
@@ -180,6 +183,26 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.COMPLETION_DOWN]: [
     { key: 'down', shift: false },
     { key: 'n', ctrl: true },
+  ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to the BARE arrow keys: Ctrl+←/→ was the original binding but many
+  // terminals intercept it for word-jump, and on macOS the system claims it
+  // for Mission Control, so the documented gesture was unreachable for most
+  // users (#8069).
+  //
+  // Tradeoff, accepted deliberately: while the `@` category tabs are visible,
+  // the bare arrows no longer move the caret in the input buffer — press Esc
+  // to dismiss the menu first. InputPrompt only renders and handles the tabs
+  // when they own the arrows, so search and attachment navigation keep their
+  // normal behavior.
+  //
+  // Modifiers are pinned false so Alt/Option+arrow word movement and any
+  // Ctrl+arrow terminal binding fall through untouched.
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: false, meta: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: false, meta: false },
   ],
 
   // Text input
@@ -192,6 +215,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       paste: false,
       shift: false,
     },
+  ],
+  [Command.QUEUE_MESSAGE]: [
+    { key: 'q', ctrl: true, command: false, shift: false, paste: false },
   ],
   // Split into multiple data-driven bindings
   // Now also includes shift+enter for multi-line input
@@ -223,7 +249,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
-  [Command.QUIT]: [{ key: 'c', ctrl: true }],
+  [Command.QUIT]: [{ key: 'c', ctrl: true, shift: false }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
@@ -241,11 +267,11 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
 
-  // Thinking expansion
-  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
-
-  // Transcript full-detail screen
-  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+  // Thinking expansion (Ctrl+O primary, Alt+T legacy)
+  [Command.TOGGLE_THINKING_EXPANDED]: [
+    { key: 'o', ctrl: true },
+    { key: 't', meta: true },
+  ],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

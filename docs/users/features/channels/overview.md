@@ -2,6 +2,8 @@
 
 Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
+Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -15,7 +17,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu))
+1. Set up a bot or authenticated workspace account (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [DingTalk Workspace](./dws), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -48,28 +50,31 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required         | Description                                                                                                                                                            |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                 |
-| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                            |
-| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
-| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
-| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
-| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
-| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
-| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
-| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
-| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
-| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
-| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
-| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
-| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
-| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
-| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
-| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
+| Option                   | Required         | Description                                                                                                                                                                                                             |
+| ------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `feishu`, `github`, `gitlab`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
+| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                                             |
+| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                            |
+| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                     |
+| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
+| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                        |
+| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                |
+| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
+| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
+| `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
+| `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
+| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
+| `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
+| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
+| `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                                               |
+| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                                                                             |
+| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                   |
+| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
+| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
+| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
+| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                         |
+| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
+| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
 
 ### Sender Policy
 
@@ -84,31 +89,70 @@ Controls who can interact with the bot:
 Controls how conversation sessions are managed:
 
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
-- **`thread`** — One session per thread/topic. Useful for group chats with threads.
+- **`chat_thread`** — One session per chat thread/topic, shared by participants in that thread.
+- **`thread`** — Legacy thread/topic routing retained for existing configurations.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
+
+### Named Tasks
+
+Daemon-managed Channels can retain several named conversations for the same user in one chat:
+
+```json
+{
+  "channels": {
+    "my-channel": {
+      "type": "telegram",
+      "sessionScope": "user",
+      "multiSession": true
+    }
+  }
+}
+```
+
+The catalog is private to the exact channel, chat, and sender. Task names use 1–32 ASCII letters, numbers, underscores, or hyphens, and are unique case-insensitively. Up to eight tasks may be open; closing a task detaches it without deleting its transcript, so selecting it later reopens the exact conversation. Session IDs are never accepted by or shown in chat commands.
+
+Named results identify their originating task: direct chats use `[task]`, while group chats use `[sender · task]`. Named text permission prompts also show the exact request ID and the corresponding `/approve <id>`, `/approve-always <id>`, and `/deny <id>` commands. The label is presentation-only and is not stored in the model transcript.
+
+One task remains selected to receive the next normal message, but other named tasks may keep running concurrently in the shared working directory. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. Per-task worktrees are planned for Part 4. Channel memory remains scoped to the chat rather than to a named task.
+
+This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
 
 ### Channel Memory
 
 Channel memory stores durable context for one chat or thread. Entries have stable
 IDs, so a list response can be used for deterministic follow-up operations.
 
-- `记住：默认使用 staging 环境` saves a new entry for the current chat or
-  thread.
+- `记住：默认使用 staging 环境` is the deterministic form and saves exactly one
+  scalar entry for the current chat or thread.
+- To save several separate facts in one request, use a natural phrase routed
+  through the classifier. For example:
+  `请记住这三条约定：使用 staging；发布前测试；优先中文回复` creates entries
+  that you can manage independently. Exact duplicate facts are skipped and
+  reported without creating another entry. Requests containing credential-like
+  text are rejected; remove secrets and save the non-sensitive facts separately.
 - `查看记忆` lists entries and their stable IDs. Use `查看第 2 页记忆` to view
   a later page, `查看记忆 <id>` to view one entry, or a natural filtered
   request such as `只看中文偏好` to list the matching entries.
 - `查看刚才那条记忆`, `把关于 staging 的记忆改成默认使用 production`, and
   `忘掉刚才那条` work when the natural reference resolves to exactly one entry.
-  `把 <id> 改成默认使用 production` updates that entry immediately, and
-  `忘掉 <id>` removes it immediately. Neither operation needs confirmation.
+  Natural updates and removals first show the proposed change. Confirm an
+  update with `确认更新记忆` or `confirm memory update`, or a removal with
+  `确认删除记忆` or `confirm memory removal`, within 60 seconds. Exact-ID
+  updates and removals remain immediate and do not need confirmation.
 - `清空记忆` starts the clear-all confirmation flow; `确认清空记忆` completes
   it.
 
 When a natural inspect, update, or removal request matches multiple entries,
 the bot returns the candidate IDs and previews without changing memory. There
-is no pending selection or confirmation state: retry the request with one exact
-ID, such as `忘掉 m-a31f0d82c7e4`. Exact-ID operations remain the deterministic
-fast path. A natural request with no match reports that no entry matched.
+is no pending selection for an ambiguous result: retry the request with one
+exact ID, such as `忘掉 m-a31f0d82c7e4`. Exact-ID operations remain the
+deterministic fast path. A natural request with no match reports that no entry
+matched.
+
+Pending update, removal, and clear confirmations apply only to the sender and
+chat or thread that created them. A newer clear, natural update, or natural
+removal proposal replaces an older pending one for that sender and target.
+Pending confirmations are discarded when the channel process restarts.
 
 The legacy slash aliases `/remember-channel`, `/channel-memory`, and
 `/forget-channel` have been removed. They are no longer channel-memory
@@ -126,14 +170,18 @@ Existing legacy `CHANNEL.md` memory is migrated automatically to structured
 standalone channel and daemon-managed channel restarts, and is injected when a
 fresh target-scoped session starts, including after `/clear`.
 
-Memory remains keyed to the current chat or thread. It is not injected into a
-`sessionScope: single` session, because that session is shared across the whole
-channel rather than scoped to one target.
+After that initial injection, each accepted message also recalls up to three
+relevant entries for that message. This keeps durable facts available during a
+long-running session without adding every stored entry to every turn. Recall is
+based on the current message and does not modify the stored memory.
 
-Channel memory does not automatically learn facts from normal conversation,
-extract multiple entries from one request, or accept `第一个` as confirmation
-for an ambiguous natural reference. Use a clear remember request and an exact
-entry ID when a natural reference is ambiguous.
+Memory remains keyed to the current chat or thread. It is not injected or
+recalled in a `sessionScope: single` session, because that session is shared
+across the whole channel rather than scoped to one target.
+
+Channel memory does not automatically learn facts from normal conversation or
+accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
+remember request and an exact entry ID when a natural reference is ambiguous.
 
 ### Token Security
 
@@ -160,7 +208,7 @@ When `senderPolicy` is set to `"pairing"`, unknown senders go through an approva
 qwen channel pairing approve my-channel VEQDDWXJ
 ```
 
-Once approved, the user's ID is saved to `~/.qwen/channels/<name>-allowlist.json` and all future messages go through normally.
+Once approved, the user's ID is saved to the channel's workspace-scoped allowlist (`~/.qwen/channels/<workspace-scope>/<name>-allowlist.json`) and all future messages go through normally. Pairing state is scoped per workspace, so two workspaces using the same channel name keep separate approvals.
 
 ### Pairing CLI Commands
 
@@ -172,17 +220,19 @@ qwen channel pairing list my-channel
 qwen channel pairing approve my-channel <CODE>
 ```
 
+Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pairing state is stored per workspace.
+
 ### Pairing Rules
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
-- Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
-- Users listed in `allowedUsers` in `settings.json` always skip pairing
-- Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
+- Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are declined until one expires or is approved
+- Users listed in `allowedUsers` in `settings.json` skip user pairing; under `groupPolicy: "pairing"`, the group itself must still be approved
+- Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 
 ## Group Chats
 
-By default, the bot only works in direct messages. To enable group chat support, set `groupPolicy` to `"allowlist"` or `"open"`.
+By default, the bot only works in direct messages. To enable group chat support, set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"`.
 
 ### Group Policy
 
@@ -190,7 +240,25 @@ Controls whether the bot participates in group chats at all:
 
 - **`disabled`** (default) — The bot ignores all group messages. Safest option.
 - **`allowlist`** — The bot only responds in groups explicitly listed in `groups` by chat ID. The `"*"` key provides default settings but does **not** act as a wildcard allow.
+- **`pairing`** — A deliberate mention or reply from an unknown group creates one pairing request for the group. Once approved, every member can use the bot in that group; `senderPolicy` continues to control direct messages.
 - **`open`** — The bot responds in all groups it's added to. Use with caution.
+
+Approve a group with the same CLI command used for user pairing. The pending
+request identifies the group and the member who initiated it:
+
+```bash
+qwen channel pairing approve my-channel <CODE>
+```
+
+Group approvals are stored by the group's chat ID in the channel's workspace scope. On GitHub and GitLab the chat ID is the repository/project path, so a rename or transfer detaches the stored approval — re-approve the group after renaming. A repo or project re-created under the same path inherits any stale approval — revoke group approvals after any rename, transfer, or deletion.
+An unmentioned message never creates a group pairing request, even when a group
+sets `requireMention` to `false`; after approval, the configured mention policy
+applies normally.
+
+Group pairing requests share the same pending queue as DM pairing requests:
+a channel holds at most 3 pending requests overall, and a sender holds at most
+one pending request across user and group requests (see
+[Pairing Rules](#pairing-rules)).
 
 ### Mention Gating
 
@@ -238,7 +306,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 - Omitted or `0` disables backfill.
 - Group-level `groupHistoryLimit` overrides the channel-level value.
-- Only messages from authorized senders are persisted.
+- Only messages from authorized senders, or members of an approved paired group, are persisted.
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
@@ -246,10 +314,10 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 ### How group messages are evaluated
 
 ```
-1. groupPolicy — is this group allowed?           (no → ignore)
-2. dmPolicy  — is this DM allowed?               (disabled → ignore)
+1. groupPolicy — is this group disabled, listed, paired, or open? (no → ignore/pairing flow)
+2. dmPolicy — is this DM allowed?                      (disabled → ignore)
 3. requireMention — was the bot mentioned/replied to? (no → ignore)
-4. senderPolicy — is this sender approved?         (no → pairing flow)
+4. senderPolicy — is this sender approved?             (skipped for a paired group; otherwise no → user pairing flow)
 5. Route to session
 ```
 
@@ -372,6 +440,48 @@ By default, the agent works for a while and then sends one large response. With 
 
 Only `blockStreaming` is required. The chunk and coalesce settings are optional and have sensible defaults.
 
+## Scheduled Channel Loops
+
+Channels have a persistent scheduler for prompts that should run later and push
+their result back to the same chat. You can ask the agent naturally, for
+example, `Every 15 minutes, check the deployment and report any change`, or use
+the local commands directly:
+
+```text
+/loop add "*/15 * * * *" check the deployment and report any change
+/loop list
+/loop inspect <id>
+/loop cancel <id>
+```
+
+The agent uses the `channel_loop_create`, `channel_loop_list`, and
+`channel_loop_cancel` tools when it manages these jobs for you. Schedules use
+standard five-field cron expressions in the machine's local time. The job runs
+unattended and its final response is delivered automatically to the chat that
+created it.
+
+Channel loops differ from the session-scoped tasks described in
+[Run Prompts on a Schedule](../scheduled-tasks):
+
+- They are stored under `$QWEN_HOME/channels/` — standalone channels use
+  `cron.json` directly, while daemon-managed channels use a per-workspace file
+  under `daemon/`. Both survive channel restarts.
+- They are scoped to the current channel chat or thread. Each target can have up
+  to 10 enabled loops, and each prompt is limited to 4,000 characters.
+- They require an adapter and target that support proactive delivery. Telegram,
+  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
+  restrictions.
+- They are unavailable with `sessionScope: "single"` because that scope is not
+  tied to one chat target.
+- A saved loop is disabled if its target is no longer authorized when it is due.
+
+## Background Agent Results
+
+When the agent delegates work to a background subagent or fork, the completion
+result is delivered back to the channel chat that owns the session. Delivery
+can happen after the original turn has ended, so keep the channel service or
+daemon running while background work is active.
+
 ## Slash Commands
 
 Channels support slash commands. These are handled locally (no agent round-trip):
@@ -379,10 +489,21 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/help` — List available commands
 - `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
 - `/status` — Show session info and access policy
+- `/sessions [all]` — List open named tasks, or include closed tasks; available only with `multiSession: true`
+- `/session current` — Show the selected named task
+- `/session new <name>` — Create and select a shared-workspace task
+- `/session new <name> --worktree` — Recognized but deferred to Part 4
+- `/session use <name>` — Select an open task or reopen a closed task
+- `/session cancel [<name>]` — Cancel the selected task's active prompt, or name another owned task; independently queued turns are not cancelled, but `collect`-mode follow-ups buffered behind the cancelled prompt are discarded by the existing cancellation behavior; media preparation is not targeted
+- `/session close <name>` — Close a task without deleting its transcript
+- `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
+- `/loop list` — List loops for the current chat
+- `/loop inspect <id>` — Show loop status and run details
+- `/loop cancel <id>` — Disable a loop
 
-All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
+All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu).
+Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
 
 ## Running
 
@@ -472,6 +593,48 @@ Example channel config:
 ```
 
 For DingTalk, set `isGroup` explicitly on every target. A direct-message target uses the DingTalk user ID as `chatId` with `isGroup: false`; a group target uses the group `openConversationId` with `isGroup: true`. Other adapters may require their own proactive target shape.
+
+Daemon-managed DingTalk, Feishu, Telegram, and WeCom channels dynamically observe contacts from authorized inbound messages. List contacts observed in the primary workspace during the default seven-day freshness window:
+
+```bash
+curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
+  http://127.0.0.1:4170/workspace/channel/observed-contacts
+```
+
+Use `GET /workspaces/:workspace/channel/observed-contacts` to select another registered, trusted workspace. Add `?freshWithinSeconds=N` to choose a window from one second through 365 days. The daemon advertises this API with the `workspace_channel_observed_contacts` capability.
+
+The response returns complete platform IDs and labels. Group labels use names already present in accepted inbound messages when available: DingTalk supplies `conversationTitle`, and Telegram supplies `chat.title`. Feishu and WeCom group labels currently fall back to their complete IDs; no platform directory or group-detail API is queried. Topic labels also fall back to complete IDs. Each `lastObservedAt` is a canonical ISO 8601 UTC timestamp with millisecond precision; clients can convert it to the user's local time zone for display. Top-level `users` contains users observed in direct messages. `groups` contains observed group conversations, `groups[].users` contains users observed in each group, and `groups[].topics[].users` contains users observed in Feishu or Telegram topics:
+
+```json
+{
+  "users": [
+    {
+      "channelName": "feishu-main",
+      "label": "Example User",
+      "id": "ou_complete_user_id",
+      "lastObservedAt": "2026-07-17T08:00:00.000Z"
+    }
+  ],
+  "groups": [
+    {
+      "channelName": "feishu-main",
+      "label": "oc_complete_chat_id",
+      "id": "oc_complete_chat_id",
+      "lastObservedAt": "2026-07-17T08:05:00.000Z",
+      "users": [
+        {
+          "label": "Example User",
+          "id": "ou_complete_user_id",
+          "lastObservedAt": "2026-07-17T08:05:00.000Z"
+        }
+      ],
+      "topics": []
+    }
+  ]
+}
+```
+
+These nested users are observed participants, not authoritative group membership. Only messages that pass direct/group, mention, sender, and pairing gates are recorded. Repeated observations refresh labels and timestamps; passive observation cannot detect a leave or deletion until the relationship becomes stale. Message content is never stored. The bounded registry lives under `$QWEN_HOME/channels/daemon/<workspaceHash>/observed-contacts.json`, outside the workspace checkout and partitioned per workspace. Its 500-observation limit is shared by all channels and conversations in that workspace, and observations older than 365 days are removed on the next accepted write. If the registry becomes malformed or uses an unsupported version, delete that file to reset it; accepted traffic recreates it. Webhook configuration and delivery are unchanged.
 
 Start `qwen serve` with the channel worker enabled:
 

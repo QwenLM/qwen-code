@@ -14,6 +14,9 @@ import {
   loadUsageHistory,
   loadUsageHistoryWithLive,
   persistSessionUsage,
+  persistUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  commitUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -602,6 +605,31 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(fs.existsSync(usagePath)).toBe(true);
   });
 
+  it('rebuild excludes the prompt ledger sidecar from transcript enumeration', async () => {
+    plantChatJsonl('sess-real', 1600);
+    // The ledger sidecar shares the chats dir and ends in `.jsonl`; plant a
+    // summarizable transcript under a distinct sessionId and rename it to
+    // the sidecar name, so an accidental ingestion would surface as a
+    // second session.
+    plantChatJsonl('sess-ghost', 800);
+    const chatsDir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+    );
+    fs.renameSync(
+      path.join(chatsDir, 'sess-ghost.jsonl'),
+      path.join(chatsDir, 'sess-real.ledger.jsonl'),
+    );
+
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe('sess-real');
+  });
+
   it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {
     const sessionId = 'sess-e2e';
     plantChatJsonl(sessionId, 1600);
@@ -774,6 +802,146 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     const merged = await loadUsageHistoryWithLive();
     expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+  });
+});
+
+// Regression for #7384: deleting a session erased its usage from the
+// rebuild-from-transcript fallback forever. The salvage runs right before
+// transcript deletion.
+describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
+  let tmpHome: string;
+  let originalQwenHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-salvage-'));
+    originalQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
+    fs.mkdirSync(process.env['QWEN_HOME'], { recursive: true });
+  });
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = originalQwenHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function plantTranscript(sessionId: string, withTelemetry: boolean): string {
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'salvage-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${sessionId}.jsonl`);
+    const start = new Date('2026-07-01T00:00:00Z').toISOString();
+    const mid = new Date('2026-07-01T00:01:00Z').toISOString();
+    const records: unknown[] = [
+      {
+        sessionId,
+        cwd: '/salvage/project',
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: start,
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+    ];
+    if (withTelemetry) {
+      records.push({
+        sessionId,
+        cwd: '/salvage/project',
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: mid,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': mid,
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 900,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      });
+    }
+    fs.writeFileSync(
+      filePath,
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+    return filePath;
+  }
+
+  function usagePath(): string {
+    return path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl');
+  }
+
+  it('writes the session summary before the transcript disappears', async () => {
+    const filePath = plantTranscript('sess-salvage-1', true);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      true,
+    );
+    const lines = fs
+      .readFileSync(usagePath(), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0].sessionId).toBe('sess-salvage-1');
+    expect(lines[0].models['qwen-max'].totalTokens).toBe(1000);
+    expect(lines[0].project).toBe('/salvage/project');
+  });
+
+  it('skips the write when the history already has the session (no #4994 duplicates)', async () => {
+    const filePath = plantTranscript('sess-salvage-2', true);
+    await persistUsageBeforeTranscriptDeletion(filePath);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      false,
+    );
+    const lines = fs.readFileSync(usagePath(), 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('does not append stale salvage after authoritative usage is persisted', async () => {
+    const sessionId = 'sess-salvage-race';
+    const filePath = plantTranscript(sessionId, true);
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared).not.toBeNull();
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(false);
+    const lines = fs.readFileSync(usagePath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('returns false for a transcript with no telemetry and writes nothing', async () => {
+    const filePath = plantTranscript('sess-salvage-3', false);
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      false,
+    );
+    expect(fs.existsSync(usagePath())).toBe(false);
+  });
+
+  it('never throws for a missing transcript', async () => {
+    await expect(
+      persistUsageBeforeTranscriptDeletion(
+        path.join(tmpHome, 'nope', 'missing.jsonl'),
+      ),
+    ).resolves.toBe(false);
   });
 });
 

@@ -18,11 +18,13 @@ import {
   qwenOAuth2Events,
   QwenOAuth2Event,
   QwenOAuth2Client,
+  showFallbackMessage,
   type DeviceAuthorizationResponse,
   type DeviceTokenResponse,
   type ErrorData,
   type QwenCredentials,
 } from './qwenOAuth2.js';
+import { HYPERLINK_ENV_KEYS } from '../utils/osc8.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -2385,5 +2387,72 @@ describe('Constants and Configuration', () => {
     expect(options?.body).toContain(
       'scope=openid%20profile%20email%20model.completion',
     );
+  });
+});
+
+describe('showFallbackMessage', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  const url = 'https://chat.qwen.ai/authorize?user_code=WDJB-MJHT';
+
+  beforeEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  const capture = (isTTY: boolean) => {
+    const chunks: string[] = [];
+    const out = {
+      isTTY,
+      write: (chunk: string) => {
+        chunks.push(String(chunk));
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { out, text: () => chunks.join('') };
+  };
+
+  it('emits the URL as a single OSC 8 hyperlink when the terminal supports it', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    // OSC 8 envelope: ESC ] 8 ; ; <url> BEL <label> ESC ] 8 ; ; BEL
+    expect(output).toContain(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`);
+    // The ASCII box is not drawn on the hyperlink path.
+    expect(output).not.toContain('+--');
+  });
+
+  it('falls back to the ASCII box when hyperlinks are disabled', () => {
+    process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('Qwen OAuth Device Authorization');
+    expect(output).toContain('+'); // box border
+  });
+
+  it('falls back to the ASCII box for a non-TTY stream even with FORCE_HYPERLINK', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(false);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('+');
   });
 });

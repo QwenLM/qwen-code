@@ -7,27 +7,18 @@
 import { randomUUID } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { logSafe } from './json-rpc.js';
-import type { TransportStream } from './transport-stream.js';
-
-/**
- * Per-stream cap on frames buffered before the client attaches its SSE
- * stream. Mirrors the EventBus's `maxQueued` backpressure cap so a client
- * that drives requests without ever opening a stream can't grow daemon
- * memory without bound. Oldest frames are dropped past the cap.
- */
-const MAX_BUFFERED_FRAMES = 256;
-
-/**
- * Defense-in-depth hard ceiling for the degenerate all-id-less buffer case.
- * Id-less deferred replies are never evicted at the soft cap (dropping one
- * hangs its caller), and they're bounded in practice by the number of in-flight
- * session RPCs — but that invariant is convention, not enforced by the type
- * system or call sites. So a future id-less producer that ISN'T RPC-bounded, or
- * a buggy client, can't grow the buffer without limit: past this hard cap we
- * drop the oldest id-less reply and log loudly (its caller may hang, but an
- * unbounded daemon heap is worse). 4× the soft cap.
- */
-const HARD_BUFFERED_FRAMES_CAP = MAX_BUFFERED_FRAMES * 4;
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+  ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+  AcpPreAttachBudget,
+  type AcpPreAttachLease,
+} from './pre-attach-budget.js';
+import type {
+  DeliveryResult,
+  TransportCloseReason,
+  TransportStream,
+} from './transport-stream.js';
 
 /** Default cap on concurrent live connections (mirrors a bounded resource). */
 const DEFAULT_MAX_CONNECTIONS = 64;
@@ -54,9 +45,15 @@ export type DetachSessionFn = (
   clientId: string | undefined,
 ) => void;
 
-/** A pre-attach session frame plus its optional bus event id (SSE cursor). */
-interface BufferedSessionFrame {
-  frame: unknown;
+export interface DeliveryReceipt {
+  delivered(): void;
+  discarded(): void;
+  outcomeUnknown?(): void;
+}
+
+interface PreparedFrame {
+  payload: Buffer;
+  sequence: number;
   id?: number;
   /**
    * For DEFERRED out-of-band replies only (`sendSessionReply`, always id-less):
@@ -67,6 +64,14 @@ interface BufferedSessionFrame {
    * (§1.8 W1). `undefined` ⇒ release at the next boundary unconditionally.
    */
   anchorId?: number;
+  receipt?: DeliveryReceipt;
+  receiptSettled?: boolean;
+  lease?: AcpPreAttachLease;
+  binding?: SessionBinding;
+  requeueOnStreamReplacement?: boolean;
+  deliveryAttempt?: number;
+  deliveryStream?: TransportStream;
+  resolve: (result: DeliveryResult) => void;
 }
 
 /**
@@ -87,12 +92,16 @@ export interface SessionBinding {
   clientId?: string;
   /** Session-scoped SSE stream (the client's `GET /acp` with both headers). */
   stream?: TransportStream;
+  /** Stable across a transport detach while `stream` is temporarily absent. */
+  usesConnectionStream?: boolean;
   /**
    * Frames emitted before the session stream attached, flushed on attach.
    * Each keeps its bus event id (when it has one) so the SSE `id:` resume
    * cursor survives the buffer → live-stream handoff.
    */
-  buffer: BufferedSessionFrame[];
+  buffer: PreparedFrame[];
+  ownedFrames: number;
+  ownedBytes: number;
   /**
    * Aborts the bridge event subscription tied to the CURRENT session
    * stream. Replaced with a fresh controller on every re-attach — a
@@ -152,6 +161,16 @@ export interface PendingClientRequest {
   kind: 'permission';
 }
 
+export interface SessionOwnershipIdentity {
+  binding: SessionBinding | undefined;
+  generation: number;
+}
+
+interface SessionOwnershipState {
+  generation: number;
+  captures: number;
+}
+
 export interface PendingClientRequestRef {
   conn: AcpConnection;
   id: string;
@@ -173,6 +192,9 @@ export interface AcpConnectionDiagnostic {
   wsStreams: number;
   bufferedConnectionFrames: number;
   bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttachOwnedFrames: number;
+  preAttachOwnedBytes: number;
 }
 
 export interface ConnectionRegistrySnapshot {
@@ -183,6 +205,12 @@ export interface ConnectionRegistrySnapshot {
   sseStreams: number;
   wsStreams: number;
   pendingClientRequests: number;
+  bufferedConnectionFrames: number;
+  bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttachOwnedFrames: number;
+  preAttachOwnedBytes: number;
+  preAttachGuardFailures: number;
   connections: AcpConnectionDiagnostic[];
 }
 
@@ -193,7 +221,17 @@ export class AcpConnection {
   private readonly abortController = new AbortController();
   readonly abortSignal = this.abortController.signal;
   /** Frames emitted before the connection stream attached, flushed on attach. */
-  private readonly connBuffer: unknown[] = [];
+  private readonly connBuffer: PreparedFrame[] = [];
+  private readonly pendingDeliveries = new Set<PreparedFrame>();
+  private nextPreparedSequence = 0;
+  private ownedFrames = 0;
+  private ownedBytes = 0;
+  private connOwnedFrames = 0;
+  private readonly pendingReceipts = new Set<DeliveryReceipt>();
+  private readonly sessionOwnershipStates = new Map<
+    string,
+    SessionOwnershipState
+  >();
   readonly sessions = new Map<string, SessionBinding>();
   /**
    * Sessions this connection created (`session/new`) or explicitly
@@ -259,6 +297,14 @@ export class AcpConnection {
     fromLoopback: boolean,
     private readonly onAbandonPending?: AbandonPendingFn,
     private readonly onDetachSession?: DetachSessionFn,
+    private readonly preAttachBudget = new AcpPreAttachBudget(),
+    private readonly onFatalConnection?: (
+      connection: AcpConnection,
+      reason: TransportCloseReason,
+    ) => void,
+    private readonly maxFramesPerConnection = ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+    private readonly maxPayloadBytesPerConnection = ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
+    private readonly onPreAttachGuardFailure?: () => void,
   ) {
     this.connectionId = connectionId ?? randomUUID();
     this.clientId = randomUUID();
@@ -288,10 +334,54 @@ export class AcpConnection {
     return this.ownedSessions.has(sessionId);
   }
 
+  captureSessionOwnershipIdentity(sessionId: string): SessionOwnershipIdentity {
+    let state = this.sessionOwnershipStates.get(sessionId);
+    if (!state) {
+      state = { generation: 0, captures: 0 };
+      this.sessionOwnershipStates.set(sessionId, state);
+    }
+    state.captures += 1;
+    return {
+      binding: this.sessions.get(sessionId),
+      generation: state.generation,
+    };
+  }
+
+  canCommitSessionOwnership(
+    sessionId: string,
+    ownership: SessionOwnershipIdentity,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      !this.closingSessions.has(sessionId) &&
+      this.sessionOwnershipStates.get(sessionId)?.generation ===
+        ownership.generation &&
+      this.sessions.get(sessionId) === ownership.binding
+    );
+  }
+
+  releaseSessionOwnershipIdentity(
+    sessionId: string,
+    ownership: SessionOwnershipIdentity,
+  ): void {
+    const state = this.sessionOwnershipStates.get(sessionId);
+    if (!state || state.generation < ownership.generation) return;
+    state.captures -= 1;
+    if (state.captures === 0) {
+      this.sessionOwnershipStates.delete(sessionId);
+    }
+  }
+
   getOrCreateSession(sessionId: string): SessionBinding {
     let binding = this.sessions.get(sessionId);
     if (!binding) {
-      binding = { sessionId, abort: new AbortController(), buffer: [] };
+      binding = {
+        sessionId,
+        abort: new AbortController(),
+        buffer: [],
+        ownedFrames: 0,
+        ownedBytes: 0,
+      };
       this.sessions.set(sessionId, binding);
     }
     return binding;
@@ -317,8 +407,14 @@ export class AcpConnection {
     }
     let sessionStreams = 0;
     let bufferedSessionFrames = 0;
+    let pendingDeliveryFrames = 0;
     for (const binding of this.sessions.values()) {
       bufferedSessionFrames += binding.buffer.length;
+      pendingDeliveryFrames += binding.buffer.filter(
+        (prepared) =>
+          prepared.lease !== undefined &&
+          prepared.deliveryAttempt !== undefined,
+      ).length;
       if (binding.stream && !binding.stream.isClosed) {
         sessionStreams += 1;
         liveStreams.add(binding.stream);
@@ -346,16 +442,28 @@ export class AcpConnection {
       wsStreams,
       bufferedConnectionFrames: this.connBuffer.length,
       bufferedSessionFrames,
+      pendingDeliveryFrames:
+        pendingDeliveryFrames +
+        [...this.pendingDeliveries].filter(
+          (prepared) => prepared.lease !== undefined,
+        ).length,
+      preAttachOwnedFrames: this.ownedFrames,
+      preAttachOwnedBytes: this.ownedBytes,
     };
   }
 
   /** Send a frame on the connection-scoped stream (buffer until it attaches). */
-  sendConn(frame: unknown): void {
-    if (this.connStream && !this.connStream.isClosed) {
-      void this.connStream.send(frame);
-    } else {
-      pushCapped(this.connBuffer, frame, `conn ${this.connectionId}`);
-    }
+  sendConn(frame: unknown, receipt?: DeliveryReceipt): Promise<DeliveryResult> {
+    const trackedReceipt = this.trackReceipt(receipt);
+    return this.prepareAndBuffer(
+      this.connBuffer,
+      frame,
+      undefined,
+      undefined,
+      trackedReceipt,
+      undefined,
+      true,
+    );
   }
 
   /** True if any session currently has a live (open) SSE stream. */
@@ -398,11 +506,20 @@ export class AcpConnection {
   attachConnStream(stream: TransportStream): void {
     // A reconnect cancels any pending grace-period reap.
     this.clearGraceTimer();
-    // Close any prior connection stream so its heartbeat interval + socket
-    // don't leak when a client reconnects the connection-scoped GET.
-    if (this.connStream && this.connStream !== stream) this.connStream.close();
+    const previousStream = this.connStream;
     this.connStream = stream;
-    for (const frame of this.connBuffer.splice(0)) void stream.send(frame);
+    // Move unresolved replies off the old stream before closing it. A queued
+    // SSE write can otherwise resolve `closed` without ever reaching the wire.
+    if (previousStream && previousStream !== stream) {
+      if (!this.requeuePendingConnectionFrames(previousStream)) {
+        previousStream.close();
+        return;
+      }
+      previousStream.close();
+    }
+    for (const prepared of this.connBuffer.splice(0)) {
+      this.deliverPrepared(stream, prepared);
+    }
   }
 
   /**
@@ -413,19 +530,24 @@ export class AcpConnection {
    * creating here would resurrect a ghost binding (no stream, no owner) that
    * buffers up to 256 late pump/reply frames forever.
    */
-  sendSession(sessionId: string, frame: unknown, id?: number): void {
+  sendSession(
+    sessionId: string,
+    frame: unknown,
+    id?: number,
+  ): Promise<DeliveryResult> {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
+    if (!binding) return Promise.resolve('closed');
     if (binding.stream && !binding.stream.isClosed) {
-      void binding.stream.send(frame, id);
-    } else {
-      pushCapped(
-        binding.buffer,
-        { frame, id },
-        `session ${sessionId}`,
-        (e) => e.id,
-      );
+      return this.sendLive(binding.stream, frame, id, undefined, binding);
     }
+    return this.prepareAndBuffer(
+      binding.buffer,
+      frame,
+      id,
+      undefined,
+      undefined,
+      binding,
+    );
   }
 
   /**
@@ -447,26 +569,21 @@ export class AcpConnection {
    * is done, replies go straight to the wire (steady state, unchanged from a
    * non-resumed stream).
    */
-  sendSessionReply(sessionId: string, frame: unknown, anchorId?: number): void {
+  sendSessionReply(
+    sessionId: string,
+    frame: unknown,
+    anchorId?: number,
+  ): Promise<DeliveryResult> {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
-    // Steady state — live stream, no replay in flight, nothing queued ahead —
-    // goes straight to the wire (same as a never-resumed stream). Otherwise
-    // defer with the watermark so ordering is preserved while catching up.
-    if (
-      binding.stream &&
-      !binding.stream.isClosed &&
-      !binding.replayPending &&
-      binding.buffer.length === 0
-    ) {
-      void binding.stream.send(frame);
-      return;
-    }
-    pushCapped(
+    if (!binding) return Promise.resolve('closed');
+    return this.prepareAndBuffer(
       binding.buffer,
-      { frame, id: undefined, anchorId },
-      `session ${sessionId}`,
-      (e) => e.id,
+      frame,
+      undefined,
+      anchorId,
+      undefined,
+      binding,
+      true,
     );
   }
 
@@ -501,7 +618,7 @@ export class AcpConnection {
         break;
       }
       binding.buffer.shift();
-      void binding.stream.send(front.frame);
+      this.deliverPrepared(binding.stream, front);
     }
   }
 
@@ -543,7 +660,12 @@ export class AcpConnection {
     // the prompt must survive. CONTRACT: that identity guard and this ordering
     // must stay in lockstep.
     binding.stream = stream;
+    binding.usesConnectionStream = stream === this.connStream;
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
+      if (!this.requeuePendingSessionReplies(binding, prevStream)) {
+        prevStream.close();
+        return binding;
+      }
       prevStream.close();
     }
     // Flush buffered pre-attach frames produced during the detach gap.
@@ -597,7 +719,7 @@ export class AcpConnection {
     const gap = binding.buffer.splice(0);
     for (const entry of gap) {
       if (!replayingOnAttach) {
-        void stream.send(entry.frame, entry.id); // fresh connect: flush all now
+        this.deliverPrepared(stream, entry); // fresh connect: flush all now
       } else if (entry.id !== undefined) {
         // Resume: ring replay owns bus events, so drop the buffered copy to
         // avoid double-delivery (the same id arrives via replay). This branch is
@@ -611,6 +733,7 @@ export class AcpConnection {
         // be ring-evicted before reconnect, which the replay signals to the
         // client as `state_resync_required` (not a silent gap) — strictly better
         // than the pre-resume live-only behaviour, which lost every gap frame.
+        this.settlePrepared(entry, 'closed');
         continue;
       } else {
         binding.buffer.push(entry); // resume: defer id-less past replay
@@ -686,8 +809,8 @@ export class AcpConnection {
       binding.buffer.length === 0
     )
       return;
-    for (const { frame, id } of binding.buffer.splice(0)) {
-      void binding.stream.send(frame, id);
+    for (const prepared of binding.buffer.splice(0)) {
+      this.deliverPrepared(binding.stream, prepared);
     }
   }
 
@@ -765,17 +888,38 @@ export class AcpConnection {
 
   closeSessionStream(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
-    this.teardownBinding(binding);
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
+    const ownershipState = this.sessionOwnershipStates.get(sessionId);
+    if (ownershipState) {
+      ownershipState.generation += 1;
+      if (ownershipState.captures === 0) {
+        this.sessionOwnershipStates.delete(sessionId);
+      }
+    }
+    if (!binding) return;
+    this.teardownBinding(binding);
   }
 
-  destroy(): void {
+  destroy(reason?: TransportCloseReason): void {
+    if (this.destroyed) return;
     this.destroyed = true;
     this.abortController.abort();
     this.clearGraceTimer();
-    for (const binding of this.sessions.values()) {
+    const bindings = [...this.sessions.values()];
+    this.sessions.clear();
+    this.ownedSessions.clear();
+    for (const prepared of this.connBuffer.splice(0)) {
+      this.discardPrepared(prepared);
+    }
+    this.connStream?.close(reason);
+    setImmediate(() => {
+      for (const prepared of this.pendingDeliveries) {
+        this.discardPreparedReceipt(prepared);
+      }
+      for (const receipt of [...this.pendingReceipts]) receipt.discarded();
+    });
+    for (const binding of bindings) {
       try {
         this.teardownBinding(binding);
       } catch (err) {
@@ -784,16 +928,22 @@ export class AcpConnection {
         );
       }
     }
-    this.sessions.clear();
-    this.ownedSessions.clear();
+    this.sessionOwnershipStates.clear();
     this.pending.clear();
-    this.connStream?.close();
   }
 
   private teardownBinding(binding: SessionBinding): void {
     if (binding.graceTimer) {
       clearTimeout(binding.graceTimer);
       binding.graceTimer = undefined;
+    }
+    for (const prepared of binding.buffer.splice(0)) {
+      this.discardPrepared(prepared);
+    }
+    for (const prepared of this.pendingDeliveries) {
+      if (prepared.binding === binding) {
+        this.discardPreparedReceipt(prepared);
+      }
     }
     binding.abort.abort();
     binding.promptAbort?.abort();
@@ -804,6 +954,496 @@ export class AcpConnection {
     }
     this.abandonPendingForSession(binding.sessionId, binding.clientId);
     this.onDetachSession?.(binding.sessionId, binding.clientId);
+  }
+
+  private sendLive(
+    stream: TransportStream,
+    frame: unknown,
+    id?: number,
+    receipt?: DeliveryReceipt,
+    binding?: SessionBinding,
+  ): Promise<DeliveryResult> {
+    let payload: Buffer;
+    try {
+      const serialized = JSON.stringify(frame);
+      if (serialized === undefined) throw new Error('not serializable');
+      payload = Buffer.from(serialized, 'utf8');
+    } catch {
+      receipt?.discarded();
+      if (!this.isCurrentStreamOwner(stream, binding)) {
+        return Promise.resolve('closed');
+      }
+      this.failSerializationOwner(binding);
+      return Promise.resolve('failed');
+    }
+    if (!this.isCurrentStreamOwner(stream, binding)) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    const result = stream.sendSerialized(payload, id);
+    this.observeLiveReceipt(result, receipt);
+    return result;
+  }
+
+  private isCurrentStreamOwner(
+    stream: TransportStream,
+    binding: SessionBinding | undefined,
+  ): boolean {
+    if (this.destroyed || stream.isClosed) return false;
+    return binding
+      ? this.sessions.get(binding.sessionId) === binding &&
+          binding.stream === stream
+      : this.connStream === stream;
+  }
+
+  private prepareAndBuffer(
+    buffer: PreparedFrame[],
+    frame: unknown,
+    id: number | undefined,
+    anchorId: number | undefined,
+    receipt: DeliveryReceipt | undefined,
+    binding: SessionBinding | undefined,
+    requeueOnStreamReplacement = false,
+  ): Promise<DeliveryResult> {
+    if (this.destroyed) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    const expectedStream = binding ? binding.stream : this.connStream;
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      receipt?.discarded();
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return Promise.resolve('failed');
+    }
+    let payload: Buffer;
+    try {
+      const serialized = JSON.stringify(frame);
+      if (serialized === undefined) throw new Error('not serializable');
+      payload = Buffer.from(serialized, 'utf8');
+    } catch {
+      receipt?.discarded();
+      if (
+        this.destroyed ||
+        (binding ? binding.stream : this.connStream) !== expectedStream ||
+        (binding !== undefined &&
+          this.sessions.get(binding.sessionId) !== binding)
+      ) {
+        return Promise.resolve('closed');
+      }
+      this.failSerializationOwner(binding);
+      return Promise.resolve('failed');
+    }
+    if (
+      this.destroyed ||
+      (binding ? binding.stream : this.connStream) !== expectedStream ||
+      (binding !== undefined &&
+        this.sessions.get(binding.sessionId) !== binding)
+    ) {
+      receipt?.discarded();
+      return Promise.resolve('closed');
+    }
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      receipt?.discarded();
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return Promise.resolve('failed');
+    }
+    const liveStream = expectedStream;
+    const deliveryDeferred = binding?.replayPending === true;
+    const deliverImmediately =
+      buffer.length === 0 &&
+      liveStream &&
+      !liveStream.isClosed &&
+      !deliveryDeferred;
+    if (deliverImmediately && !requeueOnStreamReplacement) {
+      return this.sendSerializedLive(liveStream, payload, id, receipt);
+    }
+    let lease: AcpPreAttachLease | undefined;
+    if (!deliverImmediately) {
+      if (
+        this.ownedFrames >= this.maxFramesPerConnection ||
+        payload.byteLength > this.maxPayloadBytesPerConnection - this.ownedBytes
+      ) {
+        receipt?.discarded();
+        this.failConnection('ACP pre-attach connection budget');
+        return Promise.resolve('failed');
+      }
+      lease = this.preAttachBudget.tryReserve(payload.byteLength);
+      if (!lease) {
+        receipt?.discarded();
+        this.failConnection('ACP pre-attach daemon budget', false);
+        return Promise.resolve('failed');
+      }
+    }
+    let resolve!: (result: DeliveryResult) => void;
+    const result = new Promise<DeliveryResult>((accept) => {
+      resolve = accept;
+    });
+    const prepared: PreparedFrame = {
+      payload,
+      sequence: this.nextPreparedSequence++,
+      id,
+      anchorId,
+      receipt,
+      lease,
+      binding,
+      requeueOnStreamReplacement,
+      resolve,
+    };
+    if (deliverImmediately) {
+      this.deliverPrepared(liveStream, prepared);
+      return result;
+    }
+    buffer.push(prepared);
+    this.ownedFrames += 1;
+    this.ownedBytes += payload.byteLength;
+    if (binding) {
+      binding.ownedFrames += 1;
+      binding.ownedBytes += payload.byteLength;
+    } else {
+      this.connOwnedFrames += 1;
+    }
+    return result;
+  }
+
+  private sendSerializedLive(
+    stream: TransportStream,
+    payload: Buffer,
+    id: number | undefined,
+    receipt: DeliveryReceipt | undefined,
+  ): Promise<DeliveryResult> {
+    const result = stream.sendSerialized(payload, id);
+    this.observeLiveReceipt(result, receipt);
+    return result;
+  }
+
+  private observeLiveReceipt(
+    result: Promise<DeliveryResult>,
+    receipt: DeliveryReceipt | undefined,
+  ): void {
+    void result.then(
+      (outcome) => {
+        if (outcome === 'delivered') receipt?.delivered();
+        else if (outcome === 'outcome_unknown') receipt?.outcomeUnknown?.();
+        else receipt?.discarded();
+      },
+      () => receipt?.discarded(),
+    );
+  }
+
+  private trackReceipt(
+    receipt: DeliveryReceipt | undefined,
+  ): DeliveryReceipt | undefined {
+    if (!receipt) return undefined;
+    let settled = false;
+    const tracked: DeliveryReceipt = {
+      delivered: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'delivered');
+      },
+      discarded: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'discarded');
+      },
+      outcomeUnknown: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'outcomeUnknown');
+      },
+    };
+    this.pendingReceipts.add(tracked);
+    return tracked;
+  }
+
+  private deliverPrepared(
+    stream: TransportStream,
+    prepared: PreparedFrame,
+  ): void {
+    const attempt = (prepared.deliveryAttempt ?? 0) + 1;
+    prepared.deliveryAttempt = attempt;
+    prepared.deliveryStream = stream;
+    prepared.lease?.markPendingDelivery();
+    this.pendingDeliveries.add(prepared);
+    void stream.sendSerialized(prepared.payload, prepared.id).then(
+      (outcome) => this.settlePreparedAttempt(prepared, attempt, outcome),
+      () => this.settlePreparedAttempt(prepared, attempt, 'failed'),
+    );
+  }
+
+  private requeuePendingSessionReplies(
+    binding: SessionBinding,
+    previousStream: TransportStream,
+  ): boolean {
+    // These replies have no SSE event id and are absent from ring replay. Use
+    // at-least-once handoff: a duplicate JSON-RPC response is identifiable by
+    // its request id, while dropping the only response hangs the caller.
+    const requeued = [...this.pendingDeliveries].filter(
+      (prepared) =>
+        prepared.binding === binding &&
+        prepared.deliveryStream === previousStream &&
+        prepared.requeueOnStreamReplacement,
+    );
+    for (const prepared of requeued) {
+      if (!this.reservePreparedForBuffer(prepared, binding)) return false;
+    }
+    for (const prepared of requeued) {
+      if (
+        prepared.binding !== binding ||
+        prepared.deliveryStream !== previousStream ||
+        !prepared.requeueOnStreamReplacement
+      ) {
+        continue;
+      }
+      prepared.deliveryAttempt = (prepared.deliveryAttempt ?? 0) + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(binding.buffer, prepared);
+    }
+    return true;
+  }
+
+  private requeuePendingConnectionFrames(
+    previousStream: TransportStream,
+  ): boolean {
+    const requeued = [...this.pendingDeliveries].filter(
+      (prepared) =>
+        prepared.binding === undefined &&
+        prepared.deliveryStream === previousStream &&
+        prepared.requeueOnStreamReplacement,
+    );
+    for (const prepared of requeued) {
+      if (!this.reservePreparedForBuffer(prepared)) return false;
+    }
+    for (const prepared of requeued) {
+      if (
+        prepared.binding !== undefined ||
+        prepared.deliveryStream !== previousStream ||
+        !prepared.requeueOnStreamReplacement
+      ) {
+        continue;
+      }
+      prepared.deliveryAttempt = (prepared.deliveryAttempt ?? 0) + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+    }
+    return true;
+  }
+
+  private settlePreparedAttempt(
+    prepared: PreparedFrame,
+    attempt: number,
+    outcome: DeliveryResult,
+  ): void {
+    if (prepared.deliveryAttempt !== attempt) return;
+    const binding = prepared.binding;
+    const stream = prepared.deliveryStream;
+    if (
+      outcome === 'closed' &&
+      prepared.requeueOnStreamReplacement &&
+      !binding &&
+      stream &&
+      stream.isClosed &&
+      !this.destroyed &&
+      this.connStream === stream
+    ) {
+      if (!this.reservePreparedForBuffer(prepared)) return;
+      prepared.deliveryAttempt = attempt + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+      return;
+    }
+    if (
+      outcome !== 'delivered' &&
+      prepared.requeueOnStreamReplacement &&
+      binding &&
+      stream &&
+      stream !== this.connStream &&
+      stream.isClosed &&
+      !this.destroyed &&
+      this.sessions.get(binding.sessionId) === binding &&
+      (binding.stream === stream || binding.stream === undefined)
+    ) {
+      if (!this.reservePreparedForBuffer(prepared, binding)) return;
+      prepared.deliveryAttempt = attempt + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(binding.buffer, prepared);
+      return;
+    }
+    prepared.deliveryStream = undefined;
+    this.settlePrepared(prepared, outcome);
+  }
+
+  private reservePreparedForBuffer(
+    prepared: PreparedFrame,
+    binding?: SessionBinding,
+  ): boolean {
+    if (prepared.lease) return true;
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
+      this.settlePrepared(prepared, 'failed');
+      this.failOwner(binding, 'ACP pre-attach frame limit');
+      return false;
+    }
+    if (
+      this.ownedFrames >= this.maxFramesPerConnection ||
+      prepared.payload.byteLength >
+        this.maxPayloadBytesPerConnection - this.ownedBytes
+    ) {
+      this.settlePrepared(prepared, 'failed');
+      this.failConnection('ACP pre-attach connection budget');
+      return false;
+    }
+    const lease = this.preAttachBudget.tryReserve(prepared.payload.byteLength);
+    if (!lease) {
+      this.settlePrepared(prepared, 'failed');
+      this.failConnection('ACP pre-attach daemon budget', false);
+      return false;
+    }
+    lease.markPendingDelivery();
+    prepared.lease = lease;
+    this.ownedFrames += 1;
+    this.ownedBytes += prepared.payload.byteLength;
+    if (binding) {
+      binding.ownedFrames += 1;
+      binding.ownedBytes += prepared.payload.byteLength;
+    } else {
+      this.connOwnedFrames += 1;
+    }
+    return true;
+  }
+
+  private insertPrepared(
+    buffer: PreparedFrame[],
+    prepared: PreparedFrame,
+  ): void {
+    const index = buffer.findIndex(
+      (buffered) => buffered.sequence > prepared.sequence,
+    );
+    if (index === -1) buffer.push(prepared);
+    else buffer.splice(index, 0, prepared);
+  }
+
+  private discardPrepared(prepared: PreparedFrame): void {
+    this.discardPreparedReceipt(prepared);
+    if (!this.pendingDeliveries.has(prepared)) {
+      this.settlePrepared(prepared, 'closed');
+    }
+  }
+
+  private settlePrepared(
+    prepared: PreparedFrame,
+    outcome: DeliveryResult,
+  ): void {
+    const lease = prepared.lease;
+    lease?.release();
+    prepared.lease = undefined;
+    this.pendingDeliveries.delete(prepared);
+    if (lease) {
+      this.ownedFrames -= 1;
+      this.ownedBytes -= prepared.payload.byteLength;
+      if (prepared.binding) {
+        prepared.binding.ownedFrames -= 1;
+        prepared.binding.ownedBytes -= prepared.payload.byteLength;
+      } else {
+        this.connOwnedFrames -= 1;
+      }
+    }
+    if (!prepared.receiptSettled) {
+      prepared.receiptSettled = true;
+      if (prepared.receipt) {
+        this.invokeReceipt(
+          prepared.receipt,
+          outcome === 'delivered'
+            ? 'delivered'
+            : outcome === 'outcome_unknown'
+              ? 'outcomeUnknown'
+              : 'discarded',
+        );
+      }
+    }
+    prepared.resolve(outcome);
+  }
+
+  private discardPreparedReceipt(prepared: PreparedFrame): void {
+    if (prepared.receiptSettled) return;
+    prepared.receiptSettled = true;
+    if (prepared.receipt) this.invokeReceipt(prepared.receipt, 'discarded');
+  }
+
+  private invokeReceipt(
+    receipt: DeliveryReceipt,
+    outcome: 'delivered' | 'discarded' | 'outcomeUnknown',
+  ): void {
+    try {
+      if (outcome === 'outcomeUnknown') {
+        (receipt.outcomeUnknown ?? receipt.delivered)();
+      } else {
+        receipt[outcome]();
+      }
+    } catch {
+      writeStderrLine(`qwen serve: /acp ${outcome} receipt callback failed`);
+    }
+  }
+
+  private failOwner(
+    binding: SessionBinding | undefined,
+    message: string,
+  ): void {
+    this.preAttachBudget.recordGuardFailure();
+    this.onPreAttachGuardFailure?.();
+    writeStderrLine(`qwen serve: /acp resource guard: ${message}`);
+    if (
+      !binding ||
+      binding.usesConnectionStream === true ||
+      (binding.usesConnectionStream === undefined &&
+        binding.stream === undefined &&
+        this.connStream?.kind === 'ws')
+    ) {
+      this.retireConnection(message);
+      return;
+    }
+    try {
+      this.closeSessionStream(binding.sessionId);
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: /acp resource guard session teardown failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private failSerializationOwner(binding: SessionBinding | undefined): void {
+    writeStderrLine('qwen serve: /acp response serialization failed');
+    if (binding) this.failOwner(binding, 'ACP response serialization failed');
+  }
+
+  private failConnection(message: string, recordFailure = true): void {
+    if (recordFailure) this.preAttachBudget.recordGuardFailure();
+    this.onPreAttachGuardFailure?.();
+    writeStderrLine(`qwen serve: /acp resource guard: ${message}`);
+    this.retireConnection(message);
+  }
+
+  private retireConnection(_message: string): void {
+    const reason = { code: 1013, reason: 'Resource limit' };
+    if (this.onFatalConnection) this.onFatalConnection(this, reason);
+    else this.destroy(reason);
   }
 
   /**
@@ -833,57 +1473,6 @@ export class AcpConnection {
   }
 }
 
-function pushCapped<T>(
-  buf: T[],
-  frame: T,
-  label = 'stream',
-  getId?: (entry: T) => number | undefined,
-): void {
-  if (buf.length >= MAX_BUFFERED_FRAMES) {
-    // Prefer evicting a REPLAYABLE id-bearing frame over an irreplaceable
-    // id-less one. On the session buffer, id-bearing entries are EventBus
-    // events the ring redelivers on reconnect, while id-less entries are
-    // deferred JSON-RPC replies (`sendSessionReply`) the ring does NOT track —
-    // dropping one would hang the `session/prompt` caller forever. So under a
-    // content flood during a detach gap, evict the oldest id-bearing frame and
-    // keep the reply.
-    const replayable = getId ? buf.findIndex((e) => getId(e) !== undefined) : 0;
-    if (replayable === -1) {
-      // Degenerate case: the buffer is ENTIRELY id-less deferred replies, so
-      // there is nothing replaceable to evict. Dropping one would silently hang
-      // its caller (the exact failure this guard prevents), so we do NOT drop at
-      // the soft cap — id-less replies are bounded in practice by in-flight RPC
-      // count. But enforce a HARD ceiling as defense-in-depth: past it, an
-      // unbounded daemon heap is the worse failure, so drop the oldest and log
-      // loudly.
-      if (buf.length >= HARD_BUFFERED_FRAMES_CAP) {
-        buf.shift();
-        writeStderrLine(
-          `qwen serve: /acp HARD buffer cap breached (${label}) — dropping ` +
-            `oldest id-less reply (its caller may hang); buffer was ${
-              buf.length + 1
-            }`,
-        );
-      } else if (buf.length === MAX_BUFFERED_FRAMES) {
-        // Log ONCE, at the soft-cap transition — not on every subsequent push,
-        // which would scale linearly with the over-cap depth.
-        writeStderrLine(
-          `qwen serve: /acp pre-attach buffer over soft cap (${label}) — ` +
-            `id-less replies are irreplaceable, not dropping`,
-        );
-      }
-    } else {
-      const [dropped] = buf.splice(replayable, 1);
-      const droppedId = getId?.(dropped);
-      writeStderrLine(
-        `qwen serve: /acp pre-attach buffer full (${label}), dropped frame` +
-          (droppedId !== undefined ? ` id ${droppedId}` : ''),
-      );
-    }
-  }
-  buf.push(frame);
-}
-
 /**
  * Registry of live ACP connections with an idle-TTL sweep. The sweep is
  * defensive: a well-behaved client `DELETE /acp`s, but a crashed client
@@ -892,12 +1481,16 @@ function pushCapped<T>(
 export class ConnectionRegistry {
   private readonly byId = new Map<string, AcpConnection>();
   private readonly sweepTimer: ReturnType<typeof setInterval>;
+  private preAttachGuardFailures = 0;
 
   constructor(
     private readonly onAbandonPending?: AbandonPendingFn,
     private readonly onDetachSession?: DetachSessionFn,
     private readonly maxConnections = DEFAULT_MAX_CONNECTIONS,
     private readonly idleTtlMs = 30 * 60_000,
+    private readonly preAttachBudget = new AcpPreAttachBudget(),
+    private readonly maxFramesPerConnection = ACP_PRE_ATTACH_MAX_FRAMES_PER_CONNECTION,
+    private readonly maxPayloadBytesPerConnection = ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_PER_CONNECTION,
   ) {
     this.sweepTimer = setInterval(() => this.sweep(), 60_000);
     this.sweepTimer.unref();
@@ -917,6 +1510,13 @@ export class ConnectionRegistry {
       fromLoopback,
       this.onAbandonPending,
       this.onDetachSession,
+      this.preAttachBudget,
+      (failed, reason) => this.deleteExact(failed, reason),
+      this.maxFramesPerConnection,
+      this.maxPayloadBytesPerConnection,
+      () => {
+        this.preAttachGuardFailures += 1;
+      },
     );
     this.byId.set(conn.connectionId, conn);
     return conn;
@@ -990,8 +1590,17 @@ export class ConnectionRegistry {
   delete(connectionId: string): boolean {
     const conn = this.byId.get(connectionId);
     if (!conn) return false;
-    conn.destroy();
-    return this.byId.delete(connectionId);
+    return this.deleteExact(conn);
+  }
+
+  private deleteExact(
+    conn: AcpConnection,
+    reason?: TransportCloseReason,
+  ): boolean {
+    if (this.byId.get(conn.connectionId) !== conn) return false;
+    this.byId.delete(conn.connectionId);
+    conn.destroy(reason);
+    return true;
   }
 
   get size(): number {
@@ -1022,13 +1631,38 @@ export class ConnectionRegistry {
         connections,
         (conn) => conn.pendingClientRequests,
       ),
+      bufferedConnectionFrames: sumBy(
+        connections,
+        (conn) => conn.bufferedConnectionFrames,
+      ),
+      bufferedSessionFrames: sumBy(
+        connections,
+        (conn) => conn.bufferedSessionFrames,
+      ),
+      pendingDeliveryFrames: sumBy(
+        connections,
+        (conn) => conn.pendingDeliveryFrames,
+      ),
+      preAttachOwnedFrames: sumBy(
+        connections,
+        (conn) => conn.preAttachOwnedFrames,
+      ),
+      preAttachOwnedBytes: sumBy(
+        connections,
+        (conn) => conn.preAttachOwnedBytes,
+      ),
+      preAttachGuardFailures: this.preAttachGuardFailures,
       connections,
     };
   }
 
+  clear(): void {
+    for (const id of [...this.byId.keys()]) this.delete(id);
+  }
+
   dispose(): void {
     clearInterval(this.sweepTimer);
-    for (const id of [...this.byId.keys()]) this.delete(id);
+    this.clear();
   }
 
   private sweep(): void {

@@ -6,7 +6,7 @@
 
 import type { GlobToolParams, GlobPath } from './glob.js';
 import { GlobTool, sortFileEntries } from './glob.js';
-import { partListUnionToString } from '../core/geminiRequest.js';
+import { partListUnionToString } from '../core/llm-request.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import type { Path as GlobResultPath } from 'glob';
@@ -292,13 +293,23 @@ describe('GlobTool', () => {
     });
 
     it('should allow path outside workspace (external path support)', async () => {
-      const params: GlobToolParams = { pattern: '*.txt', path: '/tmp' };
-      const invocation = globTool.build(params);
-      // External path is now allowed - it should not return a workspace error
-      const result = await invocation.execute(abortSignal);
-      expect(result.returnDisplay).not.toContain(
-        'Path is not within workspace',
+      // Shared /tmp made this walk time out on loaded runners — keep this
+      // dir dedicated and empty.
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-external-'),
       );
+      try {
+        const params: GlobToolParams = { pattern: '*.txt', path: outside };
+        const invocation = globTool.build(params);
+        // External path is now allowed - it should not return a workspace error
+        const result = await invocation.execute(abortSignal);
+        expect(result.error).toBeUndefined();
+        expect(result.returnDisplay).not.toContain(
+          'Path is not within workspace',
+        );
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
     });
 
     it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
@@ -954,6 +965,35 @@ describe('GlobTool', () => {
 
       // Should use plural "files" for multiple truncated files
       expect(result.llmContent).toContain('[5 files truncated] ...');
+    });
+  });
+
+  describe('getDescription', () => {
+    it('should generate correct description with pattern only', () => {
+      const params: GlobToolParams = { pattern: '*.ts' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts'");
+    });
+
+    it('should show project-internal paths relative to the project root', () => {
+      const params: GlobToolParams = { pattern: '*.ts', path: 'sub' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts' in sub");
+    });
+
+    it('should show . for the project root itself', () => {
+      const params: GlobToolParams = { pattern: '*.ts', path: '.' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: GlobToolParams = { pattern: '*.ts', path: outside };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe(
+        `'*.ts' in ${tildeifyPath(outside)}`,
+      );
     });
   });
 

@@ -8,6 +8,17 @@ let detectionComplete = false;
 let protocolSupported = false;
 let protocolEnabled = false;
 
+// Progressive-enhancement flag stack control (per screen buffer):
+//   push (enable) / pop (disable). See
+//   https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+const KITTY_KEYBOARD_PUSH = '\x1b[>1u';
+const KITTY_KEYBOARD_POP = '\x1b[<u';
+
+function enableProtocol(): void {
+  process.stdout.write(KITTY_KEYBOARD_PUSH);
+  protocolEnabled = true;
+}
+
 /**
  * Detects Kitty keyboard protocol support.
  * Definitive document about this protocol lives at https://sw.kovidgoyal.net/kitty/keyboard-protocol/
@@ -82,15 +93,17 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 
         if (progressiveEnhancementReceived) {
           // Enable the protocol
-          process.stdout.write('\x1b[>1u');
           protocolSupported = true;
-          protocolEnabled = true;
+          enableProtocol();
 
-          // Set up cleanup on exit (exit covers process.exit() calls,
-          // SIGTERM/SIGINT cover signal-based terminations).
+          // Last-resort fallback: if the process exits without running
+          // the async cleanup chain (e.g. direct process.exit() call),
+          // the 'exit' event still fires synchronously and restores the
+          // terminal. Signal-based teardown is handled by the main
+          // installInteractiveSignalHandlers() → runExitCleanup() →
+          // disableKittyProtocol() path, which runs *after* Ink leaves
+          // the alternate screen so the pop lands on the correct buffer.
           process.on('exit', disableProtocol);
-          process.on('SIGTERM', disableProtocol);
-          process.on('SIGINT', disableProtocol);
         }
 
         detectionComplete = true;
@@ -113,8 +126,28 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 
 function disableProtocol() {
   if (protocolEnabled) {
-    process.stdout.write('\x1b[<u');
+    process.stdout.write(KITTY_KEYBOARD_POP);
     protocolEnabled = false;
+  }
+}
+
+/**
+ * Re-pushes the Kitty keyboard progressive-enhancement flags onto the screen
+ * buffer that is current at call time.
+ *
+ * The flags are pushed once at startup (during detection) on the main screen,
+ * but the Kitty spec tracks them per screen buffer. When the app switches to
+ * the alternate screen (VP mode / `alternateScreen: true`), that screen's flag
+ * stack is empty, so modified keys such as Shift+Enter are reported without
+ * their modifier — Shift+Enter degrades to a bare Enter or an orphaned Escape.
+ * Callers must invoke this only after the alternate screen has been entered.
+ *
+ * No-op unless the protocol was detected as supported, so it is safe to call
+ * unconditionally on the VP startup path.
+ */
+export function pushKittyProtocolFlags(): void {
+  if (protocolSupported) {
+    enableProtocol();
   }
 }
 

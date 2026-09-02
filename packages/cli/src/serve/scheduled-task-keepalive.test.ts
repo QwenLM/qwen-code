@@ -19,6 +19,7 @@ import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 
 function task(over: Partial<DurableCronTask>): DurableCronTask {
   return {
@@ -42,6 +43,9 @@ describe('scheduled-task keepalive', () => {
       beats.push(id);
     },
     loadSession: async (req: { sessionId: string }) => {
+      loads.push(req.sessionId);
+    },
+    resumeSession: async (req: { sessionId: string }) => {
       loads.push(req.sessionId);
     },
     spawnOrAttach: async () => {
@@ -70,8 +74,20 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('heartbeats each distinct bound session, skipping unbound tasks', async () => {
+    const onTasksRead = vi.fn();
     await updateCronTasks(workspace, () => [
-      task({ id: 'a', sessionId: 'sess-1' }),
+      task({
+        id: 'a',
+        sessionId: 'sess-1',
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      }),
       task({ id: 'b', sessionId: 'sess-2' }),
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound — no session to keep alive
@@ -80,11 +96,17 @@ describe('scheduled-task keepalive', () => {
       bridge,
       boundWorkspace: workspace,
       intervalMs: 60_000,
+      onTasksRead,
     });
     await ka.tick();
     ka.stop();
     // Deduped to the distinct bound sessions; the unbound task is skipped.
     expect(beats.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(onTasksRead).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'a', sessionId: 'sess-1' }),
+      ]),
+    );
   });
 
   it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {
@@ -112,7 +134,7 @@ describe('scheduled-task keepalive', () => {
         }
         beats.push(id);
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
       spawnOrAttach: async () => {
@@ -154,7 +176,7 @@ describe('scheduled-task keepalive', () => {
         }
         beats.push(id);
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
       spawnOrAttach: async () => {
@@ -232,7 +254,7 @@ describe('scheduled-task keepalive', () => {
     });
     await ka.tick();
     ka.stop();
-    expect(names).toEqual([]); // legacy task never gets the ⏰ rename
+    expect(names).toEqual([]); // legacy task is never renamed
   });
 
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
@@ -263,7 +285,7 @@ describe('scheduled-task keepalive', () => {
         if (id === 'sess-1') throw new Error('not resident');
         beats.push(id);
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         loadRequests.push(req);
       },
@@ -290,7 +312,6 @@ describe('scheduled-task keepalive', () => {
       {
         sessionId: 'sess-1',
         workspaceCwd: workspace,
-        historyReplay: 'response',
         sourceType: 'scheduled_task',
         sourceId: 'a',
       },
@@ -308,7 +329,7 @@ describe('scheduled-task keepalive', () => {
         if (id === 'sess-1') throw new Error('not resident');
         beats.push(id);
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         if (req.sessionId === 'sess-1') throw new Error('transcript gone');
       },
@@ -339,7 +360,7 @@ describe('scheduled-task keepalive', () => {
       recordHeartbeat: () => {
         throw new Error('not resident');
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         throw new Error('transcript gone');
       },
@@ -371,7 +392,7 @@ describe('scheduled-task keepalive', () => {
       recordHeartbeat: () => {
         throw new Error('not resident');
       },
-      loadSession: async (req: { sessionId: string }) => {
+      resumeSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         // Hang: loadSession isn't abortable, so it keeps running past the timeout.
         await new Promise<void>((resolve) => {
@@ -398,6 +419,49 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(loads).toEqual(['sess-1']); // no duplicate spawn
     releaseLoad?.(); // let the hung load settle (cleanup)
+  });
+
+  it('does not preempt the default bridge restore deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1' }),
+      ]);
+      let releaseLoad: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const restoring = {
+        ...bridge,
+        recordHeartbeat: () => {
+          throw new Error('not resident');
+        },
+        resumeSession: async () => {
+          markStarted?.();
+          await new Promise<void>((resolve) => {
+            releaseLoad = resolve;
+          });
+        },
+      };
+      const ka = startScheduledTaskKeepalive({
+        bridge: restoring,
+        boundWorkspace: workspace,
+        intervalMs: 60_000,
+      });
+      let settled = false;
+      const tick = ka.tick().finally(() => {
+        settled = true;
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(settled).toBe(false);
+      releaseLoad?.();
+      await tick;
+      ka.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stop() is idempotent', async () => {
@@ -430,7 +494,7 @@ describe('scheduled-task keepalive', () => {
     }> = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
-        loadSession: async (req) => {
+        resumeSession: async (req) => {
           loaded.push(req);
         },
       },
@@ -463,7 +527,7 @@ describe('scheduled-task keepalive', () => {
     const errors: string[] = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
-        loadSession: async (req) => {
+        resumeSession: async (req) => {
           if (req.sessionId === 'gone') throw new Error('missing transcript');
         },
       },
@@ -478,7 +542,7 @@ describe('scheduled-task keepalive', () => {
   it('rehydrate is a no-op when there are no tasks', async () => {
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
-        loadSession: async () => {
+        resumeSession: async () => {
           throw new Error('should not be called');
         },
       },
@@ -499,7 +563,7 @@ describe('scheduled-task keepalive', () => {
     let maxInFlight = 0;
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
-        loadSession: async () => {
+        resumeSession: async () => {
           inFlight++;
           maxInFlight = Math.max(maxInFlight, inFlight);
           await new Promise((r) => setTimeout(r, 5));
@@ -528,7 +592,7 @@ describe('scheduled-task keepalive', () => {
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
         // Never resolves — a genuinely hung, non-abortable load.
-        loadSession: () => {
+        resumeSession: () => {
           started++;
           return new Promise<void>(() => {});
         },
@@ -539,6 +603,61 @@ describe('scheduled-task keepalive', () => {
     expect(res.failed).toHaveLength(12); // every session recorded failed...
     expect(res.loaded).toHaveLength(0);
     expect(started).toBe(12); // ...and every queued session was still attempted
+  });
+
+  it('does not preempt the default bridge restore deadline during rehydrate', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1' }),
+      ]);
+      let releaseLoad: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const rehydrate = rehydrateScheduledTaskSessions({
+        bridge: {
+          resumeSession: async () => {
+            markStarted?.();
+            await new Promise<void>((resolve) => {
+              releaseLoad = resolve;
+            });
+          },
+        },
+        boundWorkspace: workspace,
+      });
+      let settled = false;
+      void rehydrate.finally(() => {
+        settled = true;
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(settled).toBe(false);
+      releaseLoad?.();
+      await expect(rehydrate).resolves.toEqual({
+        loaded: ['sess-1'],
+        failed: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disables an overflowing rehydrate watchdog delay', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+    ]);
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: {
+        resumeSession: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        },
+      },
+      boundWorkspace: workspace,
+      loadTimeoutMs: 2_147_483_648,
+    });
+    expect(res).toEqual({ loaded: ['sess-1'], failed: [] });
   });
 
   it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {
@@ -574,14 +693,19 @@ describe('scheduled-task keepalive', () => {
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('check build');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
 
-  it('renames a bound session without ⏰ prefix exactly once', async () => {
+  it('renames task-owned sessions once without renaming caller-owned ones', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+      task({
+        id: 'caller-bound',
+        sessionId: 'caller-sess',
+        sessionOwnedByTask: false,
+      }),
     ]);
     const names: Array<[string, { displayName?: string }]> = [];
     const naming = {
@@ -600,7 +724,7 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('lint');
   });
 
   it('does not bind disabled unbound tasks', async () => {
@@ -668,6 +792,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -682,6 +807,8 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(closed).toContain('orphan-sess');
     expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(rollbackBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     removeSpy.mockRestore();
   });
 
@@ -706,6 +833,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -719,6 +847,8 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(closed).toContain('our-orphan');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(raceBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     // The other process's sessionId is preserved.
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('other-sess');
@@ -756,5 +886,94 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     // Clean up the hung spawn.
     releaseSpawn?.();
+  });
+
+  it('waits for close before deleting a late spawned transcript', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'hung', prompt: 'will resolve late' }),
+    ]);
+    let resolveSpawn!: (value: { sessionId: string }) => void;
+    let finishClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      finishClose = resolve;
+    });
+    const closeSession = vi.fn(() => closeGate);
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const ka = startScheduledTaskKeepalive({
+      bridge: {
+        ...bridge,
+        spawnOrAttach: () =>
+          new Promise<{ sessionId: string }>((resolve) => {
+            resolveSpawn = resolve;
+          }),
+        closeSession,
+      },
+      boundWorkspace: workspace,
+      intervalMs: 50,
+      spawnTimeoutMs: 5,
+    });
+
+    await ka.tick();
+    resolveSpawn({ sessionId: 'late-sess' });
+    await vi.waitFor(() =>
+      expect(closeSession).toHaveBeenCalledWith('late-sess'),
+    );
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    finishClose();
+    await vi.waitFor(() => expect(removeSpy).toHaveBeenCalledWith('late-sess'));
+    ka.stop();
+    removeSpy.mockRestore();
+  });
+
+  it('rehydration onTasksRead populates the authorization store for delivery-enabled tasks', async () => {
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'del-1',
+        sessionId: 'sess-del',
+        recurring: true,
+        lastFiredAt: 1_700_000_000_000,
+        delivery: {
+          kind: 'channel',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
+      }),
+      task({ id: 'no-del', sessionId: 'sess-plain' }),
+    ]);
+
+    const result = await rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace: workspace,
+      onTasksRead: (tasks) => {
+        for (const t of tasks) {
+          if (!t.delivery || !t.sessionId) continue;
+          authorizations.registerScheduledTask(workspace, {
+            sessionId: t.sessionId,
+            taskId: t.id,
+            target: t.delivery.target,
+            recurring: t.recurring,
+            ...(typeof t.lastFiredAt === 'number'
+              ? { lastFiredAt: t.lastFiredAt }
+              : {}),
+          });
+        }
+      },
+    });
+
+    expect(result.loaded).toContain('sess-del');
+    const firedAt = 1_700_000_000_000 + 60_000;
+    expect(
+      authorizations.consume(workspace, {
+        sessionId: 'sess-del',
+        deliveryId: `del-1:${firedAt}`,
+        source: 'scheduled',
+        taskId: 'del-1',
+        firedAt,
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      }),
+    ).toBe(true);
   });
 });

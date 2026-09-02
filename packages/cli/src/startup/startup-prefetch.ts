@@ -159,21 +159,25 @@ export function startPostRenderPrefetches(
   ) {
     runDeferredTask('update_check', async () => {
       const [
-        { checkForUpdatesDetailed },
+        { checkForUpdatesDetailed, describeUpdateCheckFailure },
         { handleAutoUpdate },
         { getInstallationInfo },
         { updateEventEmitter },
         { t },
       ] = await Promise.all([
         import('../ui/utils/updateCheck.js'),
-        import('../utils/handleAutoUpdate.js'),
+        import('../ui/handleAutoUpdate.js'),
         import('../utils/installationInfo.js'),
         import('../utils/updateEventEmitter.js'),
         import('../i18n/index.js'),
       ]);
-      const updateFailedMessage = t(
-        'Failed to check for updates. Please check your network or registry configuration.',
-      );
+      // The startup check is best-effort background work: surface failures as
+      // a soft warning with the concrete reason instead of an alarming error
+      // (#7049), while keeping the failure visible (#6857).
+      const updateCheckSkippedMessage = (error: unknown) =>
+        t('Update check skipped ({{reason}}) — run /update to retry.', {
+          reason: describeUpdateCheckFailure(error),
+        });
       try {
         const result = await checkForUpdatesDetailed();
         if (result.status === 'update') {
@@ -196,6 +200,10 @@ export function startPostRenderPrefetches(
             return;
           }
           const installationInfo = getInstallationInfo(projectRoot, true);
+          if (installationInfo.packageManager === 'npm') {
+            void handleAutoUpdate(result.info, settings, projectRoot);
+            return;
+          }
           if (
             installationInfo.updateCommand ||
             (installationInfo.isStandalone && installationInfo.standaloneDir)
@@ -218,12 +226,14 @@ export function startPostRenderPrefetches(
           }
         } else if (result.status === 'error') {
           updateEventEmitter.emit('update-failed', {
-            message: updateFailedMessage,
+            message: updateCheckSkippedMessage(result.error),
+            severity: 'warning',
           });
         }
       } catch (error) {
         updateEventEmitter.emit('update-failed', {
-          message: updateFailedMessage,
+          message: updateCheckSkippedMessage(error),
+          severity: 'warning',
         });
         throw error;
       }
@@ -257,15 +267,13 @@ export function startPostRenderPrefetches(
   }
 
   if (options.initializeTelemetry) {
-    runDeferredTask('telemetry_init', () => {
-      initializeTelemetry(config);
-    });
+    runDeferredTask('telemetry_init', () => initializeTelemetry(config));
   }
 
   if (config.isInteractive()) {
     runDeferredTask('background_housekeeping', async () => {
       const { startBackgroundHousekeeping } = await import(
-        '../utils/housekeeping/scheduler.js'
+        '../services/housekeeping/scheduler.js'
       );
       startBackgroundHousekeeping(config, settings);
     });

@@ -56,18 +56,22 @@ import { DoctorReport } from './views/DoctorReport.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { AdvisorMessage } from './messages/AdvisorMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   measureElementPosition,
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { ICON } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -79,12 +83,12 @@ interface HistoryItemDisplayProps {
   commands?: readonly SlashCommand[];
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
-  availableTerminalHeightGemini?: number;
+  availableTerminalHeightLlm?: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * Full-detail mode (Ctrl+O). When true, collapse is lifted:
    * thinking blocks render expanded and tool groups force `forceExpandAll`
    * + `forceShowResult` (every tool with its full, untruncated result).
    * Default false (main view stays at the #5661 partition baseline).
@@ -121,24 +125,50 @@ const ClickableThinkMessage: React.FC<{
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
+  const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
-  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const clickable =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
   const isActive = !isPending;
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (event.name !== 'left-press' || !ref.current) return;
+        if (!ref.current) return;
+        if (event.name === 'move') {
+          if (
+            pressRef.current &&
+            (event.col !== pressRef.current.col ||
+              event.row !== pressRef.current.row)
+          ) {
+            pressRef.current = null;
+          }
+          return;
+        }
+        if (event.name !== 'left-press' && event.name !== 'left-release') {
+          pressRef.current = null;
+          return;
+        }
         const metrics = measureElementPosition(ref.current);
         const col = event.col - 1;
         const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
-        if (
+        const isInside =
           col >= metrics.x &&
           col < metrics.x + metrics.width &&
           row >= metrics.y &&
-          row < metrics.y + metrics.height
-        ) {
+          row < metrics.y + metrics.height;
+        if (event.name === 'left-press') {
+          pressRef.current = isInside
+            ? { col: event.col, row: event.row }
+            : null;
+          return;
+        }
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (isInside && press?.col === event.col && press.row === event.row) {
           onToggle();
         }
       },
@@ -182,12 +212,14 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'summary':
     case 'insight_progress':
     case 'btw':
+    case 'advisor':
     case 'away_recap':
     case 'user':
     case 'user_prompt_submit_blocked':
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'goal_state':
     case 'vision_notice':
       return 0;
     default:
@@ -205,7 +237,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
-  availableTerminalHeightGemini,
+  availableTerminalHeightLlm,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
@@ -270,9 +302,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           )}
           <AssistantMessage
             text={itemForDisplay.text}
+            images={itemForDisplay.images}
+            omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
+              availableTerminalHeightLlm ?? availableTerminalHeight
             }
             contentWidth={contentWidth}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -282,9 +316,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
           text={itemForDisplay.text}
+          images={itemForDisplay.images}
+          omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -296,7 +332,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
@@ -309,7 +345,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
         />
@@ -380,8 +416,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
-        <Box paddingLeft={1}>
-          <Text dimColor>● {itemForDisplay.summary}</Text>
+        <Box flexDirection="row">
+          <Box width={2} flexShrink={0}>
+            <Text dimColor>{ICON.CIRCLE_FILLED}</Text>
+          </Box>
+          <Text dimColor>{itemForDisplay.summary}</Text>
         </Box>
       )}
       {itemForDisplay.type === 'compression' && (
@@ -443,6 +482,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
       )}
+      {itemForDisplay.type === 'advisor' && (
+        <AdvisorMessage
+          text={itemForDisplay.text}
+          model={itemForDisplay.model}
+          containerWidth={contentWidth}
+        />
+      )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">
           <Text color={theme.status.warning}>
@@ -480,6 +526,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           iterations={itemForDisplay.iterations}
           durationMs={itemForDisplay.durationMs}
           lastReason={itemForDisplay.lastReason}
+        />
+      )}
+      {itemForDisplay.type === 'goal_state' && (
+        <GoalStatusMessage
+          snapshot={itemForDisplay.snapshot}
+          cause={itemForDisplay.cause}
         />
       )}
     </Box>

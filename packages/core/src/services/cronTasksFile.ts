@@ -44,6 +44,9 @@ export interface CronTaskRun {
    * owner id was known.
    */
   sessionId?: string;
+  /** The daemon could not create the fresh session requested for this run.
+   * Absent means the dispatch did not fail (or predates this field). */
+  sessionDispatchFailed?: boolean;
   /**
    * READ-ONLY backward-compatibility field. A pre-removal version stamped this
    * on a fire whose precondition withheld the prompt (it was booked as a run
@@ -60,6 +63,18 @@ export interface CronTaskRun {
  * per-task growth of the tasks file (every fire already rewrites it to stamp
  * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
 export const MAX_TASK_RUNS = 20;
+
+export const MAX_CHANNEL_DELIVERY_NAME_LENGTH = 2048;
+export const MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH = 2048;
+
+export interface CronTaskDelivery {
+  kind: 'channel';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+}
 
 export interface DurableCronTask {
   id: string;
@@ -89,20 +104,53 @@ export interface DurableCronTask {
    */
   disabledByArchive?: boolean;
   /**
-   * Id of the dedicated session this task is bound to. A task created through
-   * the Web Shell management page mints its own session and stores its id here;
-   * the task then fires ONLY inside that session (not via the shared per-project
-   * durable owner), so the session's transcript is the task's run history, and
-   * archiving/deleting that session stops the task. Absent on tool-created
-   * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
+   * Id of the session this task is bound to. The task fires only inside that
+   * session, so its transcript is the task's run history. Absent on unbound
+   * tool-created and legacy tasks, which use the shared durable owner.
    */
   sessionId?: string;
+  /** False when the caller, rather than the task, owns the bound session.
+   * Absent means task-owned for backward compatibility. */
+  sessionOwnedByTask?: boolean;
+  /** Where executions run. Absent defaults to the historical behavior:
+   * every fire reuses the task's bound session. */
+  sessionMode?: 'persistent' | 'per_run';
+  delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
    */
   runs?: CronTaskRun[];
+}
+
+/** How a per-run fire's fresh-session dispatch ended: the session the run
+ * actually executes in, and whether creating a fresh one failed first. */
+export interface CronRunSessionOutcome {
+  sessionId?: string;
+  dispatchFailed?: boolean;
+}
+
+/**
+ * Stamps a fresh-session dispatch outcome onto the run recorded at `firedAt`.
+ * Returns the task unchanged when no such run exists (one-shots are deleted on
+ * fire, and a run whose write has not landed yet has nothing to annotate).
+ */
+export function annotateCronRunSession(
+  task: DurableCronTask,
+  firedAt: number,
+  outcome: CronRunSessionOutcome,
+): DurableCronTask {
+  const index = task.runs?.findIndex((run) => run.at === firedAt) ?? -1;
+  if (index < 0 || !task.runs) return task;
+  const run: CronTaskRun = { ...task.runs[index]! };
+  delete run.sessionId;
+  delete run.sessionDispatchFailed;
+  if (outcome.sessionId) run.sessionId = outcome.sessionId;
+  if (outcome.dispatchFailed) run.sessionDispatchFailed = true;
+  const runs = [...task.runs];
+  runs[index] = run;
+  return { ...task, runs };
 }
 
 /**
@@ -261,8 +309,10 @@ export async function readCronTasks(
 export async function writeCronTasks(
   projectRoot: string,
   tasks: DurableCronTask[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
+  options.assertCanCommit?.();
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // noFollow: this file lives inside the project working tree, so a cloned
   // or hand-edited repo could pre-place it as a symlink. Following it would
@@ -270,7 +320,10 @@ export async function writeCronTasks(
   // same project-controlled-symlink threat the credential write sites guard
   // against (see the noFollow docs in atomicFileWrite.ts). Replace the link
   // with a regular file instead of writing through it.
-  await atomicWriteJSON(filePath, tasks, { noFollow: true });
+  await atomicWriteJSON(filePath, tasks, {
+    noFollow: true,
+    assertCanCommit: options.assertCanCommit,
+  });
 }
 
 /**
@@ -344,6 +397,7 @@ async function acquireUpdateLock(
 export async function updateCronTasks(
   projectRoot: string,
   mutate: (tasks: DurableCronTask[]) => DurableCronTask[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
   return getUpdateMutex(filePath).runExclusive(async () => {
@@ -352,7 +406,7 @@ export async function updateCronTasks(
       const tasks = await readCronTasks(projectRoot);
       const next = mutate(tasks);
       if (next !== tasks) {
-        await writeCronTasks(projectRoot, next);
+        await writeCronTasks(projectRoot, next, options);
       }
     } finally {
       await release();
@@ -410,11 +464,40 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
       (run['kind'] === undefined || typeof run['kind'] === 'string') &&
       (run['sessionId'] === undefined ||
         typeof run['sessionId'] === 'string') &&
+      (run['sessionDispatchFailed'] === undefined ||
+        typeof run['sessionDispatchFailed'] === 'boolean') &&
       // Read-only legacy compat: validate so a stored `withheld` marker isn't
       // rejected on read (it is never written anymore).
       (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
     );
   });
+}
+
+function isValidDelivery(value: unknown): value is CronTaskDelivery {
+  if (typeof value !== 'object' || value === null) return false;
+  const delivery = value as Record<string, unknown>;
+  const rawTarget = delivery['target'];
+  if (
+    delivery['kind'] !== 'channel' ||
+    typeof rawTarget !== 'object' ||
+    rawTarget === null ||
+    !Object.keys(delivery).every((key) => key === 'kind' || key === 'target')
+  ) {
+    return false;
+  }
+  const target = rawTarget as Record<string, unknown>;
+  return (
+    typeof target['channelName'] === 'string' &&
+    target['channelName'].trim().length > 0 &&
+    target['channelName'].length <= MAX_CHANNEL_DELIVERY_NAME_LENGTH &&
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    typeof target['id'] === 'string' &&
+    target['id'].trim().length > 0 &&
+    target['id'].length <= MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH &&
+    Object.keys(target).every(
+      (key) => key === 'channelName' || key === 'type' || key === 'id',
+    )
+  );
 }
 
 function isValidTask(value: unknown): value is DurableCronTask {
@@ -440,6 +523,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['sessionOwnedByTask'] === undefined ||
+      typeof obj['sessionOwnedByTask'] === 'boolean') &&
+    (obj['sessionMode'] === undefined ||
+      obj['sessionMode'] === 'persistent' ||
+      obj['sessionMode'] === 'per_run') &&
+    (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

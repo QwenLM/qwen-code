@@ -1,9 +1,15 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
 const MAX_HISTORY = 100;
 
-function loadHistory(storageKey: string): string[] {
+export function getPromptHistoryStorageKey(workspaceCwd?: string): string {
+  return workspaceCwd
+    ? `${DEFAULT_STORAGE_KEY}:${encodeURIComponent(workspaceCwd)}`
+    : DEFAULT_STORAGE_KEY;
+}
+
+function readHistory(storageKey: string): string[] {
   try {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return [];
@@ -14,6 +20,16 @@ function loadHistory(storageKey: string): string[] {
   } catch {
     return [];
   }
+}
+
+function loadHistory(
+  storageKey: string,
+  fallbackStorageKey?: string,
+): string[] {
+  const history = readHistory(storageKey);
+  return history.length === 0 && fallbackStorageKey
+    ? readHistory(fallbackStorageKey)
+    : history;
 }
 
 function saveHistory(storageKey: string, history: string[]) {
@@ -27,10 +43,39 @@ function saveHistory(storageKey: string, history: string[]) {
   }
 }
 
-export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
+export function pushInputHistoryEntry(
+  storageKey: string,
+  text: string,
+  fallbackStorageKey?: string,
+): void {
+  const history = loadHistory(storageKey, fallbackStorageKey);
+  if (history[history.length - 1] === text) {
+    if (fallbackStorageKey && readHistory(storageKey).length === 0) {
+      saveHistory(storageKey, history);
+    }
+    return;
+  }
+  history.push(text);
+  if (history.length > MAX_HISTORY) history.shift();
+  saveHistory(storageKey, history);
+}
+
+export function useInputHistory(
+  storageKey = DEFAULT_STORAGE_KEY,
+  fallbackStorageKey?: string,
+) {
   const storageKeyRef = useRef(storageKey);
+  const fallbackStorageKeyRef = useRef(fallbackStorageKey);
+  const loadedStorageKeyRef = useRef(storageKey);
+  const loadedFallbackStorageKeyRef = useRef(fallbackStorageKey);
   storageKeyRef.current = storageKey;
-  const historyRef = useRef<string[]>(loadHistory(storageKey));
+  fallbackStorageKeyRef.current = fallbackStorageKey;
+  const historyRef = useRef<string[]>([]);
+  const historyLoadedRef = useRef(false);
+  if (!historyLoadedRef.current) {
+    historyRef.current = loadHistory(storageKey, fallbackStorageKey);
+    historyLoadedRef.current = true;
+  }
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
@@ -50,10 +95,34 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
     });
   }, []);
 
+  useEffect(() => {
+    if (
+      loadedStorageKeyRef.current === storageKey &&
+      loadedFallbackStorageKeyRef.current === fallbackStorageKey
+    ) {
+      return;
+    }
+    loadedStorageKeyRef.current = storageKey;
+    loadedFallbackStorageKeyRef.current = fallbackStorageKey;
+    historyRef.current = loadHistory(storageKey, fallbackStorageKey);
+    indexRef.current = -1;
+    draftRef.current = '';
+    searchIndexRef.current = -1;
+    syncNav();
+  }, [fallbackStorageKey, storageKey, syncNav]);
+
   const push = useCallback(
     (text: string) => {
       const h = historyRef.current;
-      if (h[h.length - 1] === text) return;
+      if (h[h.length - 1] === text) {
+        if (
+          fallbackStorageKeyRef.current &&
+          readHistory(storageKeyRef.current).length === 0
+        ) {
+          saveHistory(storageKeyRef.current, h);
+        }
+        return;
+      }
       h.push(text);
       if (h.length > MAX_HISTORY) h.shift();
       saveHistory(storageKeyRef.current, h);

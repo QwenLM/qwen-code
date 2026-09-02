@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  useDaemonSessionOwnerGuard,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
   type DaemonAuthProviderDescriptor,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import styles from './AuthMessage.module.css';
+
+const TOS_PRIVACY_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
@@ -108,7 +113,13 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const ownerRef = useRef(sessionOwnerGuard.capture());
+  const ownerChanged = !ownerRef.current.isCurrent();
+  if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
+  const saveOperationRef = useRef(0);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
@@ -183,6 +194,13 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const [optionIndex, setOptionIndex] = useState(0);
 
+  useEffect(() => {
+    if (!ownerChanged) return;
+    saveOperationRef.current += 1;
+    setSaving(false);
+    setError(null);
+  }, [ownerChanged]);
+
   const startProvider = useCallback(
     (
       nextProvider: DaemonAuthProviderDescriptor,
@@ -246,6 +264,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const save = useCallback(() => {
     if (!provider || saving) return;
+    const owner = ownerRef.current;
+    const operation = ++saveOperationRef.current;
+    const isCurrent = () =>
+      saveOperationRef.current === operation && owner.isCurrent();
     setSaving(true);
     setError(null);
     const ctxSize = Number(contextWindow);
@@ -277,15 +299,23 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             : undefined,
       })
       .then((result) => {
-        onMessage(result.message);
+        if (!isCurrent()) return;
+        onMessage(
+          result.runtimeSync?.status === 'failed'
+            ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
+            : result.message,
+        );
         onClose();
       })
       .catch((err: unknown) => {
+        if (!isCurrent()) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         onMessage(message, 'error');
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        if (isCurrent()) setSaving(false);
+      });
   }, [
     apiKey,
     baseUrl,
@@ -301,6 +331,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     protocol,
     provider,
     saving,
+    t,
     thinking,
     workspaceActions,
   ]);
@@ -601,6 +632,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}
             </a>
@@ -617,6 +651,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}: {provider.documentationUrl}
             </a>
@@ -827,11 +864,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             <div>{t('auth.termsTitle')}:</div>
             <a
               className={styles.link}
-              href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              href={TOS_PRIVACY_URL}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) => openExternalLink(event, TOS_PRIVACY_URL)}
             >
-              https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+              {TOS_PRIVACY_URL}
             </a>
           </div>
         </>

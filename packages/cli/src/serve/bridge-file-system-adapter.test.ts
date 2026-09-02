@@ -27,6 +27,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fsp } from 'node:fs';
+import { createServer } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -41,6 +42,7 @@ import {
 
 describe('createBridgeFileSystemAdapter', () => {
   let tmpDir: string;
+  let outsideDir: string;
   let auditEmits: Array<{ data: unknown }>;
 
   beforeEach(async () => {
@@ -51,10 +53,16 @@ describe('createBridgeFileSystemAdapter', () => {
     tmpDir = await fsp.realpath(
       await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-fs-adapter-')),
     );
+    outsideDir = await fsp.realpath(
+      await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-fs-outside-')),
+    );
     auditEmits = [];
   });
   afterEach(async () => {
-    await fsp.rm(tmpDir, { recursive: true, force: true });
+    await Promise.all([
+      fsp.rm(tmpDir, { recursive: true, force: true }),
+      fsp.rm(outsideDir, { recursive: true, force: true }),
+    ]);
   });
 
   function buildFactory(opts: {
@@ -247,6 +255,47 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).not.toContain('line1');
     });
 
+    it('reads a bounded ACP line window from text above MAX_READ_BYTES', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-window.txt');
+      const lines = Array.from(
+        { length: 4_000 },
+        (_, index) => `line${index + 1} ${'x'.repeat(80)}`,
+      );
+      const content = lines.join('\n');
+      expect(Buffer.byteLength(content)).toBeGreaterThan(MAX_READ_BYTES);
+      await fsp.writeFile(target, content, 'utf8');
+
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 3,
+        limit: 20,
+      });
+
+      expect(response.content).toBe(lines.slice(2, 22).join('\n'));
+    });
+
+    it('serves an oversized ACP line-only read as a bounded window', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-line-only.txt');
+      await fsp.writeFile(target, 'x'.repeat(MAX_READ_BYTES + 1), 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 2,
+      });
+
+      expect(response.content).toBe('');
+    });
+
     it('treats null line/limit as undefined (ACP wire compatibility)', async () => {
       const target = path.join(tmpDir, 'null-window.txt');
       await fsp.writeFile(target, 'hello\nworld\n', 'utf8');
@@ -424,6 +473,484 @@ describe('createBridgeFileSystemAdapter', () => {
     });
   });
 
+  describe('same-host built-in tool writes', () => {
+    const marker = {
+      'qwen-code/tool-write-origin': {
+        version: 1,
+        source: 'write_file',
+      },
+    };
+
+    it('writes an external file only when the adapter opts in and provenance is valid', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'created.txt');
+
+      await adapter.writeText({
+        path: target,
+        content: 'external-content',
+        sessionId: 'sess:external',
+        _meta: marker,
+      });
+
+      expect(await fsp.readFile(target, 'utf8')).toBe('external-content');
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.access',
+        intent: 'write',
+        route: 'ACP writeTextFile',
+        sessionId: 'sess:external',
+      });
+      if (process.platform !== 'win32') {
+        expect((await fsp.stat(target)).mode & 0o7777).toBe(0o600);
+      }
+    });
+
+    it('keeps a marked workspace write on the existing WFS path', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(tmpDir, 'marked-workspace.txt');
+
+      await adapter.writeText({
+        path: target,
+        content: 'workspace-content',
+        sessionId: 'sess:marked-workspace',
+        _meta: marker,
+      });
+
+      expect(await fsp.readFile(target, 'utf8')).toBe('workspace-content');
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.access',
+        route: 'ACP writeTextFile',
+      });
+    });
+
+    it('preserves the mode of an existing external file', async () => {
+      if (process.platform === 'win32') return;
+      const target = path.join(outsideDir, 'existing.txt');
+      await fsp.writeFile(target, 'before', { mode: 0o640 });
+      await fsp.chmod(target, 0o640);
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+
+      await adapter.writeText({
+        path: target,
+        content: 'after',
+        sessionId: 'sess:external-mode',
+        _meta: marker,
+      });
+
+      expect(await fsp.readFile(target, 'utf8')).toBe('after');
+      expect((await fsp.stat(target)).mode & 0o7777).toBe(0o640);
+    });
+
+    it.each([
+      ['adapter default', undefined, marker],
+      ['missing provenance', true, undefined],
+      [
+        'malformed provenance',
+        true,
+        {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+            extra: true,
+          },
+        },
+      ],
+    ])('keeps external writes fail-closed for %s', async (_, enabled, meta) => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        enabled === undefined
+          ? undefined
+          : { allowSameHostToolWritesOutsideWorkspace: enabled },
+      );
+      const target = path.join(outsideDir, 'rejected.txt');
+
+      const err = await adapter
+        .writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:rejected',
+          ...(meta !== undefined ? { _meta: meta } : {}),
+        })
+        .catch((error: unknown) => error);
+
+      expect((err as { kind?: string }).kind).toBe('path_outside_workspace');
+      await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('rejects valid provenance when the factory does not expose the host writer', async () => {
+      const completeFactory = buildFactory({ trusted: true });
+      const compatibleFactory: WorkspaceFileSystemFactory = {
+        assertCanWrite: completeFactory.assertCanWrite,
+        forRequest: completeFactory.forRequest,
+      };
+      const adapter = createBridgeFileSystemAdapter(compatibleFactory, {
+        allowSameHostToolWritesOutsideWorkspace: true,
+      });
+      const target = path.join(outsideDir, 'no-factory-capability.txt');
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:no-factory-capability',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
+    });
+
+    it('rejects external writes from an untrusted runtime with one denied audit', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: false }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'untrusted.txt');
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:untrusted',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'untrusted_workspace' });
+
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.denied',
+        errorKind: 'untrusted_workspace',
+      });
+    });
+
+    it('rejects external leaf symlinks with one denied audit', async () => {
+      const realTarget = path.join(outsideDir, 'real.txt');
+      const linkTarget = path.join(outsideDir, 'link.txt');
+      await fsp.writeFile(realTarget, 'original');
+      await fsp.symlink(realTarget, linkTarget);
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+
+      await expect(
+        adapter.writeText({
+          path: linkTarget,
+          content: 'rejected',
+          sessionId: 'sess:symlink',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'symlink_escape' });
+
+      expect(await fsp.readFile(realTarget, 'utf8')).toBe('original');
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.denied',
+        errorKind: 'symlink_escape',
+      });
+    });
+
+    it('rejects dangling external leaf symlinks', async () => {
+      const linkTarget = path.join(outsideDir, 'dangling.txt');
+      await fsp.symlink(path.join(outsideDir, 'missing.txt'), linkTarget);
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+
+      await expect(
+        adapter.writeText({
+          path: linkTarget,
+          content: 'rejected',
+          sessionId: 'sess:dangling-symlink',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'symlink_escape' });
+      expect(auditEmits).toHaveLength(1);
+    });
+
+    it.each([
+      ['relative escape', () => path.join('..', 'outside.txt')],
+      ['suspicious path', () => path.join(outsideDir, 'trailing-dot.')],
+    ])('rejects an external %s', async (_, buildTarget) => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = buildTarget();
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:invalid-path',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
+      expect(auditEmits).toHaveLength(1);
+    });
+
+    it('rejects a Unix socket as an external text target', async () => {
+      if (process.platform === 'win32') return;
+      const socketDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'bridge-fs-socket-'),
+      );
+      const socketPath = path.join(socketDir, 'target.sock');
+      const server = createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(socketPath, resolve);
+        });
+        const adapter = createBridgeFileSystemAdapter(
+          buildFactory({ trusted: true }),
+          { allowSameHostToolWritesOutsideWorkspace: true },
+        );
+        await expect(
+          adapter.writeText({
+            path: socketPath,
+            content: 'rejected',
+            sessionId: 'sess:socket',
+            _meta: marker,
+          }),
+        ).rejects.toMatchObject({ kind: 'parse_error' });
+        expect(auditEmits).toHaveLength(1);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await fsp.rm(socketDir, { recursive: true, force: true });
+      }
+    });
+
+    it('canonicalizes a symlinked parent for a new external file', async () => {
+      const alias = path.join(
+        path.dirname(outsideDir),
+        `${path.basename(outsideDir)}-alias`,
+      );
+      await fsp.symlink(outsideDir, alias, 'dir');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      try {
+        await adapter.writeText({
+          path: path.join(alias, 'through-alias.txt'),
+          content: 'through-alias',
+          sessionId: 'sess:parent-alias',
+          _meta: marker,
+        });
+        expect(
+          await fsp.readFile(
+            path.join(outsideDir, 'through-alias.txt'),
+            'utf8',
+          ),
+        ).toBe('through-alias');
+      } finally {
+        await fsp.unlink(alias).catch(() => undefined);
+      }
+    });
+
+    it('strips the ACP BOM marker before re-encoding non-UTF-8 content', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'utf16.txt');
+
+      await adapter.writeText({
+        path: target,
+        content: '\uFEFFhello',
+        sessionId: 'sess:utf16',
+        _meta: {
+          ...marker,
+          bom: true,
+          encoding: 'utf-16le',
+          lineEnding: 'crlf',
+        },
+      });
+
+      const bytes = await fsp.readFile(target);
+      expect(bytes.subarray(0, 4)).toEqual(
+        Buffer.from([0xff, 0xfe, 0x68, 0x00]),
+      );
+      expect(bytes.subarray(2).includes(Buffer.from([0xff, 0xfe]))).toBe(false);
+    });
+
+    it('preserves CRLF and writes exactly one UTF-8 BOM', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'utf8-bom-crlf.txt');
+
+      await adapter.writeText({
+        path: target,
+        content: '\uFEFFfirst\nsecond\n',
+        sessionId: 'sess:utf8-bom-crlf',
+        _meta: {
+          ...marker,
+          bom: true,
+          encoding: 'utf-8',
+          lineEnding: 'crlf',
+        },
+      });
+
+      expect(await fsp.readFile(target)).toEqual(
+        Buffer.concat([
+          Buffer.from([0xef, 0xbb, 0xbf]),
+          Buffer.from('first\r\nsecond\r\n'),
+        ]),
+      );
+    });
+
+    it('rejects content that exceeds the cap only after non-UTF-8 encoding', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'too-large-utf16.txt');
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'a'.repeat(3 * 1024 * 1024),
+          sessionId: 'sess:encoded-cap',
+          _meta: {
+            ...marker,
+            encoding: 'utf-16le',
+          },
+        }),
+      ).rejects.toMatchObject({ kind: 'file_too_large' });
+      await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.denied',
+        errorKind: 'file_too_large',
+      });
+    });
+
+    it('rejects directories as external text targets', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+
+      await expect(
+        adapter.writeText({
+          path: outsideDir,
+          content: 'rejected',
+          sessionId: 'sess:directory',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'parse_error' });
+      expect(auditEmits).toHaveLength(1);
+    });
+
+    it('records a missing external parent failure once', async () => {
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      const target = path.join(outsideDir, 'missing-parent', 'file.txt');
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:missing-parent',
+          _meta: marker,
+        }),
+      ).rejects.toMatchObject({ kind: 'path_not_found' });
+      await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.denied',
+        errorKind: 'path_not_found',
+      });
+    });
+
+    it('detects replacement of an existing leaf during canonicalization', async () => {
+      const target = path.join(outsideDir, 'raced.txt');
+      const displaced = path.join(outsideDir, 'raced-original.txt');
+      await fsp.writeFile(target, 'original');
+      const realpath = fsp.realpath.bind(fsp);
+      let targetRealpathCalls = 0;
+      const realpathSpy = vi
+        .spyOn(fsp, 'realpath')
+        .mockImplementation(async (candidate) => {
+          if (String(candidate) === target) {
+            targetRealpathCalls++;
+            if (targetRealpathCalls === 2) {
+              await fsp.rename(target, displaced);
+              await fsp.writeFile(target, 'replacement');
+            }
+          }
+          return realpath(candidate);
+        });
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+        { allowSameHostToolWritesOutsideWorkspace: true },
+      );
+      try {
+        await expect(
+          adapter.writeText({
+            path: target,
+            content: 'must-not-write',
+            sessionId: 'sess:inode-race',
+            _meta: marker,
+          }),
+        ).rejects.toMatchObject({ kind: 'symlink_escape' });
+        expect(await fsp.readFile(target, 'utf8')).toBe('replacement');
+        expect(await fsp.readFile(displaced, 'utf8')).toBe('original');
+        expect(auditEmits).toHaveLength(1);
+      } finally {
+        realpathSpy.mockRestore();
+      }
+    });
+
+    it('records a closed runtime generation once without writing', async () => {
+      const generationError = Object.assign(new Error('generation closed'), {
+        code: 'workspace_generation_closed',
+      });
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspaces: [tmpDir],
+        trusted: true,
+        emit: (event) => auditEmits.push(event),
+        generationGuard: {
+          assertOpen() {
+            throw generationError;
+          },
+        },
+      });
+      const adapter = createBridgeFileSystemAdapter(factory, {
+        allowSameHostToolWritesOutsideWorkspace: true,
+      });
+      const target = path.join(outsideDir, 'closed-generation.txt');
+
+      await expect(
+        adapter.writeText({
+          path: target,
+          content: 'rejected',
+          sessionId: 'sess:closed-generation',
+          _meta: marker,
+        }),
+      ).rejects.toBe(generationError);
+      await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(auditEmits).toHaveLength(1);
+      expect(auditEmits[0]?.data).toMatchObject({
+        kind: 'fs.denied',
+        errorKind: 'internal_error',
+      });
+    });
+  });
+
   describe('factory.forRequest wiring', () => {
     it('passes sessionId into the audit context for both read and write', async () => {
       const calls: Array<{ route: string; sessionId?: string }> = [];
@@ -456,6 +983,8 @@ describe('createBridgeFileSystemAdapter', () => {
             })),
             edit: vi.fn(),
             editAtomic: vi.fn(),
+            writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };
@@ -507,6 +1036,8 @@ describe('createBridgeFileSystemAdapter', () => {
             })),
             edit: vi.fn(),
             editAtomic: vi.fn(),
+            writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };

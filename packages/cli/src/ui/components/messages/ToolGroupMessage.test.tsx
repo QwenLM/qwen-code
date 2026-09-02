@@ -190,8 +190,40 @@ describe('<ToolGroupMessage />', () => {
       const frame = lastFrame() ?? '';
       // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
       expect(frame).toContain('Searched pattern');
-      expect(frame).toContain('read 2 files');
+      expect(frame).toContain('read a.ts, b.ts');
       expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders image-bearing collapsible tools individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'image-read',
+          name: 'ReadFile',
+          description: 'chart.png',
+          images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      expect(lastFrame()).toContain('MockTool[image-read]');
+    });
+
+    it('renders an overflow-only collapsible tool individually', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'overflow-read',
+          name: 'ReadFile',
+          description: 'many charts',
+          omittedImageCount: 2,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+      );
+
+      expect(lastFrame()).toContain('MockTool[overflow-read]');
     });
 
     it('renders mixed group with summary + individual tools', () => {
@@ -338,7 +370,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Read 2 files');
+      expect(frame).toContain('Read a.ts, b.ts');
       expect(frame).toContain('Recalled 1 memory');
     });
 
@@ -523,7 +555,7 @@ describe('<ToolGroupMessage />', () => {
     });
   });
 
-  // Transcript full-detail mode must NOT be short-circuited by the
+  // Full-detail mode must NOT be short-circuited by the
   // memory-only / pure-parallel-agent early returns (which run before the
   // forceExpandAll computation). Each tool must render in full.
   describe('fullDetail bypasses compact early returns', () => {
@@ -1035,6 +1067,45 @@ describe('<ToolGroupMessage />', () => {
         .mocked(ToolMessage)
         .mock.calls.find((c) => c[0].callId === 'shell-result');
       expect(call?.[0].availableTerminalHeight).toBe(8);
+    });
+
+    it('reserves an active compact hint row before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-complete',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'read-pending',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Pending,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      // 2 reads inline (no hint row) → summary is 1 row shorter than before.
+      expect(call?.[0].availableTerminalHeight).toBe(10);
     });
   });
 

@@ -871,6 +871,219 @@ describe('memoryImportProcessor', () => {
       expect(result.content).toContain('A @./b.md');
       expect(result.content).toContain('B content');
     });
+
+    // chain0 -> chain1 -> ... -> chain7, each importing the next.
+    const mockChain = (length: number) => {
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        const index = Number(
+          path.basename(String(file), '.md').replace('chain', ''),
+        );
+        return index < length - 1
+          ? `CHAIN${index} @./chain${index + 1}.md`
+          : `CHAIN${index}`;
+      });
+    };
+
+    const chainMarkers = (content: string, length: number) =>
+      [...Array(length).keys()].filter((i) => content.includes(`CHAIN${i}`));
+
+    it('stops expanding a flat import chain at maxDepth', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+      mockChain(8);
+
+      const result = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // The root is depth 0, so chain0..chain2 sit at depths 1..3 and chain2 is
+      // the last file allowed to expand its own imports.
+      expect(chainMarkers(result.content, 8)).toEqual([0, 1, 2]);
+    });
+
+    it('applies the same depth limit in flat and tree formats', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockChain(8);
+      const flat = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      mockChain(8);
+      const tree = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'tree',
+      );
+
+      expect(chainMarkers(flat.content, 8)).toEqual(
+        chainMarkers(tree.content, 8),
+      );
+    });
+
+    it('spends the same budget in both formats when depth is already partly used', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      // Entering with 2 of 3 levels already spent leaves one level of budget.
+      // The flat path used to start its own counter at 0 and hand out the
+      // full limit again, so it expanded two levels further than tree mode.
+      mockChain(8);
+      const flat = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 2 },
+        projectRoot,
+        'flat',
+      );
+
+      mockChain(8);
+      const tree = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 2 },
+        projectRoot,
+        'tree',
+      );
+
+      expect(chainMarkers(flat.content, 8)).toEqual(
+        chainMarkers(tree.content, 8),
+      );
+      expect(chainMarkers(flat.content, 8)).toEqual([0]);
+    });
+
+    it('fully expands a flat import chain that stays within maxDepth', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+      mockChain(3);
+
+      const result = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 5, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // Passes both before and after the depth guard, on purpose: it pins the
+      // other half of the contract so the limit can never be enforced by
+      // truncating chains that were always allowed.
+      expect(chainMarkers(result.content, 3)).toEqual([0, 1, 2]);
+    });
+
+    it('re-expands a file first reached by a route at the depth limit', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        switch (path.basename(String(file))) {
+          case 'deep0.md':
+            return 'DEEP0 @./deep1.md';
+          case 'deep1.md':
+            return 'DEEP1 @./x.md';
+          case 'x.md':
+            return 'XFILE @./y.md';
+          case 'y.md':
+            return 'YFILE';
+          default:
+            return '';
+        }
+      });
+
+      // deep0.md is listed last, so the reverse iteration takes the deep route
+      // to x.md first and lands on it exactly at the limit, truncating it.
+      const result = await processImports(
+        'Root @./x.md @./deep0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // x.md is also a direct import of the root at depth 1, so y.md sits well
+      // inside the limit and has to survive the deep route having got there
+      // first. Tracking a bare "seen" set instead of the depth dropped it.
+      expect(result.content).toContain('YFILE');
+      // The shallower re-expansion must not emit x.md a second time.
+      expect(result.content.match(/XFILE/g)).toHaveLength(1);
+    });
+
+    it('notifies once for a file a shallower route re-expands', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        switch (path.basename(String(file))) {
+          case 'deep0.md':
+            return 'DEEP0 @./deep1.md';
+          case 'deep1.md':
+            return 'DEEP1 @./x.md';
+          case 'x.md':
+            return 'XFILE @./y.md';
+          case 'y.md':
+            return 'YFILE';
+          default:
+            return '';
+        }
+      });
+
+      const importedFiles: Array<{
+        filePath: string;
+        parentFilePath: string;
+      }> = [];
+
+      // Same shape as the re-expansion case above: the deep route reaches x.md
+      // at the limit, then the root's own direct import re-expands it.
+      await processImports(
+        'Root @./x.md @./deep0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+        {
+          onFileImported: (event) => {
+            importedFiles.push(event);
+          },
+        },
+      );
+
+      // The notification says "this instruction file was loaded", and x.md is
+      // emitted into the flat output exactly once however many routes reach
+      // it, so it must be announced exactly once too. Nothing downstream
+      // de-duplicates: onFileImported feeds notifyInstructionsLoaded in
+      // memoryDiscovery, which forwards every call straight to the consumer.
+      const announced = importedFiles.map((event) =>
+        path.basename(event.filePath),
+      );
+      expect(announced.filter((name) => name === 'x.md')).toHaveLength(1);
+      // Every other file is announced once as well, and each exactly once.
+      expect([...announced].sort()).toEqual([
+        'deep0.md',
+        'deep1.md',
+        'x.md',
+        'y.md',
+      ]);
+    });
   });
 
   describe('validateImportPath', () => {

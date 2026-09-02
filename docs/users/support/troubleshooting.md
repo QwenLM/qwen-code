@@ -59,6 +59,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, and sandbox settings — for the session. Note: the CLI flags `--yolo` and `--approval-mode` still take effect in safe mode. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
     - Example: `qwen --safe-mode`
     - Alternative: set the environment variable `QWEN_CODE_SAFE_MODE=true` if the CLI cannot accept flags.
+    - Note: "MCP servers" here means servers configured in `settings.json` / project `.mcp.json` — local, ambient state that safe mode is meant to isolate against. MCP servers you explicitly supply for the current invocation (an embedding ACP client's `session/new` `mcpServers`, or `--mcp-config`) are not local/ambient state and are still honored under safe mode.
 
 ## Common error messages and solutions
 
@@ -99,7 +100,12 @@ This guide provides solutions to common issues and debugging tips, including top
 - **Trackpad scrolling in tmux changes prompt history instead of scrolling the conversation**
   - **Issue:** In a tmux session, trackpad or wheel scrolling may cycle through previous prompts, similar to pressing `Up Arrow` or `Down Arrow`.
   - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
-  - **Solution:** Enable `ui.useTerminalBuffer`; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+
+- **Right-click does nothing, links do not open, or text cannot be selected in the terminal**
+  - **Issue:** Native right-click context menus, OSC 8 hyperlink clicks (Ctrl+Click or plain click on URLs), and terminal-native text selection stop working while Qwen Code is running.
+  - **Cause:** When `ui.mouseTracking` is enabled (the default), Qwen Code captures all mouse events via SGR mouse tracking to power in-app text selection, click-to-position, row hover, and viewport scrolling. The terminal forwards every mouse event to the app instead of handling it natively.
+  - **Solution:** Set `"ui.mouseTracking": false` in your `settings.json` to restore native right-click menus and clickable URL links. This turns off all in-app mouse interaction. In Virtualized History (`ui.useTerminalBuffer: true`, the default), the wheel will no longer scroll the transcript — use `Shift+↑/↓`, `PgUp/PgDn`, or `Ctrl+Home/End` instead. To also restore native terminal scrollback, set `"ui.useTerminalBuffer": false`. Requires restart.
 
 ## IDE Companion not connecting
 

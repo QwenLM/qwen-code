@@ -18,14 +18,20 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
-import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, AuthType, Storage } from '@qwen-code/qwen-code-core';
+import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  GoalPersistenceUnavailableError,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import type {
   AgentSideConnection,
   PromptRequest,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
+import { handleSlashCommand } from '../../nonInteractiveCliCommands.js';
 
 // Stub the non-interactive CLI commands that Session.ts imports transitively.
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
@@ -60,13 +66,14 @@ describe('Session.pendingWorktreeNotice', () => {
 
   /** Parts arrays captured on each sendMessageStream call. */
   let capturedMessages: unknown[][];
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let mockClient: AgentSideConnection;
   let mockSettings: LoadedSettings;
 
   beforeEach(() => {
     capturedMessages = [];
+    vi.mocked(handleSlashCommand).mockReset();
 
     mockChat = {
       sendMessageStream: vi
@@ -86,34 +93,57 @@ describe('Session.pendingWorktreeNotice', () => {
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
 
-    const mockGeminiClient = {
+    const mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
     };
 
     mockConfig = {
+      storage: {
+        getRuntimeBaseDir: vi.fn(() => Storage.getRuntimeBaseDir()),
+      },
       setApprovalMode: vi.fn(),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: vi.fn(),
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      setActiveTodoReminder: vi.fn(),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/tmp'),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        getBranchCheckpointCursor: vi.fn().mockReturnValue({
+          recordId: null,
+          activeRecordCount: 0,
+          pendingToolCalls: [],
+        }),
+        recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
+      }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -123,13 +153,21 @@ describe('Session.pendingWorktreeNotice', () => {
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       }),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The prompt turn's finally sweeps review-worktree leases against the
+      // project root (see Session.review-lease.test.ts).
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -140,15 +178,38 @@ describe('Session.pendingWorktreeNotice', () => {
       // these registries; provide no-op stubs so construction succeeds.
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+      }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      // The Session constructor and Session.prompt both reach for the
+      // canonical Goal runtime. A real Config throws this exact error when
+      // Goal persistence is off, and both call sites are written to fall
+      // through on it — which is the shape these worktree-notice tests want.
+      getGoalRuntime: vi.fn(() => {
+        throw new GoalPersistenceUnavailableError();
+      }),
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
     } as unknown as Config;
 
     mockClient = {
@@ -247,6 +308,99 @@ describe('Session.pendingWorktreeNotice', () => {
 
     // Stays null after the second call as well.
     expect(session.pendingWorktreeNotice).toBeNull();
+  });
+
+  it('injects a recovered-agents notice into the next prompt once', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice =
+      '2 background agents were restored. Use list_agents to inspect them.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('first prompt'));
+    await session.prompt(makePromptRequest('second prompt'));
+
+    const firstParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(firstParts.some((part) => part.text?.includes(notice))).toBe(true);
+    const secondParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(secondParts.some((part) => part.text?.includes(notice))).toBe(false);
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('does not consume a recovered-agents notice for a slash command', async () => {
+    vi.mocked(handleSlashCommand).mockResolvedValueOnce({
+      type: 'submit_prompt',
+      content: [{ text: 'Prompt from command' }],
+    });
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('/testcommand'));
+    await session.prompt(makePromptRequest('ordinary prompt'));
+
+    expect(capturedMessages[0]).toEqual([{ text: 'Prompt from command' }]);
+    expect(capturedMessages[1]).toEqual(
+      expect.arrayContaining([
+        { text: expect.stringContaining(notice) as string },
+        { text: 'ordinary prompt' },
+      ]),
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('does not consume a recovered-agents notice on an interrupted-turn continuation', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    // A daemon continuation (`qwen.daemon.continueLastTurn`) closing a dangling
+    // tool call re-sends synthesized functionResponse parts. The one-shot
+    // recovered-agents notice must survive it (the `!isContinue` guard) so it
+    // is delivered on the user's next ordinary prompt instead.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        ],
+      },
+    ] as never);
+    await session.prompt({
+      ...makePromptRequest(''),
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as PromptRequest);
+
+    // The continuation send leads with the synthesized functionResponse and
+    // carries no recovered-agents notice; the notice is still pending.
+    const continuationParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(continuationParts.some((part) => part.text?.includes(notice))).toBe(
+      false,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBe(notice);
+
+    // The next ordinary prompt consumes it exactly once.
+    vi.mocked(mockChat.getHistory).mockReturnValue([]);
+    await session.prompt(makePromptRequest('ordinary prompt'));
+    const ordinaryParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(ordinaryParts.some((part) => part.text?.includes(notice))).toBe(
+      true,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
   });
 
   // VP4b: sanity — no notice set, prompt works normally, no worktree reminder injected

@@ -65,10 +65,13 @@ const UNESCAPE_REGEX = (() => {
 /**
  * Replaces the home directory with a tilde.
  * @param filePath - The path to tildeify.
+ * @param homeOverride - Optional home directory override for callers that
+ * track home themselves (e.g. memory discovery resolves it at load time so
+ * display and discovery agree).
  * @returns The tildeified path.
  */
-export function tildeifyPath(filePath: string): string {
-  const rawHomeDir = os.homedir();
+export function tildeifyPath(filePath: string, homeOverride?: string): string {
+  const rawHomeDir = homeOverride ?? os.homedir();
   if (!rawHomeDir) {
     return filePath;
   }
@@ -270,6 +273,37 @@ export function makeRelative(
 }
 
 /**
+ * Formats a file path for terminal display.
+ *
+ * - Project-internal paths render relative to `rootDirectory` (the root
+ *   itself renders as '.').
+ * - Paths outside the project stay absolute, with the home directory
+ *   shortened to '~'.
+ * - Anything longer than `maxLen` is compressed by shortenPath(), which
+ *   drops middle segments rather than truncating the file name.
+ *
+ * Relative and '~'-prefixed inputs are resolved against `rootDirectory`
+ * first, so callers can pass raw user-supplied tool params verbatim.
+ *
+ * @param filePath The path to format (absolute, relative, or tilde-prefixed).
+ * @param rootDirectory The absolute path of the project root.
+ * @param maxLen Maximum display length before middle-segment compression.
+ * @returns The formatted path for display.
+ */
+export function formatDisplayPath(
+  filePath: string,
+  rootDirectory: string,
+  maxLen: number = 80,
+): string {
+  const resolved = resolvePath(rootDirectory, filePath);
+  const relative = makeRelative(resolved, rootDirectory);
+  // makeRelative returns the resolved absolute path when the target is
+  // outside rootDirectory — only then does the home-dir shorthand apply.
+  const display = path.isAbsolute(relative) ? tildeifyPath(relative) : relative;
+  return shortenPath(display, maxLen);
+}
+
+/**
  * Escapes special characters in a file path like macOS terminal does.
  * Escapes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
@@ -299,6 +333,17 @@ export function escapePath(filePath: string): string {
 }
 
 /**
+ * Removes backslash escaping from the shared SHELL_SPECIAL_CHARS set, on any
+ * platform. Unlike unescapePath this does not skip win32, for callers that
+ * receive escaped tokens (e.g. session mentions) which must be normalized
+ * regardless of OS. Kept as the single source of truth for the escape set so
+ * platform-specific unescapers cannot drift from it.
+ */
+export function unescapeShellSpecials(value: string): string {
+  return value.replace(UNESCAPE_REGEX, '$1');
+}
+
+/**
  * Unescapes special characters in a file path.
  * Removes backslash escaping from shell metacharacters.
  *
@@ -310,8 +355,7 @@ export function unescapePath(filePath: string): string {
   if (os.platform() === 'win32') {
     return filePath;
   }
-  const unescaped = filePath.replace(UNESCAPE_REGEX, '$1');
-  return unescaped;
+  return unescapeShellSpecials(filePath);
 }
 
 /**
@@ -369,6 +413,143 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
 
 export function isSubpaths(parentPath: string[], childPath: string): boolean {
   return parentPath.some((p) => isSubpath(p, childPath));
+}
+
+/**
+ * Follow a leading symlink chain at `inputPath` to its eventual target, even
+ * when that target does not exist yet (a dangling link).
+ *
+ * Security-load-bearing: `fs.existsSync` follows links and reports a dangling
+ * symlink as "missing". Relying on it lets an attacker pre-place
+ * `decoy -> /outside/secret` (target absent) so the path classifies OUTSIDE the
+ * allowed root — while the real operation follows the link INTO it. lstat/readlink
+ * (no-follow) resolve the link target so classification matches where the bytes
+ * actually come from or land.
+ */
+function resolveLeafSymlink(inputPath: string): string {
+  const maxHops = 40; // POSIX SYMLOOP_MAX
+  let current = path.resolve(inputPath);
+  for (let i = 0; i < maxHops; i++) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      return current; // missing or unreadable — nothing left to follow
+    }
+    if (!stat.isSymbolicLink()) {
+      return current;
+    }
+    const target = fs.readlinkSync(current);
+    if (path.isAbsolute(target)) {
+      current = target;
+    } else {
+      // Resolve relative targets against the link's real parent so an
+      // intermediate directory symlink can't mis-resolve the target.
+      let parent: string;
+      try {
+        parent = fs.realpathSync(path.dirname(current));
+      } catch {
+        parent = path.dirname(current);
+      }
+      current = path.resolve(parent, target);
+    }
+  }
+  return current; // chain too deep — caller still range-checks the result
+}
+
+/**
+ * Canonicalize `inputPath` as far as the filesystem allows: resolve symlinks
+ * across the existing prefix, then re-append the segments that do not exist
+ * yet. Never throws — an unresolvable path degrades to its lexical form.
+ *
+ * Callers deciding containment must canonicalize the root the same way unless
+ * that root is partly derived from repo-tracked contents, in which case
+ * resolving it would let a checked-in symlink relocate the boundary.
+ */
+export function realpathNearestExisting(inputPath: string): string {
+  // Resolve a leading (possibly dangling) symlink first so a dangling link into
+  // an allowed root is classified by its target, not treated as a missing file.
+  const resolved = resolveLeafSymlink(inputPath);
+  const missingSegments: string[] = [];
+  let current = resolved;
+
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return resolved;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+
+  try {
+    return path.join(fs.realpathSync(current), ...missingSegments);
+  } catch {
+    return resolved;
+  }
+}
+
+async function resolveLeafSymlinkAsync(inputPath: string): Promise<string> {
+  const maxHops = 40; // POSIX SYMLOOP_MAX
+  let current = path.resolve(inputPath);
+  for (let i = 0; i < maxHops; i++) {
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.lstat(current);
+    } catch {
+      return current; // missing or unreadable — nothing left to follow
+    }
+    if (!stat.isSymbolicLink()) {
+      return current;
+    }
+    const target = await fs.promises.readlink(current);
+    if (path.isAbsolute(target)) {
+      current = target;
+    } else {
+      let parent: string;
+      try {
+        parent = await fs.promises.realpath(path.dirname(current));
+      } catch {
+        parent = path.dirname(current);
+      }
+      current = path.resolve(parent, target);
+    }
+  }
+  return current; // chain too deep — caller still range-checks the result
+}
+
+/**
+ * Promise-based {@link realpathNearestExisting} for callers on a shared event
+ * loop (the daemon guard evaluates shell calls for every workspace/session).
+ */
+export async function realpathNearestExistingAsync(
+  inputPath: string,
+): Promise<string> {
+  const resolved = await resolveLeafSymlinkAsync(inputPath);
+  const missingSegments: string[] = [];
+  let current = resolved;
+
+  for (;;) {
+    let exists = true;
+    try {
+      await fs.promises.access(current);
+    } catch {
+      exists = false;
+    }
+    if (exists) break;
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return resolved;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+
+  try {
+    return path.join(await fs.promises.realpath(current), ...missingSegments);
+  } catch {
+    return resolved;
+  }
 }
 
 /**

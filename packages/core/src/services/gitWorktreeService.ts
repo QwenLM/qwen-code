@@ -11,13 +11,13 @@ import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
+import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
@@ -57,6 +57,7 @@ export async function writeWorktreeSessionMarker(
   // `<repo>/.git/worktrees/<name>/`, so resolve `--git-dir` instead
   // of joining naively.
   try {
+    const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);
     const gitDir = (await wtGit.revparse(['--git-dir'])).trim();
     const excludePath = path.isAbsolute(gitDir)
@@ -157,6 +158,24 @@ export function generateAgentWorktreeSlug(): string {
   return `${AGENT_WORKTREE_PREFIX}-${hex}`;
 }
 
+/**
+ * Attribute lines a `git worktree list --porcelain` record can carry after
+ * its `worktree <path>` line. Anything else on those lines means the path
+ * above contained a newline and the entry was truncated.
+ */
+function isWorktreeListPorcelainAttribute(line: string): boolean {
+  return (
+    line === 'bare' ||
+    line === 'detached' ||
+    line === 'locked' ||
+    line === 'prunable' ||
+    line.startsWith('HEAD ') ||
+    line.startsWith('branch ') ||
+    line.startsWith('locked ') ||
+    line.startsWith('prunable ')
+  );
+}
+
 export interface WorktreeInfo {
   /** Unique identifier for this worktree */
   id: string;
@@ -220,13 +239,19 @@ interface SessionConfigFile {
  */
 export class GitWorktreeService {
   private sourceRepoPath: string;
-  private git: SimpleGit;
+  private gitPromise: Promise<SimpleGit> | undefined;
   private readonly customBaseDir?: string;
 
   constructor(sourceRepoPath: string, customBaseDir?: string) {
     this.sourceRepoPath = path.resolve(sourceRepoPath);
-    this.git = simpleGit(this.sourceRepoPath);
     this.customBaseDir = customBaseDir;
+  }
+
+  private getGit(): Promise<SimpleGit> {
+    this.gitPromise ??= loadSimpleGit().then(({ simpleGit }) =>
+      simpleGit(this.sourceRepoPath),
+    );
+    return this.gitPromise;
   }
 
   /**
@@ -293,8 +318,15 @@ export class GitWorktreeService {
    */
   async getRepoTopLevel(): Promise<string | null> {
     try {
-      const out = await this.git.revparse(['--show-toplevel']);
-      const top = out.trim();
+      // `raw` rather than `revparse`: the latter trims the output, silently
+      // mutating a path that legitimately carries leading/trailing whitespace
+      // into a different anchor. Strip only the LF terminator — git's stdout
+      // is LF-terminated on every platform, so a trailing CR is path data,
+      // not part of the terminator.
+      const out = await (
+        await this.getGit()
+      ).raw(['rev-parse', '--show-toplevel']);
+      const top = out.replace(/\n$/, '');
       return top.length > 0 ? top : null;
     } catch (error) {
       // Caller falls back to its cwd via `?? cwd`. Log so a corrupt
@@ -309,20 +341,103 @@ export class GitWorktreeService {
   }
 
   /**
+   * Returns the repository's primary working tree path, or `null` when it
+   * cannot be determined. Unlike `getRepoTopLevel()` — which answers
+   * "which worktree is this cwd in" and so names a linked worktree's OWN
+   * root when run inside one — this always resolves the MAIN tree:
+   * `git worktree list --porcelain` lists the primary working tree first
+   * regardless of where in the repository it runs. Callers anchoring a
+   * check at the repository itself (not the current worktree) use this.
+   *
+   * The porcelain format is newline-delimited, so a main-tree path that
+   * itself contains a newline splits across lines and the first entry
+   * truncates. The remainder then appears where a record attribute belongs
+   * — it is not one, which detects most truncations. Not all: a remainder
+   * that is itself attribute-shaped (`detached`, `HEAD …`, …) — or a path
+   * ending right at a newline, whose blank remainder ends the record — still
+   * parses. The parsed anchor is therefore round-trip-validated below:
+   * `rev-parse --git-common-dir` run AT the anchor must agree with this
+   * repository's own common dir, otherwise this method returns `null` and
+   * callers fall back to `getRepoTopLevel()`, whose single-value
+   * `--show-toplevel` answer keeps interior newlines intact. (`--porcelain
+   * -z` would be immune but needs Git >= 2.36.) A truncated anchor is not
+   * merely wrong: it can resolve inside a DIFFERENT repository whose
+   * worktree registry the caller's gate would then consult.
+   */
+  async getMainWorktreePath(): Promise<string | null> {
+    try {
+      const out = await (
+        await this.getGit()
+      ).raw(['worktree', 'list', '--porcelain']);
+      const lines = out.split('\n');
+      // git preserves a path's leading/trailing whitespace verbatim, and a
+      // trim would silently mutate it into a different, wrong anchor. A
+      // trailing CR is path data, not a terminator: git's stdout is
+      // LF-terminated on every platform.
+      const firstLine = lines[0] ?? '';
+      if (!firstLine.startsWith('worktree ')) return null;
+      for (const line of lines.slice(1)) {
+        const attr = line.trim();
+        if (attr === '') break; // blank line ends the first record
+        if (!isWorktreeListPorcelainAttribute(attr)) return null;
+      }
+      const mainPath = firstLine.slice('worktree '.length);
+      if (mainPath.length === 0) return null;
+      // Round-trip validation (see the doc block): `--git-common-dir` answers
+      // `.git` (relative) from a main tree and an absolute path from a linked
+      // worktree, so resolve both sides. realpath both so a symlinked
+      // ancestor on either side (macOS /tmp -> /private/tmp) cannot
+      // manufacture a mismatch. A probe failure at the anchor fails closed.
+      const realpathOr = async (p: string): Promise<string> => {
+        try {
+          return await fs.realpath(p);
+        } catch {
+          return p;
+        }
+      };
+      const { simpleGit } = await loadSimpleGit();
+      const [ourRaw, anchorRaw] = await Promise.all([
+        (await this.getGit()).raw(['rev-parse', '--git-common-dir']),
+        simpleGit(mainPath).raw(['rev-parse', '--git-common-dir']),
+      ]);
+      const ourCommonDir = await realpathOr(
+        path.resolve(this.sourceRepoPath, ourRaw.trim()),
+      );
+      const anchorCommonDir = await realpathOr(
+        path.resolve(mainPath, anchorRaw.trim()),
+      );
+      return ourCommonDir === anchorCommonDir ? mainPath : null;
+    } catch (error) {
+      debugLogger.warn(
+        `getMainWorktreePath failed at ${this.sourceRepoPath}: ${error}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Checks if the source path is a git repository.
    */
   async isGitRepository(): Promise<boolean> {
     try {
-      const isRoot = await this.git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);
-      if (isRoot) {
-        return true;
+      const [git, { CheckRepoActions }] = await Promise.all([
+        this.getGit(),
+        loadSimpleGit(),
+      ]);
+      try {
+        const isRoot = await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);
+        if (isRoot) {
+          return true;
+        }
+      } catch {
+        // IS_REPO_ROOT check failed — fall through to the general check
       }
-    } catch {
-      // IS_REPO_ROOT check failed — fall through to the general check
-    }
-    // Not the root (or root check threw) — check if we're inside a git repo
-    try {
-      return await this.git.checkIsRepo();
+      // Not the root (or root check threw) — check if we're inside a git repo
+      try {
+        return await git.checkIsRepo();
+      } catch {
+        return false;
+      }
     } catch {
       return false;
     }
@@ -342,11 +457,12 @@ export class GitWorktreeService {
     }
 
     try {
-      await initRepositoryWithMainBranch(this.git);
+      const git = await this.getGit();
+      await initRepositoryWithMainBranch(git);
 
       // Create initial commit so we can create worktrees
-      await this.git.add('.');
-      await this.git.commit('Initial commit', {
+      await git.add('.');
+      await git.commit('Initial commit', {
         '--allow-empty': null,
       });
 
@@ -363,7 +479,9 @@ export class GitWorktreeService {
    * Gets the current branch name.
    */
   async getCurrentBranch(): Promise<string> {
-    const branch = await this.git.revparse(['--abbrev-ref', 'HEAD']);
+    const branch = await (
+      await this.getGit()
+    ).revparse(['--abbrev-ref', 'HEAD']);
     return branch.trim();
   }
 
@@ -371,7 +489,7 @@ export class GitWorktreeService {
    * Gets the current commit hash.
    */
   async getCurrentCommitHash(): Promise<string> {
-    const hash = await this.git.revparse(['HEAD']);
+    const hash = await (await this.getGit()).revparse(['HEAD']);
     return hash.trim();
   }
 
@@ -388,7 +506,9 @@ export class GitWorktreeService {
    */
   async resolveRef(ref: string): Promise<string | null> {
     try {
-      const out = (await this.git.raw(['rev-parse', '--verify', ref])).trim();
+      const out = (
+        await (await this.getGit()).raw(['rev-parse', '--verify', ref])
+      ).trim();
       return /^[0-9a-f]{40}$/.test(out) ? out : null;
     } catch {
       return null;
@@ -429,14 +549,9 @@ export class GitWorktreeService {
       const branchName = `${base}-${shortSession}-${sanitizedName}`;
 
       // Create the worktree with a new branch
-      await this.git.raw([
-        'worktree',
-        'add',
-        '-b',
-        branchName,
-        worktreePath,
-        base,
-      ]);
+      await (
+        await this.getGit()
+      ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
 
       const worktree: WorktreeInfo = {
         id: `${sessionId}/${sanitizedName}`,
@@ -538,7 +653,9 @@ export class GitWorktreeService {
     // untracked files are handled separately below via file copy.
     let dirtyStateSnapshot = '';
     try {
-      dirtyStateSnapshot = (await this.git.stash(['create'])).trim();
+      dirtyStateSnapshot = (
+        await (await this.getGit()).stash(['create'])
+      ).trim();
     } catch {
       // Ignore — proceed without dirty state if stash create fails
     }
@@ -547,11 +664,9 @@ export class GitWorktreeService {
     // `git ls-files --others --exclude-standard` is read-only and safe.
     let untrackedFiles: string[] = [];
     try {
-      const raw = await this.git.raw([
-        'ls-files',
-        '--others',
-        '--exclude-standard',
-      ]);
+      const raw = await (
+        await this.getGit()
+      ).raw(['ls-files', '--others', '--exclude-standard']);
       untrackedFiles = raw.trim().split('\n').filter(Boolean);
     } catch {
       // Non-fatal: proceed without untracked files
@@ -597,6 +712,7 @@ export class GitWorktreeService {
     // see the same files the user currently has on disk.
     if (result.success) {
       for (const worktree of result.worktrees) {
+        const { simpleGit } = await loadSimpleGit();
         const wtGit = simpleGit(worktree.path);
 
         // 1. Apply tracked dirty changes (staged + unstaged)
@@ -702,16 +818,26 @@ export class GitWorktreeService {
   async removeWorktree(
     worktreePath: string,
   ): Promise<{ success: boolean; error?: string }> {
+    let git: SimpleGit;
+    try {
+      git = await this.getGit();
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to remove worktree: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+
     try {
       // Remove the worktree from git
-      await this.git.raw(['worktree', 'remove', worktreePath, '--force']);
+      await git.raw(['worktree', 'remove', worktreePath, '--force']);
       return { success: true };
     } catch (error) {
       // Try to remove the directory manually if git worktree remove fails
       try {
         await fs.rm(worktreePath, { recursive: true, force: true });
         // Prune worktree references
-        await this.git.raw(['worktree', 'prune']);
+        await git.raw(['worktree', 'prune']);
         return { success: true };
       } catch (_rmError) {
         return {
@@ -772,23 +898,18 @@ export class GitWorktreeService {
 
     // Clean up branches that belonged to the worktrees
     try {
+      const git = await this.getGit();
       for (const branchName of worktreeBranches) {
         try {
-          await this.git.branch(['-D', branchName]);
+          await git.branch(['-D', branchName]);
           result.removedBranches.push(branchName);
         } catch {
           // Branch might already be deleted, ignore
         }
       }
+      await git.raw(['worktree', 'prune']);
     } catch {
-      // Ignore branch listing/deletion errors
-    }
-
-    // Prune worktree references
-    try {
-      await this.git.raw(['worktree', 'prune']);
-    } catch {
-      // Ignore prune errors
+      // Ignore branch deletion, loader, and prune errors
     }
 
     return result;
@@ -804,14 +925,13 @@ export class GitWorktreeService {
     worktreePath: string,
     baseBranch?: string,
   ): Promise<string> {
-    const worktreeGit = simpleGit(worktreePath);
-
-    const base =
-      (await this.resolveBaseline(worktreeGit)) ??
-      baseBranch ??
-      (await this.getCurrentBranch());
-
     try {
+      const { simpleGit } = await loadSimpleGit();
+      const worktreeGit = simpleGit(worktreePath);
+      const base =
+        (await this.resolveBaseline(worktreeGit)) ??
+        baseBranch ??
+        (await this.getCurrentBranch());
       return await this.withStagedChanges(worktreeGit, () =>
         worktreeGit.diff(['--binary', '--cached', base]),
       );
@@ -832,10 +952,11 @@ export class GitWorktreeService {
     targetPath?: string,
   ): Promise<{ success: boolean; error?: string }> {
     const target = targetPath || this.sourceRepoPath;
-    const worktreeGit = simpleGit(worktreePath);
-    const targetGit = simpleGit(target);
 
     try {
+      const { simpleGit } = await loadSimpleGit();
+      const worktreeGit = simpleGit(worktreePath);
+      const targetGit = simpleGit(target);
       // Prefer the baseline commit (created during worktree setup after
       // overlaying dirty state) so the patch excludes pre-existing edits.
       let base = await this.resolveBaseline(worktreeGit);
@@ -1145,18 +1266,19 @@ export class GitWorktreeService {
     }
 
     // Run the two probes in parallel: this repo's common-dir comes from
-    // `this.git`, the candidate's HEAD-SHA + branch + common-dir +
+    // the source-repo client, the candidate's HEAD-SHA + branch + common-dir +
     // toplevel come from a fresh simple-git rooted at `worktreePath`
     // via a single combined rev-parse.
-    const probeGit = simpleGit(worktreePath);
     let ourCommonDir: string;
     let headCommit: string;
     let branch: string;
     let probeCommonDir: string;
     let probeToplevel: string;
     try {
+      const { simpleGit } = await loadSimpleGit();
+      const probeGit = simpleGit(worktreePath);
       const [ourRaw, probeRaw] = await Promise.all([
-        this.git.raw(['rev-parse', '--git-common-dir']),
+        (await this.getGit()).raw(['rev-parse', '--git-common-dir']),
         probeGit.raw([
           'rev-parse',
           'HEAD',
@@ -1255,7 +1377,9 @@ export class GitWorktreeService {
       // controls candidate-side files, which are never consulted.
       const ourCommonDir = path.resolve(
         this.sourceRepoPath,
-        (await this.git.raw(['rev-parse', '--git-common-dir'])).trim(),
+        (
+          await (await this.getGit()).raw(['rev-parse', '--git-common-dir'])
+        ).trim(),
       );
       const worktreesDir = path.join(ourCommonDir, 'worktrees');
       let entryNames: string[];
@@ -1293,6 +1417,7 @@ export class GitWorktreeService {
       // resolves it into the MAIN checkout, so its `--git-dir` will not be this
       // entry. The registry answers "is this path registered?"; only a probe
       // inside the path answers "is it a worktree right now?".
+      const { simpleGit } = await loadSimpleGit();
       const rawGitDir = (
         await simpleGit(target).raw(['rev-parse', '--git-dir'])
       ).trim();
@@ -1463,7 +1588,10 @@ export class GitWorktreeService {
    *   `agent-1234567` would be silently deleted after 30 days along
    *   with any work it contained.
    */
-  static validateUserWorktreeSlug(slug: string): string | null {
+  static validateUserWorktreeSlug(
+    slug: string,
+    options?: { allowPrBackedShape?: boolean },
+  ): string | null {
     if (typeof slug !== 'string' || slug.length === 0) {
       return 'Worktree name must be a non-empty string.';
     }
@@ -1475,6 +1603,18 @@ export class GitWorktreeService {
     }
     if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
       return 'Worktree name must not start with "." or "-" or contain "..".';
+    }
+    if (
+      /^pr-[1-9]\d{0,8}$/.test(slug) &&
+      options?.allowPrBackedShape !== true
+    ) {
+      // `--worktree=#<N>` launches own this shape; a user-chosen slug with
+      // it would bind the session to PR N (and take the sweep's state
+      // stamps) although the session never touched that PR.
+      return (
+        'Worktree name must not look like "pr-<number>": that shape is ' +
+        'reserved for PR-backed worktrees.'
+      );
     }
     if (slug.startsWith(`${AGENT_WORKTREE_PREFIX}-`)) {
       // The exact `agent-<7hex>` slugs that `generateAgentWorktreeSlug`
@@ -1509,9 +1649,16 @@ export class GitWorktreeService {
   async createUserWorktree(
     slug: string,
     baseBranch?: string,
-    options?: { symlinkDirectories?: readonly string[] },
+    options?: {
+      symlinkDirectories?: readonly string[];
+      /** The caller owns the pr-<N> shape (PR-backed startup). */
+      prBacked?: boolean;
+    },
   ): Promise<CreateWorktreeResult> {
-    const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
+    const validationError = GitWorktreeService.validateUserWorktreeSlug(
+      slug,
+      options?.prBacked === true ? { allowPrBackedShape: true } : undefined,
+    );
     if (validationError) {
       debugLogger.warn(
         `createUserWorktree: invalid slug ${slug}: ${validationError}`,
@@ -1553,14 +1700,9 @@ export class GitWorktreeService {
         return { success: false, error };
       }
 
-      await this.git.raw([
-        'worktree',
-        'add',
-        '-b',
-        branchName,
-        worktreePath,
-        base,
-      ]);
+      await (
+        await this.getGit()
+      ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
 
       // Configure core.hooksPath so commits inside the worktree run the
       // main repo's hooks (the new worktree's .git directory has no hooks
@@ -1643,7 +1785,7 @@ export class GitWorktreeService {
     if (!hooksPath) {
       try {
         const commonDir = (
-          await this.git.raw(['rev-parse', '--git-common-dir'])
+          await (await this.getGit()).raw(['rev-parse', '--git-common-dir'])
         ).trim();
         const resolvedCommonDir = path.isAbsolute(commonDir)
           ? commonDir
@@ -1661,6 +1803,7 @@ export class GitWorktreeService {
     }
     if (!hooksPath) return;
 
+    const { simpleGit } = await loadSimpleGit();
     const worktreeGit = simpleGit(worktreePath, {
       unsafe: { allowUnsafeHooksPath: true },
     });
@@ -1978,7 +2121,9 @@ export class GitWorktreeService {
    */
   private async localBranchExists(branchName: string): Promise<boolean> {
     try {
-      const out = await this.git.raw([
+      const out = await (
+        await this.getGit()
+      ).raw([
         'for-each-ref',
         '--count=1',
         '--format=%(refname)',
@@ -2066,8 +2211,9 @@ export class GitWorktreeService {
     // remove branches whose tip is not reachable from HEAD or any
     // upstream — preserving any commits the subagent made before
     // ending with a clean working tree.
+    const git = await this.getGit();
     try {
-      await this.git.branch(['-d', branchName]);
+      await git.branch(['-d', branchName]);
       return { success: true };
     } catch (error) {
       // Refused either because the branch carries unmerged commits
@@ -2082,7 +2228,7 @@ export class GitWorktreeService {
 
     if (options.forceDeleteBranch) {
       try {
-        await this.git.branch(['-D', branchName]);
+        await git.branch(['-D', branchName]);
         return { success: true };
       } catch (error) {
         // Best-effort: branch may have been deleted already, or may not
@@ -2114,13 +2260,14 @@ export class GitWorktreeService {
   async hasUnmergedWorktreeCommits(slug: string): Promise<boolean> {
     const branchName = worktreeBranchForSlug(slug);
     try {
-      const tipSha = (await this.git.revparse([branchName])).trim();
+      const git = await this.getGit();
+      const tipSha = (await git.revparse([branchName])).trim();
       if (!tipSha) return true;
       // List every local branch and remote-tracking ref whose tip is at
       // or above the worktree branch's tip. If anything other than the
       // worktree branch itself appears, the commits are covered.
       const refs = (
-        await this.git.raw([
+        await git.raw([
           'for-each-ref',
           '--contains',
           tipSha,
@@ -2155,6 +2302,7 @@ export class GitWorktreeService {
    */
   async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
     try {
+      const { simpleGit } = await loadSimpleGit();
       const wtGit = simpleGit(worktreePath);
       const status = await wtGit.status();
       // Defensive: `status.isClean()` reads several status arrays, but
@@ -2178,6 +2326,7 @@ export class GitWorktreeService {
     worktreePath: string,
   ): Promise<{ tracked: number; untracked: number } | null> {
     try {
+      const { simpleGit } = await loadSimpleGit();
       const wtGit = simpleGit(worktreePath);
       const status = await wtGit.status();
       // `conflicted` is mutually exclusive with the other arrays in

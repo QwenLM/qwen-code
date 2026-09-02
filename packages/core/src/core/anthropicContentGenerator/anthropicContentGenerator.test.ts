@@ -6,25 +6,28 @@
 
 import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  CountTokensParameters,
-  GenerateContentParameters,
-} from '@google/genai';
+import type { GenerateContentParameters } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
   DEFAULT_TIMEOUT,
   DISABLED_REQUEST_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from '../openaiContentGenerator/constants.js';
 
-// Mock the request tokenizer module BEFORE importing the class that uses it.
-const mockTokenizer = {
-  calculateTokens: vi.fn(),
-  dispose: vi.fn(),
-};
+const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
+const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
-vi.mock('../../utils/request-tokenizer/index.js', () => ({
-  RequestTokenEstimator: vi.fn(() => mockTokenizer),
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportAnthropicRequest: mockReportAnthropicRequest,
+  reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
+  reportAnthropicResponse: mockReportAnthropicResponse,
+  reportAnthropicEvent: mockReportAnthropicEvent,
 }));
 
 type AnthropicCreateArgs = [
@@ -87,19 +90,16 @@ describe('AnthropicContentGenerator', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    // The generator's constructor builds undici-backed fetch options
+    // synchronously; production code preloads undici in
+    // createContentGenerator, and resetModules() clears that state.
+    const { preloadRuntimeFetchModule } = await import(
+      '../../utils/runtimeFetchOptions.js'
+    );
+    await preloadRuntimeFetchModule();
     savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
     delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
-    mockTokenizer.calculateTokens.mockResolvedValue({
-      totalTokens: 50,
-      breakdown: {
-        textTokens: 50,
-        imageTokens: 0,
-        audioTokens: 0,
-        otherTokens: 0,
-      },
-      processingTime: 1,
-    });
     anthropicState = anthropicMockState;
 
     anthropicState.createImpl.mockReset();
@@ -111,6 +111,7 @@ describe('AnthropicContentGenerator', () => {
       getProxy: vi.fn().mockReturnValue(undefined),
       getTelemetryEnabled: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session'),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -959,6 +960,58 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
+      // End-to-end through the generator: `LlmClient` records the
+      // gitStatus-free base on Config, the generator reads it per request,
+      // and the converter splits the system prompt there — static prefix
+      // carries scope:'global' (cross-session reuse), volatile suffix stays
+      // per-session. Together with the last-tool and last-user-message
+      // markers this fills all 4 Anthropic breakpoints.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      (
+        mockConfig.getStaticSystemPrefix as ReturnType<typeof vi.fn>
+      ).mockReturnValue('sys-base');
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys-base\n\n# Git Status\nbranch: main',
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys-base',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+        {
+          type: 'text',
+          text: '\n\n# Git Status\nbranch: main',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      // The scope entry on the split prefix block is enough for the
+      // body-scan beta gate to fire.
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
+    });
+
     it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
@@ -1179,6 +1232,8 @@ describe('AnthropicContentGenerator', () => {
         { ...baseConfig, reasoning: { effort: 'medium' } },
         mockConfig,
       );
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hi',
@@ -1196,7 +1251,13 @@ describe('AnthropicContentGenerator', () => {
       // fallback (which would double latency + API cost).
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
-      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const [streamingRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(streamingRequest);
+      expect(mockReportAnthropicEvent).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ type: 'message_delta' }),
+      );
       const headers = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(headers['anthropic-beta']).toContain(
@@ -1205,6 +1266,27 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
       expect(headers['anthropic-beta']).toContain(
         'prompt-caching-scope-2026-01-05',
+      );
+    });
+
+    it('sends extended-cache-ttl-2025-04-11 when cacheRetention is "1h"', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+        cacheRetention: '1h',
+      });
+      expect(headers['anthropic-beta']).toContain(
+        'extended-cache-ttl-2025-04-11',
+      );
+    });
+
+    it('omits extended-cache-ttl-2025-04-11 when cacheRetention is unset (ephemeral default)', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+      });
+      expect(headers['anthropic-beta']).not.toContain(
+        'extended-cache-ttl-2025-04-11',
       );
     });
   });
@@ -1331,7 +1413,7 @@ describe('AnthropicContentGenerator', () => {
       const convertResponseSpy = vi
         .spyOn(
           AnthropicContentConverter.prototype,
-          'convertAnthropicResponseToGemini',
+          'convertAnthropicResponseToLlm',
         )
         .mockReturnValue(
           (() => {
@@ -1373,12 +1455,15 @@ describe('AnthropicContentGenerator', () => {
         config: {
           temperature: 0.1,
           maxOutputTokens: 200,
+          thinkingConfig: { thinkingBudget: 199 },
           topP: 0.5,
           topK: 5,
           abortSignal: abortController.signal,
         },
       };
 
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const result = await generator.generateContent(request);
       expect(result.responseId).toBe('gemini-1');
 
@@ -1402,12 +1487,56 @@ describe('AnthropicContentGenerator', () => {
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
-          thinking: { type: 'enabled', budget_tokens: 1000 },
+          thinking: { type: 'enabled', budget_tokens: 199 },
           output_config: { effort: 'high' },
         }),
       );
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(anthropicRequest);
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ id: 'anthropic-1' }),
+      );
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('caps an effort-derived thinking budget with the request budget', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 200 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'high' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: { thinkingConfig: { thinkingBudget: 199 } },
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          max_tokens: 200,
+          thinking: { type: 'enabled', budget_tokens: 199 },
+          output_config: { effort: 'high' },
+        }),
+      );
     });
 
     // DeepSeek extends reasoning_effort with a 'max' tier; the Anthropic
@@ -1611,7 +1740,7 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({
           output_config: { effort: 'max' },
           // 4.6+ uses adaptive thinking; the server controls the budget.
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -1648,7 +1777,7 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           output_config: { effort: 'xhigh' },
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -2084,12 +2213,15 @@ describe('AnthropicContentGenerator', () => {
       it('selects adaptive for claude-opus-4-6 / sonnet-4-6 / opus-4-7', async () => {
         expect(await thinkingFor('claude-opus-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-sonnet-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-opus-4-7')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2097,6 +2229,7 @@ describe('AnthropicContentGenerator', () => {
         // Single-digit character-class regex would have missed haiku entirely.
         expect(await thinkingFor('claude-haiku-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2105,12 +2238,46 @@ describe('AnthropicContentGenerator', () => {
         // invalid `{ type: 'enabled', budget_tokens: ... }` body.
         expect(await thinkingFor('claude-opus-4-10')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
       it('selects adaptive for a future major like claude-opus-5-1', async () => {
         expect(await thinkingFor('claude-opus-5-1')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
+      it('selects adaptive for dotted-minor aliases (claude-opus-4.7 / 4.8, claude-sonnet-4.6)', async () => {
+        // LiteLLM/Vertex/Bedrock-style proxies expose Anthropic Model Groups
+        // with dotted minor versions. A hyphen-only parser silently degrades
+        // these to `minor=0`, sending `thinking.type.enabled` to an adaptive-
+        // only model group and taking a 400. parseClaudeModelVersion must
+        // accept `[-.]` between major and minor so the version-gated shape
+        // is picked correctly regardless of alias convention.
+        expect(await thinkingFor('claude-opus-4.7')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-4.8')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-sonnet-4.6')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+      });
+
+      it('selects adaptive for dotted-minor Opus 5 aliases (claude-opus-5.0 / 5.1)', async () => {
+        expect(await thinkingFor('claude-opus-5.0')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
+        });
+        expect(await thinkingFor('claude-opus-5.1')).toEqual({
+          type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2119,6 +2286,24 @@ describe('AnthropicContentGenerator', () => {
           type: 'enabled',
           budget_tokens: 32_000,
         });
+      });
+
+      it('never sets display on the budget_tokens shape (pre-4.6 models and the explicit-override escape hatch)', async () => {
+        // display is a field on the 'enabled'/'adaptive' Anthropic thinking
+        // shapes, but the summarized-default-changed-to-omitted problem
+        // documented by Anthropic is scoped to adaptive thinking only
+        // (Opus 4.7+ / every 5.x family). Pre-4.6 models on the manual
+        // budget path, and the explicit reasoning.budget_tokens escape
+        // hatch on models that still accept it, must not carry `display`.
+        expect(await thinkingFor('claude-opus-4-5')).not.toHaveProperty(
+          'display',
+        );
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).not.toHaveProperty('display');
       });
 
       it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
@@ -2156,7 +2341,7 @@ describe('AnthropicContentGenerator', () => {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'adaptive' });
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
@@ -2203,6 +2388,7 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect((req as { thinking?: unknown }).thinking).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(req).toEqual(
           expect.not.objectContaining({ output_config: expect.anything() }),
@@ -2216,6 +2402,99 @@ describe('AnthropicContentGenerator', () => {
         expect(headers['anthropic-beta']).toContain(
           'prompt-caching-scope-2026-01-05',
         );
+      });
+    });
+
+    describe('assistant-turn prefill stripping (generator wiring)', () => {
+      // stripTrailingAssistantPrefill is derived from
+      // modelSupportsAdaptiveThinking() (anthropicContentGenerator.ts),
+      // the same 4.6+ gate used for the thinking shape. These pin that the
+      // generator actually turns the converter option on/off per model,
+      // not just that the converter behaves correctly when told to.
+      it('strips a trailing assistant turn and appends a synthetic user turn on claude-opus-4-6', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-6',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-6',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        // enableCacheControl defaults to on at the generator level (unlike
+        // the converter-level tests above, which pass it explicitly), so
+        // the synthetic turn also picks up the same cache_control the
+        // trailing user message would otherwise carry.
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Continue.',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        });
+      });
+
+      it('leaves a trailing assistant turn untouched on claude-opus-4-5 (pre-4.6)', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-5',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-5',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        });
       });
     });
 
@@ -2539,7 +2818,10 @@ describe('AnthropicContentGenerator', () => {
         'https://internal-proxy.example/anthropic',
       );
 
-      expect(request.thinking).toEqual({ type: 'adaptive' });
+      expect(request.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
       expect(request.messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'text', text: 'Visible answer' }],
@@ -3006,117 +3288,9 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
-  describe('countTokens', () => {
-    it('counts tokens using the request tokenizer', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: {},
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
-
-      const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello world' }] }],
-        model: 'claude-test',
-      };
-
-      const result = await generator.countTokens(request);
-      expect(mockTokenizer.calculateTokens).toHaveBeenCalledWith(request);
-      expect(result.totalTokens).toBe(50);
-    });
-
-    it('falls back to character approximation when tokenizer throws', async () => {
-      const { AnthropicContentGenerator } = await importGenerator();
-      mockTokenizer.calculateTokens.mockRejectedValueOnce(new Error('boom'));
-      const generator = new AnthropicContentGenerator(
-        {
-          model: 'claude-test',
-          apiKey: 'test-key',
-          timeout: 10_000,
-          maxRetries: 2,
-          samplingParams: {},
-          schemaCompliance: 'auto',
-        },
-        mockConfig,
-      );
-
-      const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
-        model: 'claude-test',
-      };
-
-      const content = JSON.stringify(request.contents);
-      const expected = Math.ceil(content.length / 4);
-      const result = await generator.countTokens(request);
-      expect(result.totalTokens).toBe(expected);
-    });
-  });
-
   describe('generateContentStream', () => {
-    it('emits tool preparation metadata before the complete function call', async () => {
+    const collectGeneratedStream = async () => {
       const { AnthropicContentGenerator } = await importGenerator();
-      const { getToolCallPreparations } = await import(
-        '../tool-call-preparation.js'
-      );
-      let stopEventReached = false;
-      anthropicState.createImpl.mockResolvedValue(
-        (async function* toolUseStream() {
-          yield {
-            type: 'message_start',
-            message: {
-              id: 'msg-1',
-              model: 'claude-test',
-              usage: { input_tokens: 1 },
-            },
-          };
-          yield {
-            type: 'content_block_start',
-            index: 0,
-            content_block: {
-              type: 'tool_use',
-              id: 'call-1',
-              name: 'read_file',
-              input: {},
-            },
-          };
-          yield {
-            type: 'content_block_delta',
-            index: 0,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: '{"file_path":',
-            },
-          };
-          yield {
-            type: 'content_block_delta',
-            index: 0,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: '"a.sql"}',
-            },
-          };
-          yield {
-            get type() {
-              stopEventReached = true;
-              return 'content_block_stop' as const;
-            },
-            index: 0,
-          };
-          yield {
-            type: 'message_delta',
-            delta: { stop_reason: 'tool_use' },
-            usage: { output_tokens: 5 },
-          };
-          yield { type: 'message_stop' };
-        })(),
-      );
-
       const generator = new AnthropicContentGenerator(
         {
           model: 'claude-test',
@@ -3128,34 +3302,908 @@ describe('AnthropicContentGenerator', () => {
         },
         mockConfig,
       );
-
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hello',
       } as unknown as GenerateContentParameters);
       const chunks: GenerateContentResponse[] = [];
-      let stopReachedWhenFunctionCallEmitted: boolean | undefined;
-      for await (const chunk of stream) {
-        chunks.push(chunk);
-        if (chunk.functionCalls) {
-          stopReachedWhenFunctionCallEmitted = stopEventReached;
-        }
+      let error: unknown;
+      try {
+        for await (const chunk of stream) chunks.push(chunk);
+      } catch (caughtError) {
+        error = caughtError;
       }
+      return { chunks, error };
+    };
 
-      expect(getToolCallPreparations(chunks[0]!)).toEqual([
-        { callId: 'call-1', toolName: 'read_file' },
-      ]);
-      const functionCallChunks = chunks.filter((chunk) => chunk.functionCalls);
-      expect(functionCallChunks).toHaveLength(1);
-      expect(stopReachedWhenFunctionCallEmitted).toBe(true);
-      expect(functionCallChunks[0]!.functionCalls).toEqual([
+    it.each([
+      {
+        case: 'multi-delta arguments',
+        jsonParts: ['{"file_path":', '"a.sql"}'],
+        expectedArgs: { file_path: 'a.sql' },
+        expectedEmission: 'message_delta',
+      },
+      {
+        case: 'empty arguments',
+        jsonParts: [''],
+        expectedArgs: {},
+        expectedEmission: 'message_delta',
+      },
+    ])(
+      'emits tool preparation metadata before a function call with $case',
+      async ({ jsonParts, expectedArgs, expectedEmission }) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        const { getToolCallPreparations } = await import(
+          '../tool-call-preparation.js'
+        );
+        let currentEvent = '';
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* toolUseStream() {
+            yield {
+              type: 'message_start',
+              message: {
+                id: 'msg-1',
+                model: 'claude-test',
+                usage: { input_tokens: 1 },
+              },
+            };
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-1',
+                name: 'read_file',
+                input: {},
+              },
+            };
+            for (const partialJson of jsonParts) {
+              yield {
+                type: 'content_block_delta',
+                index: 0,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: partialJson,
+                },
+              };
+            }
+            yield {
+              get type() {
+                currentEvent = 'content_block_stop';
+                return 'content_block_stop' as const;
+              },
+              index: 0,
+            };
+            yield {
+              get type() {
+                currentEvent = 'message_delta';
+                return 'message_delta' as const;
+              },
+              delta: { stop_reason: 'tool_use' },
+              usage: { output_tokens: 5 },
+            };
+            yield { type: 'message_stop' };
+          })(),
+        );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 100 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+        const chunks: GenerateContentResponse[] = [];
+        let eventWhenFunctionCallEmitted: string | undefined;
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+          if (chunk.functionCalls) {
+            eventWhenFunctionCallEmitted = currentEvent;
+          }
+        }
+
+        expect(getToolCallPreparations(chunks[0]!)).toEqual([
+          { callId: 'call-1', toolName: 'read_file' },
+        ]);
+        const functionCallChunks = chunks.filter(
+          (chunk) => chunk.functionCalls,
+        );
+        expect(functionCallChunks).toHaveLength(1);
+        expect(eventWhenFunctionCallEmitted).toBe(expectedEmission);
+        expect(functionCallChunks[0]!.functionCalls).toEqual([
+          {
+            id: 'call-1',
+            name: 'read_file',
+            args: expectedArgs,
+          },
+        ]);
+      },
+    );
+
+    it('defers parallel tool calls after empty arguments until the stop reason confirms them', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* parallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-empty',
+              name: 'list_directory',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'input_json_delta', partial_json: '' },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-full',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 1 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 5 },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toBeUndefined();
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
         {
-          id: 'call-1',
+          id: 'call-empty',
+          name: 'list_directory',
+          args: {},
+        },
+        {
+          id: 'call-full',
           name: 'read_file',
           args: { file_path: 'a.sql' },
         },
       ]);
     });
+
+    it('releases closed valid tool calls before rethrowing an upstream stream error', async () => {
+      const networkError = Object.assign(
+        new Error('SSE connection reset by peer'),
+        { code: 'ECONNRESET' },
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* interruptedToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          throw networkError;
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+      expect(error).toBe(networkError);
+    });
+
+    it.each([
+      {
+        case: 'an HTTP provider error',
+        error: Object.assign(new Error('credit balance is too low'), {
+          status: 402,
+        }),
+      },
+      {
+        case: 'an abort',
+        error: Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      },
+      {
+        case: 'a transport error outside the stream-retry allow-list',
+        error: Object.assign(new Error('connection refused'), {
+          code: 'ECONNREFUSED',
+        }),
+      },
+    ])(
+      'does not release a closed call before rethrowing $case',
+      async ({ error }) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* failedToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-complete',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"command":"pwd"}',
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            throw error;
+          })(),
+        );
+        const result = await collectGeneratedStream();
+
+        expect(
+          result.chunks.flatMap((chunk) => chunk.functionCalls ?? []),
+        ).toEqual([]);
+        expect(result.error).toBe(error);
+      },
+    );
+
+    it('does not release a closed call when an upstream error leaves a sibling tool block open', async () => {
+      const networkError = Object.assign(
+        new Error('SSE connection reset by peer'),
+        { code: 'ECONNRESET' },
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* interruptedParallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-truncated',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"rm -rf /tmp/scra',
+            },
+          };
+          throw networkError;
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(error).toBe(networkError);
+    });
+
+    it.each([
+      { case: 'empty arguments', partialJson: '' },
+      { case: 'malformed arguments', partialJson: '{"command":' },
+      { case: 'a non-object argument root', partialJson: '[]' },
+    ])(
+      'does not release a closed call before an upstream error when a sibling closes with $case',
+      async ({ partialJson }) => {
+        const networkError = Object.assign(
+          new Error('SSE connection reset by peer'),
+          { code: 'ECONNRESET' },
+        );
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* interruptedParallelToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-complete',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"command":"pwd"}',
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'content_block_start',
+              index: 1,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-invalid',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 1,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 1 };
+            throw networkError;
+          })(),
+        );
+
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(error).toBe(networkError);
+      },
+    );
+
+    it('routes an unterminated tool call through max-token recovery without emitting the batch', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* parallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 2,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 2,
+            delta: { type: 'text_delta', text: 'partial response' },
+          };
+          yield { type: 'content_block_stop', index: 2 };
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-full',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-truncated',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"rm -rf /tmp/scra',
+            },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'max_tokens' },
+            usage: { output_tokens: 100 },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toBeUndefined();
+      expect(
+        chunks
+          .flatMap((chunk) => chunk.candidates ?? [])
+          .flatMap((candidate) => candidate.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toContain('partial response');
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.MAX_TOKENS);
+    });
+
+    it.each([
+      { case: 'an empty argument buffer', partialJson: '' },
+      {
+        case: 'an unterminated string',
+        partialJson: '{"command":"rm -rf /tmp/scra',
+      },
+      { case: 'an unclosed object', partialJson: '{"command":"pwd"' },
+      { case: 'a missing argument value', partialJson: '{"command":' },
+      { case: 'a trailing comma', partialJson: '{"command":"pwd",}' },
+    ])(
+      'routes $case through max-token recovery without emitting a call',
+      async ({ partialJson }) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* truncatedToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-truncated',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'max_tokens' },
+              usage: { output_tokens: 100 },
+            };
+          })(),
+        );
+
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(error).toBeUndefined();
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(
+          chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)
+            ?.finishReason,
+        ).toBe(FinishReason.MAX_TOKENS);
+      },
+    );
+
+    it.each(['[]', 'null', '42'])(
+      'rejects a non-object argument root under max_tokens: %s',
+      async (partialJson) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* nonObjectToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-invalid',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'max_tokens' },
+              usage: { output_tokens: 100 },
+            };
+          })(),
+        );
+
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(error).toMatchObject({
+          name: 'InvalidStreamError',
+          type: 'MALFORMED_TOOL_CALL',
+        });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(
+          chunks.some((chunk) =>
+            chunk.candidates?.some(
+              (candidate) => candidate.finishReason === FinishReason.MAX_TOKENS,
+            ),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('emits a complete non-empty tool call even when the stop reason is max_tokens', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* completeToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'max_tokens' },
+            usage: { output_tokens: 100 },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toBeUndefined();
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.MAX_TOKENS);
+    });
+
+    it('releases a complete tool call when a non-tool block remains open at the stop reason', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* completeToolUseWithOpenTextStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'text_delta', text: 'done' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 5 },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toBeUndefined();
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+    });
+
+    it('accepts a stop reason when no tool calls are pending', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* textStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'done' },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toBeUndefined();
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.STOP);
+    });
+
+    it('rejects an open tool-use block after assistant payload at end of stream', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* openToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'text_delta', text: 'partial response' },
+          };
+          yield { type: 'content_block_stop', index: 1 };
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-open',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+        })(),
+      );
+
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toMatchObject({
+        name: 'InvalidStreamError',
+        type: 'MALFORMED_TOOL_CALL',
+      });
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+    });
+
+    it('rejects a confirmed turn with an open tool-use block without releasing closed siblings', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* openParallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-open',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"whoami"}',
+            },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 100 },
+          };
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toMatchObject({
+        name: 'InvalidStreamError',
+        type: 'MALFORMED_TOOL_CALL',
+      });
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+    });
+
+    it.each([
+      {
+        case: 'an empty argument buffer without a finish reason',
+        partialJson: '',
+        stopReason: undefined,
+      },
+      {
+        case: 'an empty argument buffer confirmed by end_turn',
+        partialJson: '',
+        stopReason: 'end_turn',
+      },
+      {
+        case: 'a malformed argument buffer without a finish reason',
+        partialJson: '{"command":',
+        stopReason: undefined,
+      },
+      {
+        case: 'a non-object argument root without a finish reason',
+        partialJson: '[]',
+        stopReason: undefined,
+      },
+      {
+        case: 'an unterminated string',
+        partialJson: '{"command":"rm -rf /tmp/scra',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'an unclosed object',
+        partialJson: '{"command":"pwd"',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'a missing argument value',
+        partialJson: '{"command":',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'a trailing comma',
+        partialJson: '{"command":"pwd",}',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'an array root',
+        partialJson: '[]',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'a null root',
+        partialJson: 'null',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'a numeric root',
+        partialJson: '42',
+        stopReason: 'tool_use',
+      },
+    ])(
+      'rejects tool arguments with $case without emitting a function call',
+      async ({ partialJson, stopReason }) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* invalidToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-invalid',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: partialJson,
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            if (stopReason) {
+              yield {
+                type: 'message_delta',
+                delta: { stop_reason: stopReason },
+                usage: { output_tokens: 100 },
+              };
+            }
+            yield { type: 'message_stop' };
+          })(),
+        );
+
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(error).toMatchObject({
+          name: 'InvalidStreamError',
+          type: 'MALFORMED_TOOL_CALL',
+        });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+      },
+    );
 
     it('emits preparations before both function calls in a multi-tool stream', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
@@ -3202,6 +4250,11 @@ describe('AnthropicContentGenerator', () => {
             },
           };
           yield { type: 'content_block_stop', index: 1 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 5 },
+          };
         })(),
       );
       const generator = new AnthropicContentGenerator(
@@ -3295,6 +4348,11 @@ describe('AnthropicContentGenerator', () => {
               },
             };
             yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'tool_use' },
+              usage: { output_tokens: 1 },
+            };
           })(),
         );
 
@@ -3452,8 +4510,71 @@ describe('AnthropicContentGenerator', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('preserves message_start usage when the stream fails after content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 4,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw new Error('stream interrupted');
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('stream interrupted');
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.usageMetadata).toEqual({
+        promptTokenCount: 9,
+        cachedContentTokenCount: 3,
+      });
+      expect(getGenAiUsageProvenance(chunks[0]?.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 4,
+      });
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3582,12 +4703,19 @@ describe('AnthropicContentGenerator', () => {
 
       // Usage/finish chunks exist; check the last one.
       const last = chunks[chunks.length - 1]!;
+      expect(
+        chunks.every((chunk) => chunk.modelVersion === 'claude-test'),
+      ).toBe(true);
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
         cachedContentTokenCount: 7,
         promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: undefined,
       });
     });
 
@@ -3601,6 +4729,9 @@ describe('AnthropicContentGenerator', () => {
       // dropped from the displayed total and the Footer under-reports by
       // exactly that many tokens.
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3666,6 +4797,55 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the requested model when a stream omits it', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: { id: 'msg-1', usage: { input_tokens: 1 } },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'requested-model',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      expect(chunks).not.toHaveLength(0);
+      expect(chunks.every((chunk) => chunk.modelVersion === undefined)).toBe(
+        true,
+      );
     });
 
     it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
@@ -3711,10 +4891,196 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({ stream: true }),
       );
       expect(fallbackRequest).not.toHaveProperty('stream');
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        undefined,
+      );
     });
+
+    it('keeps the fallback probe signal live after the drain abort (no spurious AbortError)', async () => {
+      // Regression for the empty-fallback probe: the shared stream guard aborts
+      // the per-request controller the moment the source stream drains, which
+      // happens before the probe runs. The probe must NOT inherit that
+      // already-aborted signal, or the SDK rejects it immediately with a
+      // spurious AbortError instead of surfacing the provider's real error
+      // (e.g. a 402 credit-balance response). Model the SDK's abort semantics:
+      // the probe's `create` rejects at call time when handed an aborted signal.
+      //
+      // The guards must be ON for this regression to bite — the spurious
+      // AbortError only exists because the guard's drain-time abort precedes
+      // the probe. Stub the env knobs so an ambient `QWEN_STREAM_*=0`
+      // (documented disable values) in the dev/CI shell can't silently switch
+      // the guards off and vacate the test.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      try {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* () {
+              // Empty stream: drains immediately, after which the guard aborts
+              // the per-request controller and the fallback probe runs.
+            })(),
+          )
+          .mockImplementationOnce(
+            (_req: unknown, opts: { signal?: AbortSignal }) => {
+              if (opts?.signal?.aborted) {
+                const abortErr = new Error('The operation was aborted');
+                abortErr.name = 'AbortError';
+                return Promise.reject(abortErr);
+              }
+              return Promise.reject(new Error('402 credit balance is too low'));
+            },
+          );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 123 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        await expect(async () => {
+          for await (const _chunk of stream) {
+            void _chunk;
+          }
+        }).rejects.toThrow('402 credit balance is too low');
+
+        expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('aborts the fallback probe when the caller signal cancels mid-probe', async () => {
+      // Pins the probe's caller-signal linkage: the probe derives a child of
+      // the caller's signal, so a user Ctrl-C landing while the non-streaming
+      // probe is in flight (the quota/billing-shaped 200-but-empty response)
+      // aborts the probe instead of letting it run to completion against the
+      // provider and spend quota on a turn already cancelled. Mutant check:
+      // deriving the child from `undefined` leaves the hung probe unsettled
+      // and this test fails on the timeout assertion.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      try {
+        const { AnthropicContentGenerator } = await importGenerator();
+        const callerAc = new AbortController();
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* () {
+              // Empty stream: drains immediately, then the probe runs.
+            })(),
+          )
+          .mockImplementationOnce(
+            // A probe that hangs until its signal aborts, modelling an
+            // in-flight non-streaming request.
+            (_req: unknown, opts: { signal?: AbortSignal }) =>
+              new Promise((_resolve, reject) => {
+                const abortErr = new Error('The operation was aborted');
+                abortErr.name = 'AbortError';
+                if (opts?.signal?.aborted) {
+                  reject(abortErr);
+                  return;
+                }
+                opts?.signal?.addEventListener('abort', () => reject(abortErr));
+              }),
+          );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 123 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+
+        const settled = (async () => {
+          for await (const _chunk of stream) {
+            void _chunk;
+          }
+        })().catch((e: unknown) => e);
+
+        // Wait until the probe call is in flight, then cancel like a user.
+        await vi.waitFor(() =>
+          expect(anthropicState.createImpl).toHaveBeenCalledTimes(2),
+        );
+        callerAc.abort();
+        const err = await settled;
+        expect((err as Error).name).toBe('AbortError');
+        expect((err as Error).message).toBe('The operation was aborted');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it.each([
+      { case: 'an empty buffer', partialJson: '' },
+      { case: 'a partial buffer', partialJson: '{"file_path":' },
+    ])(
+      'falls back to non-streaming when an unconfirmed tool block with $case is the only stream payload',
+      async ({ partialJson }) => {
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* unconfirmedToolUseStream() {
+              yield {
+                type: 'content_block_start',
+                index: 0,
+                content_block: {
+                  type: 'tool_use',
+                  id: 'call-open',
+                  name: 'read_file',
+                  input: {},
+                },
+              };
+              yield {
+                type: 'content_block_delta',
+                index: 0,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: partialJson,
+                },
+              };
+            })(),
+          )
+          .mockRejectedValueOnce(new Error('402 credit balance is too low'));
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(error).toMatchObject({
+          message: '402 credit balance is too low',
+        });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      },
+    );
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const streamingAttempt = { generation: 1 };
+      const fallbackAttempt = { generation: 2 };
+      mockReportAnthropicRequest.mockReturnValueOnce(streamingAttempt);
+      mockReportAnthropicFollowingRequest.mockReturnValueOnce(fallbackAttempt);
       anthropicState.createImpl
         .mockResolvedValueOnce(
           (async function* () {
@@ -3752,12 +5118,588 @@ describe('AnthropicContentGenerator', () => {
       }
 
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
       expect(chunks).toHaveLength(1);
       expect(chunks[0]?.responseId).toBe('msg-fallback');
       expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
         { text: 'fallback ok' },
       ]);
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        streamingAttempt,
+      );
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        fallbackAttempt,
+        expect.objectContaining({ id: 'msg-fallback' }),
+      );
+      expect(mockReportAnthropicResponse).not.toHaveBeenCalledWith(
+        streamingAttempt,
+        expect.anything(),
+      );
+      // The probe's short-lived child must be aborted once the probe settles:
+      // that is what releases the SDK's abort listener instead of leaving it
+      // attached until the caller's long-lived round signal ends.
+      const [, fallbackOptions] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
+      expect(fallbackOptions?.signal?.aborted).toBe(true);
+    });
+  });
+
+  // Issue #9005 finding 4: the OpenAI wire wraps its stream in an idle
+  // watchdog plus a non-resetting lifetime cap (openaiContentGenerator
+  // `withStreamGuards`), while the Anthropic wire had neither — a stream that
+  // returns 200 and then goes silent (or drip-feeds `thinking_delta` frames
+  // forever, which keep resetting any idle-only timer) hangs the CLI until
+  // the process is killed. These tests pin the Anthropic wire to the same
+  // guards, mirroring the OpenAI pipeline's watchdog suite.
+  describe('stream watchdog guards (issue #9005 finding 4)', () => {
+    // A manually gated SSE event source: events arrive only when pushed, so
+    // tests can model a stream that goes silent or is drip-fed. Mirrors the
+    // `gatedStream` helper in openaiContentGenerator/pipeline.test.ts.
+    function gatedEventStream() {
+      let resolveNext: ((r: IteratorResult<unknown>) => void) | null = null;
+      const buffered: unknown[] = [];
+      let ended = false;
+      let returned = false;
+      const deliver = (r: IteratorResult<unknown>) => {
+        const r2 = resolveNext;
+        resolveNext = null;
+        r2?.(r);
+      };
+      return {
+        push(event: unknown) {
+          if (resolveNext) deliver({ done: false, value: event });
+          else buffered.push(event);
+        },
+        end() {
+          ended = true;
+          if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        wasReturned() {
+          return returned;
+        },
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<unknown>> {
+                if (buffered.length) {
+                  return Promise.resolve({
+                    done: false,
+                    value: buffered.shift()!,
+                  });
+                }
+                if (ended) {
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as never,
+                  });
+                }
+                return new Promise((res) => {
+                  resolveNext = res;
+                });
+              },
+              return(): Promise<IteratorResult<unknown>> {
+                returned = true;
+                ended = true;
+                if (resolveNext) {
+                  deliver({ done: true, value: undefined as never });
+                }
+                return Promise.resolve({
+                  done: true,
+                  value: undefined as never,
+                });
+              },
+            };
+          },
+        },
+      };
+    }
+
+    const buildGenerator = async (guardConfig: {
+      streamIdleTimeoutMs?: number;
+      streamMaxLifetimeMs?: number;
+    }) => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      return new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+          ...(guardConfig.streamIdleTimeoutMs !== undefined
+            ? { streamIdleTimeoutMs: guardConfig.streamIdleTimeoutMs }
+            : {}),
+          ...(guardConfig.streamMaxLifetimeMs !== undefined
+            ? { streamMaxLifetimeMs: guardConfig.streamMaxLifetimeMs }
+            : {}),
+        },
+        mockConfig,
+      );
+    };
+
+    const streamRequest = {
+      model: 'models/ignored',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Drain the stream and capture whatever it ends with. Without the guards a
+    // silent/drip-fed source never settles, so callers race the result
+    // against a sentinel instead of awaiting it directly — a missing
+    // watchdog then fails the assertion instead of hanging the test.
+    const consumeUntilSettled = (
+      stream: AsyncGenerator<GenerateContentResponse>,
+    ) =>
+      (async () => {
+        for await (const _chunk of stream) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+
+    beforeEach(() => {
+      // Ignore ambient QWEN_STREAM_* knobs from the dev/CI shell so the
+      // explicit-config tests aren't silently overridden.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    it('aborts and throws a retryable ETIMEDOUT when the stream is silent past the idle timeout', async () => {
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: 1000,
+        chunksReceived: 0,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('uses the shared default idle timeout when no override is configured', async () => {
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('default-idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        chunksReceived: 0,
+      });
+    });
+
+    it('honours QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case: with no explicit
+      // `streamIdleTimeoutMs` config field, the constructor must resolve the
+      // idle window from the deployment env knob. Mutant check: replacing the
+      // constructor's `resolveStreamIdleTimeoutMs(contentGeneratorConfig)`
+      // with `contentGeneratorConfig.streamIdleTimeoutMs ??
+      // DEFAULT_STREAM_IDLE_TIMEOUT_MS` ignores the env knob (falls back to
+      // the 240s default) and this test fails on the sentinel.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(2999); // inside the env window
+      await vi.advanceTimersByTimeAsync(0);
+      const earlySentinel = Symbol('idle-watchdog-fired-before-env-value');
+      const early = await Promise.race([
+        captured,
+        Promise.resolve(earlySentinel),
+      ]);
+      expect(early).toBe(earlySentinel); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1); // t=3000 — the env value
+      await vi.advanceTimersByTimeAsync(0);
+      const lateSentinel = Symbol('env-idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(lateSentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: 3000,
+        chunksReceived: 0,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('does not interrupt a stream whose events keep arriving inside the idle window', async () => {
+      const gated = gatedEventStream();
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      let done = false;
+      let error: unknown;
+      const texts: string[] = [];
+      const consume = (async () => {
+        for await (const chunk of stream) {
+          for (const candidate of chunk.candidates ?? []) {
+            for (const part of candidate.content?.parts ?? []) {
+              if (part.text) texts.push(part.text);
+            }
+          }
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      });
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'hel' },
+      });
+      await vi.advanceTimersByTimeAsync(500); // < 1000ms idle window
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'lo' },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push({ type: 'content_block_stop', index: 0 });
+      gated.push({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 1 },
+      });
+      gated.push({ type: 'message_stop' });
+      gated.end();
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+      expect(texts).toEqual(['hel', 'lo']);
+    });
+
+    it('caps total stream lifetime when thinking deltas keep resetting the idle watchdog', async () => {
+      // The issue #9005 finding-4 shape: adaptive thinking emits long runs of
+      // `thinking_delta` frames, each resetting an idle-only timer, while the
+      // message never completes (the #8597 drip-fed hang). The lifetime cap
+      // does not reset.
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 3000,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      for (let i = 0; i < 4; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(500); // each drip resets the 1s idle watchdog
+      }
+      await vi.advanceTimersByTimeAsync(1000); // now past the 3000ms cap
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: 3000,
+        chunksReceived: 6,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('honours QWEN_STREAM_MAX_LIFETIME_MS when no explicit config is set', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case: with no explicit
+      // `streamMaxLifetimeMs` config field, the constructor must resolve the
+      // cap from the deployment env knob. Mutant check: replacing the
+      // constructor's `resolveStreamMaxLifetimeMs(contentGeneratorConfig)`
+      // with `contentGeneratorConfig.streamMaxLifetimeMs ?? 0` disables the
+      // cap and this test fails on the sentinel.
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '4000');
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      for (let i = 0; i < 7; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(500); // each drip resets the idle watchdog
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=4500 — past the 4s env cap
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('env-lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: 4000,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+    });
+
+    it('uses the default lifetime cap when nothing overrides it', async () => {
+      // No explicit config, no QWEN_STREAM_* env: the cap must resolve to the
+      // shared default. The drips land every 200s — inside the 240s default
+      // idle window, so the idle watchdog stays quiet while the lifetime cap
+      // accumulates upstream wait up to the 900s default.
+      const gated = gatedEventStream(); // drip-fed, never ends
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      gated.push({
+        type: 'message_start',
+        message: {
+          id: 'msg-1',
+          model: 'claude-test',
+          usage: { input_tokens: 1 },
+        },
+      });
+      for (let i = 0; i < 5; i++) {
+        gated.push({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 't' },
+        });
+        // Inside the 240s default idle window, so only the cap can fire.
+        await vi.advanceTimersByTimeAsync(200_000);
+      }
+      // The cap is reached at t=900s during the last advance; the final drip
+      // at t=800s keeps the 240s idle watchdog pending until t=1040s.
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('default-lifetime-cap-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamLifetimeExceededError',
+        code: 'ETIMEDOUT',
+        maxLifetimeMs: DEFAULT_STREAM_MAX_LIFETIME_MS,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+    });
+
+    it('leaves streams unguarded when both timeouts are disabled (<= 0)', async () => {
+      const gated = gatedEventStream();
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 0,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream(streamRequest);
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _chunk of stream) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      });
+      // A silence far beyond the default idle timeout — survivable only
+      // when the guards are explicitly disabled.
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 1000);
+      gated.push({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'still here' },
+      });
+      gated.push({ type: 'content_block_stop', index: 0 });
+      gated.push({
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 1 },
+      });
+      gated.end();
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case. A user Ctrl-C that
+      // lands while the idle-watchdog timer is pending must surface as a
+      // non-retryable AbortError, not the watchdog's retryable ETIMEDOUT —
+      // ETIMEDOUT is in the retryable set, so the retry loop would otherwise
+      // resume the turn the user just cancelled. This pins the `parentSignal`
+      // argument threaded into `withStreamGuards`: replacing it with
+      // `undefined` makes the timer reject with StreamInactivityTimeoutError
+      // and this test fail.
+      const callerAc = new AbortController();
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({
+        streamIdleTimeoutMs: 1000,
+        streamMaxLifetimeMs: 0,
+      });
+      const stream = await generator.generateContentStream({
+        ...streamRequest,
+        config: { abortSignal: callerAc.signal },
+      } as unknown as GenerateContentParameters);
+      const captured = consumeUntilSettled(stream);
+      callerAc.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentinel = Symbol('user-abort-did-not-propagate');
+      const err = await Promise.race([captured, Promise.resolve(sentinel)]);
+      expect(err).not.toBe(sentinel);
+      expect((err as Error).name).toBe('AbortError');
+      expect((err as { code?: string }).code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+    });
+  });
+
+  describe('tool_choice mapping from Gemini toolConfig', () => {
+    async function sendWithToolConfig(
+      mode: string | undefined,
+      hasTools = true,
+    ) {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const tools = hasTools
+        ? [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  description: 'test',
+                  parameters: {
+                    type: 'object' as const,
+                    properties: {
+                      shouldBlock: { type: 'boolean' as const },
+                    },
+                  },
+                },
+              ],
+            },
+          ]
+        : undefined;
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {
+          tools,
+          ...(mode !== undefined && {
+            toolConfig: { functionCallingConfig: { mode } },
+          }),
+        },
+      } as unknown as GenerateContentParameters);
+
+      return anthropicState.lastCreateArgs?.[0] as Record<string, unknown>;
+    }
+
+    it('sets tool_choice=any when mode is ANY', async () => {
+      const req = await sendWithToolConfig('ANY');
+      expect(req['tool_choice']).toEqual({ type: 'any' });
+    });
+
+    it('omits tool_choice when mode is NONE (Anthropic has no none type)', async () => {
+      const req = await sendWithToolConfig('NONE');
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when mode is AUTO', async () => {
+      const req = await sendWithToolConfig('AUTO');
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when no toolConfig is set', async () => {
+      const req = await sendWithToolConfig(undefined);
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when there are no tools even with mode ANY', async () => {
+      const req = await sendWithToolConfig('ANY', false);
+      expect(req['tool_choice']).toBeUndefined();
     });
   });
 });

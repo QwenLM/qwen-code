@@ -7,10 +7,52 @@ export function getDaemonBaseUrl(): string {
   return getAllowedDaemonOrigin(raw);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '[::1]'
+  );
+}
+
+/**
+ * Whether the browser and the daemon are on the same machine. Host-local
+ * affordances (e.g. opening a folder in the OS file manager) only make sense
+ * then; a LAN-paired client must not see them.
+ */
+export function isLocalDaemon(): boolean {
+  if (typeof window === 'undefined') return false;
+  const base = getDaemonBaseUrl();
+  const hostname = base ? new URL(base).hostname : window.location.hostname;
+  return isLoopbackHostname(hostname);
+}
+
 let cachedDaemonToken: string | undefined;
 let cachedExtensionPairingCredential: string | undefined;
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
+const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
+
+// sessionStorage access can throw (privacy modes, storage-disabled
+// embeds); the token flow must degrade to the pre-persistence behavior
+// rather than break page load.
+function readStoredDaemonToken(): string | undefined {
+  try {
+    return window.sessionStorage.getItem(DAEMON_TOKEN_STORAGE_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function persistDaemonToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Storage unavailable — the token still works for this load via the
+    // in-memory cache; a refresh will lose it, matching the old behavior.
+  }
+}
 
 export function getDaemonToken(): string | undefined {
   if (cachedDaemonToken) return cachedDaemonToken;
@@ -24,10 +66,19 @@ export function getDaemonToken(): string | undefined {
   const fromHash = new URLSearchParams(
     window.location.hash.replace(/^#/, ''),
   ).get('token');
-  cachedDaemonToken =
-    fromHash ||
-    new URLSearchParams(window.location.search).get('token') ||
-    undefined;
+  const fromUrl =
+    fromHash || new URLSearchParams(window.location.search).get('token') || '';
+  if (fromUrl) {
+    // Persist per-tab so the token survives navigations that do not carry it.
+    // sessionStorage (not localStorage) keeps the token scoped to this tab and
+    // cleared when the tab closes.
+    persistDaemonToken(fromUrl);
+    cachedDaemonToken = fromUrl;
+    return cachedDaemonToken;
+  }
+  // Refresh path: the URL was already cleaned on the first load — fall
+  // back to the per-tab persisted copy.
+  cachedDaemonToken = readStoredDaemonToken();
   return cachedDaemonToken;
 }
 
@@ -110,12 +161,7 @@ function getAllowedDaemonOrigin(raw: string): string {
     const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     if (!isHttp) return '';
     if (parsed.origin === window.location.origin) return parsed.origin;
-    const isLocalhost =
-      parsed.hostname === 'localhost' ||
-      parsed.hostname === '127.0.0.1' ||
-      parsed.hostname === '::1' ||
-      parsed.hostname === '[::1]';
-    if (!isLocalhost) return '';
+    if (!isLoopbackHostname(parsed.hostname)) return '';
     const pagePort =
       window.location.port ||
       (window.location.protocol === 'https:' ? '443' : '80');

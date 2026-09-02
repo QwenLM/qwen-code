@@ -38,7 +38,7 @@ export class SseFramingError extends Error {
  *   - Malformed frames (non-JSON `data`, missing `data`) are skipped
  *     silently so a single bad frame can't poison the iterator.
  *
- * The reader is released in `finally` so `for await … break` paths and
+ * The body stream is cancelled in `finally` so `for await … break` paths and
  * AbortSignal cancellation both clean up cleanly.
  */
 /**
@@ -171,10 +171,9 @@ export async function* parseSseStream(
     if (signal && onAbort) {
       signal.removeEventListener('abort', onAbort);
     }
-    // `reader.cancel()` does both the release-lock work AND signals the
-    // upstream that we don't want any more data — closing the underlying
-    // HTTP body stream when the consumer breaks out early. Using only
-    // `releaseLock()` would orphan the connection until idle timeout.
+    // `reader.cancel()` cancels the body stream and unblocks pending reads. It
+    // does not reliably close a fetch socket in every runtime (notably Bun),
+    // so the transport that owns the request must also abort its fetch signal.
     try {
       await reader.cancel();
     } catch {

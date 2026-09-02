@@ -152,13 +152,17 @@ describe('Feishu markdown utilities', () => {
       expect(splitChunks('')).toEqual(['']);
     });
 
+    it('rejects a code-fence limit that cannot make progress', () => {
+      expect(() => splitChunks('```\nabc\n```', 4)).toThrow(RangeError);
+    });
+
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
       const text = line.repeat(50); // 5050 chars > 4000
       const chunks = splitChunks(text);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(4100);
+        expect(chunk.length).toBeLessThanOrEqual(4000);
       });
     });
 
@@ -178,6 +182,54 @@ describe('Feishu markdown utilities', () => {
       expect(chunks.length).toBe(2);
       expect(chunks[0]!.length).toBe(4000);
       expect(chunks[1]!.length).toBe(1000);
+    });
+
+    it('does not split surrogate pairs at an odd chunk boundary', () => {
+      const text = '😀'.repeat(2500);
+      const chunks = splitChunks(text, 3999);
+
+      expect(chunks.join('')).toBe(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(3999);
+        const last = chunk.charCodeAt(chunk.length - 1);
+        const first = chunk.charCodeAt(0);
+        expect(last < 0xd800 || last > 0xdbff).toBe(true);
+        expect(first < 0xdc00 || first > 0xdfff).toBe(true);
+      });
+    });
+
+    it('accounts for the closing fence when a code line lands near the limit', () => {
+      // 3993 puts the buffer at CHUNK_LIMIT - 3 once the opening fence and
+      // newline are counted, so appending the closing fence overshot by one.
+      const longCode = '```\n' + 'x'.repeat(3993) + '\n```';
+      const chunks = splitChunks(longCode);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(4000);
+      });
+    });
+
+    it('reserves room for the closing fence on the line that opens a block', () => {
+      // The opening fence arrives while `inCode` is still false, so the reserve
+      // has to look at the fence state this line produces, not the one it found.
+      const text = 'a'.repeat(3991) + '\n```js\n' + 'z'.repeat(500) + '\n```';
+      const chunks = splitChunks(text);
+      chunks.forEach((chunk) => {
+        expect(chunk.length).toBeLessThanOrEqual(4000);
+      });
+    });
+
+    it('keeps every code character when splitting near the limit', () => {
+      // Passes both before and after the fence-reserve fix, on purpose: the
+      // chunks were oversized, not lossy. It pins the other half of the
+      // contract so shrinking a chunk can never be achieved by dropping code.
+      const body = 'x'.repeat(3993);
+      const chunks = splitChunks('```\n' + body + '\n```');
+      const recovered = chunks
+        .join('\n')
+        .split('\n')
+        .filter((l) => !l.startsWith('```'))
+        .join('');
+      expect(recovered).toBe(body);
     });
   });
 

@@ -1,7 +1,10 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  DaemonWorkspaceProvider,
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -14,10 +17,13 @@ import {
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
+
+const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -79,13 +85,7 @@ function getInitialLanguage(): WebShellLanguage {
 }
 
 function getSessionIdFromUrl(): string | undefined {
-  const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
+  return parseSessionId(window.location.pathname);
 }
 
 function getWorkspaceIdFromUrl(): string | undefined {
@@ -94,16 +94,32 @@ function getWorkspaceIdFromUrl(): string | undefined {
   );
 }
 
+function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
+  const context = new URLSearchParams(window.location.search).get('context');
+  return context === 'standalone' || context === 'live'
+    ? { kind: context }
+    : undefined;
+}
+
 function replaceStandaloneSessionUrl(
   sessionId: string | undefined,
   workspaceId?: string,
+  sessionContext?: DaemonProductSessionContext,
 ): void {
   const url = new URL(window.location.href);
-  url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
-  if (sessionId && workspaceId) {
+  url.pathname = buildSessionPathname(url.pathname, sessionId);
+  if (
+    sessionContext?.kind === 'standalone' ||
+    sessionContext?.kind === 'live'
+  ) {
+    url.searchParams.set('context', sessionContext.kind);
+    url.searchParams.delete('workspace');
+  } else if (sessionId && workspaceId) {
     url.searchParams.set('workspace', workspaceId);
+    url.searchParams.delete('context');
   } else {
     url.searchParams.delete('workspace');
+    url.searchParams.delete('context');
   }
   // Strip one-shot query params so bookmarked / shared URLs do not
   // permanently override stored preferences on every page load.
@@ -117,7 +133,7 @@ function replaceStandaloneSessionUrl(
   window.history.replaceState(null, '', url);
 }
 
-function StandaloneApp({
+export function StandaloneApp({
   daemonToken,
   extensionPairingCredential,
 }: {
@@ -128,10 +144,15 @@ function StandaloneApp({
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
-  const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
-  const [workspaceId] = useState<string | undefined>(() =>
+  const [sessionId, setSessionId] = useState<string | undefined>(() =>
+    getSessionIdFromUrl(),
+  );
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
     getWorkspaceIdFromUrl(),
   );
+  const [sessionContext, setSessionContext] = useState<
+    DaemonProductSessionContext | undefined
+  >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the React theme so mobile status bars / overscroll backgrounds stay
@@ -155,8 +176,25 @@ function StandaloneApp({
     storeLanguage(nextLanguage);
   }, []);
   const handleSessionIdChange = useCallback(
-    (nextSessionId?: string, nextWorkspaceId?: string) => {
-      replaceStandaloneSessionUrl(nextSessionId, nextWorkspaceId);
+    (
+      nextSessionId?: string,
+      nextWorkspaceId?: string,
+      _nextWorkspaceCwd?: string,
+      nextSessionContext?: DaemonProductSessionContext,
+    ) => {
+      setSessionId(nextSessionId);
+      const nonWorkspaceContext =
+        nextSessionContext?.kind === 'standalone' ||
+        nextSessionContext?.kind === 'live'
+          ? nextSessionContext
+          : undefined;
+      setSessionContext(nonWorkspaceContext);
+      setWorkspaceId(nonWorkspaceContext ? undefined : nextWorkspaceId);
+      replaceStandaloneSessionUrl(
+        nextSessionId,
+        nextWorkspaceId,
+        nonWorkspaceContext,
+      );
     },
     [],
   );
@@ -172,6 +210,7 @@ function StandaloneApp({
         <WorkspaceSessionProvider
           sessionId={sessionId}
           workspaceId={workspaceId}
+          sessionContext={sessionContext}
           extensionPairingCredential={extensionPairingCredential}
           webShellProps={{
             theme,
@@ -180,8 +219,19 @@ function StandaloneApp({
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
+            header: {
+              items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
+            },
+            rightPanel: {
+              items: ['review', 'sideTask', 'terminal'],
+            },
+            environmentPanel: {
+              items: ['environment', 'subagents', 'backgroundTasks'],
+            },
             compactThinking: true,
             markdownTableMode: 'advanced',
+            composerToolbarAdditionalActions:
+              STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
           }}
         />
       </DaemonWorkspaceProvider>
@@ -194,7 +244,15 @@ async function main() {
   const extensionPairingCredential = getExtensionPairingCredential();
   removeDaemonTokenFromUrl();
 
-  ReactDOM.createRoot(document.getElementById('root')!).render(
+  const container = document.getElementById('root');
+  // Boot can outlast the watchdog's grace period (a slow daemon, a token
+  // handshake that only completes after a restart settles), in which case
+  // index.html's fallback panel is already in #root. React appends to the
+  // container rather than replacing it, so drop the panel here — otherwise
+  // the recovered app renders below a full-viewport "failed to load" screen.
+  container?.querySelector('[data-boot-fallback]')?.remove();
+
+  ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneApp
         daemonToken={daemonToken}

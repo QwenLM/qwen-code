@@ -72,6 +72,15 @@ export interface PermissionRule {
   toolParamMatchers?: Array<{ key: string; valuePattern: string }>;
   /** True if the raw rule was malformed (e.g. unbalanced parens) and should never match. */
   invalid?: boolean;
+  /**
+   * True for a session allow rule granted by repository-controlled
+   * configuration — a project skill's `allowedTools` — which is honoured
+   * only while the folder is trusted. The rule stays in the session set so
+   * that a trust revoked mid-session suspends it (nothing repo-supplied
+   * auto-approves in an untrusted folder) and a trust granted again
+   * restores it, without any per-skill bookkeeping.
+   */
+  trustGated?: boolean;
 }
 
 /** A complete set of permission rules organized by type. */
@@ -93,6 +102,8 @@ export interface PermissionRuleSet {
 export interface PermissionCheckContext {
   /** The canonical tool name being checked. */
   toolName: string;
+  /** Historical names that may still appear in persisted rules. */
+  toolAliases?: readonly string[];
   /**
    * The shell command being executed (only for Bash / run_shell_command).
    */

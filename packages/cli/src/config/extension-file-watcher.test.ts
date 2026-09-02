@@ -90,7 +90,7 @@ function fireAllEvent(
 }
 
 describe('ExtensionFileWatcher', () => {
-  const extensionsDir = '/home/user/.qwen/extensions';
+  const extensionsDir = path.resolve('/home/user/.qwen/extensions');
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -272,7 +272,8 @@ describe('ExtensionFileWatcher', () => {
     }
   });
 
-  it('treats the first successful generation read as a change after an initial read failure', () => {
+  it('establishes baseline on first successful generation read and detects subsequent changes', () => {
+    vi.useFakeTimers();
     mockReadFileSync.mockImplementationOnce(() => {
       throw new Error('state unavailable');
     });
@@ -287,9 +288,43 @@ describe('ExtensionFileWatcher', () => {
     try {
       watcher.startWatching();
 
+      // First successful read establishes baseline (undefined→2), no change.
+      expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
+
+      // A subsequent real generation change IS detected.
+      mockReadFileSync.mockReturnValue('{"generation":3}');
+      vi.advanceTimersByTime(30_000);
+
       expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
         'extension store generation changed',
       );
+    } finally {
+      watcher.stopWatching();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fire a change notification when the store writes its first snapshot on a fresh install', () => {
+    // Fresh install: state.json does not exist yet, so baseline is undefined.
+    mockReadFileSync.mockImplementationOnce(() => {
+      const err = new Error('ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    });
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    // The extension store initializes and writes generation:0.
+    mockReadFileSync.mockReturnValue('{"generation":0}');
+
+    try {
+      watcher.startWatching();
+
+      // undefined→0 is baseline establishment, not a change (#7029).
+      expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
     } finally {
       watcher.stopWatching();
     }
@@ -400,7 +435,8 @@ describe('ExtensionFileWatcher', () => {
 
   it('treats content events as stale when the extension manifest is gone', () => {
     mockExistsSync.mockImplementation(
-      (filePath: string) => !filePath.endsWith('/alpha/qwen-extension.json'),
+      (filePath: string) =>
+        !filePath.endsWith(path.join('alpha', 'qwen-extension.json')),
     );
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
@@ -467,8 +503,8 @@ describe('ExtensionFileWatcher', () => {
   });
 
   it('does not watch inactive linked extension sources or context files', () => {
-    const activeSource = '/tmp/active-linked-extension';
-    const inactiveSource = '/tmp/inactive-linked-extension';
+    const activeSource = path.resolve('/tmp/active-linked-extension');
+    const inactiveSource = path.resolve('/tmp/inactive-linked-extension');
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
       {
@@ -555,9 +591,9 @@ describe('ExtensionFileWatcher', () => {
 
     expect(mockWatch).toHaveBeenCalledTimes(2);
     expect(mockWatchers[0].target).toEqual([
-      '/home/user/.qwen/extension-store/state.json',
+      path.resolve('/home/user/.qwen/extension-store/state.json'),
     ]);
-    expect(mockWatchers[1].target).toBe('/home/user/.qwen');
+    expect(mockWatchers[1].target).toBe(path.resolve('/home/user/.qwen'));
     expect(mockWatchers[1].options).toEqual(
       expect.objectContaining({
         ignoreInitial: true,

@@ -21,9 +21,10 @@ import {
   type Mock,
 } from 'vitest';
 import * as fs from 'node:fs';
-import * as commentJson from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
+import * as jsoncEditor from '../utils/jsonc-editor.js';
 import {
   loadTrustedFolders,
   getTrustedFoldersPath,
@@ -34,7 +35,10 @@ import {
   resetTrustedFoldersForTesting,
 } from './trustedFolders.js';
 import type { Settings } from './settings.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+
+vi.mock('proper-lockfile', () => ({
+  default: { lockSync: vi.fn(() => vi.fn()) },
+}));
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof osActual>();
@@ -50,6 +54,7 @@ vi.mock('fs', async (importOriginal) => {
     ...actualFs,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
+    lstatSync: vi.fn(),
     writeFileSync: vi.fn(),
     mkdirSync: vi.fn(),
   };
@@ -57,12 +62,12 @@ vi.mock('fs', async (importOriginal) => {
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
-vi.mock('comment-json', async (importOriginal) => {
-  const actual = await importOriginal<typeof commentJson>();
+vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/jsonc-editor.js')>();
   return {
     ...actual,
-    parse: vi.fn(actual.parse),
-    stringify: vi.fn(actual.stringify),
+    updateJsoncContent: vi.fn(actual.updateJsoncContent),
   };
 });
 
@@ -93,6 +98,10 @@ describe('Trusted Folders Loading', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
+    (fs.lstatSync as Mock).mockReturnValue({
+      isSymbolicLink: () => false,
+      isFile: () => true,
+    });
   });
 
   afterEach(() => {
@@ -141,13 +150,23 @@ describe('Trusted Folders Loading', () => {
       expect(folders.isPathTrusted('/trustedparent/trustme')).toBe(true);
 
       // No explicit rule covers this file
-      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(
-        undefined,
-      );
-      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(
-        undefined,
-      );
+      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(false);
+      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(false);
       expect(folders.isPathTrusted('/user/someotherfolder')).toBe(undefined);
+    });
+
+    it('uses the deepest matching rule for both trust directions', () => {
+      const { folders } = setup({
+        config: {
+          '/projects': TrustLevel.DO_NOT_TRUST,
+          '/projects/good': TrustLevel.TRUST_FOLDER,
+          '/projects/good/private': TrustLevel.DO_NOT_TRUST,
+        },
+      });
+
+      expect(folders.isPathTrusted('/projects/evil/src')).toBe(false);
+      expect(folders.isPathTrusted('/projects/good/src')).toBe(true);
+      expect(folders.isPathTrusted('/projects/good/private/src')).toBe(false);
     });
   });
 
@@ -231,6 +250,42 @@ describe('Trusted Folders Loading', () => {
     );
   });
 
+  it('setValue re-reads under the lock and preserves concurrent disk rules', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock)
+      .mockReturnValueOnce('{}')
+      .mockReturnValueOnce(
+        JSON.stringify({ '/concurrent/path': TrustLevel.DO_NOT_TRUST }),
+      );
+
+    const loadedFolders = loadTrustedFolders();
+    loadedFolders.setValue('/new/path', TrustLevel.TRUST_FOLDER);
+
+    expect(loadedFolders.user.config).toEqual({
+      '/concurrent/path': TrustLevel.DO_NOT_TRUST,
+      '/new/path': TrustLevel.TRUST_FOLDER,
+    });
+    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toContain(
+      '"/concurrent/path": "DO_NOT_TRUST"',
+    );
+  });
+
+  it('setValue does not mutate memory when the atomic write fails', () => {
+    const loadedFolders = loadTrustedFolders();
+    vi.mocked(atomicWriteFileSync).mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    expect(() =>
+      loadedFolders.setValue('/new/path', TrustLevel.TRUST_FOLDER),
+    ).toThrow('disk full');
+    expect(loadedFolders.user.config).toEqual({});
+  });
+
   it('setValue should preserve existing comments when rewriting the trust file', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
@@ -291,7 +346,30 @@ describe('Trusted Folders Loading', () => {
     expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
   });
 
-  it('saveTrustedFolders should fall back to a clean rewrite when preserving comments fails during parse', () => {
+  it('saveTrustedFolders registers a lock-compromised handler', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockReturnValue('{}');
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/new/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    const options = vi.mocked(lockfile.lockSync).mock.calls.at(-1)?.[1];
+    expect(options?.onCompromised).toBeTypeOf('function');
+    expect(() =>
+      options?.onCompromised?.(new Error('lock lost')),
+    ).not.toThrow();
+  });
+
+  it('saveTrustedFolders should reject malformed input without overwriting it', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
 
@@ -303,34 +381,24 @@ describe('Trusted Folders Loading', () => {
       return '{}';
     });
 
-    saveTrustedFolders({
-      path: userPath,
-      config: {
-        '/new/path': TrustLevel.TRUST_FOLDER,
-      },
-    });
-
-    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
-      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
-    );
-    expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Falling back to clean rewrite for trusted folders',
-      ),
-    );
+    expect(() =>
+      saveTrustedFolders({
+        path: userPath,
+        config: {
+          '/new/path': TrustLevel.TRUST_FOLDER,
+        },
+      }),
+    ).toThrow();
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
   });
 
-  it('saveTrustedFolders should fall back to a clean rewrite when preserved output validation fails', async () => {
+  it('saveTrustedFolders should reject invalid preserved output', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
     const originalContent = `{
   // work repos
   "/existing/path": "TRUST_FOLDER"
 }`;
-    const parseSpy = vi.mocked(commentJson.parse);
-    const actualCommentJson =
-      await vi.importActual<typeof commentJson>('comment-json');
 
     (mockFsExistsSync as Mock).mockImplementation(
       (p) => p === userPath || p === dirPath,
@@ -339,31 +407,22 @@ describe('Trusted Folders Loading', () => {
       if (p === userPath) return originalContent;
       return '{}';
     });
-    parseSpy
-      .mockImplementationOnce((...args: Parameters<typeof commentJson.parse>) =>
-        actualCommentJson.parse(...args),
-      )
-      .mockImplementationOnce(() => {
-        throw new Error('invalid preserved output');
-      });
-
-    saveTrustedFolders({
-      path: userPath,
-      config: {
-        '/new/path': TrustLevel.TRUST_FOLDER,
-      },
+    vi.mocked(jsoncEditor.updateJsoncContent).mockImplementationOnce(() => {
+      throw new Error('invalid preserved output');
     });
 
-    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
-      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
-    );
-    expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('invalid preserved output'),
-    );
+    expect(() =>
+      saveTrustedFolders({
+        path: userPath,
+        config: {
+          '/new/path': TrustLevel.TRUST_FOLDER,
+        },
+      }),
+    ).toThrow('invalid preserved output');
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
   });
 
-  it('saveTrustedFolders should fall back to a clean rewrite when the existing file is a top-level array', () => {
+  it('saveTrustedFolders should reject an existing top-level array', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
 
@@ -375,24 +434,19 @@ describe('Trusted Folders Loading', () => {
       return '{}';
     });
 
-    saveTrustedFolders({
-      path: userPath,
-      config: {
-        '/new/path': TrustLevel.TRUST_FOLDER,
-      },
-    });
-
-    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
-      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
-    );
-    expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('trusted folders file is not a JSON object'),
-    );
+    expect(() =>
+      saveTrustedFolders({
+        path: userPath,
+        config: {
+          '/new/path': TrustLevel.TRUST_FOLDER,
+        },
+      }),
+    ).toThrow('not a valid JSON object');
+    expect(atomicWriteFileSync).not.toHaveBeenCalled();
   });
 
   it.each(['"hello"', '42', 'true', 'null'])(
-    'saveTrustedFolders should fall back to a clean rewrite when the existing file is a top-level primitive: %s',
+    'saveTrustedFolders should reject an existing top-level primitive: %s',
     (existingContent) => {
       const userPath = getTrustedFoldersPath();
       const dirPath = path.dirname(userPath);
@@ -405,20 +459,15 @@ describe('Trusted Folders Loading', () => {
         return '{}';
       });
 
-      saveTrustedFolders({
-        path: userPath,
-        config: {
-          '/new/path': TrustLevel.TRUST_FOLDER,
-        },
-      });
-
-      expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
-        `{\n  "/new/path": "TRUST_FOLDER"\n}`,
-      );
-      expect(writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('trusted folders file is not a JSON object'),
-      );
+      expect(() =>
+        saveTrustedFolders({
+          path: userPath,
+          config: {
+            '/new/path': TrustLevel.TRUST_FOLDER,
+          },
+        }),
+      ).toThrow('not a valid JSON object');
+      expect(atomicWriteFileSync).not.toHaveBeenCalled();
     },
   );
 });
@@ -519,10 +568,10 @@ describe('isWorkspaceTrusted', () => {
     });
   });
 
-  it('should return undefined for a child of an untrusted folder', () => {
+  it('should return false for a child of an untrusted folder', () => {
     mockCwd = '/home/user/untrusted/src';
     mockRules['/home/user/untrusted'] = TrustLevel.DO_NOT_TRUST;
-    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
+    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBe(false);
   });
 
   it('should return undefined when no rules match', () => {
@@ -532,12 +581,12 @@ describe('isWorkspaceTrusted', () => {
     expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
   });
 
-  it('should prioritize trust over distrust', () => {
+  it('should prioritize exact distrust over ancestor trust', () => {
     mockCwd = '/home/user/projectA/untrusted';
     mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
     mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
     expect(isWorkspaceTrusted(mockSettings)).toEqual({
-      isTrusted: true,
+      isTrusted: false,
       source: 'file',
     });
   });
@@ -662,6 +711,18 @@ describe('getWorkspaceTrustStatus', () => {
     ).toMatchObject({
       effective: { state: 'unknown', source: 'none' },
       explicitTrustLevel: null,
+    });
+  });
+
+  it('reports exact distrust over ancestor trust', () => {
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectA/untrusted'),
+    ).toMatchObject({
+      effective: { state: 'untrusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.DO_NOT_TRUST,
     });
   });
 

@@ -20,9 +20,11 @@ import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
+  type WorkspaceRememberRouteDeps,
 } from './workspace-remember.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 
 const { mockDebugLogger } = vi.hoisted(() => ({
   mockDebugLogger: {
@@ -33,7 +35,8 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createDebugLogger: () => mockDebugLogger,
 }));
 
@@ -226,6 +229,7 @@ function buildApp(
     requireAuth: false,
   },
   lane = new WorkspaceRememberTaskLane(bridge),
+  routeOverrides: Partial<WorkspaceRememberRouteDeps> = {},
 ) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
@@ -252,11 +256,59 @@ function buildApp(
       }
       return raw as Record<string, unknown>;
     },
+    ...routeOverrides,
   });
   return app;
 }
 
 describe('workspace memory remember routes', () => {
+  it('routes qualified remember tasks to the selected workspace lane', async () => {
+    const primary = buildBridgeStub({});
+    const secondary = buildBridgeStub({});
+    const secondaryLane = new WorkspaceRememberTaskLane(
+      secondary,
+      '/work/secondary',
+    );
+    const app = express();
+    app.use(express.json({ limit: '1mb' }));
+    const mutate = createMutationGate({
+      tokenConfigured: true,
+      requireAuth: false,
+    });
+    const common = {
+      parseClientId: () => undefined,
+      safeBody: (req: express.Request) => req.body as Record<string, unknown>,
+    };
+    mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+      mutate,
+      resolveRouteDeps: (req, res) => {
+        if (req.params['workspace'] !== 'secondary-id') {
+          res.status(400).json({ code: 'workspace_mismatch' });
+          return null;
+        }
+        return {
+          bridge: secondary,
+          lane: secondaryLane,
+          ...common,
+        };
+      },
+    });
+
+    const post = await request(app)
+      .post('/workspaces/secondary-id/memory/remember')
+      .send({ content: 'Secondary only' })
+      .expect(202);
+    await waitFor(() => secondary.rememberCalls.length === 1);
+
+    await request(app)
+      .get(`/workspaces/secondary-id/memory/remember/${post.body.taskId}`)
+      .expect(200);
+    expect(secondary.rememberCalls).toEqual([
+      { content: 'Secondary only', contextMode: 'workspace' },
+    ]);
+    expect(primary.rememberCalls).toEqual([]);
+  });
+
   it('queues and completes a hidden workspace remember task', async () => {
     const bridge = buildBridgeStub({ knownIds: ['client-1'] });
     const app = buildApp(bridge);
@@ -330,7 +382,7 @@ describe('workspace memory remember routes', () => {
     const post = await request(app)
       .post('/workspace/memory/forget')
       .set('X-Qwen-Client-Id', 'client-1')
-      .send({ query: 'old preference' })
+      .send({ query: 'old preference', scope: 'user' })
       .expect(202);
 
     const taskId = post.body.taskId as string;
@@ -345,6 +397,7 @@ describe('workspace memory remember routes', () => {
     expect(get.body).toMatchObject({
       taskId,
       status: 'completed',
+      scope: 'user',
       result: {
         summary: 'forgot',
         touchedTopics: ['user', 'reference'],
@@ -358,7 +411,10 @@ describe('workspace memory remember routes', () => {
         ],
       },
     });
-    expect(bridge.forgetCalls[0]).toEqual({ query: 'old preference' });
+    expect(bridge.forgetCalls[0]).toEqual({
+      query: 'old preference',
+      scope: 'user',
+    });
     expect(bridge.events[0]).toMatchObject({
       type: 'memory_changed',
       originatorClientId: 'client-1',
@@ -369,6 +425,178 @@ describe('workspace memory remember routes', () => {
         touchedScopes: ['user'],
       },
     });
+  });
+
+  it('echoes a scoped remember back on the task snapshot', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ content: 'Remember this', scope: 'project' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+    await waitFor(() => bridge.rememberCalls.length === 1);
+
+    // The snapshot is the only place a polling client learns which scope the
+    // daemon actually accepted: the enqueue response carries a task id, not
+    // the request echo, so a scope silently dropped on the way into the lane
+    // would be invisible until the write landed in the wrong store.
+    const get = await request(app)
+      .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).toMatchObject({ taskId, scope: 'project' });
+    expect(bridge.rememberCalls[0]).toStrictEqual({
+      content: 'Remember this',
+      contextMode: 'workspace',
+      scope: 'project',
+    });
+  });
+
+  it('omits scope from an unscoped remember rather than passing undefined', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ content: 'Remember this' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+    await waitFor(() => bridge.rememberCalls.length === 1);
+
+    // `toStrictEqual` is the point: an explicit `scope: undefined` reaching
+    // the bridge reads as "a scope was requested" to anything that checks
+    // for the key rather than its value, and automatic scope selection is
+    // exactly the branch that must stay absent.
+    expect(bridge.rememberCalls[0]).toStrictEqual({
+      content: 'Remember this',
+      contextMode: 'workspace',
+    });
+    const get = await request(app)
+      .get(`/workspace/memory/remember/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).not.toHaveProperty('scope');
+  });
+
+  it('passes a project-scoped forget through the lane and echoes it back', async () => {
+    const bridge = buildBridgeStub({
+      knownIds: ['client-1'],
+      forgetImpl: vi.fn(
+        async (): Promise<BridgeWorkspaceMemoryForgetResult> => ({
+          summary: 'forgot',
+          removedEntries: [
+            {
+              topic: 'project',
+              summary: 'stale project note',
+              filePath: '/mem/project/project.md',
+            },
+          ],
+          touchedTopics: ['project'],
+          touchedScopes: ['project'],
+        }),
+      ),
+    });
+    const app = buildApp(bridge);
+
+    // The twin above pins 'user'. Forget is the destructive half of this
+    // surface, so the scope that selects WHICH store gets deleted from must
+    // be pinned for both values, not one.
+    const post = await request(app)
+      .post('/workspace/memory/forget')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ query: 'stale project note', scope: 'project' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+    await waitFor(() => bridge.forgetCalls.length === 1);
+
+    const get = await request(app)
+      .get(`/workspace/memory/forget/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).toMatchObject({
+      taskId,
+      status: 'completed',
+      scope: 'project',
+      result: { touchedScopes: ['project'] },
+    });
+    expect(bridge.forgetCalls[0]).toStrictEqual({
+      query: 'stale project note',
+      scope: 'project',
+    });
+  });
+
+  it('omits scope from an unscoped forget rather than passing undefined', async () => {
+    const bridge = buildBridgeStub({
+      knownIds: ['client-1'],
+      forgetImpl: vi.fn(
+        async (): Promise<BridgeWorkspaceMemoryForgetResult> => ({
+          summary: 'forgot',
+          removedEntries: [],
+          touchedTopics: [],
+          touchedScopes: [],
+        }),
+      ),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/forget')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ query: 'anything' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+    await waitFor(() => bridge.forgetCalls.length === 1);
+
+    // Same contract as the remember twin: the omitted direction is a real
+    // branch (`...(params.scope ? { scope } : {})` on both the task record
+    // and the bridge call), and only a strict compare can catch it leaking
+    // an undefined-valued key.
+    expect(bridge.forgetCalls[0]).toStrictEqual({ query: 'anything' });
+    const get = await request(app)
+      .get(`/workspace/memory/forget/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).not.toHaveProperty('scope');
+  });
+
+  it('surfaces a scope mismatch with its public message', async () => {
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn().mockRejectedValueOnce(
+        Object.assign(
+          new Error('Remember agent wrote outside the requested user scope'),
+          {
+            code: 'remember_scope_mismatch',
+          },
+        ),
+      ),
+    });
+    const app = buildApp(bridge);
+
+    // The scope guard is the whole point of the scoped remember surface, and
+    // its public message is the only thing a client can show: without this,
+    // `remember_scope_mismatch` could fall through to the generic
+    // remember-failed text and nobody would learn the write was refused for
+    // crossing a scope boundary.
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'cross-scope', scope: 'user' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_scope_mismatch',
+          message: 'Remember agent wrote outside the requested memory scope.',
+          details: 'Remember agent wrote outside the requested user scope',
+        });
+      });
   });
 
   it('queues and completes a hidden workspace dream task', async () => {
@@ -420,7 +648,7 @@ describe('workspace memory remember routes', () => {
     });
   });
 
-  it('requires auth for task polling', async () => {
+  it('requires authority when trusted mode is omitted from the gate', async () => {
     const bridge = buildBridgeStub({});
     const app = buildApp(bridge, {
       tokenConfigured: false,
@@ -495,6 +723,18 @@ describe('workspace memory remember routes', () => {
       .set('X-Qwen-Client-Id', 'missing')
       .expect(400)
       .expect((res) => expect(res.body.code).toBe('invalid_client_id'));
+  });
+
+  it('rejects an invalid forget scope before enqueuing the task', async () => {
+    const bridge = buildBridgeStub({});
+    const app = buildApp(bridge);
+
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference', scope: 'global' })
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_scope'));
+    expect(bridge.forgetCalls).toHaveLength(0);
   });
 
   it('does not expose client-owned task status to other clients', async () => {
@@ -720,6 +960,35 @@ describe('workspace memory remember routes', () => {
     expect(bridge.events).toEqual([]);
   });
 
+  it('does not run a queued task after its runtime generation closes', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    let generationClosed = false;
+    const queued = lane.enqueue({
+      content: 'stale queued task',
+      contextMode: 'workspace',
+      assertGenerationOpen: () => {
+        if (generationClosed) throw new Error('generation closed');
+      },
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    generationClosed = true;
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+
+    await waitFor(() => lane.get(queued.taskId)?.status === 'failed');
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
+  });
+
   it('runs hidden remember tasks serially within the remember lane', async () => {
     const first = deferred<BridgeWorkspaceMemoryRememberResult>();
     const second = deferred<BridgeWorkspaceMemoryRememberResult>();
@@ -749,16 +1018,16 @@ describe('workspace memory remember routes', () => {
 
     first.resolve({
       summary: 'first',
-      filesTouched: [],
-      touchedScopes: [],
+      filesTouched: ['/mem/project/first.md'],
+      touchedScopes: ['project'],
     });
     await waitFor(() => starts.length === 2);
     expect(starts).toEqual(['one', 'two']);
 
     second.resolve({
       summary: 'second',
-      filesTouched: [],
-      touchedScopes: [],
+      filesTouched: ['/mem/project/second.md'],
+      touchedScopes: ['project'],
     });
 
     await request(app)
@@ -769,7 +1038,7 @@ describe('workspace memory remember routes', () => {
       .get(`/workspace/memory/remember/${postTwo.body.taskId}`)
       .expect(200)
       .expect((res) => expect(res.body.status).toBe('completed'));
-    expect(bridge.events).toHaveLength(0);
+    expect(bridge.events).toHaveLength(2);
   });
 
   it('serializes remember, forget, and dream tasks in one lane', async () => {
@@ -818,7 +1087,7 @@ describe('workspace memory remember routes', () => {
     dream.resolve({ touchedTopics: [], dedupedEntries: 0 });
   });
 
-  it('does not publish memory_changed for no-op remember results', async () => {
+  it('fails no-op remember results without publishing memory_changed', async () => {
     const bridge = buildBridgeStub({
       rememberImpl: vi.fn(async () => ({
         summary: 'nothing to save',
@@ -837,7 +1106,15 @@ describe('workspace memory remember routes', () => {
     await request(app)
       .get(`/workspace/memory/remember/${post.body.taskId}`)
       .expect(200)
-      .expect((res) => expect(res.body.status).toBe('completed'));
+      .expect((res) =>
+        expect(res.body).toMatchObject({
+          status: 'failed',
+          error: {
+            code: 'remember_no_update',
+            message: 'Remember agent did not update any memory.',
+          },
+        }),
+      );
     expect(bridge.events).toHaveLength(0);
   });
 
@@ -947,6 +1224,69 @@ describe('workspace memory remember routes', () => {
     expect(bridge.forgetCalls).toHaveLength(0);
     expect(bridge.dreamCalls).toBe(0);
   });
+
+  it('returns runtime unavailable when the generation closes during availability checking', async () => {
+    const availability = deferred<boolean>();
+    const availableImpl = vi.fn(() => availability.promise);
+    const bridge = buildBridgeStub({ availableImpl });
+    let closed = false;
+    const app = buildApp(bridge, undefined, undefined, {
+      captureGenerationAssertion: () => () => {
+        if (closed) {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+    });
+    const responsePromise = request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .then((response) => response);
+    await waitFor(() => availableImpl.mock.calls.length === 1);
+    closed = true;
+    availability.reject(new Error('bridge closed'));
+
+    const response = await responsePromise;
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects untrusted %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        isWorkspaceTrusted: () => false,
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('untrusted_workspace');
+    },
+  );
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects closed-generation %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        captureGenerationAssertion: () => () => {
+          throw new Error('closed');
+        },
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    },
+  );
 
   it('falls back to kind-specific codes when enqueue code extraction throws', async () => {
     mockDebugLogger.warn.mockClear();

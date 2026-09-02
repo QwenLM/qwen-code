@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import type { GrepToolParams } from './grep.js';
 import { GrepTool } from './grep.js';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
@@ -855,11 +857,87 @@ describe('GrepTool', () => {
     });
   });
 
+  describe('search binary arguments', () => {
+    // The pattern reaches git grep and system grep as an argv entry, so a
+    // pattern that begins with a dash is indistinguishable from an option
+    // unless it is introduced by `-e`. `validateToolParams` accepts it --
+    // `new RegExp('-n')` is a perfectly good regex -- so the tool has to be the
+    // one to disambiguate it.
+    const argsFor = (bin: string): string[][] =>
+      vi
+        .mocked(spawn)
+        .mock.calls.filter((call) => call[0] === bin)
+        .map((call) => call[1] as string[]);
+
+    // True only when `b` directly follows `a`, which is what distinguishes the
+    // pattern from the identically-spelled `-n` flag git grep already passes.
+    const hasAdjacent = (args: string[], a: string, b: string): boolean =>
+      args.some((value, i) => value === a && args[i + 1] === b);
+
+    beforeEach(async () => {
+      vi.mocked(spawn).mockClear();
+      // isGitRepository only looks for a .git entry, so this is enough to make
+      // the git grep strategy run before the system grep fallback.
+      await fs.mkdir(path.join(tempRootDir, '.git'), { recursive: true });
+    });
+
+    it.each([['-n'], ['-i'], ['--color']])(
+      'introduces the pattern "%s" with -e for git grep',
+      async (pattern) => {
+        await grepTool.build({ pattern }).execute(abortSignal);
+
+        const calls = argsFor('git');
+        expect(calls).not.toHaveLength(0);
+        for (const args of calls) {
+          expect(hasAdjacent(args, '-e', pattern)).toBe(true);
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([['-n'], ['-i'], ['--color']])(
+      'introduces the pattern "%s" with -e for system grep',
+      async (pattern) => {
+        await grepTool.build({ pattern }).execute(abortSignal);
+
+        const calls = argsFor('grep');
+        expect(calls).not.toHaveLength(0);
+        for (const args of calls) {
+          expect(hasAdjacent(args, '-e', pattern)).toBe(true);
+        }
+      },
+    );
+
+    // Guards against over-correcting: the surrounding argv has to keep its
+    // shape. These assertions hold both before and after the fix.
+    it('leaves the rest of the argument list unchanged', async () => {
+      await grepTool
+        .build({ pattern: 'world', glob: '*.ts' })
+        .execute(abortSignal);
+
+      for (const args of argsFor('git')) {
+        expect(args[0]).toBe('grep');
+        expect(args).toEqual(
+          expect.arrayContaining(['--untracked', '-z', '-E']),
+        );
+        // The glob stays a pathspec, behind the `--` separator.
+        expect(hasAdjacent(args, '--', '*.ts')).toBe(true);
+      }
+      for (const args of argsFor('grep')) {
+        expect(args).toEqual(
+          expect.arrayContaining(['-r', '-n', '-H', '-E', '--null']),
+        );
+        expect(args).toContain('--include=*.ts');
+        // The search path stays the final operand.
+        expect(args[args.length - 1]).toBe('.');
+      }
+    });
+  });
+
   describe('getDescription', () => {
     it('should generate correct description with pattern only', () => {
       const params: GrepToolParams = { pattern: 'testPattern' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path './'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
     });
 
     it('should generate correct description with pattern and glob', () => {
@@ -869,7 +947,7 @@ describe('GrepTool', () => {
       };
       const invocation = grepTool.build(params);
       expect(invocation.getDescription()).toBe(
-        "'testPattern' in path './' (filter: '*.ts')",
+        "'testPattern' in . (filter: '*.ts')",
       );
     });
 
@@ -881,16 +959,15 @@ describe('GrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')}`,
       );
-      expect(invocation.getDescription()).toContain("app'");
     });
 
     it('should indicate searching workspace directory when no path specified', () => {
       const params: GrepToolParams = { pattern: 'testPattern' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path './'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
     });
 
     it('should generate correct description with pattern, glob, and path', async () => {
@@ -902,16 +979,23 @@ describe('GrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')} (filter: '*.ts')`,
       );
-      expect(invocation.getDescription()).toContain("(filter: '*.ts')");
     });
 
-    it('should use ./ for root path in description', () => {
+    it('should use . for root path in description', () => {
       const params: GrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: GrepToolParams = { pattern: 'testPattern', path: outside };
+      const invocation = grepTool.build(params);
+      const description = invocation.getDescription();
+      expect(description).toBe(`'testPattern' in ${tildeifyPath(outside)}`);
     });
   });
 

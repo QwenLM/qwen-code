@@ -6,12 +6,18 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  context as otelContext,
+  createContextKey,
   propagation,
+  ROOT_CONTEXT,
   SpanStatusCode,
   trace,
+  TraceFlags,
+  type Context,
   type Span,
   type Tracer,
 } from '@opentelemetry/api';
+import { W3CTraceContextPropagator } from '@opentelemetry/core';
 
 vi.mock('./sdk.js', () => ({
   isTelemetrySdkInitialized: () => true,
@@ -20,17 +26,38 @@ import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
   addDaemonRequestAttribute,
+  captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
+  runWithDaemonTelemetryContext,
+  setDaemonFallbackPropagator,
   withDaemonSpan,
   withDaemonRequestSpan,
+  type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
+import { getSessionIdFromContext } from './session-context.js';
+
+// Mirror the post-init state: `sdk-impl.ts` injects the W3C fallback
+// propagator once the lazy SDK chunk assembles successfully (this suite
+// mocks `isTelemetrySdkInitialized` as true above, so the holder must be
+// populated the same way the real SDK would).
+setDaemonFallbackPropagator(new W3CTraceContextPropagator());
+
+// vitest transpiles without type-checking: this compile-time assertion keeps
+// the optional parentContext field from silently disappearing (only `tsc`
+// would notice), while the runtime suite guards the behavior it enables.
+type DaemonRequestSpanOptionsExposesParentContext =
+  DaemonRequestSpanOptions extends { parentContext?: Context } ? true : false;
+const daemonRequestSpanOptionsExposesParentContext: DaemonRequestSpanOptionsExposesParentContext = true;
 
 describe('daemon-tracing', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('injects traceparent from the active span without the global propagator', () => {
@@ -150,6 +177,226 @@ describe('daemon-tracing', () => {
     expect(extracted).toBeDefined();
     expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
     expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.traceState?.get('vendor')).toBe(
+      'value',
+    );
+  });
+
+  it('extracts trace context from inbound HTTP traceparent headers', () => {
+    const traceId = '3'.repeat(32);
+    const spanId = '4'.repeat(16);
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `00-${traceId}-${spanId}-01`,
+    });
+
+    expect(extracted).toBeDefined();
+    expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
+    expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.isRemote).toBe(true);
+  });
+
+  it('rejects invalid inbound HTTP traceparent headers', () => {
+    expect(extractDaemonHttpTraceContext(undefined)).toBeUndefined();
+    expect(extractDaemonHttpTraceContext({})).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({ traceparent: 'not-a-traceparent' }),
+    ).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `00-${'0'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects traceparent headers the W3C propagator rejects', () => {
+    // version ff is reserved for future use and always invalid
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `ff-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    // version 00 must not carry the optional future-extension field
+    expect(
+      extractDaemonHttpTraceContext({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01-extra`,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('extracts only the trace id for the telemetry-off log join', () => {
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+    expect(
+      extractInboundTraceId({
+        traceparent: `01-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+    // Acceptance mirrors the vendored W3C propagator: a single optional
+    // whitespace on either edge, and trailing extension fields above
+    // version 00 — so a header joins on both paths or neither.
+    expect(
+      extractInboundTraceId({
+        traceparent: ` 00-${'3'.repeat(32)}-${'4'.repeat(16)}-01 `,
+      }),
+    ).toBe('3'.repeat(32));
+    expect(
+      extractInboundTraceId({
+        traceparent: `01-${'3'.repeat(32)}-${'4'.repeat(16)}-01-future-field`,
+      }),
+    ).toBe('3'.repeat(32));
+  });
+
+  it('rejects invalid headers on the telemetry-off trace id path', () => {
+    expect(extractInboundTraceId(undefined)).toBeUndefined();
+    expect(extractInboundTraceId({})).toBeUndefined();
+    expect(
+      extractInboundTraceId({ traceparent: 'not-a-traceparent' }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'0'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'0'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: `ff-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    // version 00 must not carry extension fields — same as the propagator
+    expect(
+      extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01-extra`,
+      }),
+    ).toBeUndefined();
+    expect(
+      extractInboundTraceId({
+        traceparent: [`00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('yields no parent context until the SDK chunk injects the fallback propagator', async () => {
+    // Fresh module registry: daemon-tracing without the sdk-impl injection.
+    // The global propagator stays a no-op in tests (nothing registers one),
+    // so a valid traceparent resolves to nothing while the fallback holder
+    // is empty — the telemetry-off / SDK-chunk-not-loaded state.
+    vi.resetModules();
+    const fresh = await import('./daemon-tracing.js');
+
+    expect(
+      fresh.extractDaemonHttpTraceContext({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBeUndefined();
+    // The telemetry-off trace id path needs no propagator — that is the
+    // whole point of the plain regex parse.
+    expect(
+      fresh.extractInboundTraceId({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      }),
+    ).toBe('3'.repeat(32));
+    expect(
+      fresh.extractDaemonTraceContext({
+        _meta: {
+          [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-01`,
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts future traceparent versions like the registered W3C propagator', () => {
+    const traceId = '3'.repeat(32);
+    const spanId = '4'.repeat(16);
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `01-${traceId}-${spanId}-01`,
+    });
+
+    expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
+    expect(trace.getSpanContext(extracted!)?.spanId).toBe(spanId);
+    expect(trace.getSpanContext(extracted!)?.isRemote).toBe(true);
+  });
+
+  it('preserves inbound tracestate on the extracted HTTP context', () => {
+    const extracted = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      tracestate: 'vendor=value',
+    });
+
+    expect(trace.getSpanContext(extracted!)?.traceState?.get('vendor')).toBe(
+      'value',
+    );
+  });
+
+  it('forces the sampled flag on inbound HTTP parents under the default sampler', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', '');
+    const forced = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    const forcedContext = trace.getSpanContext(forced!);
+    expect(forcedContext).toBeDefined();
+    expect((forcedContext?.traceFlags ?? 0) & TraceFlags.SAMPLED).toBe(
+      TraceFlags.SAMPLED,
+    );
+    expect(forcedContext?.isRemote).toBe(true);
+    // already-sampled parents keep their flags
+    const sampled = extractDaemonHttpTraceContext({
+      traceparent: `00-${'5'.repeat(32)}-${'6'.repeat(16)}-01`,
+    });
+    const sampledFlags = trace.getSpanContext(sampled!)?.traceFlags ?? 0;
+    expect(sampledFlags & TraceFlags.SAMPLED).toBe(TraceFlags.SAMPLED);
+  });
+
+  it('keeps the caller flags when the sampler config opts out of forcing', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'parentbased_always_off');
+    const alwaysOff = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    expect(trace.getSpanContext(alwaysOff!)?.traceFlags).toBe(0);
+
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'traceidratio');
+    const ratio = extractDaemonHttpTraceContext({
+      traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-00`,
+    });
+    expect(trace.getSpanContext(ratio!)?.traceFlags).toBe(0);
+  });
+
+  it('forces the sampled flag on _meta parents under the default sampler', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', '');
+    const extracted = extractDaemonTraceContext({
+      _meta: {
+        [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-00`,
+      },
+    });
+    expect(
+      (trace.getSpanContext(extracted!)?.traceFlags ?? 0) & TraceFlags.SAMPLED,
+    ).toBe(TraceFlags.SAMPLED);
+  });
+
+  it('keeps the caller flags on the _meta path when the sampler opts out', () => {
+    vi.stubEnv('OTEL_TRACES_SAMPLER', 'parentbased_always_off');
+    const extracted = extractDaemonTraceContext({
+      _meta: {
+        [DAEMON_TRACEPARENT_META_KEY]: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-00`,
+      },
+    });
+    expect(trace.getSpanContext(extracted!)?.traceFlags).toBe(0);
+  });
+
+  it('keeps parentContext on DaemonRequestSpanOptions (type-level guard)', () => {
+    expect(daemonRequestSpanOptionsExposesParentContext).toBe(true);
   });
 
   it('starts a daemon span under an explicit remote parent context', async () => {
@@ -190,6 +437,84 @@ describe('daemon-tracing', () => {
       expect.any(Function),
     );
     expect(span.end).toHaveBeenCalledOnce();
+  });
+
+  it('starts a daemon request span under an extracted HTTP parent context', async () => {
+    const parentContext = extractDaemonHttpTraceContext({
+      traceparent: `00-${'5'.repeat(32)}-${'6'.repeat(16)}-01`,
+    });
+    const span = {
+      setStatus: vi.fn(),
+      end: vi.fn(),
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      recordException: vi.fn(),
+    } as unknown as Span;
+    const startActiveSpan = vi.fn(
+      async (
+        _name: string,
+        _options: unknown,
+        _parent: unknown,
+        fn: (span: Span) => Promise<string>,
+      ) => await fn(span),
+    );
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan,
+    } as unknown as Tracer);
+
+    await expect(
+      withDaemonRequestSpan(
+        {
+          method: 'GET',
+          route: 'GET /daemon/status',
+          parentContext,
+        },
+        async () => 'ok',
+      ),
+    ).resolves.toBe('ok');
+
+    expect(startActiveSpan).toHaveBeenCalledWith(
+      'qwen-code.daemon.request',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          'http.request.method': 'GET',
+        }),
+      }),
+      parentContext!,
+      expect.any(Function),
+    );
+    expect(span.end).toHaveBeenCalledOnce();
+  });
+
+  it('binds an explicit daemon session to the callback context', async () => {
+    const span = {
+      setStatus: vi.fn(),
+      end: vi.fn(),
+    } as unknown as Span;
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan: vi.fn(
+        async (
+          _name: string,
+          _options: unknown,
+          fn: (span: Span) => Promise<string>,
+        ) => await fn(span),
+      ),
+    } as unknown as Tracer);
+    let scopedSessionId: string | undefined;
+    vi.spyOn(otelContext, 'with').mockImplementation(
+      (ctx, fn: () => Promise<string>) => {
+        scopedSessionId = getSessionIdFromContext(ctx);
+        return fn();
+      },
+    );
+
+    await withDaemonSpan(
+      'daemon-session',
+      { 'session.id': 'daemon-session-B' },
+      async () => 'ok',
+    );
+
+    expect(scopedSessionId).toBe('daemon-session-B');
   });
 
   it('strips reserved metadata when no active daemon span exists', () => {
@@ -340,5 +665,40 @@ describe('daemon-tracing', () => {
     expect(() =>
       addDaemonRequestAttribute('qwen-code.prompt_id', 'orphan'),
     ).not.toThrow();
+  });
+
+  it('runs deferred telemetry under the context captured by the request', async () => {
+    const requestContext = ROOT_CONTEXT.setValue(
+      createContextKey('daemon-sse-request'),
+      'request',
+    );
+    const publisherContext = ROOT_CONTEXT.setValue(
+      createContextKey('daemon-publisher'),
+      'publisher',
+    );
+    let activeContext = requestContext;
+    vi.spyOn(otelContext, 'active').mockImplementation(() => activeContext);
+    const withSpy = vi.spyOn(otelContext, 'with');
+
+    const captured = captureDaemonTelemetryContext();
+    activeContext = publisherContext;
+    await runWithDaemonTelemetryContext(captured, async () => undefined);
+
+    expect(withSpy).toHaveBeenCalledWith(requestContext, expect.any(Function));
+  });
+
+  it('bridge telemetry sets attributes on the active span', () => {
+    const setAttributes = vi.fn();
+    vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttributes,
+    } as unknown as Span);
+
+    createDaemonBridgeTelemetry().setActiveSpanAttributes?.({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
+
+    expect(setAttributes).toHaveBeenCalledWith({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
   });
 });

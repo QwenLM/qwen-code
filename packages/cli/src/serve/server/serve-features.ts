@@ -14,7 +14,7 @@ import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 
 export const SERVE_LANGUAGE_CODES = [
@@ -44,14 +44,29 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  currentSessionSchedulingAvailable: boolean;
+  workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
   channelControlAvailable: boolean;
+  channelManagementAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
+  scratchWorkspaceRegistrationAvailable: () => boolean;
+  realtimeVoiceEnabled: () => boolean;
+  standaloneSessionsAvailable?: () => boolean;
+  acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
+  isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
+  getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeFeaturesRuntime {
@@ -69,15 +84,28 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    currentSessionSchedulingAvailable,
+    workspaceGenerationAvailable,
     reloadAvailable,
     channelReloadAvailable,
     channelControlAvailable,
+    channelManagementAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
+    scratchWorkspaceRegistrationAvailable,
+    realtimeVoiceEnabled,
+    standaloneSessionsAvailable,
+    acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
+    workspaceTrustHotReloadAvailable,
   } = deps;
-  const env = deps.env ?? process.env;
+  const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
     cachedVoiceTranscriptionAvailable = undefined;
@@ -86,8 +114,9 @@ export function createServeFeatures(
     cachedVoiceTranscriptionAvailable ??=
       isWorkspaceVoiceTranscriptionAvailable(
         boundWorkspace,
-        env,
-        deps.env !== undefined,
+        getEnv(),
+        deps.env !== undefined || deps.getEnv !== undefined,
+        deps.isPrimaryWorkspaceTrusted?.() ?? true,
       );
     return cachedVoiceTranscriptionAvailable;
   };
@@ -95,8 +124,11 @@ export function createServeFeatures(
   return {
     languageCodes: SERVE_LANGUAGE_CODES,
     invalidateServeFeaturesCache,
-    currentServeFeatures: () =>
-      getAdvertisedServeFeatures(undefined, {
+    currentServeFeatures: () => {
+      const env = getEnv();
+      const currentAcpHttpEnabled =
+        acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
+      return getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:
@@ -111,14 +143,27 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        currentSessionSchedulingAvailable,
+        workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable: channelReloadAvailable(),
         channelControlAvailable,
+        channelManagementAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
+        scratchWorkspaceRegistrationAvailable:
+          scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
-        acpHttpEnabled: resolveAcpHttpEnabled(),
+        nativeDirectoryPickerAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
+        workspaceTrustHotReloadAvailable,
+        acpHttpEnabled: currentAcpHttpEnabled,
+        realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
@@ -130,8 +175,9 @@ export function createServeFeatures(
         // on). A configured token no longer suppresses it — the browser carries
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
-        voiceWsAvailable: resolveAcpHttpEnabled(env),
-      }),
+        voiceWsAvailable: currentAcpHttpEnabled,
+      });
+    },
   };
 }
 
@@ -139,10 +185,15 @@ function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
   env: Readonly<Record<string, string | undefined>>,
   skipLoadEnvironment: boolean,
+  workspaceTrusted: boolean,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace, { skipLoadEnvironment }),
+      loadSettings(boundWorkspace, {
+        skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      }),
       { env },
     );
   } catch (err) {

@@ -9,7 +9,7 @@ import pkg from './package.json' with { type: 'json' };
 const COMPONENT_SCOPE =
   ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
 const COMPONENT_ROOT_SCOPE =
-  ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn])';
+  ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
 
 function scopeComponentCss(css: string): string {
   const root = postcss.parse(css);
@@ -108,10 +108,7 @@ function injectCssModules(): Plugin {
       const escapedCss = JSON.stringify(css);
       for (const item of Object.values(bundle)) {
         if (item.type !== 'chunk') continue;
-        if (
-          !item.isEntry &&
-          !item.facadeModuleId?.endsWith('/client/index.tsx')
-        ) {
+        if (!item.facadeModuleId?.endsWith('/client/index.tsx')) {
           continue;
         }
         item.code =
@@ -128,6 +125,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), injectCssModules()],
   resolve: {
     alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
       '@': resolve(__dirname, './client'),
     },
   },
@@ -137,9 +138,12 @@ export default defineConfig({
   build: {
     emptyOutDir: false,
     lib: {
-      entry: 'client/index.tsx',
+      entry: {
+        index: 'client/index.tsx',
+        'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+      },
       formats: ['es'],
-      fileName: () => 'index.js',
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
       external: [
@@ -153,18 +157,24 @@ export default defineConfig({
         'class-variance-authority',
         'clsx',
         'tailwind-merge',
+        'vaul',
         '@qwen-code/sdk',
         /^@qwen-code\/sdk\//,
-        '@qwen-code/webui',
-        /^@qwen-code\/webui\//,
+        '@datafe-open/markdown-chart',
+        '@datafe-open/markdown-chart-echarts',
+        '@datafe-open/markdown-chart-react',
+        'echarts',
+        /^echarts\//,
         'react-markdown',
+        'remark-cjk-friendly',
+        /^remark-cjk-friendly\//,
         'remark-gfm',
         'remark-math',
         'rehype-katex',
         'shiki',
         'mermaid',
         'katex',
-        /^katex\//,
+        /^katex\/(?!dist\/katex\.min\.css$)/,
         'codemirror',
         /^@codemirror\//,
       ],

@@ -37,6 +37,7 @@ export function isTranscribableVoiceModel(model: AvailableModel): boolean {
   return (
     model.authType === AuthType.USE_OPENAI &&
     model.isRuntimeModel !== true &&
+    model.imageOnly !== true &&
     typeof model.baseUrl === 'string' &&
     model.baseUrl.trim().length > 0
   );

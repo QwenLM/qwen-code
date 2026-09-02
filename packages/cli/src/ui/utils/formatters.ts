@@ -4,16 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const formatMemoryUsage = (bytes: number): string => {
-  const gb = bytes / (1024 * 1024 * 1024);
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${gb.toFixed(2)} GB`;
-};
+// Re-exported from core so the CLI UI, the shell/diagnostics paths in core
+// and the serve daemon all render a byte count identically.
+export { formatMemoryUsage } from '@qwen-code/qwen-code-core';
 
 /**
  * Formats a duration in milliseconds into a concise, human-readable string (e.g., "1h 5s").

@@ -97,6 +97,160 @@ describe('TaskListTool', () => {
     expect(result.llmContent).not.toContain('Pending');
   });
 
+  it('canonicalizes owner filters', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Owned',
+      description: 'desc',
+    });
+    await updateTask(TEAM, t.id, { owner: 'alice' });
+    // Negative control: without it, dropping the owner filter entirely
+    // still passes the positive assertion above.
+    await createTask(TEAM, {
+      subject: 'Unrelated',
+      description: 'desc',
+    }).then((other) => updateTask(TEAM, other.id, { owner: 'bob' }));
+
+    const invocation = tool.build({ owner: 'Alice' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Owned');
+    expect(result.llmContent).not.toContain('Unrelated');
+  });
+
+  it('matches legacy raw-spelled owners against a canonical filter', async () => {
+    const t = await createTask(TEAM, {
+      subject: 'Legacy',
+      description: 'desc',
+    });
+    // Owners persisted before the sanitization landed keep their raw
+    // spelling on disk; the filter must still find them.
+    await updateTask(TEAM, t.id, { owner: 'Bob' });
+
+    const invocation = tool.build({ owner: 'bob' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.llmContent).toContain('Legacy');
+  });
+
+  it('rejects owner filters that sanitize to empty', async () => {
+    const invocation = tool.build({ owner: '!!!' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(String(result.llmContent)).toContain('owner must include');
+  });
+
+  // #9281: blank optional filters must behave like absent filters,
+  // matching how the tool's description/schema present them.
+  describe('blank filters are treated as absent (#9281)', () => {
+    it('treats an empty owner filter as no filter', async () => {
+      await createTask(TEAM, {
+        subject: 'Owned',
+        description: 'desc',
+        owner: 'alice',
+      });
+      await createTask(TEAM, {
+        subject: 'Unowned',
+        description: 'desc',
+      });
+
+      const invocation = tool.build({ owner: '' });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Owned');
+      expect(result.llmContent).toContain('Unowned');
+    });
+
+    it('treats a whitespace-only owner filter as no filter', async () => {
+      await createTask(TEAM, {
+        subject: 'Owned',
+        description: 'desc',
+        owner: 'alice',
+      });
+
+      const invocation = tool.build({ owner: '   ' });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Owned');
+      expect(invocation.getDescription()).toBe('List all tasks');
+    });
+
+    it('treats an empty blockedBy filter as no filter', async () => {
+      await createTask(TEAM, {
+        subject: 'Task A',
+        description: 'desc',
+      });
+
+      const invocation = tool.build({ blockedBy: '' });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Task A');
+    });
+
+    it('treats a whitespace-only blockedBy filter as no filter', async () => {
+      await createTask(TEAM, {
+        subject: 'Task A',
+        description: 'desc',
+      });
+
+      const invocation = tool.build({ blockedBy: '   ' });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Task A');
+      expect(invocation.getDescription()).toBe('List all tasks');
+    });
+
+    it('still filters precisely by a non-empty blockedBy', async () => {
+      const blocker = await createTask(TEAM, {
+        subject: 'Blocker',
+        description: 'desc',
+      });
+      const blocked = await createTask(TEAM, {
+        subject: 'Blocked',
+        description: 'desc',
+      });
+      await createTask(TEAM, {
+        subject: 'Free',
+        description: 'desc',
+      });
+      await updateTask(TEAM, blocked.id, { addBlockedBy: [blocker.id] });
+
+      const invocation = tool.build({ blockedBy: blocker.id });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Blocked');
+      expect(result.llmContent).not.toContain('Blocker');
+      expect(result.llmContent).not.toContain('Free');
+
+      const formatted = tool.build({ blockedBy: ` #${blocker.id} ` });
+      const formattedResult = await formatted.execute(
+        new AbortController().signal,
+      );
+      expect(formattedResult.error).toBeUndefined();
+      expect(formattedResult.llmContent).toContain('Blocked');
+
+      const invalid = await tool
+        .build({ blockedBy: 'task-1' })
+        .execute(new AbortController().signal);
+      expect(invalid.error).toBeDefined();
+    });
+
+    it('rejects a non-blank blockedBy that normalizes to nothing', async () => {
+      await createTask(TEAM, {
+        subject: 'Task A',
+        description: 'desc',
+      });
+
+      // A bare '#' must fail closed like the owner path, not activate
+      // a never-matching '' filter (silent empty board) nor behave as
+      // absent while getDescription() still advertises the filter.
+      for (const blockedBy of ['#', ' #']) {
+        const result = await tool
+          .build({ blockedBy })
+          .execute(new AbortController().signal);
+        expect(result.error).toBeDefined();
+        expect(result.llmContent).toContain('blockedBy');
+      }
+    });
+  });
+
   it('returns TaskListResultDisplay', async () => {
     await createTask(TEAM, {
       subject: 'Task X',

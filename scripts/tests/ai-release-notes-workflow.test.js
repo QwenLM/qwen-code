@@ -12,6 +12,10 @@ const finalizeWorkflow = readFileSync(
   '.github/workflows/finalize-release.yml',
   'utf8',
 );
+const releaseNotesScript = readFileSync(
+  'scripts/generate-release-notes.js',
+  'utf8',
+);
 
 function getStep(workflow, name) {
   const match = new RegExp(
@@ -27,8 +31,25 @@ describe('stable release notes workflow', () => {
   it('publishes immediately with GitHub-generated notes', () => {
     const step = getStep(releaseWorkflow, 'Create GitHub Release and Tag');
 
-    expect(step).toContain('--notes-start-tag "${PREVIOUS_RELEASE_TAG}"');
-    expect(step).toContain('--generate-notes');
+    expect(step).toContain(
+      'repos/${GITHUB_REPOSITORY}/releases/generate-notes',
+    );
+    expect(step).toContain('-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}"');
+    expect(step).toContain('"${NOTES_ARGS[@]}"');
+    expect(step).toContain('--notes-file "${NOTES_FILE}"');
+    // Stable tags live on their own release/* branch and are merged back to
+    // main only afterwards, so the previous tag is never an ancestor of the
+    // branch being released. Anchoring on ancestry dropped the anchor on every
+    // stable release, and unanchored notes span the whole branch history and
+    // overrun the 125000 character body limit.
+    expect(step).not.toContain('git merge-base --is-ancestor');
+    expect(step).toContain('node .github/scripts/cap-release-notes.mjs');
+    expect(step).toContain('--file "${NOTES_FILE}"');
+    // gh prints the API error payload on stdout, so a failed attempt's output
+    // must not survive into the release body.
+    expect(step).toContain(
+      'generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"',
+    );
     expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
@@ -41,12 +62,19 @@ describe('stable release notes workflow', () => {
 
   it('finalizes stable releases asynchronously', () => {
     const validate = getStep(finalizeWorkflow, 'Validate stable release tag');
+    const checkout = getStep(finalizeWorkflow, 'Checkout release branch');
+    const install = getStep(finalizeWorkflow, 'Install Dependencies');
     const generate = getStep(
       finalizeWorkflow,
       'Generate AI-assisted release notes',
     );
     const update = getStep(finalizeWorkflow, 'Update GitHub Release notes');
     const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
+
+    expect(
+      finalizeWorkflow.slice(0, finalizeWorkflow.indexOf('jobs:')),
+    ).not.toContain('CI_BOT_PAT');
+    expect(install).not.toContain('CI_BOT_PAT');
 
     expect(finalizeWorkflow).toContain("types: ['published']");
     expect(finalizeWorkflow).toContain(
@@ -58,8 +86,28 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
-    expect(generate).toContain('timeout-minutes: 15');
+    expect(checkout).toContain('persist-credentials: false');
+    expect(install).toContain(
+      'npm ci --ignore-scripts --no-audit --progress=false',
+    );
+    expect(install).toContain('npm run postinstall');
+    expect(install).toContain('npm run generate');
+    expect(install).not.toContain('QWEN_SKIP_PREPARE');
+    expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
+
+    // The step timeout must exceed the script's internal budget; otherwise
+    // the runner SIGKILLs the step and even the fallback notes are lost.
+    const stepTimeoutMin = Number(
+      generate.match(/timeout-minutes:\s*(\d+)/)[1],
+    );
+    const budgetMs = releaseNotesScript
+      .match(/totalTimeoutMs\s*=\s*([\d_]+)\s*\*\s*([\d_]+)/)
+      .slice(1)
+      .map((part) => Number(part.replace(/_/g, '')))
+      .reduce((a, b) => a * b, 1);
+    expect(stepTimeoutMin * 60_000).toBeGreaterThan(budgetMs);
+
     expect(generate).toContain('GitHub-generated notes');
     expect(generate).toContain('node scripts/generate-release-notes.js');
     expect(update).toContain('continue-on-error: true');
@@ -67,6 +115,11 @@ describe('stable release notes workflow', () => {
       'gh release edit "${RELEASE_TAG}" --notes-file "${RELEASE_NOTES_FILE}"',
     );
     expect(changelog).not.toContain('continue-on-error: true');
+    expect(changelog).toContain("GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
+    expect(changelog).toContain('gh auth setup-git');
+    expect(changelog.indexOf('gh auth setup-git')).toBeLessThan(
+      changelog.indexOf('git push origin "${BRANCH_NAME}"'),
+    );
   });
 
   it('updates the changelog before opening the release PR', () => {
@@ -83,6 +136,22 @@ describe('stable release notes workflow', () => {
     expect(finalizeWorkflow).toContain(
       "name: 'Enable auto-merge for release PR'",
     );
+  });
+
+  it('comments released-in version only for squash-merge PR trailers', () => {
+    const step = getStep(
+      finalizeWorkflow,
+      'Comment released-in version on merged PRs',
+    );
+
+    expect(step).toContain('continue-on-error: true');
+    expect(step).toContain("grep -oE '\\(#[0-9]+\\)$'");
+    expect(step).toContain("tr -d '()#'");
+    expect(step).not.toContain("grep -oE '#[0-9]+'");
+    expect(step).toContain("marker='<!-- qwen-release-comment:v1 -->'");
+    expect(step).toContain('gh pr view "${num}" --json comments');
+    expect(step).toContain('grep -qF "${marker}" <<<"${existing}"');
+    expect(step).toContain('gh pr comment "${num}" --body "${body}"');
   });
 
   it('does not recreate an already merged release PR during retries', () => {

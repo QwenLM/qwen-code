@@ -76,6 +76,11 @@ export interface UsageSummaryRecord {
   };
 }
 
+export interface PreparedUsageBeforeTranscriptDeletion {
+  usagePath: string;
+  record: UsageSummaryRecord;
+}
+
 export type TimeRange = 'today' | 'week' | 'month' | 'all';
 
 export interface AggregatedReport {
@@ -222,6 +227,126 @@ export function metricsToUsageRecord(
   };
 }
 
+/**
+ * Replays a session transcript's `ui_telemetry` records into a usage
+ * summary. Returns null for an empty transcript; `record` is null when the
+ * transcript has no telemetry events (or unparseable timestamps) — the
+ * sessionId is still reported so callers can dedupe by session.
+ *
+ * Single implementation shared by the rebuild migration and the
+ * pre-deletion salvage (#7384) so the two can never drift.
+ */
+function summarizeTranscript(
+  records: ChatRecord[],
+): { sessionId: string; record: UsageSummaryRecord | null } | null {
+  if (records.length === 0) return null;
+  const firstRecord = records[0]!;
+  const sessionId = firstRecord.sessionId;
+  if (!sessionId) return null;
+  const project = firstRecord.cwd;
+
+  const telemetry = new UiTelemetryService();
+  let hasEvents = false;
+  for (const record of records) {
+    if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+      const payload = record.systemPayload as { uiEvent?: UiEvent } | undefined;
+      if (payload?.uiEvent) {
+        telemetry.addEvent(payload.uiEvent);
+        hasEvents = true;
+      }
+    }
+  }
+  if (!hasEvents) return { sessionId, record: null };
+
+  const startTime = new Date(firstRecord.timestamp).getTime();
+  const endTime = new Date(records[records.length - 1]!.timestamp).getTime();
+  if (isNaN(startTime) || isNaN(endTime)) {
+    return { sessionId, record: null };
+  }
+  return {
+    sessionId,
+    record: metricsToUsageRecord(
+      sessionId,
+      project,
+      startTime,
+      endTime,
+      telemetry.getMetrics(),
+    ),
+  };
+}
+
+export async function prepareUsageBeforeTranscriptDeletion(
+  transcriptPath: string,
+): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
+  try {
+    const records = await jsonl.read<ChatRecord>(transcriptPath);
+    const summarized = summarizeTranscript(records);
+    if (!summarized?.record) return null;
+
+    const usagePath = getUsageHistoryPath();
+    try {
+      if (fs.existsSync(usagePath)) {
+        const existing = await jsonl.read<UsageSummaryRecord>(usagePath);
+        if (existing.some((r) => r?.sessionId === summarized.sessionId)) {
+          return null;
+        }
+      }
+    } catch (e) {
+      // Unreadable history: write anyway — the read side dedupes by
+      // sessionId (last-wins), so a duplicate is bounded and preferable to
+      // silently losing the session's usage.
+      debugLogger.debug(
+        `persistUsageBeforeTranscriptDeletion: cannot read history: ${e}`,
+      );
+    }
+    return { usagePath, record: summarized.record };
+  } catch (e) {
+    debugLogger.debug(`prepareUsageBeforeTranscriptDeletion: ${e}`);
+    return null;
+  }
+}
+
+export function commitUsageBeforeTranscriptDeletion(
+  prepared: PreparedUsageBeforeTranscriptDeletion,
+): boolean {
+  try {
+    if (fs.existsSync(prepared.usagePath)) {
+      const alreadyPersisted = fs
+        .readFileSync(prepared.usagePath, 'utf8')
+        .split(/\r?\n/)
+        .some((line) => {
+          const trimmed = line.trim();
+          return (
+            trimmed.length > 0 &&
+            jsonl
+              .parseLineTolerant<UsageSummaryRecord>(
+                trimmed,
+                prepared.usagePath,
+              )
+              .some((record) => record.sessionId === prepared.record.sessionId)
+          );
+        });
+      if (alreadyPersisted) return false;
+    }
+    jsonl.writeLineSync(prepared.usagePath, prepared.record);
+    return true;
+  } catch (e) {
+    debugLogger.debug(`commitUsageBeforeTranscriptDeletion: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Salvages a session's usage before transcript deletion (#7384). Never throws,
+ * and skips sessions that already have a persisted authoritative summary.
+ */
+export async function persistUsageBeforeTranscriptDeletion(
+  transcriptPath: string,
+): Promise<boolean> {
+  const prepared = await prepareUsageBeforeTranscriptDeletion(transcriptPath);
+  return prepared ? commitUsageBeforeTranscriptDeletion(prepared) : false;
+}
+
 interface RebuildFromSessionJsonlOptions {
   /**
    * Session to exclude from the one-time persistence migration (the caller's
@@ -278,7 +403,11 @@ async function rebuildFromSessionJsonl(
     const chatsDir = path.join(projectsDir, projDir, 'chats');
     let files: string[];
     try {
-      files = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.jsonl'));
+      // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
+      // transcript — only real session JSONL files carry usage evidence.
+      files = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
     } catch (e) {
       debugLogger.debug(
         `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
@@ -315,45 +444,12 @@ async function rebuildFromSessionJsonl(
         }
 
         const records = await jsonl.read<ChatRecord>(filePath);
-        if (records.length === 0) continue;
-
-        const firstRecord = records[0]!;
-        const sessionId = firstRecord.sessionId;
-        if (seenSessionIds.has(sessionId)) continue;
-        seenSessionIds.add(sessionId);
-        const project = firstRecord.cwd;
-
-        const telemetry = new UiTelemetryService();
-        let hasEvents = false;
-
-        for (const record of records) {
-          if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-            const payload = record.systemPayload as
-              | { uiEvent?: UiEvent }
-              | undefined;
-            if (payload?.uiEvent) {
-              telemetry.addEvent(payload.uiEvent);
-              hasEvents = true;
-            }
-          }
-        }
-
-        if (!hasEvents) continue;
-
-        const startTime = new Date(firstRecord.timestamp).getTime();
-        const lastRecord = records[records.length - 1]!;
-        const endTime = new Date(lastRecord.timestamp).getTime();
-        if (isNaN(startTime) || isNaN(endTime) || !sessionId) continue;
-
-        results.push(
-          metricsToUsageRecord(
-            sessionId,
-            project,
-            startTime,
-            endTime,
-            telemetry.getMetrics(),
-          ),
-        );
+        const summarized = summarizeTranscript(records);
+        if (!summarized) continue;
+        if (seenSessionIds.has(summarized.sessionId)) continue;
+        seenSessionIds.add(summarized.sessionId);
+        if (!summarized.record) continue;
+        results.push(summarized.record);
       } catch (e) {
         debugLogger.debug(
           `rebuildFromSessionJsonl: failed to process ${file}: ${e}`,

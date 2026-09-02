@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AnyToolInvocation } from '../index.js';
+import type { AnyDeclarativeTool, AnyToolInvocation } from '../tools/tools.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
-import { doesToolInvocationMatch } from './tool-utils.js';
+import { isTool } from './is-tool.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -19,6 +19,72 @@ import {
 import { accessSync, constants as fsConstants } from 'node:fs';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
+
+/**
+ * Checks if a tool invocation matches any of a list of patterns.
+ *
+ * @param toolOrToolName The tool object or the name of the tool being invoked.
+ * @param invocation The invocation object for the tool.
+ * @param patterns A list of patterns to match against.
+ *   Patterns can be:
+ *   - A tool name (e.g., "ReadFileTool") to match any invocation of that tool.
+ *   - A tool name with a prefix (e.g., "ShellTool(git status)") to match
+ *     invocations where the arguments start with that prefix.
+ * @returns True if the invocation matches any pattern, false otherwise.
+ */
+export function doesToolInvocationMatch(
+  toolOrToolName: AnyDeclarativeTool | string,
+  invocation: AnyToolInvocation,
+  patterns: string[],
+): boolean {
+  let toolNames: string[];
+  if (isTool(toolOrToolName)) {
+    toolNames = [toolOrToolName.name, toolOrToolName.constructor.name];
+  } else {
+    toolNames = [toolOrToolName as string];
+  }
+
+  if (toolNames.some((name) => SHELL_TOOL_NAMES.includes(name))) {
+    toolNames = [...new Set([...toolNames, ...SHELL_TOOL_NAMES])];
+  }
+
+  for (const pattern of patterns) {
+    const openParen = pattern.indexOf('(');
+
+    if (openParen === -1) {
+      // No arguments, just a tool name
+      if (toolNames.includes(pattern)) {
+        return true;
+      }
+      continue;
+    }
+
+    const patternToolName = pattern.substring(0, openParen);
+    if (!toolNames.includes(patternToolName)) {
+      continue;
+    }
+
+    if (!pattern.endsWith(')')) {
+      continue;
+    }
+
+    const argPattern = pattern.substring(openParen + 1, pattern.length - 1);
+
+    if (
+      'command' in invocation.params &&
+      toolNames.includes('run_shell_command')
+    ) {
+      const argValue = String(
+        (invocation.params as { command: string }).command,
+      );
+      if (argValue === argPattern || argValue.startsWith(argPattern + ' ')) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 /**
  * An identifier for the shell type.
@@ -210,6 +276,10 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let inBackticks = false;
   let substitutionDepth = 0;
+  // Quote state of each enclosing level, saved on `$(` and restored on the
+  // matching `)`, so a substitution body's quotes cannot leak outwards and the
+  // surrounding quotes cannot mask the body's closing paren.
+  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -231,7 +301,12 @@ export function splitCommands(command: string): string[] {
       continue;
     }
 
-    if (char === '\\' && i < command.length - 1) {
+    // Inside single quotes the shell treats a backslash as a literal
+    // character — it escapes nothing, so `'a\'` closes the quote. Consuming
+    // the following character here would keep the parser "inside" the quote
+    // and swallow every separator to the end of the line, hiding whole
+    // commands from the permission checks that consume these segments.
+    if (!inSingleQuotes && char === '\\' && i < command.length - 1) {
       currentCommand += char + command[i + 1];
       i += 2;
       continue;
@@ -245,25 +320,39 @@ export function splitCommands(command: string): string[] {
       char === '$' &&
       nextChar === '('
     ) {
+      // A substitution body is quoted independently of its surroundings, so
+      // save the enclosing quote state and start the body unquoted. `"$(...)"`
+      // is the common case: the double quote belongs to the outer command and
+      // must not make the body's `)` look quoted.
+      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      inSingleQuotes = false;
+      inDoubleQuotes = false;
       substitutionDepth++;
       currentCommand += '$(';
       i += 2;
       continue;
-    } else if (!inBackticks && substitutionDepth > 0 && char === ')') {
-      substitutionDepth--;
     } else if (
       !inBackticks &&
-      substitutionDepth === 0 &&
-      char === "'" &&
+      substitutionDepth > 0 &&
+      char === ')' &&
+      !inSingleQuotes &&
       !inDoubleQuotes
     ) {
+      // A quoted `)` inside the body is data, not the closing paren. Closing
+      // on it ended the substitution early and left the body's closing quote
+      // to flip the parser into "in quote" state, which then swallowed every
+      // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
+      // came back as one segment with `rm` nowhere in it.
+      const enclosing = quoteStack.pop();
+      inSingleQuotes = enclosing?.single ?? false;
+      inDoubleQuotes = enclosing?.double ?? false;
+      substitutionDepth--;
+    } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
+      // Tracked at every depth, not just the top level: without this the
+      // quotes inside a substitution body are invisible and the `)` guard
+      // above has nothing to test.
       inSingleQuotes = !inSingleQuotes;
-    } else if (
-      !inBackticks &&
-      substitutionDepth === 0 &&
-      char === '"' &&
-      !inSingleQuotes
-    ) {
+    } else if (!inBackticks && char === '"' && !inSingleQuotes) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 
@@ -325,6 +414,68 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
+ * A parameter expansion standing in command position — `$VAR`, `"$VAR"`,
+ * `${VAR}`, `"${VAR:-default}"`, `${VAR-default}` — resolved the way the shell
+ * will resolve it at execution time.
+ *
+ * Without this, such a command had NO identifiable root: the tokenizer turns
+ * the expansion into a non-string (or empty) token, `getCommandRoot` returns
+ * undefined, and the shell tool hard-refuses the command before any approval
+ * mode is consulted — including YOLO. Dogfooded live: the bundled /review
+ * skill invokes every command as `"${QWEN_CODE_CLI:-qwen}" review …`, and each
+ * run opened with "Could not identify command root to obtain permission from
+ * user" until the model hand-resolved the variable itself.
+ *
+ * Resolution mirrors POSIX: `:-` substitutes the default when the variable is
+ * unset OR empty; `-` only when unset. Quoting then decides what happens,
+ * exactly as it does in the shell. A QUOTED expansion is one word: empty means
+ * an empty command name, which has nothing to name and stays refusable. An
+ * UNQUOTED expansion field-splits: an empty result is REMOVED and the next
+ * token is the command (`$VAR printf OK` with VAR unset runs `printf`), and a
+ * multi-word value's FIRST field is the command (`$VAR OK` with
+ * VAR='/usr/bin/env printf' runs `env`). The environment consulted is this
+ * process's own, which is what the spawned shell inherits.
+ */
+const PARAMETER_EXPANSION_COMMAND =
+  /^("?)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))\1$/;
+
+function resolveLeadingParameterExpansion(command: string): string | undefined {
+  let rest = command;
+  // Leading env assignments come first (`FOO=1 "${BAR:-baz}" …`), exactly as
+  // the plain-token path below skips them.
+  while (true) {
+    const t = takeLeadingToken(rest);
+    if (!t || !isEnvAssignmentToken(t.token)) break;
+    rest = t.rest;
+  }
+  const head = takeLeadingToken(rest);
+  if (!head) return undefined;
+  const m = PARAMETER_EXPANSION_COMMAND.exec(head.token);
+  if (!m) return undefined;
+  const quoted = m[1] === '"';
+  const name = (m[2] ?? m[5]) as string;
+  const op = m[3];
+  const value = process.env[name];
+  const useDefault =
+    op === undefined ? false : op === ':-' ? !value : value === undefined;
+  const resolved = useDefault
+    ? stripSymmetricQuotes(m[4] ?? '').value
+    : (value ?? '');
+  if (quoted) {
+    // One word, splitting suppressed — empty is an empty command name.
+    return resolved || undefined;
+  }
+  // Unquoted: the shell field-splits the expansion before command lookup.
+  const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
+  if (fields.length === 0) {
+    // The empty expansion is removed; the command is whatever follows it.
+    const next = head.rest.trim();
+    return next ? getCommandRoot(next) : undefined;
+  }
+  return fields[0];
+}
+
+/**
  * Extracts the root command from a given shell command string.
  * Skips leading env var assignments (VAR=value) so that
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
@@ -333,6 +484,11 @@ export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
+  }
+
+  const expanded = resolveLeadingParameterExpansion(trimmedCommand);
+  if (expanded !== undefined) {
+    return expanded.split(/[\\/]/).pop();
   }
 
   try {
@@ -1734,6 +1890,23 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
+        }
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
+        }
+        if (
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
+        ) {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -1772,6 +1945,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1799,12 +1980,13 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
 
 /**
  * Single dual-check predicate: does the command contain shell command
@@ -1895,7 +2077,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }

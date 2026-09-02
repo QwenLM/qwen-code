@@ -10,11 +10,26 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { serveCommand, maybeOpenWebShellBrowser } from './serve.js';
+import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockApplyOpenWithAuth = vi.hoisted(() =>
+  vi.fn((options: { token?: string }) => {
+    options.token ??= 'generated-token';
+  }),
+);
+const mockQr = vi.hoisted(() => ({
+  generate: vi.fn(
+    (
+      _input: string,
+      _opts?: { small: boolean },
+      callback?: (qrcode: string) => void,
+    ) => callback?.('QR'),
+  ),
+  setErrorLevel: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -24,8 +39,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     shouldLaunchBrowser: mockShouldLaunchBrowser,
   };
 });
+vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
+}));
+vi.mock('../serve/open-with-auth.js', () => ({
+  applyOpenWithAuth: mockApplyOpenWithAuth,
 }));
 
 function buildParser(): Argv {
@@ -35,6 +54,31 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('documents the complete IPv4 loopback range', async () => {
+    // Remove whitespace before checking so a long option name forcing yargs
+    // to wrap the description does not split the CIDR literal across lines.
+    expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
+      '127.0.0.0/8',
+    );
+  });
+
+  it('defaults authenticated open to disabled', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['open-with-auth']).toBe(false);
+  });
+
+  it('parses standalone --open-with-auth', () => {
+    const parsed = buildParser().parseSync('--open-with-auth');
+    expect(parsed['open']).toBe(false);
+    expect(parsed['open-with-auth']).toBe(true);
+  });
+
+  it('allows redundant --open with --open-with-auth', () => {
+    const parsed = buildParser().parseSync('--open --open-with-auth');
+    expect(parsed['open']).toBe(true);
+    expect(parsed['open-with-auth']).toBe(true);
+  });
+
   it('parses --enable-session-shell', () => {
     const parsed = buildParser().parseSync('--enable-session-shell');
     expect(parsed['enable-session-shell']).toBe(true);
@@ -43,6 +87,11 @@ describe('serve command args', () => {
   it('defaults direct session shell to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['enable-session-shell']).toBe(false);
+  });
+
+  it('defaults max sessions to 32', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-sessions']).toBe(32);
   });
 
   it('accepts --experimental-lsp in strict parser mode', () => {
@@ -69,9 +118,49 @@ describe('serve command args', () => {
     expect(parsed['max-total-sessions']).toBe(42);
   });
 
+  it('parses --initialize-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync('--initialize-timeout-ms 30000');
+    expect(parsed['initialize-timeout-ms']).toBe(30000);
+  });
+
+  it('parses --session-restore-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--session-restore-timeout-ms 60000',
+    );
+    expect(parsed['session-restore-timeout-ms']).toBe(60000);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --initialize-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['initialize-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --session-restore-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['session-restore-timeout-ms']).toBeUndefined();
+  });
+
+  it('defaults external tool guarding to off', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['external-tool-guard-mode']).toBe('off');
+  });
+
+  it('parses required external tool guard options', () => {
+    const parsed = buildParser().parseSync(
+      '--external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+    expect(parsed['external-tool-guard-mode']).toBe('required');
+    expect(parsed['external-tool-guard-endpoint']).toBe(
+      'http://127.0.0.1:8787',
+    );
+    expect(parsed['external-tool-guard-timeout-ms']).toBe(2500);
   });
 
   it('parses --experimental-lsp for daemon child opt-in', () => {
@@ -98,6 +187,82 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('--open')['open']).toBe(true);
   });
 
+  it('leaves the journal caps undefined unless the operator pins them', () => {
+    // Adaptive growth is disabled only for PINNED caps: yargs defaults here
+    // would make every unpinned boot look pinned and silently disable it.
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-journal-events']).toBeUndefined();
+    expect(parsed['max-journal-bytes']).toBeUndefined();
+    expect(
+      buildParser().parseSync('--max-journal-events 5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes 1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
+  it('rejects valueless journal cap flags instead of silently unpinning', () => {
+    // Presence pins the caps and disables adaptive growth; without nargs a
+    // bare flag parses as undefined and the pin never reaches runQwenServe.
+    for (const input of [
+      '--max-journal-events',
+      '--max-journal-bytes',
+      '--no-web --max-journal-events',
+      '--max-journal-events --max-journal-bytes',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: max-journal-(events|bytes)/,
+      );
+    }
+    expect(
+      buildParser().parseSync('--max-journal-events=5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes=1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
+  it('parses --local-control without taking over daemon credentials', () => {
+    expect(buildParser().parseSync('')['local-control']).toBe(false);
+    expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');
+    expect(
+      buildParser().parseSync('--allow-origin http://localhost:3000')[
+        'allow-origin'
+      ],
+    ).toEqual(['http://localhost:3000']);
+    expect(buildParser().parseSync('--local-control')['local-control']).toBe(
+      true,
+    );
+    const composed = buildParser().parseSync(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+    expect(composed['token']).toBe('fixed');
+    expect(composed['allow-origin']).toEqual(['http://localhost:3000']);
+    expect(composed['port']).toBe(0);
+    expect(() => buildParser().parseSync('--local-control --no-web')).toThrow(
+      /Local Control requires the Web Shell/,
+    );
+    expect(() =>
+      buildParser().parseSync('--local-control --hostname 192.168.1.2'),
+    ).toThrow(/Local Control requires --hostname 127\.0\.0\.1/);
+    expect(() =>
+      buildParser().parseSync('--local-control-address 192.168.1.2'),
+    ).toThrow(/requires --local-control/);
+    expect(
+      buildParser().parseSync(
+        '--local-control --local-control-address 192.168.1.2',
+      )['local-control-address'],
+    ).toBe('192.168.1.2');
+  });
+
   it('parses repeatable --channel values', () => {
     const parsed = buildParser().parseSync(
       '--channel telegram --channel feishu',
@@ -118,6 +283,22 @@ describe('serve command args', () => {
     );
 
     expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
+
+  it('parses --memory-project-scope and rejects unsupported values', () => {
+    expect(
+      buildParser().parseSync('--memory-project-scope workspace')[
+        'memory-project-scope'
+      ],
+    ).toBe('workspace');
+    expect(
+      buildParser().parseSync('--memory-project-scope git-root')[
+        'memory-project-scope'
+      ],
+    ).toBe('git-root');
+    expect(() =>
+      buildParser().parseSync('--memory-project-scope unsupported'),
+    ).toThrow(/Invalid values/);
   });
 
   it('rejects valueless --workspace forms', () => {
@@ -180,6 +361,9 @@ describe('serve rate limit env parsing', () => {
     });
   }
 
+  // Call this at most once per test: it waits on `toHaveBeenCalled()`, which a
+  // previous call in the same test already satisfies, so a second invocation
+  // returns before its own args land and assertions read the first call's.
   async function startServeHandlerWithArgs(args: string) {
     const handler = serveCommand.handler;
     if (!handler) throw new Error('serve handler missing');
@@ -230,6 +414,291 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('applies authenticated open before the yargs path starts the daemon', async () => {
+    let tokenAtBoot: string | undefined;
+    mockRunQwenServe.mockImplementationOnce(
+      async (options: { token?: string }) => {
+        tokenAtBoot = options.token;
+        return {
+          url: 'http://127.0.0.1:4170/',
+          webShellMounted: true,
+          runtimeReady: Promise.resolve(),
+          resolvedToken: 'generated-token',
+        };
+      },
+    );
+
+    await startServeHandlerWithArgs('--open-with-auth');
+
+    expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
+    expect(tokenAtBoot).toBe('generated-token');
+  });
+
+  it('prints the authenticated manual URL on the yargs headless path', async () => {
+    mockShouldLaunchBrowser.mockReturnValue(false);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      resolvedToken: 'generated-token',
+    });
+
+    await startServeHandlerWithArgs('--open-with-auth');
+    await vi.waitFor(() =>
+      expect(stderrWrites.join('')).toContain(
+        'http://127.0.0.1:4170/#token=generated-token',
+      ),
+    );
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+  });
+
+  it('omits the journal caps for an unpinned boot so adaptive growth stays enabled', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).not.toHaveProperty('maxJournalEvents');
+    expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards pinned journal caps to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --max-journal-events 5000 --max-journal-bytes 1048576',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxJournalEvents: 5000,
+        maxJournalBytes: 1048576,
+      }),
+    );
+  });
+
+  it('forwards a single pinned entry cap without the byte cap', async () => {
+    // The two conditional spreads are independent; pinning ONE flag must
+    // forward it alone. Coupling them would silently drop the pinned cap.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-events 5000');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalEvents: 5000 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalBytes',
+    );
+  });
+
+  it('forwards a single pinned byte cap without the entry cap', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-bytes 1048576');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalBytes: 1048576 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalEvents',
+    );
+  });
+
+  it('delegates Local Control to the daemon service and prints its pairing URL', async () => {
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'https://192.168.1.20/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: true,
+      encrypted: true,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --open --port 443 --tls-cert cert.pem --tls-key key.pem',
+    );
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        hostname: '127.0.0.1',
+        token: undefined,
+      }),
+    );
+    expect(options).not.toHaveProperty('strictPort');
+    expect(enable).toHaveBeenCalledWith({});
+    expect(mockQr.setErrorLevel).toHaveBeenCalledWith('Q');
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'https://192.168.1.20/#token=pairing',
+      { small: true },
+      expect.any(Function),
+    );
+    expect(stdoutWrites.join('')).toContain('Local Control is on');
+    expect(stdoutWrites.join('')).toContain('Sleep is inhibited');
+    expect(stdoutWrites.join('')).toContain('Traffic is encrypted');
+    await vi.waitFor(() =>
+      expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+        'https://127.0.0.1/',
+      ),
+    );
+  });
+
+  it('keeps Local Control pairing separate from the temporary primary token', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing-token',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      resolvedToken: 'generated-token',
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs('--local-control --open-with-auth');
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'generated-token' }),
+    );
+    expect(mockQr.generate).toHaveBeenCalledWith(
+      'http://192.168.1.20:4170/#token=pairing-token',
+      { small: true },
+      expect.any(Function),
+    );
+    expect(mockQr.generate).not.toHaveBeenCalledWith(
+      expect.stringContaining('generated-token'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('forwards --token and --allow-origin through to runQwenServe with --local-control', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'https://127.0.0.1/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getLocalControl: () => ({
+        enable: vi.fn().mockResolvedValue({
+          active: true,
+          url: 'http://192.168.1.20:4170/#token=pairing',
+          interfaceName: 'en0',
+          sleepInhibited: false,
+          encrypted: false,
+        }),
+      }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
+    );
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        token: 'fixed',
+        allowOrigins: ['http://localhost:3000'],
+      }),
+    );
+  });
+
+  it('closes the daemon when pairing output fails', async () => {
+    const close = vi.fn().mockRejectedValue(new Error('close failed'));
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockQr.generate.mockImplementationOnce(() => {
+      throw new Error('QR failed');
+    });
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://192.168.1.20:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(stderrWrites.join('')).toContain('QR failed');
+    expect(stderrWrites.join('')).not.toContain('close failed');
+  });
+
+  it('closes Local Control when the authenticated Web Shell is unavailable', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4170/',
+      webShellMounted: false,
+      runtimeReady: Promise.resolve(),
+      close,
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(mockQr.generate).not.toHaveBeenCalled();
+  });
+
   it('passes normalized named channels to runQwenServe', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
@@ -275,6 +744,128 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
     );
+  });
+
+  it('passes --memory-project-scope to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --memory-project-scope git-root');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryProjectScope: 'git-root' }),
+    );
+  });
+
+  it('passes required guard config and keeps its token daemon-local', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'http://127.0.0.1:8787',
+          token: 'guard-secret',
+          timeoutMs: 2500,
+        },
+      }),
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('does not pass a provider when mode is off even if config exists', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-endpoint http://127.0.0.1:8787',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'externalToolGuard',
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('passes --memory-pressure-mode to runQwenServe', async () => {
+    // Without this, deleting the `memoryPressureMode` line in the handler
+    // leaves every other suite green: the fast path parses the flag in its
+    // own module, and the status builder supplies the same default itself.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --memory-pressure-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'off' }),
+    );
+  });
+
+  it('passes --child-heap-mode to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'off' }),
+    );
+  });
+
+  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'observe' }),
+    );
+    // `enforce` is not a value yet, and boot must say so rather than accept
+    // it: applying the partition needs an observation this daemon cannot make.
+    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+      /Invalid values/,
+    );
+  });
+
+  it('defaults the memory pressure mode to observe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'observe' }),
+    );
+  });
+
+  it('rejects a memory pressure mode outside the choices', () => {
+    expect(() =>
+      buildParser().parseSync('--memory-pressure-mode enforce'),
+    ).toThrow(/Invalid values/);
   });
 
   it('passes --channel all as an all-channel selection', async () => {
@@ -347,6 +938,30 @@ describe('maybeOpenWebShellBrowser', () => {
     expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 
+  it('prints a fragment URL for authenticated open in headless environments', async () => {
+    mockShouldLaunchBrowser.mockReturnValue(false);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).toContain(
+      'http://127.0.0.1:4170/#token=temporary-secret',
+    );
+  });
+
   it('rewrites a wildcard bind host to loopback', async () => {
     await maybeOpenWebShellBrowser(
       { url: 'http://0.0.0.0:4170/', webShellMounted: true },
@@ -400,179 +1015,215 @@ describe('maybeOpenWebShellBrowser', () => {
       ),
     ).resolves.toBeUndefined();
   });
+
+  it('prints the authenticated URL when browser launch fails', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('boom'));
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+
+    await maybeOpenWebShellBrowser(
+      {
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: true,
+        resolvedToken: 'temporary-secret',
+      },
+      true,
+      true,
+    );
+
+    expect(stderrWrites.join('')).toContain(
+      'Please open this URL manually: ' +
+        'http://127.0.0.1:4170/#token=temporary-secret',
+    );
+  });
 });
 
 describe('serve startup import boundary', () => {
-  it('reaches listening through the dev entrypoint without loading interactive Ink internals first', async () => {
-    const workspace = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-')),
-    );
-    const qwenHome = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-home-')),
-    );
-    const root = path.resolve(process.cwd(), '../..');
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      QWEN_CODE_NO_RELAUNCH: '1',
-      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
-      QWEN_HOME: qwenHome,
-      QWEN_RUNTIME_DIR: workspace,
-      QWEN_SERVE_RATE_LIMIT: '0',
-    };
-    delete childEnv['VITEST_WORKER_ID'];
-    const child = spawn(
-      process.execPath,
-      [
-        path.join(root, 'scripts/dev.js'),
-        'serve',
-        '--port',
-        '0',
-        '--hostname',
-        '127.0.0.1',
-        '--workspace',
-        workspace,
-        '--no-web',
-        '--no-open',
-        '--rate-limit-prompt',
-        '0',
-        '--rate-limit-window-ms',
-        '1',
-      ],
-      {
-        cwd: root,
-        detached: process.platform !== 'win32',
-        env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+  const ecs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-');
+  const startupMs = ecs ? 60_000 : 30_000;
+  const testMs = ecs ? 70_000 : 40_000;
 
-    let stdout = '';
-    let stderr = '';
-    let childExited = false;
-    const exited = new Promise<void>((resolve) => {
-      child.once('exit', () => {
-        childExited = true;
-        resolve();
-      });
-    });
-    const waitForExit = (ms: number) =>
-      Promise.race([
-        exited,
-        new Promise<'timeout'>((resolve) => setTimeout(resolve, ms, 'timeout')),
-      ]);
-    const cleanup = async () => {
-      if (child.pid === undefined) return;
-      const childPid = child.pid;
-      const signalProcessTree = (signal: NodeJS.Signals) => {
-        if (process.platform === 'win32') {
-          spawnSync('taskkill', ['/pid', String(childPid), '/T', '/F']);
-          return;
-        }
-        process.kill(-childPid, signal);
+  it(
+    'reaches listening through the dev entrypoint without loading interactive Ink internals first',
+    async () => {
+      const workspace = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-')),
+      );
+      const qwenHome = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-home-')),
+      );
+      const root = path.resolve(process.cwd(), '../..');
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        QWEN_CODE_NO_RELAUNCH: '1',
+        QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+        QWEN_HOME: qwenHome,
+        QWEN_RUNTIME_DIR: workspace,
+        QWEN_SERVE_RATE_LIMIT: '0',
       };
-      try {
-        signalProcessTree('SIGTERM');
-      } catch {
-        // Process may have already exited.
-      }
-      if (!childExited) {
-        await waitForExit(2_000);
-      }
-      if (process.platform !== 'win32') {
+      delete childEnv['VITEST_WORKER_ID'];
+      const child = spawn(
+        process.execPath,
+        [
+          path.join(root, 'scripts/dev.js'),
+          'serve',
+          '--port',
+          '0',
+          '--hostname',
+          '127.0.0.1',
+          '--workspace',
+          workspace,
+          '--no-web',
+          '--no-open',
+          '--rate-limit-prompt',
+          '0',
+          '--rate-limit-window-ms',
+          '1',
+        ],
+        {
+          cwd: root,
+          detached: process.platform !== 'win32',
+          env: childEnv,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+
+      let stdout = '';
+      let stderr = '';
+      let childExited = false;
+      const exited = new Promise<void>((resolve) => {
+        child.once('exit', () => {
+          childExited = true;
+          resolve();
+        });
+      });
+      const waitForExit = (ms: number) =>
+        Promise.race([
+          exited,
+          new Promise<'timeout'>((resolve) =>
+            setTimeout(resolve, ms, 'timeout'),
+          ),
+        ]);
+      const cleanup = async () => {
+        if (child.pid === undefined) return;
+        const childPid = child.pid;
+        const signalProcessTree = (signal: NodeJS.Signals) => {
+          if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/pid', String(childPid), '/T', '/F']);
+            return;
+          }
+          process.kill(-childPid, signal);
+        };
         try {
-          signalProcessTree('SIGKILL');
+          signalProcessTree('SIGTERM');
         } catch {
           // Process may have already exited.
         }
         if (!childExited) {
           await waitForExit(2_000);
         }
-      }
-    };
-    const removeTempDir = async (dir: string) => {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          fs.rmSync(dir, { recursive: true, force: true });
-          return;
-        } catch (err) {
-          if (attempt === 4) throw err;
+        if (process.platform !== 'win32') {
+          try {
+            signalProcessTree('SIGKILL');
+          } catch {
+            // Process may have already exited.
+          }
+          if (!childExited) {
+            await waitForExit(2_000);
+          }
+        }
+      };
+      const removeTempDir = async (dir: string) => {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true });
+            return;
+          } catch (err) {
+            if (attempt === 4) throw err;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+      };
+      const processGroupHasMembers = (pgid: number): boolean => {
+        if (process.platform === 'win32') return false;
+        const result = spawnSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
+          encoding: 'utf8',
+        });
+        if (result.status !== 0) return false;
+        return result.stdout
+          .split(/\s+/)
+          .some((pid) => pid.length > 0 && Number(pid) > 0);
+      };
+      const waitForProcessGroupExit = async (pgid: number) => {
+        if (process.platform === 'win32') return;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          if (!processGroupHasMembers(pgid)) return;
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
-      }
-    };
-    const processGroupHasMembers = (pgid: number): boolean => {
-      if (process.platform === 'win32') return false;
-      const result = spawnSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
-        encoding: 'utf8',
-      });
-      if (result.status !== 0) return false;
-      return result.stdout
-        .split(/\s+/)
-        .some((pid) => pid.length > 0 && Number(pid) > 0);
-    };
-    const waitForProcessGroupExit = async (pgid: number) => {
-      if (process.platform === 'win32') return;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        if (!processGroupHasMembers(pgid)) return;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      throw new Error(`serve process group ${pgid} did not exit`);
-    };
+        throw new Error(`serve process group ${pgid} did not exit`);
+      };
 
-    try {
-      const reachedListening = await new Promise<boolean>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          void cleanup();
-          reject(
-            new Error(
-              `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-            ),
-          );
-        }, 15_000);
+      try {
+        const reachedListening = await new Promise<boolean>(
+          (resolve, reject) => {
+            const timeout = setTimeout(() => {
+              void cleanup();
+              reject(
+                new Error(
+                  `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                ),
+              );
+            }, startupMs);
 
-        child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString('utf8');
-          if (stdout.includes('qwen serve listening on')) {
-            clearTimeout(timeout);
-            void cleanup();
-            resolve(true);
-          }
-        });
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString('utf8');
-          if (
-            stderr.includes('ERR_PACKAGE_PATH_NOT_EXPORTED') ||
-            stderr.includes('ink/dom') ||
-            stderr.includes('ink/components/CursorContext')
-          ) {
-            clearTimeout(timeout);
-            void cleanup();
-            reject(new Error(stderr));
-          }
-        });
-        child.on('error', (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-        child.on('exit', (code, signal) => {
-          if (stdout.includes('qwen serve listening on')) return;
-          clearTimeout(timeout);
-          reject(
-            new Error(
-              `serve exited before listening: code=${code} signal=${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-            ),
-          );
-        });
-      });
+            child.stdout.on('data', (chunk: Buffer) => {
+              stdout += chunk.toString('utf8');
+              if (stdout.includes('qwen serve listening on')) {
+                clearTimeout(timeout);
+                void cleanup();
+                resolve(true);
+              }
+            });
+            child.stderr.on('data', (chunk: Buffer) => {
+              stderr += chunk.toString('utf8');
+              if (
+                stderr.includes('ERR_PACKAGE_PATH_NOT_EXPORTED') ||
+                stderr.includes('ink/dom') ||
+                stderr.includes('ink/components/CursorContext')
+              ) {
+                clearTimeout(timeout);
+                void cleanup();
+                reject(new Error(stderr));
+              }
+            });
+            child.on('error', (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            });
+            child.on('exit', (code, signal) => {
+              if (stdout.includes('qwen serve listening on')) return;
+              clearTimeout(timeout);
+              reject(
+                new Error(
+                  `serve exited before listening: code=${code} signal=${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                ),
+              );
+            });
+          },
+        );
 
-      expect(reachedListening).toBe(true);
-    } finally {
-      await cleanup();
-      if (child.pid !== undefined) {
-        await waitForProcessGroupExit(child.pid);
+        expect(reachedListening).toBe(true);
+      } finally {
+        await cleanup();
+        if (child.pid !== undefined) {
+          await waitForProcessGroupExit(child.pid);
+        }
+        await removeTempDir(workspace);
+        await removeTempDir(qwenHome);
       }
-      await removeTempDir(workspace);
-      await removeTempDir(qwenHome);
-    }
-  }, 20_000);
+    },
+    testMs,
+  );
 });

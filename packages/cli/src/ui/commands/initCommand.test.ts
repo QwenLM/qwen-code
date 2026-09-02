@@ -7,6 +7,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import React from 'react';
 import { initCommand } from './initCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { type CommandContext } from './types.js';
@@ -35,7 +36,7 @@ describe('initCommand', () => {
   let mockContext: CommandContext;
   const targetDir = '/test/dir';
   const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
-  const geminiMdPath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
+  const memoryFilePath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
 
   beforeEach(() => {
     // Create a fresh mock context for each test
@@ -73,6 +74,23 @@ describe('initCommand', () => {
     expect(fs.writeFileSync).not.toHaveBeenCalled();
   });
 
+  it(`should preserve ${DEFAULT_CONTEXT_FILENAME} if the confirmation prompt cannot be built`, async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('# Existing content');
+    vi.spyOn(React, 'createElement').mockImplementationOnce(() => {
+      throw new Error('prompt unavailable');
+    });
+
+    const result = await initCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: `Unexpected error preparing ${DEFAULT_CONTEXT_FILENAME}: prompt unavailable`,
+    });
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
   it(`should create ${DEFAULT_CONTEXT_FILENAME} and submit a prompt if it does not exist`, async () => {
     // Arrange: Simulate that the file does not exist
     vi.mocked(fs.existsSync).mockReturnValue(false);
@@ -81,7 +99,7 @@ describe('initCommand', () => {
     const result = await initCommand.action!(mockContext, '');
 
     // Assert: Check that writeFileSync was called correctly
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
 
     // Assert: Check that an informational message was added to the UI
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
@@ -109,7 +127,7 @@ describe('initCommand', () => {
 
     const result = await initCommand.action!(mockContext, '');
 
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
     expect(result).toEqual(
       expect.objectContaining({
         type: 'submit_prompt',
@@ -127,7 +145,7 @@ describe('initCommand', () => {
     const result = await initCommand.action!(mockContext, '');
 
     // Assert: Check that writeFileSync was called correctly
-    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(fs.writeFileSync).toHaveBeenCalledWith(memoryFilePath, '', 'utf8');
 
     // Assert: Check that an informational message was added to the UI
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(

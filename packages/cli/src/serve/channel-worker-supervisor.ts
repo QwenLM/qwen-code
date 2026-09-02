@@ -1,7 +1,14 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { channelSelectionNames } from './channel-selection.js';
+import {
+  ExtraCaInspectionError,
+  extractCertificateBlocks,
+} from './pem-certificate-blocks.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
@@ -18,6 +25,7 @@ import {
   CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
   CHANNEL_WORKER_STOP_GRACE_MS,
 } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
@@ -27,6 +35,16 @@ import {
   type ChannelWebhookAccepted,
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
+import {
+  CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  ChannelDeliveryError,
+  createChannelDeliveryMessage,
+  isChannelDeliveryResultMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
+  type ChannelDeliveryAccepted,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from '../runtime/channel-delivery-ipc.js';
 import {
   createWorkerDiagnosticRedactor,
   normalizeWorkerDiagnostic,
@@ -40,8 +58,22 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelAdapterSnapshot,
   type ChannelStartupFailure,
 } from './channel-worker-startup-ipc.js';
+import {
+  registerChannelWorkerPromptAuthorization,
+  revokeChannelWorkerPromptAuthorization,
+} from './channel-worker-prompt-authorization.js';
+import {
+  CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS,
+  createChannelLoopMcpRequest,
+  isChannelLoopMcpControlMessage,
+  isChannelLoopMcpResultMessage,
+  MAX_CHANNEL_LOOP_MCP_IN_FLIGHT,
+  type ChannelLoopMcpControlMessage,
+  type ChannelLoopMcpIpcSend,
+} from './channel-loop-mcp-ipc.js';
 
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
@@ -119,6 +151,7 @@ export interface ChannelWorkerSnapshot {
   staleHeartbeatAt?: string;
   startupFailures?: ChannelStartupFailure[];
   startupFailuresTruncated?: boolean;
+  adapters?: ChannelAdapterSnapshot[];
 }
 
 export interface ChannelWorkerSupervisor {
@@ -132,6 +165,9 @@ export interface ChannelWorkerSupervisor {
   restart(): Promise<ChannelWorkerSnapshot>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
+  deliverChannelMessage?(
+    request: ChannelDeliveryRequest,
+  ): Promise<ChannelDeliveryAccepted>;
   enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
 }
 
@@ -193,6 +229,22 @@ export interface CreateChannelWorkerSupervisorOptions {
    * daemon base env.
    */
   workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
+  /**
+   * PEM cert the worker must additionally trust when calling the daemon
+   * over a self-signed TLS listener, injected as their `NODE_EXTRA_CA_CERTS`.
+   *
+   * With no operator CA set this is handed over as a PATH, and Node re-reads
+   * it at every (re)spawn — while the daemon keeps serving the bytes it read
+   * at boot. Rotating this file in place without restarting the daemon
+   * therefore leaves respawned workers trusting the NEW contents against the
+   * OLD served cert, and they restart-loop until the daemon restarts. An
+   * operator CA gives no cover: `resolveWorkerCaCertPath` stamps BOTH sources,
+   * so rotating this file in place invalidates the merged bundle and rebuilds
+   * it from the NEW contents — the same restart loop. Either way, rotating
+   * `--tls-cert` requires a daemon restart; see the HTTPS / TLS notes in
+   * docs/users/qwen-serve.md.
+   */
+  tlsCaCertPath?: string;
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
   onExit?: (snapshot: ChannelWorkerSnapshot) => void;
@@ -200,6 +252,15 @@ export interface CreateChannelWorkerSupervisorOptions {
   onLog?: (entry: ChannelWorkerLogEntry) => void;
   restartPolicy?: ChannelWorkerRestartPolicy;
   heartbeatTimeoutMs?: number;
+  registerChannelLoopMcp?: (request: {
+    sessionId: string;
+    ownerId: string;
+    sendMessage: (payload: unknown) => Promise<unknown>;
+  }) => Promise<void>;
+  unregisterChannelLoopMcp?: (
+    sessionId: string,
+    ownerId: string,
+  ) => Promise<void>;
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
@@ -334,19 +395,276 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
   return snapshot.exitCode !== undefined || snapshot.signal !== undefined;
 }
 
+const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
+
+/**
+ * Merged bundles keyed by `${operatorCaPath}\0${daemonCertPath}`. Workers are
+ * respawned on every restart, so without this the daemon would mint a fresh
+ * bundle directory per spawn and leak all of them.
+ */
+const mergedWorkerCaBundles = new Map<string, MergedWorkerCaBundle>();
+
+interface MergedWorkerCaBundle {
+  bundlePath: string;
+  /** `${mtimeMs}:${size}` of each source file, in merge order. */
+  sourceStamps: readonly string[];
+}
+
+function sourceStamp(filePath: string): string {
+  const stat = fs.statSync(filePath);
+  return `${stat.mtimeMs}:${stat.size}`;
+}
+
+/**
+ * Path pairs already warned about, keyed the way `mergedWorkerCaBundles` is.
+ * Every fallback branch returns without caching, `launch()` rebuilds the env
+ * on every 'initial' and 'restart' spawn, and `process.emitWarning` does not
+ * dedup identical text — so without this a crash-looping worker appends one
+ * identical multi-line warning per restart, burying the very log stream the
+ * operator reads to diagnose the loop.
+ */
+const warnedWorkerCaMergeFallbacks = new Set<string>();
+
+/**
+ * The coarse reason a merge fell back, so a CHANGED failure mode re-warns once
+ * while a crash loop stays deduped. `reason` itself carries errno text and
+ * would let a flapping message defeat the dedup entirely; the paths alone
+ * swallowed the second, now-accurate diagnosis (`ENOENT` before a mount
+ * appears, then a DER export afterwards sends the operator to fix mounts).
+ */
+const WORKER_CA_MERGE_FALLBACK_FAMILIES = [
+  'read-error',
+  'inspection-failed',
+  'no-operator-blocks',
+  'no-daemon-blocks',
+] as const;
+
+type WorkerCaMergeFallbackFamily =
+  (typeof WORKER_CA_MERGE_FALLBACK_FAMILIES)[number];
+
+function workerCaMergeFallbackKey(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
+): string {
+  return `${operatorCaPath}\0${daemonCertPath}\0${family}`;
+}
+
+function warnWorkerCaMergeFallback(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
+  reason: string,
+): void {
+  const key = workerCaMergeFallbackKey(operatorCaPath, daemonCertPath, family);
+  if (warnedWorkerCaMergeFallbacks.has(key)) return;
+  warnedWorkerCaMergeFallbacks.add(key);
+  // Falling back to the daemon cert alone silently drops the operator CA
+  // the merge above exists to preserve, and Node says nothing when the
+  // remaining cert loads fine — so say it here.
+  process.emitWarning(
+    `qwen: failed to merge ${NODE_EXTRA_CA_CERTS_ENV} "${operatorCaPath}" ` +
+      `with the daemon cert "${daemonCertPath}": ${reason}; channel ` +
+      `workers will trust only the daemon cert`,
+  );
+}
+
+/**
+ * Bundle directories minted this process, cleaned up together. One
+ * `process.once('exit')` per mint accumulated a listener, a closure and an
+ * orphaned directory per rebuild — and the merge cache is rebuilt on purpose
+ * (in-place operator CA rotation, tmp-cleaner aging), so a long-lived daemon
+ * crossed Node's `MaxListenersExceededWarning` threshold and printed that
+ * leak warning into the very log stream `warnWorkerCaMergeFallback` dedups to
+ * keep readable.
+ */
+const mintedWorkerCaBundleDirs = new Set<string>();
+let workerCaBundleExitHookRegistered = false;
+
+function cleanupWorkerCaBundleDir(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort: a tmp cleaner may already have taken it.
+  }
+}
+
+function writeMergedWorkerCaBundle(contents: string): string {
+  // mkdtempSync gives a 0700 directory with a random suffix, so the bundle
+  // path cannot be pre-planted the way a fixed `qwen-worker-ca-<pid>.pem` in
+  // the shared tmpdir can (CWE-377/CWE-59: a pre-planted symlink redirects
+  // the write, a pre-planted regular file keeps attacker ownership and mode
+  // while receiving the cert — the private key too, for a combined PEM).
+  // Same defence as standalone-update.ts's extract dir.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worker-ca-'));
+  // Nothing else references this directory, so the daemon owns its lifetime —
+  // and it owns it from the moment it exists, not from the moment the write
+  // succeeds. A throw at the write (ENOSPC/EDQUOT on a size-capped tmpfs
+  // /tmp: the directory entry fits, the ~2 KB body does not) lands in
+  // `resolveWorkerCaCertPath`'s read-error fallback, which returns the daemon
+  // cert and never unwinds this. Registering afterwards left every failing
+  // respawn one more untracked 0700 directory that the exit hook — which
+  // walks the registry and nothing else — could not see.
+  mintedWorkerCaBundleDirs.add(dir);
+  if (!workerCaBundleExitHookRegistered) {
+    workerCaBundleExitHookRegistered = true;
+    process.once('exit', cleanupMintedWorkerCaBundleDirs);
+  }
+  const bundlePath = path.join(dir, 'ca-bundle.pem');
+  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
+  return bundlePath;
+}
+
+/**
+ * Removes every merged-bundle directory this process minted and empties the
+ * registry, returning the directories it swept. This is the `exit` hook's
+ * whole body, named so a test can run it: nothing else observes process exit,
+ * so the registration, the sweep and the reset were all unpinned, and what it
+ * swept is what makes "a superseded bundle leaves the registry" observable.
+ */
+export function cleanupMintedWorkerCaBundleDirs(): string[] {
+  const swept = [...mintedWorkerCaBundleDirs];
+  for (const minted of swept) {
+    cleanupWorkerCaBundleDir(minted);
+  }
+  mintedWorkerCaBundleDirs.clear();
+  return swept;
+}
+
+export function resolveWorkerCaCertPath(
+  daemonCertPath: string,
+  existing: string | undefined,
+): string {
+  if (!existing || existing === daemonCertPath) return daemonCertPath;
+  const cacheKey = `${existing}\0${daemonCertPath}`;
+  const sources = [existing, daemonCertPath];
+  const cached = mergedWorkerCaBundles.get(cacheKey);
+  if (cached) {
+    try {
+      // Two ways a hit goes stale, both ending in workers that restart-loop
+      // while the daemon stays green: the operator rotates their CA file in
+      // place (before this bundle existed a respawned worker read that file
+      // live), and an external tmp cleaner ages out the bundle directory,
+      // leaving the cache pointing at a dead path. Re-stat both ends.
+      fs.statSync(cached.bundlePath);
+      if (
+        sources.every((src, i) => sourceStamp(src) === cached.sourceStamps[i])
+      ) {
+        return cached.bundlePath;
+      }
+    } catch {
+      // Unreadable source or vanished bundle: rebuild below.
+    }
+    // No eviction here on purpose. Control always reaches the rebuild below,
+    // which overwrites this key on success, and every future hit re-stats the
+    // bundle and re-compares both stamps before returning it — so a stale
+    // entry can never be handed out, and deleting it changes no observable
+    // behaviour. The rebuild itself is pinned by the rotation and tmp-cleaner
+    // tests.
+  }
+  try {
+    const sourceStamps = sources.map(sourceStamp);
+    // NODE_EXTRA_CA_CERTS takes a single file; merge so an operator-set CA
+    // (e.g. corporate proxy) keeps working alongside the daemon cert. A
+    // merely *readable* operator file is not enough — one Node's loader
+    // rejects takes the daemon cert down with it, which is strictly worse
+    // than the fallback below.
+    const operatorBlocks = extractCertificateBlocks(
+      fs.readFileSync(existing, 'utf8'),
+      existing,
+    );
+    if (!operatorBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'no-operator-blocks',
+        // Three causes reject a file, not one: markers, decoding, and DER.
+        // Blaming markers alone tells an operator whose CA is truncated or
+        // hand-edited to fix lines that are already correct — and after boot
+        // this warning is the only diagnostic they get, so it has to name the
+        // same three the boot-time check does.
+        'it holds no PEM certificate block Node can load (every ' +
+          '-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ' +
+          'line and every block must decode, and a DER file is never read ' +
+          'at all)',
+      );
+      return daemonCertPath;
+    }
+    const daemonBlocks = extractCertificateBlocks(
+      fs.readFileSync(daemonCertPath, 'utf8'),
+      daemonCertPath,
+    );
+    if (!daemonBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'no-daemon-blocks',
+        'the daemon cert holds no PEM certificate block to merge into',
+      );
+      return daemonCertPath;
+    }
+    const bundlePath = writeMergedWorkerCaBundle(
+      `${[...operatorBlocks, ...daemonBlocks].join('\n')}\n`,
+    );
+    const superseded = mergedWorkerCaBundles.get(cacheKey);
+    mergedWorkerCaBundles.set(cacheKey, { bundlePath, sourceStamps });
+    if (superseded) {
+      // This rebuild orphaned the previous bundle; the exit hook would hold
+      // one per rotation until the daemon stops.
+      const dir = path.dirname(superseded.bundlePath);
+      mintedWorkerCaBundleDirs.delete(dir);
+      cleanupWorkerCaBundleDir(dir);
+    }
+    // The merge works again, so a LATER failure of the same pair is new
+    // information — without this, the first failure's key silenced it forever
+    // and the workers restart-looped with no diagnostic at all.
+    for (const family of WORKER_CA_MERGE_FALLBACK_FAMILIES) {
+      warnedWorkerCaMergeFallbacks.delete(
+        workerCaMergeFallbackKey(existing, daemonCertPath, family),
+      );
+    }
+    return bundlePath;
+  } catch (err) {
+    warnWorkerCaMergeFallback(
+      existing,
+      daemonCertPath,
+      // An inspection that could not run blames nothing about the file's
+      // contents; sharing the read-error family would let a first ENOENT
+      // silence the later, now-accurate inspection-failure diagnosis.
+      err instanceof ExtraCaInspectionError
+        ? 'inspection-failed'
+        : 'read-error',
+      err instanceof Error ? err.message : String(err),
+    );
+    return daemonCertPath;
+  }
+}
+
 function createWorkerEnv(opts: {
   daemonUrl: string;
   daemonToken?: string;
   workspace: string;
   baseEnv?: Readonly<NodeJS.ProcessEnv>;
+  tlsCaCertPath?: string;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+  // Marks the worker (and the ACP children it spawns) as daemon-spawned so
+  // the ACP channel fallback reports channel=daemon in usage statistics
+  // (see cli/src/config/acp-channel-fallback.ts).
+  env['QWEN_CODE_SERVE'] = '1';
+  if (opts.tlsCaCertPath) {
+    env[NODE_EXTRA_CA_CERTS_ENV] = resolveWorkerCaCertPath(
+      opts.tlsCaCertPath,
+      env[NODE_EXTRA_CA_CERTS_ENV],
+    );
+  }
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
   delete env[QWEN_SERVER_TOKEN_ENV];
   delete env[QWEN_DAEMON_TOKEN_ENV];
+  delete env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   if (opts.daemonToken) {
     env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
   }
@@ -453,6 +771,7 @@ export function createChannelWorkerSupervisor(
     );
   }
   let child: ChannelWorkerChild | undefined;
+  let activePromptAuthorization: string | undefined;
   let snapshot: ChannelWorkerSnapshot = {
     enabled: true,
     state: 'disabled',
@@ -471,6 +790,23 @@ export function createChannelWorkerSupervisor(
       timer: NodeJS.Timeout;
     }
   >();
+  const pendingChannelDeliveries = new Map<
+    string,
+    {
+      resolve: (accepted: ChannelDeliveryAccepted) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  const pendingChannelLoopMcpMessages = new Map<
+    string,
+    {
+      resolve: (payload: unknown) => void;
+      reject: (error: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  let cleanupChannelLoopMcpRegistrations: (() => void) | undefined;
   let restarting: Promise<ChannelWorkerSnapshot> | undefined;
   let disposed = false;
 
@@ -486,6 +822,9 @@ export function createChannelWorkerSupervisor(
             ...failure,
           })),
         }
+      : {}),
+    ...(snapshot.adapters
+      ? { adapters: snapshot.adapters.map((adapter) => ({ ...adapter })) }
       : {}),
   });
 
@@ -544,6 +883,69 @@ export function createChannelWorkerSupervisor(
           code,
           message.error || 'Channel webhook task failed.',
         ),
+      );
+    }
+    return true;
+  };
+
+  const rejectPendingChannelDeliveries = (
+    code: ChannelDeliveryErrorCode,
+    message: string,
+  ) => {
+    for (const pending of pendingChannelDeliveries.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new ChannelDeliveryError(code, message));
+    }
+    pendingChannelDeliveries.clear();
+  };
+
+  const rejectPendingChannelDelivery = (id: string, error: Error) => {
+    const pending = pendingChannelDeliveries.get(id);
+    if (!pending) return;
+    pendingChannelDeliveries.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  };
+
+  const settleChannelDelivery = (message: unknown): boolean => {
+    if (!isChannelDeliveryResultMessage(message)) return false;
+    const pending = pendingChannelDeliveries.get(message.id);
+    if (!pending) return true;
+    if (message.ok) {
+      pendingChannelDeliveries.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve({ delivered: true });
+    } else {
+      rejectPendingChannelDelivery(
+        message.id,
+        new ChannelDeliveryError(
+          message.code,
+          message.error || 'Channel delivery failed.',
+        ),
+      );
+    }
+    return true;
+  };
+
+  const rejectPendingChannelLoopMcpMessages = (message: string) => {
+    for (const pending of pendingChannelLoopMcpMessages.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    pendingChannelLoopMcpMessages.clear();
+  };
+
+  const settleChannelLoopMcpMessage = (message: unknown): boolean => {
+    if (!isChannelLoopMcpResultMessage(message)) return false;
+    const pending = pendingChannelLoopMcpMessages.get(message.id);
+    if (!pending) return true;
+    pendingChannelLoopMcpMessages.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.ok) {
+      pending.resolve(message.payload ?? {});
+    } else {
+      pending.reject(
+        new Error(message.error ?? 'Channel loop MCP request failed.'),
       );
     }
     return true;
@@ -664,7 +1066,20 @@ export function createChannelWorkerSupervisor(
       workspace: opts.workspace,
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
+      ...(opts.tlsCaCertPath ? { tlsCaCertPath: opts.tlsCaCertPath } : {}),
     });
+    const promptAuthorization = env[CHANNEL_DAEMON_WORKER_SENTINEL]!;
+    registerChannelWorkerPromptAuthorization(
+      promptAuthorization,
+      opts.workspace,
+    );
+    activePromptAuthorization = promptAuthorization;
+    const revokePromptAuthorization = () => {
+      revokeChannelWorkerPromptAuthorization(promptAuthorization);
+      if (activePromptAuthorization === promptAuthorization) {
+        activePromptAuthorization = undefined;
+      }
+    };
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
     const requestedChannels = requestedChannelNames(opts.selection);
     const startedAt = new Date().toISOString();
@@ -673,6 +1088,14 @@ export function createChannelWorkerSupervisor(
       state: 'starting',
       channels: channelSelectionNames(opts.selection),
       ...(requestedChannels ? { requestedChannels } : {}),
+      ...(requestedChannels
+        ? {
+            adapters: requestedChannels.map((name) => ({
+              name,
+              state: 'starting' as const,
+            })),
+          }
+        : {}),
       startedAt,
       restartCount: snapshot.restartCount ?? 0,
       ...(snapshot.lastExitAt ? { lastExitAt: snapshot.lastExitAt } : {}),
@@ -702,6 +1125,7 @@ export function createChannelWorkerSupervisor(
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
     } catch (err) {
+      revokePromptAuthorization();
       const message = err instanceof Error ? err.message : String(err);
       const error = sanitizeWorkerError(message, redaction);
       if (kind === 'initial') {
@@ -728,6 +1152,67 @@ export function createChannelWorkerSupervisor(
     if (startedChild.pid !== undefined) {
       snapshot = { ...snapshot, pid: startedChild.pid };
     }
+
+    const channelLoopMcpOwnerId = `channel-worker:${randomUUID()}`;
+    const registeredChannelLoopMcpSessions = new Set<string>();
+    const activeChannelLoopMcpControls = new Set<string>();
+    const sendToStartedChild: ChannelLoopMcpIpcSend = (message, callback) => {
+      if (child !== startedChild || !startedChild.send) {
+        throw new Error('Channel worker IPC is unavailable.');
+      }
+      return callback
+        ? startedChild.send.call(startedChild, message, callback)
+        : startedChild.send.call(startedChild, message);
+    };
+    const sendChannelLoopMcpMessage = (
+      sessionId: string,
+      payload: unknown,
+    ): Promise<unknown> => {
+      if (
+        pendingChannelLoopMcpMessages.size >= MAX_CHANNEL_LOOP_MCP_IN_FLIGHT
+      ) {
+        return Promise.reject(new Error('Channel loop MCP IPC queue is full.'));
+      }
+      const message = createChannelLoopMcpRequest(sessionId, payload);
+      return new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingChannelLoopMcpMessages.delete(message.id);
+          reject(new Error('Channel loop MCP IPC timed out.'));
+        }, CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingChannelLoopMcpMessages.set(message.id, {
+          resolve,
+          reject,
+          timer,
+        });
+        try {
+          sendToStartedChild(message, (error) => {
+            if (!error) return;
+            const pending = pendingChannelLoopMcpMessages.get(message.id);
+            if (!pending) return;
+            pendingChannelLoopMcpMessages.delete(message.id);
+            clearTimeout(pending.timer);
+            pending.reject(new Error('Channel loop MCP IPC send failed.'));
+          });
+        } catch {
+          const pending = pendingChannelLoopMcpMessages.get(message.id);
+          if (!pending) return;
+          pendingChannelLoopMcpMessages.delete(message.id);
+          clearTimeout(pending.timer);
+          pending.reject(new Error('Channel loop MCP IPC send failed.'));
+        }
+      });
+    };
+    const cleanupLaunchChannelLoopMcpRegistrations = () => {
+      for (const sessionId of registeredChannelLoopMcpSessions) {
+        void opts
+          .unregisterChannelLoopMcp?.(sessionId, channelLoopMcpOwnerId)
+          .catch(() => {});
+      }
+      registeredChannelLoopMcpSessions.clear();
+    };
+    cleanupChannelLoopMcpRegistrations =
+      cleanupLaunchChannelLoopMcpRegistrations;
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -881,6 +1366,15 @@ export function createChannelWorkerSupervisor(
         snapshot = {
           ...snapshot,
           startupFailures: [...(snapshot.startupFailures ?? []), failure],
+          adapters: snapshot.adapters?.map((adapter) =>
+            adapter.name === failure.channel
+              ? {
+                  name: adapter.name,
+                  state: 'error' as const,
+                  error: failure.message,
+                }
+              : adapter,
+          ),
         };
         acknowledgeStartupReport();
       };
@@ -909,6 +1403,24 @@ export function createChannelWorkerSupervisor(
         if (message.requestedChannels?.length) {
           next.requestedChannels = [...message.requestedChannels];
         }
+        const adapterNames = message.requestedChannels?.length
+          ? message.requestedChannels
+          : (next.requestedChannels ?? next.channels);
+        const connected = new Set(next.channels);
+        const failures = new Map(
+          next.startupFailures?.map((failure) => [failure.channel, failure]),
+        );
+        next.adapters = adapterNames.map((name) => {
+          if (connected.has(name)) {
+            return { name, state: 'connected' as const };
+          }
+          const failure = failures.get(name);
+          return {
+            name,
+            state: 'error' as const,
+            ...(failure ? { error: failure.message } : {}),
+          };
+        });
         snapshot = next;
         armStaleHeartbeatTimer(startedChild);
         notifyReady(opts.onReady, snapshotCopy());
@@ -928,9 +1440,95 @@ export function createChannelWorkerSupervisor(
         };
         armStaleHeartbeatTimer(startedChild);
       };
+      const sendChannelLoopMcpControlResult = (
+        id: string,
+        result: { ok: true } | { ok: false; error: string },
+      ) => {
+        try {
+          sendToStartedChild({
+            type: 'channel_loop_mcp_control_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // The worker request owns the timeout when IPC is already closed.
+        }
+      };
+      const handleChannelLoopMcpControl = (
+        message: ChannelLoopMcpControlMessage,
+      ) => {
+        if (
+          activeChannelLoopMcpControls.size >= MAX_CHANNEL_LOOP_MCP_IN_FLIGHT
+        ) {
+          sendChannelLoopMcpControlResult(message.id, {
+            ok: false,
+            error: 'Channel loop MCP IPC queue is full.',
+          });
+          return;
+        }
+        activeChannelLoopMcpControls.add(message.id);
+        const operation =
+          message.type === 'channel_loop_mcp_register'
+            ? (opts
+                .registerChannelLoopMcp?.({
+                  sessionId: message.sessionId,
+                  ownerId: channelLoopMcpOwnerId,
+                  sendMessage: (payload) =>
+                    sendChannelLoopMcpMessage(message.sessionId, payload),
+                })
+                .then(async () => {
+                  if (child !== startedChild) {
+                    await opts.unregisterChannelLoopMcp?.(
+                      message.sessionId,
+                      channelLoopMcpOwnerId,
+                    );
+                    throw new Error('Channel worker exited during MCP setup.');
+                  }
+                  registeredChannelLoopMcpSessions.add(message.sessionId);
+                }) ??
+              Promise.reject(
+                new Error('Channel loop MCP registration is unavailable.'),
+              ))
+            : (opts
+                .unregisterChannelLoopMcp?.(
+                  message.sessionId,
+                  channelLoopMcpOwnerId,
+                )
+                .then(() => {
+                  registeredChannelLoopMcpSessions.delete(message.sessionId);
+                }) ?? Promise.resolve());
+        void operation
+          .then(() => {
+            sendChannelLoopMcpControlResult(message.id, { ok: true });
+          })
+          .catch((error: unknown) => {
+            sendChannelLoopMcpControlResult(message.id, {
+              ok: false,
+              error:
+                sanitizeWorkerDiagnostic(
+                  error instanceof Error ? error.message : String(error),
+                  512,
+                  redaction,
+                ) || 'Channel loop MCP operation failed.',
+            });
+          })
+          .finally(() => {
+            activeChannelLoopMcpControls.delete(message.id);
+          });
+      };
       function handleMessage(message: unknown) {
         if (child !== startedChild) return;
+        if (settleChannelDelivery(message)) {
+          return;
+        }
         if (settleWebhookTask(message)) {
+          return;
+        }
+        if (settleChannelLoopMcpMessage(message)) {
+          return;
+        }
+        if (isChannelLoopMcpControlMessage(message)) {
+          handleChannelLoopMcpControl(message);
           return;
         }
         if (!ready && isChannelStartupReportType(message)) {
@@ -943,6 +1541,7 @@ export function createChannelWorkerSupervisor(
       }
       function settleExit(code: number | null, signal: NodeJS.Signals | null) {
         if (child !== startedChild) return;
+        revokePromptAuthorization();
         exitObserved = true;
         cleanupLaunch();
         const state = ready ? 'exited' : 'failed';
@@ -958,6 +1557,18 @@ export function createChannelWorkerSupervisor(
           'channel_worker_unavailable',
           'Channel worker exited.',
         );
+        rejectPendingChannelDeliveries(
+          'channel_worker_unavailable',
+          'Channel worker exited.',
+        );
+        rejectPendingChannelLoopMcpMessages('Channel worker exited.');
+        cleanupLaunchChannelLoopMcpRegistrations();
+        if (
+          cleanupChannelLoopMcpRegistrations ===
+          cleanupLaunchChannelLoopMcpRegistrations
+        ) {
+          cleanupChannelLoopMcpRegistrations = undefined;
+        }
         child = undefined;
         if ((ready || kind === 'restart') && !stopping) {
           scheduleRestart();
@@ -1036,6 +1647,11 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
+      rejectPendingChannelLoopMcpMessages('Channel worker stopped.');
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1093,6 +1709,13 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
+      rejectPendingChannelLoopMcpMessages('Channel worker stopped.');
+      cleanupChannelLoopMcpRegistrations?.();
+      cleanupChannelLoopMcpRegistrations = undefined;
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1108,6 +1731,10 @@ export function createChannelWorkerSupervisor(
       clearRestartTimer();
       clearStaleHeartbeatTimer();
       stopping = true;
+      if (activePromptAuthorization) {
+        revokeChannelWorkerPromptAuthorization(activePromptAuthorization);
+        activePromptAuthorization = undefined;
+      }
       child.kill('SIGKILL');
       child = undefined;
       if (!preserveFailure) {
@@ -1120,6 +1747,64 @@ export function createChannelWorkerSupervisor(
     },
     snapshot() {
       return snapshotCopy();
+    },
+    async deliverChannelMessage(request) {
+      const startedChild = child;
+      if (!startedChild || snapshot.state !== 'running') {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker is not running.',
+        );
+      }
+      const send = startedChild.send;
+      if (!send) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker IPC send failed.',
+        );
+      }
+      if (pendingChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT) {
+        throw new ChannelDeliveryError(
+          'channel_delivery_queue_full',
+          'Channel delivery queue is full.',
+        );
+      }
+      const message = createChannelDeliveryMessage(request);
+      return await new Promise<ChannelDeliveryAccepted>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingChannelDeliveries.delete(message.id);
+          reject(
+            new ChannelDeliveryError(
+              'channel_delivery_timeout',
+              'Channel delivery IPC timed out.',
+            ),
+          );
+        }, CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingChannelDeliveries.set(message.id, { resolve, reject, timer });
+        try {
+          send.call(startedChild, message, (error) => {
+            if (!error) return;
+            rejectPendingChannelDelivery(
+              message.id,
+              new ChannelDeliveryError(
+                'channel_worker_unavailable',
+                `Channel worker IPC send failed: ${error.message}`,
+              ),
+            );
+          });
+        } catch (error) {
+          rejectPendingChannelDelivery(
+            message.id,
+            new ChannelDeliveryError(
+              'channel_worker_unavailable',
+              `Channel worker IPC send failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
+      });
     },
     async enqueueWebhookTask(task) {
       const startedChild = child;

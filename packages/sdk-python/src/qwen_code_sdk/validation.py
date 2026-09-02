@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import get_args
 from uuid import RFC_4122, UUID
 
 from .errors import ValidationError
 from .types import (
+    AuthType,
+    Effort,
+    PermissionMode,
     QueryOptions,
     _validate_can_use_tool_callable,
     _validate_stderr_callable,
 )
 
-_VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
-_VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
-_VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+_VALID_PERMISSION_MODES = set(get_args(PermissionMode))
+_VALID_AUTH_TYPES = set(get_args(AuthType))
+_VALID_EFFORTS = set(get_args(Effort))
 
 
 _RESERVED_CLI_FLAGS = frozenset(
@@ -87,19 +91,19 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError(
             f"Invalid permission_mode: {options.permission_mode!r}. "
-            "Expected one of: default, plan, auto-edit, yolo."
+            f"Expected one of: {', '.join(get_args(PermissionMode))}."
         )
 
     if options.auth_type and options.auth_type not in _VALID_AUTH_TYPES:
         raise ValidationError(
             f"Invalid auth_type: {options.auth_type!r}. "
-            "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
+            f"Expected one of: {', '.join(get_args(AuthType))}."
         )
 
     if options.effort and options.effort not in _VALID_EFFORTS:
         raise ValidationError(
             f"Invalid effort: {options.effort!r}. "
-            "Expected one of: low, medium, high, xhigh, max."
+            f"Expected one of: {', '.join(get_args(Effort))}."
         )
 
     _validate_optional_callable(options.can_use_tool, _validate_can_use_tool_callable)
@@ -135,9 +139,7 @@ def validate_query_options(options: QueryOptions) -> None:
         )
 
     if options.max_session_turns is not None and (
-        isinstance(options.max_session_turns, bool)
-        or not isinstance(options.max_session_turns, int)
-        or options.max_session_turns < -1
+        not _is_int(options.max_session_turns) or options.max_session_turns < -1
     ):
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
 
@@ -147,13 +149,16 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
-    if options.max_tool_calls is not None and options.max_tool_calls < -1:
+    if options.max_tool_calls is not None and (
+        not _is_int(options.max_tool_calls) or options.max_tool_calls < -1
+    ):
         raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
 
-    if options.max_subagent_depth is not None and not (
-        1 <= options.max_subagent_depth <= 100
+    if options.max_subagent_depth is not None and (
+        not _is_int(options.max_subagent_depth)
+        or not (1 <= options.max_subagent_depth <= 100)
     ):
-        raise ValidationError("max_subagent_depth must be between 1 and 100")
+        raise ValidationError("max_subagent_depth must be an integer between 1 and 100")
 
     if options.agents:
         for i, agent in enumerate(options.agents):
@@ -205,6 +210,15 @@ def validate_query_options(options: QueryOptions) -> None:
         raise ValidationError("proxy cannot be empty")
 
 
+def _is_int(value: object) -> bool:
+    """True for a real integer.
+
+    ``bool`` subclasses ``int``, so ``isinstance(True, int)`` is True and a
+    bare isinstance check would let ``max_tool_calls=True`` through as 1.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _validate_optional_callable(
     value: object,
     validator: Callable[[object, type[ValidationError]], None],
@@ -225,4 +239,15 @@ def validate_session_id(value: str, param_name: str) -> None:
     if parsed.variant != RFC_4122:
         raise ValidationError(
             f"Invalid {param_name}: {value!r}. UUID variant must be RFC 4122."
+        )
+
+    # UUID() also accepts braced, urn:uuid: and dash-less spellings, but the
+    # value is forwarded to the CLI verbatim as --session-id/--resume, so
+    # anything but the canonical 8-4-4-4-12 form produces a malformed id
+    # downstream. Case is not part of canonical form: UUID() lowercases, and
+    # an all-uppercase spelling is still valid input.
+    if str(parsed) != value.lower():
+        raise ValidationError(
+            f"Invalid {param_name}: {value!r}. Must be a UUID in canonical "
+            f"8-4-4-4-12 form (got the equivalent of {str(parsed)!r})."
         )

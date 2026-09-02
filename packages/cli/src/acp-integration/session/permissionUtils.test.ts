@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import {
+  buildPermissionRequestContent,
   interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -96,6 +99,98 @@ describe('permissionUtils', () => {
         }),
       );
     });
+
+    it('offers switch-to-Default before Reject and hides persistent choices', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message: 'Classifier unavailable.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+          name: 'Switch to Default Mode and allow once (recommended)',
+          kind: 'allow_once',
+        },
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
+
+    it('can hide project persistence while keeping user persistence', () => {
+      const options = toPermissionOptions(
+        {
+          type: 'exec',
+          title: 'Confirm Shell Command',
+          command: 'git status',
+          rootCommand: 'git',
+          permissionRules: ['Bash(git status)'],
+          onConfirm: async () => undefined,
+        },
+        false,
+        {
+          allowProjectPersistence: false,
+          allowUserPersistence: true,
+        },
+      );
+
+      expect(options).not.toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        }),
+      );
+      expect(options).toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+        }),
+      );
+    });
+
+    it('keeps one-shot and always-allow options on edit approvals', () => {
+      const options = toPermissionOptions({
+        type: 'edit',
+        title: 'Confirm edit',
+        fileName: 'a.txt',
+        filePath: '/tmp/a.txt',
+        fileDiff: 'diff',
+        originalContent: 'a',
+        newContent: 'b',
+        onConfirm: async () => undefined,
+      });
+
+      // Both kinds must stay present and in this wire order: the web-shell
+      // native Accept path selects by kind preference (allow_once first), so
+      // a missing allow_once would escalate a single Accept into
+      // "Allow All Edits".
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: 'Allow All Edits',
+          kind: 'allow_always',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
   });
 
   describe('interactionMetaFields', () => {
@@ -131,5 +226,111 @@ describe('permissionUtils', () => {
         }),
       ).toEqual({});
     });
+  });
+
+  it('places warnings before edit diff content', () => {
+    const content = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      warnings: ['Unknown safety', 'Exact shell command: sed -i s/a/b/ a.txt'],
+      onConfirm: async () => undefined,
+    });
+
+    expect(content.map((item) => item.type)).toEqual([
+      'content',
+      'content',
+      'diff',
+    ]);
+    expect(content[0]).toMatchObject({
+      content: { text: 'Unknown safety' },
+    });
+  });
+
+  it('places classifier fallback guidance before other content', () => {
+    const content = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      warnings: ['Existing warning'],
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: 'Classifier unavailable. Default Mode is recommended.',
+      },
+      onConfirm: async () => undefined,
+    });
+
+    expect(content.map((item) => item.type)).toEqual([
+      'content',
+      'content',
+      'diff',
+    ]);
+    expect(content[0]).toMatchObject({
+      content: {
+        text: 'Classifier unavailable. Default Mode is recommended.',
+      },
+    });
+  });
+
+  it('accepts only an option that was actually offered', () => {
+    const options = toPermissionOptions({
+      type: 'exec',
+      title: 'Confirm shell',
+      command: 'python script.py',
+      rootCommand: 'python',
+      hideAlwaysAllow: true,
+      onConfirm: async () => undefined,
+    });
+    expect(
+      resolvePermissionOutcome(
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+          },
+        },
+        options,
+      ),
+    ).toBe(ToolConfirmationOutcome.ProceedOnce);
+    expect(() =>
+      resolvePermissionOutcome(
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          },
+        },
+        options,
+      ),
+    ).toThrow('unoffered option');
+  });
+
+  it('aborts permission requests and ignores late settlement', async () => {
+    let resolveRequest: ((value: never) => void) | undefined;
+    const client = {
+      requestPermission: vi.fn(
+        () =>
+          new Promise<never>((resolve) => {
+            resolveRequest = resolve;
+          }),
+      ),
+    };
+    const controller = new AbortController();
+    const request = requestPermissionWithAbort(
+      client as never,
+      { sessionId: 'session', options: [], toolCall: {} as never },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(request).rejects.toThrow('aborted');
+    resolveRequest?.({} as never);
   });
 });

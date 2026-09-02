@@ -5,17 +5,32 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
+const mockReaddirSync = vi.hoisted(() => vi.fn());
+const mockMkdirSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  // Default the mocks this file adds to the real implementations: a bare
+  // vi.fn() returns undefined, silently turning fs reads and writes into
+  // no-ops for every describe that does not restub them.
+  mockReaddirSync.mockImplementation((dir: unknown) =>
+    actual.readdirSync(String(dir), { withFileTypes: true }),
+  );
+  mockMkdirSync.mockImplementation(
+    (...args: Parameters<typeof actual.mkdirSync>) => actual.mkdirSync(...args),
+  );
   const mocked = {
     ...actual,
     realpathSync: mockRealpathSync,
+    readdirSync: mockReaddirSync,
+    mkdirSync: mockMkdirSync,
   };
   return {
     ...mocked,
@@ -401,6 +416,18 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
   });
 
+  it('getGeneratedWorkflowsDir sits under the project workflow runs dir', () => {
+    const customDir = path.resolve('custom');
+    Storage.setRuntimeBaseDir(customDir);
+    const storage = new Storage('/tmp/project');
+    expect(storage.getGeneratedWorkflowsDir()).toBe(
+      path.join(storage.getWorkflowRunsDir(), 'generated'),
+    );
+    expect(storage.getGeneratedWorkflowsDir()).toContain(
+      path.join(customDir, 'projects'),
+    );
+  });
+
   it('getProjectTempDir uses custom runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);
@@ -641,4 +668,865 @@ describe('Storage – runtime base dir async context isolation', () => {
     expect(a).toBe(path.join(cwdA, '.qwen-a'));
     expect(b).toBe(path.join(cwdB, '.qwen-b'));
   });
+
+  it('lets a resolved runtime pin override later process env changes', async () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+    process.env['QWEN_RUNTIME_DIR'] = path.resolve(
+      'workspace',
+      'ambient-runtime',
+    );
+
+    await Storage.runWithResolvedRuntimeBaseDir(pinned, async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+      await Promise.resolve();
+      expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+    });
+  });
+
+  it('keeps a resolved runtime pin across nested configurable contexts', () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+
+    Storage.runWithResolvedRuntimeBaseDir(pinned, () => {
+      Storage.runWithRuntimeBaseDir(
+        path.resolve('workspace', 'nested-runtime'),
+        undefined,
+        () => {
+          expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+          expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+        },
+      );
+    });
+  });
+
+  it('pins an instance to the runtime dir where it was created', () => {
+    const cwd = path.resolve('workspace', 'pinned');
+    const runtimeDir = path.join(cwd, '.qwen-a');
+    const storage = Storage.runWithRuntimeBaseDir(
+      '.qwen-a',
+      cwd,
+      () => new Storage(cwd),
+    );
+
+    Storage.runWithRuntimeBaseDir('.qwen-b', cwd, () => {
+      expect(storage.getRuntimeBaseDir()).toBe(runtimeDir);
+      expect(storage.getProjectDir()).toContain(
+        path.join(runtimeDir, 'projects'),
+      );
+      expect(storage.getProjectTempDir()).toContain(
+        path.join(runtimeDir, 'tmp'),
+      );
+    });
+  });
+});
+
+describe('Storage – ensureAuditFallbackDir', () => {
+  const originalEnv = process.env['QWEN_HOME'];
+  let home: string;
+
+  beforeEach(() => {
+    home = actualFs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-test-'));
+    process.env['QWEN_HOME'] = home;
+    // The file-wide mock replaces realpathSync with a bare vi.fn(), which
+    // answers `undefined`. Give it the real function's contract instead:
+    // production code must not carry a branch that exists only to tolerate a
+    // test double.
+    mockRealpathSync.mockImplementation((p: unknown) =>
+      actualFs.realpathSync(String(p)),
+    );
+    // Same for readdirSync, which individual tests below restub to reach
+    // shapes real tmpfs dirents never have (untyped entries, EACCES).
+    mockReaddirSync.mockImplementation((dir: unknown) =>
+      actualFs.readdirSync(String(dir), { withFileTypes: true }),
+    );
+    // Same for mkdirSync, which the race tests below also restub as a
+    // deterministic injection seam.
+    mockMkdirSync.mockImplementation(
+      (...args: Parameters<typeof actualFs.mkdirSync>) =>
+        actualFs.mkdirSync(...args),
+    );
+  });
+
+  afterEach(() => {
+    actualFs.rmSync(home, { recursive: true, force: true });
+    if (originalEnv === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalEnv;
+    }
+  });
+
+  it('lands under QWEN_HOME/audits/<project hash>', () => {
+    const dir = Storage.ensureAuditFallbackDir('/some/project');
+    expect(path.dirname(path.dirname(dir))).toBe(home);
+    expect(path.basename(path.dirname(dir))).toBe('audits');
+    expect(path.basename(dir)).toMatch(/^[0-9a-f]{64}$/);
+    expect(actualFs.statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it('creates the landing 0700 so quoted module content stays private', () => {
+    const mode = actualFs.statSync(Storage.ensureAuditFallbackDir('/p')).mode;
+    // On Windows mkdirSync's mode is a no-op and libuv emulates permission
+    // bits by duplicating owner bits to group/other.
+    if (process.platform !== 'win32') {
+      expect(mode & 0o077).toBe(0);
+      expect(mode & 0o700).toBe(0o700);
+    }
+  });
+
+  it('separates projects and is idempotent', () => {
+    const first = Storage.ensureAuditFallbackDir('/project/a');
+    const second = Storage.ensureAuditFallbackDir('/project/b');
+    expect(first).not.toBe(second);
+    expect(Storage.ensureAuditFallbackDir('/project/a')).toBe(first);
+  });
+
+  it('creates a missing QWEN_HOME base instead of failing with ENOENT', () => {
+    const base = path.join(home, 'not-created-yet', 'nested');
+    process.env['QWEN_HOME'] = base;
+    const dir = Storage.ensureAuditFallbackDir('/fresh-home');
+    expect(path.dirname(path.dirname(dir))).toBe(base);
+    expect(actualFs.statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an uncreatable QWEN_HOME tail with an actionable refusal',
+    () => {
+      // A dangling symlink, symlink loop, or symlink-to-file as the tail
+      // makes the recursive base creation fail resolution before any
+      // adoption check can own the state; the refusal must be classified
+      // like its siblings instead of escaping as a raw errno stack trace.
+      const tail = path.join(home, 'tail');
+      const shapes = {
+        dangling: () => actualFs.symlinkSync(path.join(home, 'nowhere'), tail),
+        loop: () => actualFs.symlinkSync(tail, tail),
+        'file-link': () => {
+          actualFs.writeFileSync(path.join(home, 'regular'), 'x\n');
+          actualFs.symlinkSync(path.join(home, 'regular'), tail);
+        },
+      };
+      for (const [shape, plant] of Object.entries(shapes)) {
+        actualFs.rmSync(tail, { force: true });
+        plant();
+        process.env['QWEN_HOME'] = tail;
+        expect(
+          () => Storage.ensureAuditFallbackDir(`/tail-${shape}`),
+          `tail shape: ${shape}`,
+        ).toThrow(FatalConfigError);
+        expect(
+          () => Storage.ensureAuditFallbackDir(`/tail-${shape}`),
+          `tail shape: ${shape}`,
+        ).toThrow(/could not be created/);
+      }
+    },
+  );
+
+  it('refuses a landing that resolves inside the audited repository', () => {
+    const repo = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-repo-'));
+    try {
+      process.env['QWEN_HOME'] = path.join(repo, '.qwen-state');
+      expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+        /resolves inside the audited/,
+      );
+      // Refused before creating anything inside the working tree.
+      expect(actualFs.existsSync(path.join(repo, '.qwen-state'))).toBe(false);
+    } finally {
+      actualFs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a case-variant spelling of the audited root on case-insensitive platforms', () => {
+    // Darwin's default volumes equate spellings that differ only in case,
+    // and realpath preserves the spelling it was given — so the same
+    // physical repository can reach the containment check spelled one way
+    // as the audited root and another way inside QWEN_HOME. A byte-wise
+    // comparison misses the containment and creates the landing inside the
+    // working tree; the refusal must hold across a case mismatch.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const repo = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'audit-CaseRepo-'),
+    );
+    const variant = repo.replace('audit-CaseRepo-', 'audit-caserepo-');
+    try {
+      process.env['QWEN_HOME'] = path.join(variant, '.qwen-state');
+      expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+        /resolves inside the audited/,
+      );
+      // Refused before creating anything inside the working tree.
+      expect(actualFs.existsSync(path.join(variant, '.qwen-state'))).toBe(
+        false,
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      actualFs.rmSync(repo, { recursive: true, force: true });
+      actualFs.rmSync(variant, { recursive: true, force: true });
+    }
+  });
+
+  it('lands case-variant spellings of one root at one leaf on case-insensitive platforms', () => {
+    // Two spellings of the same physical repository must hash to one leaf,
+    // or plan-files, guard-check, and relocation split across two roots.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const repo = actualFs.mkdtempSync(
+      path.join(os.tmpdir(), 'audit-CaseRepo-'),
+    );
+    const variant = repo.replace('audit-CaseRepo-', 'audit-caserepo-');
+    try {
+      expect(Storage.ensureAuditFallbackDir(variant)).toBe(
+        Storage.ensureAuditFallbackDir(repo),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      actualFs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a landing planted as a symlink instead of adopting it',
+    () => {
+      const decoy = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-decoy-'),
+      );
+      const audits = path.join(home, 'audits');
+      actualFs.mkdirSync(audits, { recursive: true });
+      // Predict the leaf the way the audited agent can: the hash is a pure
+      // function of the project root.
+      const leaf = Storage.ensureAuditFallbackDir('/predictable');
+      actualFs.rmSync(leaf, { recursive: true, force: true });
+      actualFs.symlinkSync(decoy, leaf);
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/predictable')).toThrow(
+          /not a directory/,
+        );
+      } finally {
+        actualFs.rmSync(leaf, { force: true });
+        actualFs.rmSync(decoy, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an audits PARENT planted as a symlink, which relocates the whole landing',
+    () => {
+      // mkdirSync(recursive) follows symlinks in every component ABOVE the
+      // leaf, and lstat refuses to follow only the FINAL one — so a
+      // leaf-only check cannot see a redirected parent. Planting `audits`
+      // is one `ln -s` with no race: ~/.qwen exists long before `audits`.
+      const attacker = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-attacker-'),
+      );
+      actualFs.symlinkSync(attacker, path.join(home, 'audits'));
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/any/project')).toThrow(
+          /audit artifact directory .* is not a directory/,
+        );
+        // Nothing was created inside the planter's directory.
+        expect(actualFs.readdirSync(attacker)).toEqual([]);
+      } finally {
+        actualFs.rmSync(path.join(home, 'audits'), { force: true });
+        actualFs.rmSync(attacker, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a landing holding a symlink child, which redirects writes out of it',
+    () => {
+      // Validating the leaf alone leaves the escape open: artifacts land
+      // BELOW it, and mkdirSync treats a symlink-to-directory as the
+      // directory, so everything written "inside" goes wherever the link
+      // points while the leaf keeps passing every check.
+      const escape = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-out-'));
+      const leaf = Storage.ensureAuditFallbackDir('/with-child');
+      actualFs.symlinkSync(escape, path.join(leaf, 'audit-2026-01-01.sidecar'));
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/with-child')).toThrow(
+          /contains a symlink/,
+        );
+        expect(() => Storage.ensureAuditFallbackDir('/with-child')).toThrow(
+          FatalConfigError,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink planted inside a child directory of the landing',
+    () => {
+      // Artifacts nest BELOW the leaf (audit-<ts>.sidecar/sidecar.json), so a
+      // real subdirectory holding a symlinked file is the same escape as a
+      // symlink child — validation must recurse, not stop at the leaf level.
+      const leaf = Storage.ensureAuditFallbackDir('/nested-symlink');
+      const victim = path.join(home, 'victim.md');
+      actualFs.writeFileSync(victim, 'user content\n');
+      const sidecar = path.join(leaf, 'audit-2026-01-01.sidecar');
+      actualFs.mkdirSync(sidecar);
+      actualFs.symlinkSync(victim, path.join(sidecar, 'sidecar.json'));
+      expect(() => Storage.ensureAuditFallbackDir('/nested-symlink')).toThrow(
+        /contains a symlink/,
+      );
+      expect(() => Storage.ensureAuditFallbackDir('/nested-symlink')).toThrow(
+        FatalConfigError,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a landing holding a hardlinked file',
+    () => {
+      const leaf = Storage.ensureAuditFallbackDir('/with-hardlink');
+      const twin = path.join(home, 'twin.md');
+      actualFs.writeFileSync(twin, 'planted\n');
+      actualFs.linkSync(twin, path.join(leaf, '2026-01-01-000000-mod.md'));
+      expect(() => Storage.ensureAuditFallbackDir('/with-hardlink')).toThrow(
+        /hardlinked file/,
+      );
+      expect(() => Storage.ensureAuditFallbackDir('/with-hardlink')).toThrow(
+        FatalConfigError,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a landing holding a special file such as a FIFO',
+    () => {
+      // A FIFO/socket/device child answers false to every typing predicate;
+      // opening it for the report would block or stream content to whoever
+      // holds the other end, so it must be refused like a symlink. A FIFO
+      // plants the identical shape with no sockaddr length limit — a socket
+      // under the 64-char hash leaf exceeds AF_UNIX's sun_path cap, so bind
+      // would truncate the path (Linux) or fail outright (macOS).
+      const leaf = Storage.ensureAuditFallbackDir('/with-special-file');
+      const fifoPath = path.join(leaf, '2026-01-01-000000-mod.md');
+      const result = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
+      expect(result.status).toBe(0);
+      expect(() =>
+        Storage.ensureAuditFallbackDir('/with-special-file'),
+      ).toThrow(/contains a special file/);
+      expect(() =>
+        Storage.ensureAuditFallbackDir('/with-special-file'),
+      ).toThrow(FatalConfigError);
+    },
+  );
+
+  it('keeps adopting a landing that holds a previous run own artifacts', () => {
+    // The landing is REUSED: the report and its sidecar are the durable
+    // artifacts, so refusing a non-empty landing would refuse every run
+    // after the first.
+    const leaf = Storage.ensureAuditFallbackDir('/reused');
+    actualFs.writeFileSync(
+      path.join(leaf, '2026-01-01-000000-mod.md'),
+      '# r\n',
+    );
+    actualFs.mkdirSync(path.join(leaf, 'audit-2026-01-01.sidecar'), {
+      recursive: true,
+    });
+    expect(Storage.ensureAuditFallbackDir('/reused')).toBe(leaf);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'is stable across symlink spellings of the same directory',
+    () => {
+      // macOS `/var` → `/private/var`: plan-files and guard-check must hash
+      // the same logical directory to the same fallback root whichever
+      // spelling arrives, or the relocation-containment check spuriously
+      // fails.
+      const real = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-real-'));
+      const link = path.join(os.tmpdir(), `audit-link-${Date.now()}`);
+      try {
+        actualFs.symlinkSync(real, link);
+        expect(Storage.ensureAuditFallbackDir(link)).toBe(
+          Storage.ensureAuditFallbackDir(actualFs.realpathSync(real)),
+        );
+      } finally {
+        actualFs.rmSync(link, { force: true });
+        actualFs.rmSync(real, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'adopts a pre-existing loose-mode directory and tightens it to 0700',
+    () => {
+      const audits = path.join(home, 'audits');
+      actualFs.mkdirSync(audits);
+      actualFs.chmodSync(audits, 0o755);
+      Storage.ensureAuditFallbackDir('/loose-mode');
+      expect(actualFs.statSync(audits).mode & 0o777).toBe(0o700);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'repairs a 0300-planted landing to readable and catches its planted symlink',
+    () => {
+      // Listing needs r while creating entries needs only w+x, so a 0300
+      // landing still accepts writes: adoption must restore owner-read and
+      // then validate, not skip validation because listing failed.
+      const leaf = Storage.ensureAuditFallbackDir('/planted-0300');
+      actualFs.rmSync(leaf, { recursive: true, force: true });
+      actualFs.mkdirSync(leaf);
+      actualFs.chmodSync(leaf, 0o300);
+      const escape = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-300-'));
+      actualFs.symlinkSync(escape, path.join(leaf, 'audit-2026-01-01.sidecar'));
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/planted-0300')).toThrow(
+          /contains a symlink/,
+        );
+        expect(actualFs.statSync(leaf).mode & 0o777).toBe(0o700);
+      } finally {
+        actualFs.chmodSync(leaf, 0o700);
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a landing it cannot list for validation', () => {
+    Storage.ensureAuditFallbackDir('/unlistable');
+    const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+    err.code = 'EACCES';
+    mockReaddirSync.mockImplementation(() => {
+      throw err;
+    });
+    expect(() => Storage.ensureAuditFallbackDir('/unlistable')).toThrow(
+      /could not be listed for validation/,
+    );
+    expect(() => Storage.ensureAuditFallbackDir('/unlistable')).toThrow(
+      FatalConfigError,
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to lstat when a dirent arrives untyped',
+    () => {
+      const leaf = Storage.ensureAuditFallbackDir('/untyped-dirent');
+      const escape = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-dt-'));
+      actualFs.symlinkSync(escape, path.join(leaf, 'audit-2026-01-01.sidecar'));
+      mockReaddirSync.mockImplementationOnce(() => [
+        {
+          name: 'audit-2026-01-01.sidecar',
+          isSymbolicLink: () => false,
+          isFile: () => false,
+          isDirectory: () => false,
+        },
+      ]);
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/untyped-dirent')).toThrow(
+          /contains a symlink/,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a QWEN_HOME tail raced into a repo symlink between the containment check and the base creation',
+    () => {
+      // The pre-creation containment check resolves through the deepest
+      // EXISTING ancestor, so a not-yet-existing QWEN_HOME passes it. Plant
+      // the tail at the mkdirSync seam — the window a same-UID process wins
+      // — and the re-check after the base creation must catch it.
+      const repo = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-repo-'));
+      const target = path.join(repo, 'evil');
+      actualFs.mkdirSync(target);
+      const base = path.join(home, 'not-yet');
+      process.env['QWEN_HOME'] = base;
+      let planted = false;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (!planted && String(args[0]) === base) {
+            planted = true;
+            actualFs.symlinkSync(target, base);
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        // The audited root IS the repo the tail now points into.
+        expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+          /resolves inside the audited/,
+        );
+        // Refused before anything was created inside the working tree.
+        expect(actualFs.existsSync(path.join(target, 'audits'))).toBe(false);
+      } finally {
+        actualFs.rmSync(repo, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses audits raced into a repo symlink between the two adoption checks',
+    () => {
+      // The first adoption validates `audits`; the second creates the leaf
+      // THROUGH it. Swapping `audits` for a symlink into the audited repo in
+      // that window relocates the whole landing past every check that
+      // already ran, so the pre-return re-validation must catch it.
+      const repo = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-repo-'));
+      const stolen = path.join(repo, 'stolen');
+      actualFs.mkdirSync(stolen);
+      const audits = path.join(home, 'audits');
+      let swapped = false;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (!swapped && String(args[0]).startsWith(audits + path.sep)) {
+            swapped = true;
+            actualFs.rmSync(audits, { recursive: true, force: true });
+            actualFs.symlinkSync(stolen, audits);
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-audits')).toThrow(
+          /audit artifact directory .* is not a directory/,
+        );
+        expect(actualFs.lstatSync(audits).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(repo, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an ancestor raced into a repo symlink above the adoption checks',
+    () => {
+      // Swapping a QWEN_HOME component ABOVE `audits` relocates the whole
+      // landing while the re-adoption lstats still pass — `audits` and the
+      // leaf remain real directories, merely relocated. Only the pre-return
+      // containment re-check sees the move.
+      const repo = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-repo-'));
+      const stolen = path.join(repo, 'stolen');
+      actualFs.mkdirSync(stolen);
+      const inner = path.join(home, 'inner');
+      process.env['QWEN_HOME'] = inner;
+      const audits = path.join(inner, 'audits');
+      let swapped = false;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (!swapped && String(args[0]) === audits) {
+            swapped = true;
+            actualFs.rmSync(inner, { recursive: true, force: true });
+            actualFs.symlinkSync(stolen, inner);
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        // The audited root IS the repo the ancestor now points into.
+        expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+          /resolves inside the audited/,
+        );
+      } finally {
+        actualFs.rmSync(repo, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a leaf raced into a symlink after its own adoption',
+    () => {
+      const leaf = Storage.ensureAuditFallbackDir('/raced-leaf');
+      const decoy = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-decoy-'),
+      );
+      // Inject at the content check: the leaf's own lstat has already
+      // passed, so only the pre-return re-validation can still see the swap.
+      mockReaddirSync.mockImplementationOnce((dir: unknown) => {
+        actualFs.rmSync(leaf, { recursive: true, force: true });
+        actualFs.symlinkSync(decoy, leaf);
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-leaf')).toThrow(
+          /fallback landing .* is not a directory/,
+        );
+        expect(actualFs.lstatSync(leaf).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(decoy, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink child planted after the content check snapshot',
+    () => {
+      // The content check's readdir snapshot runs BEFORE the pre-return
+      // re-validation; a child planted in that window passes the leaf-only
+      // re-adoption lstats, so the re-validation must re-run the content
+      // check to refuse it.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-child');
+      const escape = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-race-'),
+      );
+      const audits = path.join(home, 'audits');
+      let adoptionCalls = 0;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (String(args[0]) === audits) {
+            adoptionCalls += 1;
+            if (adoptionCalls === 2) {
+              actualFs.symlinkSync(escape, path.join(leaf, 'pwn'));
+            }
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-child')).toThrow(
+          /contains a symlink/,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a listed file raced into a symlink inside the re-run content check',
+    () => {
+      // The pre-return re-validation re-runs the content check, but that
+      // re-run decides entry types from its own readdir snapshot: a same-UID
+      // process can swap a listed regular file for a symlink between that
+      // snapshot and the loop reaching the entry (the landing is reused
+      // across runs and its entry names are predictable). Every arm must
+      // decide from the loop's own fresh lstat, not the snapshot's dirents.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-swap');
+      const name = '2026-01-01-000000-mod.md';
+      actualFs.writeFileSync(path.join(leaf, name), '# report\n');
+      const escape = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-swap-'),
+      );
+      const audits = path.join(home, 'audits');
+      let adoptionCalls = 0;
+      mockMkdirSync.mockImplementation(
+        (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (String(args[0]) === audits) {
+            adoptionCalls += 1;
+            if (adoptionCalls === 2) {
+              // Swap the listed file for a symlink, then feed the re-run
+              // content check a snapshot whose dirent still says regular
+              // file — the exact state the race leaves behind.
+              actualFs.rmSync(path.join(leaf, name));
+              actualFs.symlinkSync(escape, path.join(leaf, name));
+              mockReaddirSync.mockImplementationOnce(() => [
+                {
+                  name,
+                  isSymbolicLink: () => false,
+                  isFile: () => true,
+                  isDirectory: () => false,
+                },
+              ]);
+            }
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      );
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/raced-swap')).toThrow(
+          /contains a symlink/,
+        );
+      } finally {
+        actualFs.rmSync(escape, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('surfaces the actionable refusal when audits is planted as a regular file', () => {
+    // A non-directory `audits` makes the containment check's realpath fail
+    // with ENOTDIR; that must fall through to the adoption checks and their
+    // actionable message instead of escaping as a raw errno.
+    actualFs.writeFileSync(path.join(home, 'audits'), 'planted\n');
+    expect(() => Storage.ensureAuditFallbackDir('/audits-as-file')).toThrow(
+      /audit artifact directory .* is not a directory/,
+    );
+  });
+
+  it('fails closed when the final containment re-check cannot resolve the landing', () => {
+    // At the pre-return site nothing downstream owns a resolution failure:
+    // a swap that makes realpath fail (EACCES/ELOOP/ENOTDIR) must fail
+    // closed, not be swallowed into returning an unvalidated landing.
+    mockRealpathSync.mockImplementation((p: unknown) => {
+      const target = String(p);
+      if (target.startsWith(home)) {
+        const err = new Error(
+          `EACCES: permission denied, realpath '${target}'`,
+        ) as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return actualFs.realpathSync(target);
+    });
+    expect(() => Storage.ensureAuditFallbackDir('/final-check')).toThrow(
+      FatalConfigError,
+    );
+    expect(() => Storage.ensureAuditFallbackDir('/final-check')).toThrow(
+      /could not be validated/,
+    );
+  });
+
+  it('refuses a containment violation as FatalConfigError rather than a bare crash', () => {
+    const repo = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-repo-'));
+    try {
+      process.env['QWEN_HOME'] = path.join(repo, '.qwen-state');
+      expect(() => Storage.ensureAuditFallbackDir(repo)).toThrow(
+        FatalConfigError,
+      );
+    } finally {
+      actualFs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a planted landing as FatalConfigError rather than a bare crash',
+    () => {
+      const decoy = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-decoy-'),
+      );
+      const leaf = Storage.ensureAuditFallbackDir('/fatal-class');
+      actualFs.rmSync(leaf, { recursive: true, force: true });
+      actualFs.symlinkSync(decoy, leaf);
+      try {
+        expect(() => Storage.ensureAuditFallbackDir('/fatal-class')).toThrow(
+          FatalConfigError,
+        );
+      } finally {
+        actualFs.rmSync(leaf, { force: true });
+        actualFs.rmSync(decoy, { recursive: true, force: true });
+      }
+    },
+  );
+  it.skipIf(process.platform === 'win32')(
+    'refuses a directory child swapped for a symlink inside the final content check',
+    () => {
+      // The directory arm decides "real directory" from a fresh lstat, then
+      // recurses through a readdir that FOLLOWS symlinks: swapping the child
+      // for a link to a clean directory inside that window validates the
+      // link target and returns a landing still holding the link. The arm
+      // must re-lstat the child after the recursion returns.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-dir-child');
+      const sidecar = path.join(leaf, 'audit-2026-01-01.sidecar');
+      actualFs.mkdirSync(sidecar);
+      const cleanTarget = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-clean-'),
+      );
+      let sidecarReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === sidecar) {
+          sidecarReads += 1;
+          if (sidecarReads === 2) {
+            actualFs.rmSync(sidecar, { recursive: true, force: true });
+            actualFs.symlinkSync(cleanTarget, sidecar);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-dir-child'),
+        ).toThrow(/contains a symlink/);
+        expect(actualFs.lstatSync(sidecar).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(cleanTarget, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'tolerates a directory child that vanishes during the final content check',
+    () => {
+      // The post-recursion re-lstat races a landing reused across runs: a
+      // child removed between the recursive walk and that re-lstat leaves
+      // nothing to validate and must not fail the adoption.
+      const leaf = Storage.ensureAuditFallbackDir('/vanished-dir-child');
+      const sidecar = path.join(leaf, 'audit-2026-01-01.sidecar');
+      actualFs.mkdirSync(sidecar);
+      let sidecarReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        const listed = actualFs.readdirSync(String(dir), {
+          withFileTypes: true,
+        });
+        if (String(dir) === sidecar) {
+          sidecarReads += 1;
+          if (sidecarReads === 2) {
+            actualFs.rmSync(sidecar, { recursive: true, force: true });
+          }
+        }
+        return listed;
+      });
+      expect(Storage.ensureAuditFallbackDir('/vanished-dir-child')).toBe(leaf);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a leaf raced into a symlink inside the final content check',
+    () => {
+      // The final content and containment re-checks both FOLLOW the leaf, so
+      // a swap landing inside either passes every check that already ran and
+      // returns a symlinked landing; the re-adoption lstats must run again
+      // after those checks. The earlier leaf race test injects at the FIRST
+      // content check, where the re-adoption lstats still precede the swap.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-leaf-late');
+      const attacker = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-attacker-'),
+      );
+      let leafReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === leaf) {
+          leafReads += 1;
+          if (leafReads === 2) {
+            actualFs.rmSync(leaf, { recursive: true, force: true });
+            actualFs.symlinkSync(attacker, leaf);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-leaf-late'),
+        ).toThrow(/fallback landing .* is not a directory/);
+        expect(actualFs.lstatSync(leaf).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(attacker, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses audits raced into a symlink inside the final content check',
+    () => {
+      // Swapping the `audits` parent relocates the whole landing while the
+      // final content and containment checks FOLLOW the new root and pass;
+      // only a re-adoption lstat after those checks can still see the swap.
+      const leaf = Storage.ensureAuditFallbackDir('/raced-audits-late');
+      const attacker = actualFs.mkdtempSync(
+        path.join(os.tmpdir(), 'audit-attacker-'),
+      );
+      // The relocation target must hold the predictable leaf name, or the
+      // follow-based checks would fail ENOENT instead of passing the swap.
+      actualFs.mkdirSync(path.join(attacker, path.basename(leaf)));
+      const audits = path.join(home, 'audits');
+      let leafReads = 0;
+      mockReaddirSync.mockImplementation((dir: unknown) => {
+        if (String(dir) === leaf) {
+          leafReads += 1;
+          if (leafReads === 2) {
+            actualFs.rmSync(audits, { recursive: true, force: true });
+            actualFs.symlinkSync(attacker, audits);
+          }
+        }
+        return actualFs.readdirSync(String(dir), { withFileTypes: true });
+      });
+      try {
+        expect(() =>
+          Storage.ensureAuditFallbackDir('/raced-audits-late'),
+        ).toThrow(/audit artifact directory .* is not a directory/);
+        expect(actualFs.lstatSync(audits).isSymbolicLink()).toBe(true);
+      } finally {
+        actualFs.rmSync(attacker, { recursive: true, force: true });
+      }
+    },
+  );
 });

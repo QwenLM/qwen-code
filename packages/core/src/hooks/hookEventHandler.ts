@@ -22,6 +22,7 @@ import type {
   ContextUsageData,
   SessionStartInput,
   SessionEndInput,
+  SessionDeleteInput,
   SessionStartSource,
   SessionEndReason,
   AgentType,
@@ -157,10 +158,15 @@ export class HookEventHandler {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
       prompt,
+      ...(typeof submittedPrompt === 'string' &&
+      submittedPrompt.trim().length > 0
+        ? { submitted_prompt: submittedPrompt }
+        : {}),
     };
 
     return this.executeHooks(
@@ -329,6 +335,26 @@ export class HookEventHandler {
       {
         trigger: reason,
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a SessionDelete event after an explicitly selected session is deleted.
+   */
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionDeleteInput = {
+      ...this.createBaseInput(HookEventName.SessionDelete),
+      deleted_session_id: deletedSessionId,
+    };
+
+    return this.executeHooks(
+      HookEventName.SessionDelete,
+      input,
+      undefined,
       signal,
     );
   }
@@ -781,7 +807,7 @@ export class HookEventHandler {
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
       const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
-      const sessionHooks =
+      const registeredSessionHooks =
         sessionId !== undefined
           ? matcherTarget === undefined
             ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
@@ -791,6 +817,25 @@ export class HookEventHandler {
                 matcherTarget,
               )
           : [];
+      // The second side of the project-skill trust gate: a hook registered
+      // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
+      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // is live under an IDE connection, so a revocation mid-session
+      // silences the hook at its next event without a restart or any
+      // per-skill unregistration; trust granted again lets it fire. Only
+      // consulted when a gated entry is present — nothing else changes.
+      const sessionHooks = registeredSessionHooks.some(
+        (entry) => entry.trustGated === true,
+      )
+        ? registeredSessionHooks.filter(
+            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+          )
+        : registeredSessionHooks;
+      if (sessionHooks.length !== registeredSessionHooks.length) {
+        debugLogger.debug(
+          `Skipping ${registeredSessionHooks.length - sessionHooks.length} project-skill hook(s) for ${eventName}: the folder is no longer trusted`,
+        );
+      }
 
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];
@@ -888,9 +933,13 @@ export class HookEventHandler {
   private createBaseInput(eventName: HookEventName): HookInput {
     // Get the transcript path from the Config
     const transcriptPath = this.config.getTranscriptPath();
+    const sourceType = this.config.getSessionSourceType();
+    const sourceId = this.config.getSessionSourceId();
 
     return {
       session_id: this.config.getSessionId(),
+      ...(sourceType !== undefined ? { source_type: sourceType } : {}),
+      ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       transcript_path: transcriptPath,
       cwd: this.config.getWorkingDir(),
       hook_event_name: eventName,

@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
+import {
+  MAX_WORKSPACE_PATH_LENGTH,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
@@ -143,8 +146,12 @@ export function parseOptionalWorkspaceCwd(
     });
     return undefined;
   }
-  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the absolute-path check.
+  const cwd = translateAndCheckAbsoluteWorkspacePath(
+    hasCwd ? (body['cwd'] as string) : boundWorkspace,
+  );
+  if (cwd === null) {
     res
       .status(400)
       .json({ error: '`cwd` must be an absolute path when provided' });
@@ -159,7 +166,7 @@ export function requireSessionId(req: Request, res: Response): string | null {
     res.status(400).json({ error: '`sessionId` route parameter is required' });
     return null;
   }
-  return sessionId;
+  return normalizeSessionIdForLookup(sessionId);
 }
 
 export function parseClientIdHeader(

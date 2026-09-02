@@ -11,8 +11,10 @@ import path from 'node:path';
 import {
   SAFE_TOOL_ALLOWLIST,
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  formatClassifierUnavailableFallbackMessage,
   getAutoModePermissionDeniedReason,
   isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
@@ -27,7 +29,17 @@ import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
-import { setGeminiMdFilename } from '../memory/const.js';
+import { setMemoryFilename } from '../utils/memory-constants.js';
+
+//Mock classifier to ensure in workspace protected writes still reach it
+vi.mock('./classifier.js', () => ({
+  classifyAction: vi.fn(async () => ({
+    shouldBlock: false,
+    reason: 'ok',
+    stage: 'fast',
+    durationMs: 1,
+  })),
+}));
 
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
@@ -35,6 +47,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
   it('includes the canonical read-only / metadata tools', () => {
     const expected = [
       ToolNames.READ_FILE,
+      ToolNames.ZOOM_IMAGE,
       ToolNames.GREP,
       ToolNames.GLOB,
       ToolNames.LS,
@@ -95,6 +108,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
         "task_stop",
         "todo_write",
         "tool_search",
+        "zoom_image",
       ]
     `);
   });
@@ -151,6 +165,7 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/.qwen/agents/reviewer.md',
       '/repo/.qwen/skills/skill-a/SKILL.md',
       '/repo/.qwen/hooks/pre-tool-use.json',
+      '/repo/.qwen/fork-profiles/ro-research.md',
       '/repo/.qwen/QWEN.local.md',
       '/repo/.qwen/rules/backend.md',
       '/repo/.mcp.json',
@@ -207,7 +222,7 @@ describe('isAutoModeProtectedWritePath', () => {
   });
 
   it('matches configured context filenames', () => {
-    setGeminiMdFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
+    setMemoryFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
     try {
       const protectedPaths = [
         '/repo/CUSTOM_AGENTS.md',
@@ -219,7 +234,7 @@ describe('isAutoModeProtectedWritePath', () => {
         expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
       }
     } finally {
-      setGeminiMdFilename(['QWEN.md', 'AGENTS.md']);
+      setMemoryFilename(['QWEN.md', 'AGENTS.md']);
     }
   });
 
@@ -236,6 +251,7 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/agents/reviewer.md',
         '/tmp/custom-qwen-home/skills/review/SKILL.md',
         '/tmp/custom-qwen-home/hooks/pre-tool-use.json',
+        '/tmp/custom-qwen-home/fork-profiles/ro-research.md',
         '/tmp/custom-qwen-home/rules/backend.md',
         '/tmp/custom-qwen-home/.mcp.json',
       ];
@@ -356,18 +372,18 @@ describe('passesAcceptEditsFastPath', () => {
       `${cwd}/.qwen/agents/reviewer.md`,
       `${cwd}/.qwen/skills/review/SKILL.md`,
       `${cwd}/.qwen/hooks/pre-tool-use.json`,
+      `${cwd}/.qwen/fork-profiles/ro-research.md`,
       `${cwd}/.qwen/QWEN.local.md`,
       `${cwd}/.qwen/rules/backend.md`,
       `${cwd}/.mcp.json`,
     ];
 
-    for (const filePath of protectedPaths) {
-      expect(
-        passesAcceptEditsFastPath(
-          ctx({ toolName: ToolNames.WRITE_FILE, filePath }),
-          config,
-        ),
-      ).toBe(false);
+    for (const toolName of [ToolNames.EDIT, ToolNames.WRITE_FILE]) {
+      for (const filePath of protectedPaths) {
+        expect(
+          passesAcceptEditsFastPath(ctx({ toolName, filePath }), config),
+        ).toBe(false);
+      }
     }
   });
 
@@ -1102,6 +1118,67 @@ describe('evaluateAutoMode — fast-path gating', () => {
     });
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
   });
+
+  // ─── New tests for external write fallback ───
+  it('routes external EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: '/Users/test/other-project/x.ts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external WRITE_FILE to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/etc/hosts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external NOTEBOOK_EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.NOTEBOOK_EDIT,
+        filePath: '/users/test/other-project/nb.ipynb',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes in-workspace protected writes to classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: `${cwd}/.qwen/settings.json`,
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('classifier');
+  });
 });
 
 // ─── applyAutoModeDecision reason mapping ────────────────────────────────
@@ -1141,7 +1218,7 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     });
   });
 
-  it('maps classifier infrastructure failures to classifier_unavailable', () => {
+  it('routes classifier infrastructure failures to manual approval', () => {
     const setAutoModeDenialState = vi.fn();
     const result = applyAutoModeDecision(
       {
@@ -1157,8 +1234,9 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     );
 
     expect(result).toMatchObject({
-      kind: 'blocked',
+      kind: 'fallback',
       reason: 'classifier_unavailable',
+      message: expect.stringContaining('Switching to Default Mode'),
     });
     expect(setAutoModeDenialState).toHaveBeenCalledWith({
       consecutiveBlock: 0,
@@ -1234,29 +1312,47 @@ describe('formatClassifierBlockMessage', () => {
       'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
   });
+});
 
-  it('renders an unavailable message with cause when reason is present', () => {
+describe('classifier unavailable confirmation', () => {
+  const baseDecision = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    stage: 'thinking' as const,
+    durationMs: 100,
+    unavailable: true,
+  };
+
+  it('renders a manual fallback message with the cause and recommendation', () => {
     expect(
-      formatClassifierBlockMessage({
+      formatClassifierUnavailableFallbackMessage({
         ...baseDecision,
         reason: 'Conversation transcript exceeds classifier context window',
-        unavailable: true,
       }),
     ).toBe(
-      'Auto mode classifier unavailable (Conversation transcript exceeds classifier context window); action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+      "Auto Mode couldn't classify this action (Conversation transcript exceeds classifier context window). Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.",
     );
   });
 
-  it('falls back to a bare unavailable message when reason is empty', () => {
-    expect(
-      formatClassifierBlockMessage({
-        ...baseDecision,
-        reason: '',
-        unavailable: true,
-      }),
-    ).toBe(
-      'Auto mode classifier unavailable; action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+  it('decorates the confirmation and suppresses persistent approval', () => {
+    const confirmation = decorateClassifierUnavailableConfirmation(
+      {
+        type: 'exec',
+        title: 'Run command',
+        command: 'touch marker',
+        rootCommand: 'touch',
+        onConfirm: vi.fn(),
+      },
+      'Classifier unavailable.',
     );
+
+    expect(confirmation).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: 'Classifier unavailable.',
+      },
+    });
   });
 });
 
@@ -1285,6 +1381,17 @@ describe('PermissionDenied hook gating', () => {
       shouldFirePermissionDeniedForAutoMode(
         { ...classifierBlock, shouldBlock: false },
         { kind: 'approved' },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { ...classifierBlock, unavailable: true },
+        {
+          kind: 'fallback',
+          reason: 'classifier_unavailable',
+          message: 'Classifier unavailable.',
+        },
       ),
     ).toBe(false);
 

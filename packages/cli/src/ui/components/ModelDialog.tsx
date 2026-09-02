@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import process from 'node:process';
-import { useCallback, useContext, useMemo, useState } from 'react';
+import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
@@ -14,9 +14,11 @@ import {
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
   isImageCapable,
+  isImageGenerationCapable,
   parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
+  type Config,
   type ContentGeneratorConfig,
   type InputModalities,
 } from '@qwen-code/qwen-code-core';
@@ -33,6 +35,7 @@ import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
+import type { HistoryItemWithoutId } from '../types.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -116,6 +119,8 @@ interface ModelDialogProps {
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
+  isCompactionModelMode?: boolean;
+  isImageModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
   availableTerminalHeight?: number;
@@ -202,6 +207,7 @@ function hydrateApiKeyEnvFromSettings(
 }
 
 interface HandleModelSwitchSuccessParams {
+  config: Config;
   settings: ReturnType<typeof useSettings>;
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
@@ -213,6 +219,7 @@ interface HandleModelSwitchSuccessParams {
 }
 
 function handleModelSwitchSuccess({
+  config,
   settings,
   uiState,
   after,
@@ -240,20 +247,23 @@ function handleModelSwitchSuccess({
       : persistScope === 'user'
         ? t(' (global)')
         : '';
-  uiState?.historyManager.addItem(
-    {
-      type: 'info',
-      text:
-        `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-        `\n` +
-        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-        `\n` +
-        `Base URL: ${baseUrl}` +
-        `\n` +
-        `API key: ${maskedKey}`,
-    },
-    Date.now(),
-  );
+  const feedbackItem = {
+    type: 'info' as const,
+    text:
+      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+      `\n` +
+      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+      `\n` +
+      `Base URL: ${baseUrl}` +
+      `\n` +
+      `API key: ${maskedKey}`,
+  };
+  uiState?.historyManager.addItem(feedbackItem, Date.now());
+  config.getChatRecordingService?.()?.recordSlashCommand({
+    phase: 'result',
+    rawCommand: '/model',
+    outputHistoryItems: [feedbackItem],
+  });
 }
 
 function formatContextWindow(size?: number): string {
@@ -285,6 +295,8 @@ export function ModelDialog({
   isFastModelMode,
   isVoiceModelMode,
   isVisionModelMode,
+  isCompactionModelMode,
+  isImageModelMode,
   persistScope,
   availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
@@ -302,15 +314,27 @@ export function ModelDialog({
     const allModels = config ? config.getAllConfiguredModels() : [];
 
     // Separate runtime models from registry models
-    const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter(
-      (m) =>
+    const runtimeModels = isImageModelMode
+      ? []
+      : allModels.filter((m) => m.isRuntimeModel);
+    const registryModels = allModels.filter((m) => {
+      const imageModelSelector = encodeVisionModelSelector(
+        buildModelSelectionKey(m.authType, m.id, m.baseUrl),
+      );
+      const isSelectableImageModel = isImageModelMode
+        ? isImageGenerationCapable(m) &&
+          config?.resolveImageGenerationModel(imageModelSelector) !== undefined
+        : m.imageOnly !== true;
+      return (
         !m.isRuntimeModel &&
         (m.authType !== AuthType.QWEN_OAUTH ||
           authType === AuthType.QWEN_OAUTH) &&
+        isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
-        (isVoiceModelMode || !m.voiceOnly),
-    );
+        (isVoiceModelMode || !m.voiceOnly) &&
+        (isVisionModelMode || isImageModelMode || !m.visionOnly)
+      );
+    });
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -363,7 +387,14 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config, isFastModelMode, isVoiceModelMode]);
+  }, [
+    authType,
+    config,
+    isFastModelMode,
+    isImageModelMode,
+    isVoiceModelMode,
+    isVisionModelMode,
+  ]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -462,7 +493,9 @@ export function ModelDialog({
   const visionModelSetting = settings?.merged?.visionModel as
     | string
     | undefined;
+  const imageModelSetting = settings?.merged?.imageModel as string | undefined;
   const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
+  const parsedImageModelValue = parseVisionModelSetting(imageModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
     try {
@@ -479,18 +512,33 @@ export function ModelDialog({
       return undefined;
     }
   }, [parsedVisionModelValue?.selector, isVisionModelMode]);
+  const parsedImageModelSetting = useMemo(() => {
+    if (!isImageModelMode) return undefined;
+    try {
+      return resolveModelId(parsedImageModelValue?.selector);
+    } catch {
+      return undefined;
+    }
+  }, [parsedImageModelValue?.selector, isImageModelMode]);
   const preferredModelId =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.modelId
       : isVisionModelMode && parsedVisionModelSetting
         ? parsedVisionModelSetting.modelId
-        : config?.getModel() || MAINLINE_CODER_MODEL;
+        : isImageModelMode && parsedImageModelSetting
+          ? parsedImageModelSetting.modelId
+          : config?.getModel() || MAINLINE_CODER_MODEL;
+  const isAuxiliaryModelMode =
+    isFastModelMode ||
+    isVoiceModelMode ||
+    isVisionModelMode ||
+    isCompactionModelMode ||
+    isImageModelMode;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot =
-    isFastModelMode || isVoiceModelMode || isVisionModelMode
-      ? undefined // fast/voice/vision models are never runtime model selections
-      : config?.getActiveRuntimeModelSnapshot?.();
+  const activeRuntimeSnapshot = isAuxiliaryModelMode
+    ? undefined
+    : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
@@ -538,6 +586,45 @@ export function ModelDialog({
               matchesVisionModelBaseUrl(model),
           )
       : undefined;
+  const preferredImageModelEntry =
+    isImageModelMode && parsedImageModelSetting
+      ? parsedImageModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedImageModelSetting.authType &&
+              model.id === parsedImageModelSetting.modelId &&
+              (!parsedImageModelValue?.baseUrl ||
+                model.baseUrl === parsedImageModelValue.baseUrl),
+          )
+        : availableModelEntries.find(
+            ({ model }) =>
+              model.id === parsedImageModelSetting.modelId &&
+              (!parsedImageModelValue?.baseUrl ||
+                model.baseUrl === parsedImageModelValue.baseUrl),
+          )
+      : undefined;
+  const parsedCompactionSetting = useMemo(() => {
+    if (!isCompactionModelMode) return undefined;
+    const raw = settings?.merged?.compactionModel?.trim();
+    if (!raw) return undefined;
+    try {
+      return resolveModelId(raw);
+    } catch {
+      return undefined;
+    }
+  }, [settings?.merged?.compactionModel, isCompactionModelMode]);
+  const preferredCompactionModelEntry =
+    isCompactionModelMode && parsedCompactionSetting
+      ? parsedCompactionSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedCompactionSetting.authType &&
+              model.id === parsedCompactionSetting.modelId,
+          )
+        : availableModelEntries.find(
+            ({ model }) => model.id === parsedCompactionSetting.modelId,
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : preferredVoiceModelEntry
@@ -552,24 +639,82 @@ export function ModelDialog({
             preferredVisionModelEntry.model.id,
             preferredVisionModelEntry.model.baseUrl,
           )
-        : preferredFastModelEntry
+        : preferredCompactionModelEntry
           ? buildModelSelectionKey(
-              preferredFastModelEntry.authType,
-              preferredFastModelEntry.model.id,
-              preferredFastModelEntry.model.baseUrl,
+              preferredCompactionModelEntry.authType,
+              preferredCompactionModelEntry.model.id,
+              preferredCompactionModelEntry.model.baseUrl,
             )
-          : authType
-            ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-            : '';
+          : preferredImageModelEntry
+            ? buildModelSelectionKey(
+                preferredImageModelEntry.authType,
+                preferredImageModelEntry.model.id,
+                preferredImageModelEntry.model.baseUrl,
+              )
+            : preferredFastModelEntry
+              ? buildModelSelectionKey(
+                  preferredFastModelEntry.authType,
+                  preferredFastModelEntry.model.id,
+                  preferredFastModelEntry.model.baseUrl,
+                )
+              : authType
+                ? buildModelSelectionKey(
+                    authType,
+                    preferredModelId,
+                    currentBaseUrl,
+                  )
+                : '';
+
+  // Escape can arrive twice in one stdin chunk before the parent unmounts
+  // the dialog; latch so the close feedback and onClose fire only once.
+  const closeLatchRef = useRef(false);
+  const selectionInFlightRef = useRef(false);
+  const selectionCommittedRef = useRef(false);
+  const reportAuxiliaryModelSelection = useCallback(
+    (feedbackItem: HistoryItemWithoutId & Record<string, unknown>) => {
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
+    },
+    [config, uiState],
+  );
+  const closeWithoutSelection = useCallback(() => {
+    if (closeLatchRef.current || selectionInFlightRef.current) return;
+    closeLatchRef.current = true;
+    if (!isAuxiliaryModelMode && !selectionCommittedRef.current) {
+      const feedbackItem = {
+        type: 'info' as const,
+        text: t('Kept model as {{model}}', {
+          model: activeRuntimeSnapshot?.modelId ?? preferredModelId,
+        }),
+      };
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
+    }
+    onClose();
+  }, [
+    activeRuntimeSnapshot,
+    config,
+    isAuxiliaryModelMode,
+    onClose,
+    preferredModelId,
+    uiState,
+  ]);
 
   useKeypress(
     (key) => {
       if (
         key.name === 'escape' ||
-        (key.name === 'left' &&
-          (isFastModelMode || isVoiceModelMode || isVisionModelMode))
+        (key.name === 'left' && isAuxiliaryModelMode)
       ) {
-        onClose();
+        closeWithoutSelection();
       }
     },
     { isActive: true },
@@ -601,6 +746,7 @@ export function ModelDialog({
 
   const handleSelect = useCallback(
     async (selected: string) => {
+      if (selectionInFlightRef.current || selectionCommittedRef.current) return;
       setErrorMessage(null);
       const selectedEntry = availableModelEntries.find(
         ({ authType: t2, model, isRuntime, snapshotId }) => {
@@ -645,13 +791,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -672,13 +815,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -719,13 +859,74 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
+        });
+        onClose();
+        return;
+      }
+
+      // Compaction model mode: persist the selected model for chat compression.
+      if (isCompactionModelMode) {
+        if (!selectedEntry || !config) {
+          setErrorMessage(t('Selected compaction model is unavailable.'));
+          return;
+        }
+        const compactionModelId = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'compactionModel', compactionModelId);
+        // Sync runtime Config so the compression service picks it up immediately.
+        config.setCompactionModel(compactionModelId);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+        });
+        onClose();
+        return;
+      }
+
+      if (isImageModelMode) {
+        if (!selectedEntry || !config) {
+          setErrorMessage(t('Selected image model is unavailable.'));
+          return;
+        }
+        const imageModel = encodeVisionModelSelector(selected);
+        const imageModelDisplay =
+          parseVisionModelSetting(imageModel)?.selector ?? imageModel;
+        if (!config.resolveImageGenerationModel(imageModel)) {
+          setErrorMessage(
+            t(
+              "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.",
+              { model: imageModelDisplay },
+            ),
+          );
+          return;
+        }
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'imageModel', imageModel);
+        selectionInFlightRef.current = true;
+        try {
+          await config.setImageModel(imageModel);
+        } finally {
+          selectionInFlightRef.current = false;
+        }
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -785,13 +986,19 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
-        await config.switchModel(selectedAuthType, modelId, {
-          ...(selectedAuthType !== authType &&
-          selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : {}),
-          baseUrl: selectedBaseUrl,
-        });
+        selectionInFlightRef.current = true;
+        try {
+          await config.switchModel(selectedAuthType, modelId, {
+            ...(selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+              ? { requireCachedCredentials: true }
+              : {}),
+            baseUrl: selectedBaseUrl,
+          });
+          selectionCommittedRef.current = true;
+        } finally {
+          selectionInFlightRef.current = false;
+        }
 
         if (!isRuntime) {
           const event = new ModelSlashCommandEvent(modelId);
@@ -817,24 +1024,34 @@ export function ModelDialog({
         return;
       }
 
-      handleModelSwitchSuccess({
-        settings,
-        uiState,
-        after,
-        effectiveAuthType,
-        effectiveModelId,
-        // Persist the selected provider's baseUrl so the right provider is
-        // restored next launch when several share the same id. Pair it with the
-        // same resolved config that effectiveModelId comes from (`after`) so the
-        // persisted (model.name, model.baseUrl) stays consistent even if
-        // switchModel transforms the id; fall back to the picker entry's
-        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
-        effectiveBaseUrl: isRuntime
-          ? undefined
-          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
-        isRuntime,
-        persistScope,
-      });
+      try {
+        handleModelSwitchSuccess({
+          config,
+          settings,
+          uiState,
+          after,
+          effectiveAuthType,
+          effectiveModelId,
+          // Persist the selected provider's baseUrl so the right provider is
+          // restored next launch when several share the same id. Pair it with the
+          // same resolved config that effectiveModelId comes from (`after`) so the
+          // persisted (model.name, model.baseUrl) stays consistent even if
+          // switchModel transforms the id; fall back to the picker entry's
+          // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+          effectiveBaseUrl: isRuntime
+            ? undefined
+            : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
+          isRuntime,
+          persistScope,
+        });
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        setErrorMessage(
+          `${t('Model switched, but the selection could not be saved.')}\n\n${errorMessage}`,
+        );
+        return;
+      }
+      closeLatchRef.current = true;
       onClose();
     },
     [
@@ -847,8 +1064,11 @@ export function ModelDialog({
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      isCompactionModelMode,
+      isImageModelMode,
       availableModelEntries,
       persistScope,
+      reportAuxiliaryModelSelection,
     ],
   );
 
@@ -867,9 +1087,13 @@ export function ModelDialog({
           ? t('Select Voice Model')
           : isVisionModelMode
             ? t('Select Vision Model')
-            : isFastModelMode
-              ? t('Select Fast Model')
-              : t('Select Model')) +
+            : isCompactionModelMode
+              ? t('Select Compaction Model')
+              : isImageModelMode
+                ? t('Select Image Model')
+                : isFastModelMode
+                  ? t('Select Fast Model')
+                  : t('Select Model')) +
           (persistScope === 'workspace'
             ? t(' (this project)')
             : persistScope === 'user'

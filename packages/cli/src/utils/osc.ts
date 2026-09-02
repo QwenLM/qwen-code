@@ -115,25 +115,12 @@ export function osc(...parts: Array<string | number>): string {
 }
 
 /**
- * Wrap an OSC sequence for tmux / screen passthrough.
- *
- * - tmux: DCS `\ePtmux;\e<seq>\e\\` with ESC doubling inside
- * - screen: DCS `\eP<seq>\e\\`
- *
- * BEL should NOT be wrapped — raw BEL triggers tmux's bell-action,
- * whereas a wrapped BEL becomes an opaque DCS payload and is ignored.
+ * Wrap an OSC sequence for tmux / screen passthrough (DCS-passthrough, with
+ * ESC doubling under tmux). Re-exported from `@qwen-code/qwen-code-core`, the
+ * single source of truth for this helper — core-side emitters need it too —
+ * so this package's existing importers keep resolving unchanged.
  */
-export function wrapForMultiplexer(sequence: string): string {
-  if (process.env['TMUX']) {
-    // tmux requires all ESC bytes inside the payload to be doubled
-    const escaped = sequence.replaceAll('\x1b', '\x1b\x1b');
-    return `\x1bPtmux;${escaped}\x1b\\`;
-  }
-  if (process.env['STY']) {
-    return `\x1bP${sequence}\x1b\\`;
-  }
-  return sequence;
-}
+export { wrapForMultiplexer } from '@qwen-code/qwen-code-core';
 
 // ── Encoding helpers ───────────────────────────────────────────────
 

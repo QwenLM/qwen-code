@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.11",
+  "version": "0.22.3",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -14,15 +14,21 @@
     "packages/channels/wecom",
     "packages/channels/feishu",
     "packages/channels/qqbot",
+    "packages/channels/github",
+    "packages/channels/dws",
+    "packages/channels/gitlab",
     "packages/channels/plugin-example",
-    "!packages/desktop"
+    "integrations/external-context",
+    "integrations/external-context-mem0",
+    "!packages/desktop-shell",
+    "!packages/live-host"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.11"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.3"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -38,18 +44,21 @@
     "build:packages": "npm run build --workspaces",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
-    "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present --parallel",
-    "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel && npm run test:scripts",
-    "test:release": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false && npm run test:scripts && npm -w packages/chrome-extension run package",
+    "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present",
+    "test:ci": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present && npm run test:scripts",
+    "test:release": "npm run test:release:workspaces && npm run test:scripts",
+    "test:release:workspaces": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present -- --coverage.enabled=false",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
+    "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
+    "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests ./fake-openai-server.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts",
-    "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
-    "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/daemon-invocation-context.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
+    "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
+    "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
     "test:integration:cli:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests cli",
     "test:integration:cli:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests cli",
@@ -63,9 +72,10 @@
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
     "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
-    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
+    "audit:runtime:critical": "node scripts/audit-runtime-critical.js",
     "format": "prettier --experimental-cli --write .",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && npm run typecheck:integration",
+    "typecheck:integration": "tsc -p integration-tests/tsconfig.json --pretty false",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
     "smoke:sdk:python": "python3 packages/sdk-python/scripts/smoke_real.py",
     "build:sdk:python": "python3 -m build packages/sdk-python",
@@ -83,8 +93,8 @@
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
+    "check:tui-dep-direction": "node scripts/check-tui-dep-direction.mjs",
     "check:serve-fast-path-bundle": "node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle && node scripts/check-serve-fast-path-bundle.js",
-    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },
@@ -98,7 +108,8 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0"
+    "@types/react-dom": "^19.2.0",
+    "axios": "^1.19.0"
   },
   "bin": {
     "qwen": "scripts/cli-entry.js"
@@ -111,6 +122,7 @@
   ],
   "devDependencies": {
     "@types/chrome": "^0.1.32",
+    "@types/jsdom": "^28.0.3",
     "@types/marked": "^5.0.2",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
@@ -135,6 +147,7 @@
     "glob": "^10.5.0",
     "globals": "^16.0.0",
     "husky": "^9.1.7",
+    "jsdom": "^26.1.0",
     "json": "^11.0.0",
     "lint-staged": "^16.1.6",
     "memfs": "^4.42.0",
@@ -146,6 +159,7 @@
     "prettier": "^3.5.3",
     "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",
+    "sharp": "^0.35.0",
     "strip-ansi": "^7.1.2",
     "tsx": "^4.20.3",
     "typescript-eslint": "^8.30.1",

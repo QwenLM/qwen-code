@@ -14,6 +14,26 @@ import { ToolNames } from '../../tools/tool-names.js';
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
+// Matches the FULL placeholder shape this module emits
+// (`${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${mime}]`; the mime is sanitized
+// to contain no `]` and may be EMPTY — sanitizeMimeForPlaceholder returns
+// '' for empty/whitespace-only/bracket-only mimeTypes, and the producer's
+// `??` fallback only covers null/undefined), not just the prefix. The
+// interior also rejects \r/\n/\t because sanitizeMimeForPlaceholder
+// normalizes them to spaces, so the producer can never emit them inside
+// the placeholder — accepting them would let multi-line user text that
+// merely starts with the prefix be misclassified as a placeholder. Derived
+// from the constant above so producer and consumer cannot drift. A genuine
+// user prompt that merely *begins* with the prefix is NOT a placeholder and
+// must keep counting as user text wherever this predicate is used.
+const CLEARED_MEDIA_PLACEHOLDER_RE = new RegExp(
+  `^${MICROCOMPACT_CLEARED_IMAGE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} [^\\]\\r\\n\\t]*\\]$`,
+);
+
+export function isClearedMediaPlaceholder(text: string): boolean {
+  return CLEARED_MEDIA_PLACEHOLDER_RE.test(text);
+}
+
 // IMPORTANT: any new file-touching tool added here MUST also be added
 // to FILE_PATH_TOOLS below, or microcompaction will blank its output
 // without reporting the eviction — silently reintroducing issue #4239.
@@ -23,6 +43,7 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
@@ -367,6 +388,15 @@ function buildKeptFilePaths(
     if (!keepRefs.has(refKey(ref))) continue;
     const part = getPart(history, ref);
     if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
+    // Only write_file results anchor the file's complete current bytes:
+    // the functionCall carries the full `content` on a model-role part
+    // microcompaction never blanks. read_file results can be cache-hit
+    // placeholders or partial slices, and edit results carry only an
+    // old/new snippet while still setting the cache's sticky full-read
+    // flags — neither proves the file stays resident (issue #4239).
+    if (part.functionResponse?.name !== ToolNames.WRITE_FILE) {
+      continue;
+    }
     const paths = getFilePathsForResponse(part, callIdToFilePath);
     // If an id maps to multiple possible paths, a kept result cannot prove
     // which file is still resident. Keep the #4239-safe behavior and do not
@@ -386,6 +416,7 @@ interface SizeClearPlan {
   toolResultCharsAfter: number;
   pendingToolResultChars: number;
   toolResultsTotalCharsThreshold: number;
+  toolResultsLowWatermark: number;
 }
 
 function planSizeBasedClearing(
@@ -399,6 +430,12 @@ function planSizeBasedClearing(
   if (!Number.isFinite(threshold) || threshold < 0) {
     return null;
   }
+  // Clear down to half the threshold, not just below it: stopping at the
+  // threshold leaves the total riding the limit, so every subsequent turn
+  // re-triggers and rewrites one more old result, breaking the provider
+  // prompt-cache prefix on every request. The watermark is a best-effort
+  // target — protected results may keep the total above it.
+  const lowWatermark = Math.floor(threshold / 2);
 
   const pending = normalizePendingContent(pendingContent);
   const virtualHistory =
@@ -426,11 +463,26 @@ function planSizeBasedClearing(
   const compactableToolRefs = tool.filter(
     (ref) => !preservedToolRefs.has(refKey(ref)),
   );
-  const keepToolRefs = buildKeepRefs(compactableToolRefs, keepRecent);
+  // keepRecent protects the most-recent committed results that are
+  // actually at risk of clearing — refs present in charsByRef (positive,
+  // successful, uncleared output). Zero-char refs (errors, prior
+  // placeholders, empty output) are never cleared, so letting them absorb
+  // protection slots would strand real recent outputs unprotected.
+  // Pending refs are excluded entirely: they are uncleared by
+  // construction (contentIndex guard below), and a pending read_file
+  // result may be a cache-hit placeholder rather than file bytes, so it
+  // must not vouch for path residency either — an over-disarm only costs
+  // a redundant re-read (issue #4239).
+  const keepToolRefs = buildKeepRefs(
+    compactableToolRefs.filter(
+      (ref) => ref.contentIndex < history.length && charsByRef.has(refKey(ref)),
+    ),
+    keepRecent,
+  );
   const clearRefs: PartRef[] = [];
   let remainingChars = totalChars;
   for (const ref of compactableToolRefs) {
-    if (remainingChars <= threshold) break;
+    if (remainingChars <= lowWatermark) break;
 
     const key = refKey(ref);
     const chars = charsByRef.get(key) ?? 0;
@@ -454,6 +506,7 @@ function planSizeBasedClearing(
     toolResultCharsAfter: remainingChars - pendingChars,
     pendingToolResultChars: pendingChars,
     toolResultsTotalCharsThreshold: threshold,
+    toolResultsLowWatermark: lowWatermark,
   };
 }
 
@@ -476,6 +529,7 @@ export interface MicrocompactMeta {
   toolResultCharsAfter?: number;
   pendingToolResultChars?: number;
   toolResultsTotalCharsThreshold?: number;
+  toolResultsLowWatermark?: number;
   /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
   /** Count of media parts cleared (`media` top-level + `nested-media` under non-compactable tools). */
@@ -531,6 +585,7 @@ export function microcompactHistory(
   let toolResultCharsAfter: number | undefined;
   let pendingToolResultChars: number | undefined;
   let toolResultsTotalCharsThreshold: number | undefined;
+  let toolResultsLowWatermark: number | undefined;
   let keptPathHistory = history;
   let keptPathRefs: PartRef[] = [];
 
@@ -556,13 +611,41 @@ export function microcompactHistory(
     // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
     // matches what users typically expect when they configure the
     // threshold for "tool results".
+    // Zero-char tool refs (errors, already-cleared placeholders, empty
+    // output) are never clearable, so letting them absorb protection
+    // slots would strand real recent outputs unprotected. Media-carrying
+    // results (image/PDF reads) have empty text output but ARE clearable
+    // on this path, so they must stay protection candidates. Media uses
+    // the same budget by count but is always clearable.
+    const keepToolRefs = buildKeepRefs(
+      tool.filter((ref) => {
+        const part = getPart(history, ref);
+        return getToolOutputChars(part) > 0 || (!!part && hasNestedMedia(part));
+      }),
+      keepRecent,
+    );
     keepRefs = new Set([
-      ...tool.slice(-keepRecent).map(refKey),
+      ...keepToolRefs,
       ...media.slice(-keepRecent).map(refKey),
       ...nestedMedia.slice(-keepRecent).map(refKey),
     ]);
     const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
-    clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
+    const toolKeys = new Set(tool.map(refKey));
+    clearRefs = allRefs.filter((r) => {
+      if (keepRefs.has(refKey(r))) return false;
+      const part = getPart(history, r);
+      // Zero-character non-media tool refs are never clearable (mirrors the
+      // size path's `chars <= 0` skip). They are excluded from keepRecent
+      // candidates above, so without this guard they would be blanked here.
+      if (
+        toolKeys.has(refKey(r)) &&
+        getToolOutputChars(part) === 0 &&
+        !(part && hasNestedMedia(part))
+      ) {
+        return false;
+      }
+      return true;
+    });
     keptPathRefs = tool;
   } else {
     const pending = normalizePendingContent(opts?.pendingContent);
@@ -587,6 +670,7 @@ export function microcompactHistory(
     toolResultCharsAfter = sizePlan.toolResultCharsAfter;
     pendingToolResultChars = sizePlan.pendingToolResultChars;
     toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
+    toolResultsLowWatermark = sizePlan.toolResultsLowWatermark;
   }
 
   if (clearRefs.length === 0 && triggerReason !== 'size') {
@@ -713,6 +797,7 @@ export function microcompactHistory(
       toolResultCharsAfter,
       pendingToolResultChars,
       toolResultsTotalCharsThreshold,
+      toolResultsLowWatermark,
       toolsCleared,
       mediaCleared,
       toolsKept,

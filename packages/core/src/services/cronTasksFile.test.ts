@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
+  annotateCronRunSession,
   appendCronRun,
   generateCronTaskId,
   getCronFilePath,
@@ -145,6 +146,51 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
+    it('round-trips optional channel delivery metadata', async () => {
+      const task = makeTask({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      });
+
+      await writeCronTasks(tmpDir, [task]);
+
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it.each([
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'user', id: 'user-1' },
+      },
+      {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'topic', id: 'topic-1' },
+      },
+      {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          type: 'user',
+          id: 'user-1',
+          threadId: 'thread-1',
+        },
+      },
+    ])('rejects malformed delivery metadata %#', async (delivery) => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), delivery }]),
+      );
+
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('accepts legacy tasks with no name/enabled fields', async () => {
       // A task written before the fields existed must still read back.
       const legacy = makeTask();
@@ -166,6 +212,39 @@ describe('cronTasksFile', () => {
       await seedTasksFile(
         tmpDir,
         JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a non-boolean session ownership marker', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), sessionId: 'sess-1', sessionOwnedByTask: 'yes' },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips per-run session mode and dispatch failures', async () => {
+      const task = makeTask({
+        sessionMode: 'per_run',
+        runs: [
+          {
+            at: 1718000240000,
+            kind: 'scheduled',
+            sessionDispatchFailed: true,
+          },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects an unknown session mode', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), sessionMode: 'new' }]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
@@ -271,6 +350,53 @@ describe('cronTasksFile', () => {
       // Oldest five dropped: the window is the last MAX_TASK_RUNS entries.
       expect(runs[0]!.at).toBe(5);
       expect(runs[runs.length - 1]!.at).toBe(MAX_TASK_RUNS + 4);
+    });
+  });
+
+  describe('annotateCronRunSession', () => {
+    const task = makeTask({
+      runs: [
+        { at: 1, kind: 'scheduled', sessionId: 'controller' },
+        { at: 2, kind: 'scheduled' },
+      ],
+    });
+
+    it('stamps the fresh session onto the run fired at that minute', () => {
+      const next = annotateCronRunSession(task, 2, { sessionId: 'child-1' });
+      expect(next.runs).toEqual([
+        { at: 1, kind: 'scheduled', sessionId: 'controller' },
+        { at: 2, kind: 'scheduled', sessionId: 'child-1' },
+      ]);
+      // Pure — the stored task and its runs are untouched.
+      expect(task.runs![1]).toEqual({ at: 2, kind: 'scheduled' });
+    });
+
+    it('records a failed dispatch with the session that ran it instead', () => {
+      const failed = annotateCronRunSession(task, 1, {
+        sessionId: 'controller',
+        dispatchFailed: true,
+      });
+      expect(failed.runs![0]).toEqual({
+        at: 1,
+        kind: 'scheduled',
+        sessionId: 'controller',
+        sessionDispatchFailed: true,
+      });
+      // A later success clears the marker and replaces the session.
+      const recovered = annotateCronRunSession(failed, 1, {
+        sessionId: 'child-2',
+      });
+      expect(recovered.runs![0]).toEqual({
+        at: 1,
+        kind: 'scheduled',
+        sessionId: 'child-2',
+      });
+    });
+
+    it('returns the task unchanged when no run matches', () => {
+      expect(annotateCronRunSession(task, 3, { sessionId: 'x' })).toBe(task);
+      const bare = makeTask();
+      expect(annotateCronRunSession(bare, 1, { sessionId: 'x' })).toBe(bare);
     });
   });
 
@@ -396,6 +522,26 @@ describe('cronTasksFile', () => {
 
       const stat = await fs.stat(filePath);
       expect(stat.mtimeMs).toBeLessThan(Date.now() - 30_000);
+    });
+
+    it('checks the caller guard at the commit boundary', async () => {
+      await writeCronTasks(tmpDir, [makeTask({ id: 'existing' })]);
+      const assertCanCommit = vi.fn(() => {
+        throw new Error('generation closed');
+      });
+
+      await expect(
+        updateCronTasks(
+          tmpDir,
+          (tasks) => [...tasks, makeTask({ id: 'stale' })],
+          { assertCanCommit },
+        ),
+      ).rejects.toThrow('generation closed');
+
+      expect(assertCanCommit).toHaveBeenCalledOnce();
+      expect((await readCronTasks(tmpDir)).map((task) => task.id)).toEqual([
+        'existing',
+      ]);
     });
 
     it('steals a stale update lock left by a crashed holder', async () => {

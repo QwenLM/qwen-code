@@ -83,9 +83,41 @@ describe('SessionService - rename and custom title', () => {
     vi.spyOn(fs, 'openSync').mockReturnValue(42);
     readSyncSpy = vi.spyOn(fs, 'readSync').mockReturnValue(0);
     vi.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
+    // Platforms without O_NOFOLLOW (Windows) open session files through an
+    // lstat -> open -> fstat identity check (openSyncNoFollow). Spy both
+    // stats so that fallback accepts the fabricated paths above: a regular
+    // (non-symlink) file whose identity trivially matches itself. On
+    // platforms with the flag the spies stay inert.
+    vi.spyOn(fs, 'lstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
+    vi.spyOn(fs, 'fstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          // size 0 keeps readLatestTailIfGrown's grown-tail pass inert,
+          // matching the pre-rerouting behavior where it never ran.
+          size: 0,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
 
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+      async (filePath, count, options) => ({
+        records: await jsonl.readLines(filePath, count, options),
+        complete: true,
+      }),
+    );
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
   });
 
@@ -114,6 +146,85 @@ describe('SessionService - rename and custom title', () => {
         titleSource: 'manual',
       });
       expect(writtenRecord.sessionId).toBe(sessionIdA);
+    });
+
+    it('should rename a session in the archive store', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.renameSession(
+        sessionIdA,
+        'archived session',
+        'manual',
+        'archived',
+      );
+
+      expect(result).toBe(true);
+      expect(vi.mocked(jsonl.writeLineSync).mock.calls[0][0]).toContain(
+        `/archive/${sessionIdA}.jsonl`,
+      );
+    });
+
+    it('runs lifecycle mutation fences before appending the title', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const internals = sessionService as unknown as {
+        resolveMaintainableSessionSnapshot: () => Promise<{
+          location: 'active';
+          identities: Array<{
+            state: 'active';
+            filePath: string;
+            dev: number;
+            ino: number;
+            size: number;
+            mtimeMs: number;
+            ctimeMs: number;
+          }>;
+        }>;
+        assertMaintainableSessionUnchanged: () => void;
+      };
+      vi.spyOn(
+        internals,
+        'resolveMaintainableSessionSnapshot',
+      ).mockResolvedValue({
+        location: 'active',
+        identities: [
+          {
+            state: 'active',
+            filePath: `/chats/${sessionIdA}.jsonl`,
+            dev: 1,
+            ino: 1,
+            size: 1,
+            mtimeMs: 1,
+            ctimeMs: 1,
+          },
+        ],
+      });
+      vi.spyOn(
+        internals,
+        'assertMaintainableSessionUnchanged',
+      ).mockImplementation(() => undefined);
+      const order: string[] = [];
+      vi.mocked(jsonl.writeLineSync).mockImplementation(() => {
+        order.push('write');
+      });
+
+      await expect(
+        sessionService.renameSessionForLifecycle(
+          sessionIdA,
+          'lifecycle title',
+          'manual',
+          'active',
+          {
+            assertStorageUnchanged: () => {
+              order.push('storage');
+            },
+            assertCanMutate: () => {
+              order.push('runtime');
+            },
+          },
+        ),
+      ).resolves.toBe(true);
+
+      expect(order).toEqual(['storage', 'runtime', 'write']);
     });
 
     it('should return false when session does not exist', async () => {

@@ -16,6 +16,7 @@ vi.mock('../../utils/schemaConverter.js', () => ({
 
 import { convertSchema } from '../../utils/schemaConverter.js';
 import { AnthropicContentConverter } from './converter.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('AnthropicContentConverter', () => {
   let converter: AnthropicContentConverter;
@@ -25,9 +26,9 @@ describe('AnthropicContentConverter', () => {
     converter = new AnthropicContentConverter('test-model', 'auto');
   });
 
-  describe('convertGeminiRequestToAnthropic', () => {
+  describe('convertLlmRequestToAnthropic', () => {
     it('extracts systemInstruction text from string', () => {
-      const { system } = converter.convertGeminiRequestToAnthropic({
+      const { system } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: 'hi',
         config: { systemInstruction: 'sys' },
@@ -43,7 +44,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('extracts systemInstruction text from parts and joins with newlines', () => {
-      const { system } = converter.convertGeminiRequestToAnthropic({
+      const { system } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: 'hi',
         config: {
@@ -69,7 +70,7 @@ describe('AnthropicContentConverter', () => {
       // cross-session caching under the `prompt-caching-scope-2026-01-05`
       // beta. Non-Anthropic backends pass false (or omit) so they see the
       // standard per-session shape verified by the test above.
-      const { system } = converter.convertGeminiRequestToAnthropic(
+      const { system } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: 'hi',
@@ -87,8 +88,105 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    describe('staticSystemPrefix split', () => {
+      const staticPrefix = 'core prompt + memory';
+      const volatileSuffix = '\n\n# Git Status\nbranch: main';
+      const fullSystem = staticPrefix + volatileSuffix;
+
+      it('splits the system prompt at the static prefix boundary, scoping only the prefix', () => {
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+          {
+            // The volatile tail (git status, session-start context) always
+            // carries the per-session shape — it differs across sessions,
+            // so a global entry here would churn cache for zero hits.
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('splits without scope when useGlobalCacheScope is off', () => {
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral' },
+          },
+          {
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when the prefix does not match (subagent prompt)', () => {
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'a different subagent prompt' },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'a different subagent prompt',
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when there is no suffix beyond the prefix', () => {
+        // Not a git repo → the system prompt IS the static prefix. A split
+        // would leave an empty second block, which Anthropic rejects.
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: staticPrefix },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
+    });
+
     it('converts a plain string content into a user message', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: 'Hello',
       });
@@ -108,7 +206,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts user content parts into a user message with text blocks', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -134,7 +232,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('preserves ordered multi-part startup reminder user content', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -163,7 +261,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts assistant thought parts into Anthropic thinking blocks', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -188,7 +286,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts functionCall parts from model role into tool_use blocks', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -233,8 +331,50 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  args: { query: 'P12345' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const assistant = messages[0];
+      const toolUse = Array.isArray(assistant?.content)
+        ? assistant.content.find((block) => block.type === 'tool_use')
+        : undefined;
+
+      expect(toolUse?.type).toBe('tool_use');
+      if (toolUse?.type === 'tool_use') {
+        expect(toolUse.name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+        expect(toolUse.name).not.toContain('.');
+      }
+    });
+
     it('converts functionResponse parts into user tool_result messages', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -278,7 +418,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('extracts function response error field when present', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -323,7 +463,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('creates tool result with empty content for empty function responses', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -369,7 +509,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts function response with inlineData image parts into tool_result with images', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -430,67 +570,70 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('renders non-image inlineData as a text block (avoids invalid image media_type)', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call-1',
-                  name: 'Read',
-                  args: {},
+    it.each(['audio/mpeg', 'image/bmp'])(
+      'renders unsupported %s inlineData as a text block',
+      (mimeType) => {
+        const { messages } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'Read',
+                    args: {},
+                  },
                 },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call-1',
-                  name: 'Read',
-                  response: { output: 'Audio content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'audio/mpeg',
-                        data: 'base64encodedaudiodata',
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'Read',
+                    response: { output: 'Unsupported content' },
+                    parts: [
+                      {
+                        inlineData: {
+                          mimeType,
+                          data: 'base64encodeddata',
+                        },
                       },
-                    },
-                  ],
+                    ],
+                  },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(messages).toHaveLength(2);
-      expect(messages[1]?.role).toBe('user');
+        expect(messages).toHaveLength(2);
+        expect(messages[1]?.role).toBe('user');
 
-      const toolResult = messages[1]?.content?.[0] as {
-        type: string;
-        content: Array<{ type: string; text?: string }>;
-      };
-      expect(toolResult.type).toBe('tool_result');
-      expect(Array.isArray(toolResult.content)).toBe(true);
-      expect(toolResult.content[0]).toEqual({
-        type: 'text',
-        text: 'Audio content',
-      });
-      expect(toolResult.content[1]?.type).toBe('text');
-      expect(toolResult.content[1]?.text).toContain(
-        'Unsupported inline media type',
-      );
-      expect(toolResult.content[1]?.text).toContain('audio/mpeg');
-    });
+        const toolResult = messages[1]?.content?.[0] as {
+          type: string;
+          content: Array<{ type: string; text?: string }>;
+        };
+        expect(toolResult.type).toBe('tool_result');
+        expect(Array.isArray(toolResult.content)).toBe(true);
+        expect(toolResult.content[0]).toEqual({
+          type: 'text',
+          text: 'Unsupported content',
+        });
+        expect(toolResult.content[1]?.type).toBe('text');
+        expect(toolResult.content[1]?.text).toContain(
+          'Unsupported inline media type',
+        );
+        expect(toolResult.content[1]?.text).toContain(mimeType);
+      },
+    );
 
     it('converts inlineData with PDF into document block', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -552,7 +695,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts fileData with image into image url block', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -614,7 +757,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('converts fileData with PDF into document url block', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -676,7 +819,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('renders unsupported fileData as a text block', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -733,7 +876,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('associates each image with its preceding functionResponse', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           {
@@ -836,7 +979,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('merges consecutive assistant messages into one', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -884,7 +1027,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('merges thinking blocks before non-thinking blocks', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -927,7 +1070,11 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      // A genuine orphan requires a subsequent message that was actually
+      // scanned and found lacking a matching tool_result -- not merely the
+      // absence of any subsequent message (see the "trailing tool_use"
+      // test below for that case).
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -938,25 +1085,181 @@ describe('AnthropicContentConverter', () => {
               { functionCall: { id: 'orphan', name: 'tool', args: {} } },
             ],
           },
+          { role: 'user', parts: [{ text: 'never mind' }] },
         ],
       });
 
       expect(messages).toEqual([
         {
           role: 'user',
-          content: [
-            { type: 'text', text: 'Hi', cache_control: { type: 'ephemeral' } },
-          ],
+          content: [{ type: 'text', text: 'Hi' }],
         },
         {
           role: 'assistant',
           content: [{ type: 'text', text: 'Let me help' }],
         },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'never mind',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('does not strip a trailing tool_use that has no subsequent message yet (unresolved, not orphaned)', () => {
+      // "History ends on a pending tool_use" is not evidence the call is
+      // orphaned -- the tool may simply not have finished executing yet,
+      // or this conversion may be happening for a reason other than
+      // sending the completed turn to Anthropic (token counting, a
+      // resumed/replayed session snapshot, ...). Regression test for the
+      // bug where this exact shape had its tool_use silently deleted.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'What is the weather in Paris?' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Let me check the weather.' },
+              {
+                functionCall: {
+                  id: 'toolu_pending',
+                  name: 'get_weather',
+                  args: { city: 'Paris' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.content).toEqual([
+        { type: 'text', text: 'Let me check the weather.' },
+        {
+          type: 'tool_use',
+          id: 'toolu_pending',
+          name: 'get_weather',
+          input: { city: 'Paris' },
+        },
+      ]);
+    });
+
+    it('cascade-strips a signed thinking block when its sibling tool_use is orphaned in the same pass', () => {
+      // A thinking block's signature is computed over the full sibling
+      // content of its turn. If a sibling tool_use is stripped as an
+      // orphan, the signature no longer matches and replaying it 400s:
+      // "thinking blocks in the latest assistant message cannot be
+      // modified". So the thinking block must go with it.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { text: 'Let me help' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'never mind' }] },
+        ],
+      });
+
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg!.content).toEqual([
+        { type: 'text', text: 'Let me help' },
+      ]);
+    });
+
+    it('does not cascade-strip thinking when a sibling tool_use survives alongside an orphaned one', () => {
+      // Partial-orphan case: turn = [thinking, tool_use A, tool_use B],
+      // only A's result comes back -- B is a genuine orphan and is
+      // stripped, but A survives. The thinking sibling must stay too: it's
+      // still needed to satisfy Anthropic's manual-mode "final turn must
+      // begin with thinking when a tool_use is present" rule, and
+      // cascading here would trade one 400 for another.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'a', name: 'tool', args: {} } },
+              { functionCall: { id: 'b', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'a',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      const blocks = assistantMsg!.content as Array<{ type: string }>;
+      expect(blocks[0]?.type).toBe('thinking');
+      expect(blocks.some((b) => b.type === 'tool_use')).toBe(true);
+      expect(blocks).toHaveLength(2);
+    });
+
+    it('drops the whole message and merges surrounding user turns when a cascade empties out the turn entirely', () => {
+      // The bot review's flagged coverage gap: the only existing cascade
+      // test leaves a surviving `text` block, so `finalBlocks` is never
+      // empty and the `else` drop branch in cleanOrphanedToolCalls is
+      // never exercised. Here the turn's only blocks are a signed thinking
+      // part and an orphaned tool_use, so after the cascade strips both,
+      // finalBlocks is empty and the whole assistant message must be
+      // dropped -- and the surrounding user messages must merge.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'before' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'after' }] },
+        ],
+      });
+
+      expect(messages.some((m) => m.role === 'assistant')).toBe(false);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.role).toBe('user');
+      expect(messages[0]!.content).toEqual([
+        { type: 'text', text: 'before' },
+        {
+          type: 'text',
+          text: 'after',
+          cache_control: { type: 'ephemeral' },
+        },
       ]);
     });
 
     it('cleans orphaned tool_result blocks without matching tool_use', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -996,8 +1299,258 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('drops a duplicate tool_result sharing a tool_use_id within one message', () => {
+      // Anthropic rejects a message with two tool_result blocks for the
+      // same tool_use_id ("each `tool_use` block must have a single
+      // result" -- HTTP 400). This can happen when a tool call's result
+      // is recorded twice in history.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toHaveLength(3);
+      const toolResults = (
+        messages[2]!.content as Array<{ type: string; tool_use_id?: string }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0]).toMatchObject({
+        tool_use_id: 'dup',
+        content: 'first',
+      });
+    });
+
+    it('drops a duplicate tool_result for one id while keeping a different id in the same message', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'dup', name: 'tool', args: {} } },
+              { functionCall: { id: 'other', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'other',
+                  name: 'tool',
+                  response: { output: 'other-result' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const toolResults = (
+        messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+          content?: string;
+        }>
+      ).filter((b) => b.type === 'tool_result');
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults.map((b) => [b.tool_use_id, b.content])).toEqual([
+        ['dup', 'first'],
+        ['other', 'other-result'],
+      ]);
+    });
+
+    describe('tool_use id sanitization', () => {
+      // Anthropic validates tool_use.id / tool_result.tool_use_id against
+      // ^[a-zA-Z0-9_-]+$ server-side (HTTP 400 otherwise), but the Gemini
+      // lingua-franca's functionCall.id / functionResponse.id has no such
+      // constraint. Verified live: sending an id containing characters
+      // outside that set, or an empty tool_use_id, both 400 with
+      // "String should match pattern '^[a-zA-Z0-9_-]+$'".
+      it('sanitizes a tool_use id containing characters outside [a-zA-Z0-9_-]', () => {
+        const rawId = 'call:abc.def/ghi?jkl';
+        const { messages } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: { id: rawId, name: 'tool', args: { a: 1 } },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const userBlocks = messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        const toolResult = userBlocks.find((b) => b.type === 'tool_result');
+
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+        expect(toolUse?.id).not.toBe(rawId);
+        // The sanitized id links the pair back up.
+        expect(toolResult?.tool_use_id).toBe(toolUse?.id);
+      });
+
+      it('generates a non-empty fallback id when functionCall.id is missing (not an empty string)', () => {
+        const { messages } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { name: 'tool', args: {} } }],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        expect(toolUse?.id).toBeTruthy();
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+      });
+
+      // Note: there is no analogous standalone test for "functionResponse.id
+      // missing" here -- a tool_result with no id can't be linked to any
+      // tool_use by definition (which call is it responding to?), so it is
+      // always a genuine orphan and gets cleaned up by cleanOrphanedToolCalls
+      // regardless of this fix. tool_result.tool_use_id goes through the
+      // exact same resolveToolUseId/nextGeneratedToolId path exercised by
+      // the tool_use-side tests above, so the never-empty-string guarantee
+      // is already covered.
+
+      it('does not collide fallback ids generated for two different missing-id tool calls in the same request', () => {
+        const { messages } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { functionCall: { name: 'tool_a', args: {} } },
+                { functionCall: { name: 'tool_b', args: {} } },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const ids = assistantBlocks
+          .filter((b) => b.type === 'tool_use')
+          .map((b) => b.id);
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(2);
+      });
+
+      it('resolves the same source id to the same sanitized id across tool_use and tool_result in different messages', () => {
+        const rawId = 'weird/id:1';
+        const { messages } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { id: rawId, name: 'tool', args: {} } }],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const toolUseId = (
+          messages[1]?.content as Array<{ type: string; id?: string }>
+        ).find((b) => b.type === 'tool_use')?.id;
+        const toolResultId = (
+          messages[2]?.content as Array<{
+            type: string;
+            tool_use_id?: string;
+          }>
+        ).find((b) => b.type === 'tool_result')?.tool_use_id;
+
+        expect(toolUseId).toBeDefined();
+        expect(toolUseId).toBe(toolResultId);
+      });
+    });
+
     it('keeps tool results split across consecutive user messages', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -1058,8 +1611,136 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('drops a duplicate tool_result for the same id across two consecutive user messages', () => {
+      // cleanOrphanedToolCalls only dedupes tool_result blocks within a
+      // single message; mergeConsecutiveUserMessages runs afterward and
+      // can combine two originally-separate user messages that each
+      // independently carried a (individually valid) tool_result for the
+      // same tool_use_id. Without a second dedup pass at the merge site,
+      // the merged message would resurface the exact "two tool_result
+      // blocks for one tool_use_id" shape Anthropic rejects.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+              { text: 'a follow-up note' },
+            ],
+          },
+        ],
+      });
+
+      // Full merged content, not just the filtered tool_result blocks --
+      // confirms the non-tool_result sibling from the second message
+      // survives the merge and still sorts after the (deduped) results.
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'dup', content: 'first' },
+          {
+            type: 'text',
+            text: 'a follow-up note',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops duplicate tool_result blocks across three consecutive user messages', () => {
+      // Pins that the merge-site dedup accumulates across the whole
+      // `combined` array on every iteration, not just pairwise between
+      // the two most recently merged messages -- with three originally
+      // separate user turns each carrying a tool_result for the same
+      // tool_use_id, only the first should survive.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup3', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup3',
+                  name: 'tool',
+                  response: { output: 'third' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toHaveLength(3);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'dup3',
+            content: 'first',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
     it('merges users when dropping an orphan-only assistant turn', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'before' }] },
@@ -1087,7 +1768,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('keeps tool results before text when merging consecutive users', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -1128,8 +1809,16 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
-    it('drops tool results that do not lead user content', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+    it('reorders a tool_result ahead of other content in the same message rather than dropping it', () => {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use. A text part preceding the
+      // functionResponse part within the same Gemini Content used to be
+      // treated by cleanOrphanedToolCalls's own "seenNonToolResult" gate as
+      // if the tool_result never showed up at all -- silently discarding
+      // both the tool_result AND its paired tool_use, rather than fixing
+      // the order. Now the blocks are reordered before that gate runs, so
+      // the pairing is recognized and everything survives.
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -1154,10 +1843,15 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+        },
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'Hi' },
+            { type: 'tool_result', tool_use_id: 't1', content: 'late' },
             {
               type: 'text',
               text: 'preface',
@@ -1168,8 +1862,55 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('preserves relative order among multiple tool_result blocks when reordering ahead of text', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+              { functionCall: { id: 't2', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { text: 'preface' },
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 't2',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.content).toEqual([
+        { type: 'tool_result', tool_use_id: 't1', content: 'first' },
+        { type: 'tool_result', tool_use_id: 't2', content: 'second' },
+        {
+          type: 'text',
+          text: 'preface',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
     it('deduplicates tool_use blocks by id during merge', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -1206,7 +1947,7 @@ describe('AnthropicContentConverter', () => {
 
   describe('unsigned proxy thinking history', () => {
     it('drops unsigned thinking while preserving visible content and signed blocks', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1251,7 +1992,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('drops a thinking-only turn and merges the surrounding user turns', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1282,7 +2023,7 @@ describe('AnthropicContentConverter', () => {
 
     it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
       expect(() =>
-        converter.convertGeminiRequestToAnthropic(
+        converter.convertLlmRequestToAnthropic(
           {
             model: 'models/test',
             contents: [
@@ -1313,8 +2054,79 @@ describe('AnthropicContentConverter', () => {
       ).toThrow('proxy omitted the thinking signature');
     });
 
+    it('fails locally, rather than silently dropping the block, when an EMPTY-text unsigned thinking block belongs to a non-latest step of an active tool-use loop', () => {
+      // Regression guard for pipeline ordering: dropEmptyTextThinkingBlocks
+      // must run AFTER this check, not before. An empty-text thinking
+      // block with no signature is unsigned by the same definition this
+      // active-loop check uses -- if the empty-text guard ran first it
+      // would delete the block before this check ever saw it, silently
+      // swallowing exactly the proxy bug this throw exists to surface
+      // (the same pass-ordering hazard identified against the removed
+      // PATCH-B heuristic).
+      //
+      // Needs a two-step loop: a single assistant turn is always "the
+      // latest", and dropEmptyTextThinkingBlocks unconditionally exempts
+      // the latest turn regardless of ordering, so a one-step fixture
+      // can't distinguish the two orderings. Step 1's empty-text thinking
+      // must be on a NON-latest turn that is still part of the unbroken
+      // tool_use/tool_result chain reaching the end of history.
+      expect(() =>
+        converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tool' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: '', thought: true },
+                  { functionCall: { id: 't1', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+              {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'signed reasoning',
+                    thought: true,
+                    thoughtSignature: 'sig',
+                  },
+                  { functionCall: { id: 't2', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't2',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+
     it('drops unsigned thinking from a completed tool-use turn', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1353,7 +2165,7 @@ describe('AnthropicContentConverter', () => {
 
     it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
       expect(() =>
-        converter.convertGeminiRequestToAnthropic(
+        converter.convertLlmRequestToAnthropic(
           {
             model: 'models/test',
             contents: [
@@ -1408,6 +2220,95 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  describe('dropEmptyTextThinkingBlocks', () => {
+    it('leaves a signed, non-empty thinking block on a non-latest turn untouched', () => {
+      // A broader cross-turn heuristic here (detecting "this turn's
+      // tool_use went stale in an earlier trim" and downgrading its
+      // thinking to text) was removed after review: it couldn't
+      // distinguish that state from "this turn was always thinking-only",
+      // and live verification showed it rewriting turns that were never
+      // actually invalid. Only an empty-text thinking block is
+      // unconditionally invalid regardless of tool_use presence; a
+      // populated, signed thinking block is left exactly as-is.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                text: 'stale reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const olderAssistant = messages[1];
+      expect(olderAssistant.role).toBe('assistant');
+      expect(olderAssistant.content).toEqual([
+        { type: 'thinking', thinking: 'stale reasoning', signature: 'sig' },
+      ]);
+    });
+
+    it('drops an empty redacted_thinking-derived turn entirely (defensive, no plaintext fallback)', () => {
+      // convertAnthropicResponseToLlm represents a redacted_thinking
+      // block as `{ text: '', thought: true }` (its opaque `data` doesn't
+      // survive the Gemini-Part round trip -- see that method's doc). When
+      // this round-trips back through processContent it becomes an
+      // empty-text `thinking` block on the wire, which this defensive
+      // guard drops outright, dropping the whole message since nothing
+      // else survives.
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true }],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0].content).toEqual([
+        { type: 'text', text: 'Sure, here you go.' },
+      ]);
+    });
+
+    it('leaves the latest assistant turn untouched even with empty-text thinking', () => {
+      // The latestAssistantIdx short-circuit fires before the empty-text
+      // filter runs at all, so this must hold regardless of content -- use
+      // an actually-empty-text block (matching the title) rather than a
+      // populated one, so this test would fail if the exemption were ever
+      // narrowed to "non-empty-text latest turns only".
+      const { messages } = converter.convertLlmRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true, thoughtSignature: 'sig' }],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'sig' },
+      ]);
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
   // anthropic-compatible API rejects requests in thinking mode when a prior
   // assistant turn carrying `tool_use` omits a thinking block. Plain-text
@@ -1426,7 +2327,7 @@ describe('AnthropicContentConverter', () => {
       // Verified against api.deepseek.com/anthropic: plain-text assistant
       // turns without thinking are accepted. Avoid bloating replay history
       // with synthetic blocks the API does not require.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1444,7 +2345,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('injects an empty thinking block on tool-calling assistant turns missing one', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1493,7 +2394,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('preserves existing thinking blocks on tool-use assistant turns', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1536,7 +2437,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('does not modify user messages', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
@@ -1555,7 +2456,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('does nothing when option is disabled (default)', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'Hi' }] },
@@ -1577,7 +2478,7 @@ describe('AnthropicContentConverter', () => {
         functionResponse: { id, name: 'tool', response: { output: 'ok' } },
       });
 
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1612,7 +2513,7 @@ describe('AnthropicContentConverter', () => {
       // `content: []`, which Anthropic API rejects, and dropping the message
       // would break user/assistant alternation. Keep the original blocks
       // instead — DeepSeek empirically tolerates the residual mismatch.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1646,7 +2547,7 @@ describe('AnthropicContentConverter', () => {
       // parts but the side-query disables thinking. The converter must drop
       // those blocks so the outgoing request matches the absent top-level
       // `thinking` config.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1698,7 +2599,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('strips thinking after consecutive assistant turns are merged', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1791,7 +2692,7 @@ describe('AnthropicContentConverter', () => {
       // `signature` field. The cleanup adds an empty signature in place;
       // because the normalized block now satisfies the requirement, Step 2
       // does not prepend a synthetic.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1832,7 +2733,7 @@ describe('AnthropicContentConverter', () => {
     it('preserves an existing compliant thinking block on a tool-use turn', () => {
       // A thinking block with a real `signature` field is fully compliant —
       // the injector must not duplicate it.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1886,7 +2787,7 @@ describe('AnthropicContentConverter', () => {
       // signature. The cleanup adds an empty signature in place to make the
       // block spec-compliant while preserving the original thinking text.
       // No synthetic is prepended on a plain-text turn (no tool_use).
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1919,7 +2820,7 @@ describe('AnthropicContentConverter', () => {
     it('injects on mixed text+tool_use assistant turns missing thinking', () => {
       // Common shape: model says something, then calls a tool. With no
       // thinking, this is still a tool-use turn that needs the synthetic.
-      const { messages } = converter.convertGeminiRequestToAnthropic(
+      const { messages } = converter.convertLlmRequestToAnthropic(
         {
           model: 'models/test',
           contents: [
@@ -1959,7 +2860,135 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
-  describe('convertGeminiToolsToAnthropic', () => {
+  describe('assistant-turn prefill stripping', () => {
+    it('drops a trailing empty assistant message when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            // Whitespace-only, not empty: processContent only emits a text
+            // block when part.text is truthy, so an actually-empty string
+            // never reaches this pass at all (the fixture would be
+            // vacuous). isEmptyAssistantMessage's `.trim()` check is what
+            // this test needs to exercise.
+            { role: 'model', parts: [{ text: '   ' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      ]);
+    });
+
+    it('appends a synthetic user turn when a trailing assistant message has real content', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+
+    it('leaves a trailing user message untouched when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Hello!' }] },
+            { role: 'user', parts: [{ text: 'How are you?' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Hello!' }] },
+        { role: 'user', content: [{ type: 'text', text: 'How are you?' }] },
+      ]);
+    });
+
+    it('does not strip a trailing assistant message when the option is unset', () => {
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+      ]);
+    });
+
+    it('keeps a trailing thinking-only assistant message and appends a synthetic user turn', () => {
+      // A thinking block is real content (not text/whitespace-only), so it
+      // must be preserved rather than dropped as an "empty prefill" —
+      // unlike an unanswered tool_use, thinking blocks are never treated
+      // as orphans by the earlier merge/clean passes.
+      const { messages } = converter.convertLlmRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'pondering the answer',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'pondering the answer',
+              signature: 'sig',
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+  });
+
+  describe('convertLlmToolsToAnthropic', () => {
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [
         {
@@ -1977,7 +3006,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools);
+      const result = await converter.convertLlmToolsToAnthropic(tools);
 
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
@@ -2007,7 +3036,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools, {
+      const result = await converter.convertLlmToolsToAnthropic(tools, {
         useGlobalCacheScope: true,
       });
 
@@ -2033,7 +3062,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as CallableTool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(callable);
+      const result = await converter.convertLlmToolsToAnthropic(callable);
 
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('dynamic_tool');
@@ -2048,7 +3077,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools);
+      const result = await converter.convertLlmToolsToAnthropic(tools);
 
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
@@ -2075,7 +3104,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools);
+      const result = await converter.convertLlmToolsToAnthropic(tools);
       expect(result[0]?.input_schema?.type).toBe('object');
     });
 
@@ -2103,7 +3132,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools);
+      const result = await converter.convertLlmToolsToAnthropic(tools);
 
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('valid_tool');
@@ -2129,16 +3158,16 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result = await converter.convertGeminiToolsToAnthropic(tools);
+      const result = await converter.convertLlmToolsToAnthropic(tools);
 
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('valid_tool');
     });
   });
 
-  describe('convertAnthropicResponseToGemini', () => {
+  describe('convertAnthropicResponseToLlm', () => {
     it('converts text, tool_use, thinking, and redacted_thinking blocks', () => {
-      const response = converter.convertAnthropicResponseToGemini({
+      const response = converter.convertAnthropicResponseToLlm({
         id: 'msg-1',
         model: 'claude-test',
         stop_reason: 'end_turn',
@@ -2160,6 +3189,10 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 8,
         cachedContentTokenCount: 0,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
+        cacheCreationInputTokens: undefined,
+      });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([
@@ -2171,7 +3204,7 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('handles tool_use input that is a JSON string', () => {
-      const response = converter.convertAnthropicResponseToGemini({
+      const response = converter.convertAnthropicResponseToLlm({
         id: 'msg-1',
         model: 'claude-test',
         stop_reason: null,
@@ -2194,7 +3227,7 @@ describe('AnthropicContentConverter', () => {
       // converter must forward both cache fields so the normalizer can sum
       // them — dropping either silently undercounts the Footer reading by
       // the size of the dropped bucket.
-      const response = converter.convertAnthropicResponseToGemini({
+      const response = converter.convertAnthropicResponseToLlm({
         id: 'msg-1',
         model: 'claude-test',
         stop_reason: 'end_turn',
@@ -2213,25 +3246,52 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the request model when the provider omits its model', () => {
+      const response = converter.convertAnthropicResponseToLlm({
+        id: 'msg-no-model',
+        model: '',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+
+      expect(response.modelVersion).toBeUndefined();
     });
   });
 
-  describe('mapAnthropicFinishReasonToGemini', () => {
+  describe('mapAnthropicFinishReasonToLlm', () => {
     it('maps known reasons', () => {
-      expect(converter.mapAnthropicFinishReasonToGemini('end_turn')).toBe(
+      expect(converter.mapAnthropicFinishReasonToLlm('end_turn')).toBe(
         FinishReason.STOP,
       );
-      expect(converter.mapAnthropicFinishReasonToGemini('max_tokens')).toBe(
+      expect(converter.mapAnthropicFinishReasonToLlm('max_tokens')).toBe(
         FinishReason.MAX_TOKENS,
       );
-      expect(converter.mapAnthropicFinishReasonToGemini('content_filter')).toBe(
+      expect(converter.mapAnthropicFinishReasonToLlm('content_filter')).toBe(
+        FinishReason.SAFETY,
+      );
+    });
+
+    it('maps refusal into the content-filter family (#9026)', () => {
+      // A refusal stop_reason is a provider safety decision. It must map
+      // to SAFETY so the quiet post-tool-result acceptance gate in
+      // llmChat keeps it fatal; falling through to
+      // FINISH_REASON_UNSPECIFIED would let an armed attempt accept the
+      // refusal as a quiet "(empty content)" completion.
+      expect(converter.mapAnthropicFinishReasonToLlm('refusal')).toBe(
         FinishReason.SAFETY,
       );
     });
 
     it('returns undefined for null/empty', () => {
-      expect(converter.mapAnthropicFinishReasonToGemini(null)).toBeUndefined();
-      expect(converter.mapAnthropicFinishReasonToGemini('')).toBeUndefined();
+      expect(converter.mapAnthropicFinishReasonToLlm(null)).toBeUndefined();
+      expect(converter.mapAnthropicFinishReasonToLlm('')).toBeUndefined();
     });
   });
 
@@ -2242,7 +3302,7 @@ describe('AnthropicContentConverter', () => {
         'auto',
         false,
       );
-      const { system } = noCacheConverter.convertGeminiRequestToAnthropic({
+      const { system } = noCacheConverter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: 'hi',
         config: { systemInstruction: 'sys' },
@@ -2257,7 +3317,7 @@ describe('AnthropicContentConverter', () => {
         'auto',
         false,
       );
-      const { messages } = noCacheConverter.convertGeminiRequestToAnthropic({
+      const { messages } = noCacheConverter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: 'Hello',
       });
@@ -2277,7 +3337,7 @@ describe('AnthropicContentConverter', () => {
       // breakpoint from turn 2 onward and collapsed the cacheable region
       // back to system+tools. Anthropic docs explicitly list tool_result
       // as a cacheable block type in messages.content.
-      const { messages } = converter.convertGeminiRequestToAnthropic({
+      const { messages } = converter.convertLlmRequestToAnthropic({
         model: 'models/test',
         contents: [
           { role: 'user', parts: [{ text: 'do the thing' }] },
@@ -2333,8 +3393,7 @@ describe('AnthropicContentConverter', () => {
         },
       ] as Tool[];
 
-      const result =
-        await noCacheConverter.convertGeminiToolsToAnthropic(tools);
+      const result = await noCacheConverter.convertLlmToolsToAnthropic(tools);
 
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
@@ -2371,7 +3430,7 @@ describe('AnthropicContentConverter', () => {
         );
 
         const { system, messages } =
-          constructedWithCacheOff.convertGeminiRequestToAnthropic(
+          constructedWithCacheOff.convertLlmRequestToAnthropic(
             {
               model: 'models/test',
               contents: 'Hello',
@@ -2401,11 +3460,13 @@ describe('AnthropicContentConverter', () => {
           },
         ]);
 
-        const result =
-          await constructedWithCacheOff.convertGeminiToolsToAnthropic(tools, {
+        const result = await constructedWithCacheOff.convertLlmToolsToAnthropic(
+          tools,
+          {
             enableCacheControl: true,
             useGlobalCacheScope: true,
-          });
+          },
+        );
         expect(result[0].cache_control).toEqual({
           type: 'ephemeral',
           scope: 'global',
@@ -2423,7 +3484,7 @@ describe('AnthropicContentConverter', () => {
         );
 
         const { system, messages } =
-          constructedWithCacheOn.convertGeminiRequestToAnthropic(
+          constructedWithCacheOn.convertLlmRequestToAnthropic(
             {
               model: 'models/test',
               contents: 'Hello',
@@ -2437,10 +3498,12 @@ describe('AnthropicContentConverter', () => {
           { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
         ]);
 
-        const result =
-          await constructedWithCacheOn.convertGeminiToolsToAnthropic(tools, {
+        const result = await constructedWithCacheOn.convertLlmToolsToAnthropic(
+          tools,
+          {
             enableCacheControl: false,
-          });
+          },
+        );
         expect(result[0]).not.toHaveProperty('cache_control');
       });
 
@@ -2452,7 +3515,7 @@ describe('AnthropicContentConverter', () => {
           'test-model',
           'auto',
         );
-        const { system } = converterDefault.convertGeminiRequestToAnthropic(
+        const { system } = converterDefault.convertLlmRequestToAnthropic(
           {
             model: 'models/test',
             contents: 'Hello',
@@ -2470,11 +3533,249 @@ describe('AnthropicContentConverter', () => {
           },
         ]);
 
-        const result = await converterDefault.convertGeminiToolsToAnthropic(
+        const result = await converterDefault.convertLlmToolsToAnthropic(
           tools,
           { enableCacheControl: true },
         );
         expect(result[0].cache_control).toEqual({ type: 'ephemeral' });
+      });
+    });
+
+    describe('cacheRetention', () => {
+      it('omits ttl on the system block when cacheRetention is unset (ephemeral default)', () => {
+        const { system } = converter.convertLlmRequestToAnthropic({
+          model: 'models/test',
+          contents: 'hi',
+          config: { systemInstruction: 'sys' },
+        });
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+      });
+
+      it("sets ttl:'1h' on system, last tool, and trailing user message when cacheRetention is '1h'", async () => {
+        const { system, messages } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertLlmToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          { cacheRetention: '1h' },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it('composes ttl with scope:"global" on the same cache_control entry', () => {
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h', useGlobalCacheScope: true },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: {
+              type: 'ephemeral',
+              scope: 'global',
+              ttl: '1h',
+            },
+          },
+        ]);
+      });
+
+      it('honors a per-anchor cacheRetentionByBlock override, promoting the earlier tool anchor to keep wire order legal', async () => {
+        // Anthropic requires cache entries with a longer TTL to appear
+        // before shorter ones on the wire (tools -> system -> messages).
+        // { system: '1h' } alone would otherwise leave a 5m-default tool
+        // anchor ahead of a 1h system anchor -- an ordering violation.
+        // resolveCacheRetention promotes every anchor before a '1h' one,
+        // so the tool anchor here also resolves to '1h'.
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+
+        const tools = await converter.convertLlmToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("does not promote anchors after the overridden one -- { tool: '1h' } alone leaves system/user.last at the default", async () => {
+        // tool -> system -> user.last is already longest-to-shortest here,
+        // so nothing needs promoting; this is the one override shape that
+        // was always legal even before the ordering fix.
+        const { system, messages } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral' },
+        });
+
+        const tools = await converter.convertLlmToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("promotes both tool and system when only 'user.last' is overridden to '1h'", async () => {
+        // { 'user.last': '1h' } alone would otherwise leave both the tool
+        // and system anchors at the 5m default ahead of a 1h trailing
+        // user message -- also an ordering violation, and one the
+        // reviewer's case analysis called out explicitly (case E).
+        const { system, messages } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertLlmToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it('carries ttl on both halves of a split system prompt (staticSystemPrefix)', () => {
+        const { system } = converter.convertLlmRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'stable prefixvolatile suffix' },
+          },
+          { cacheRetention: '1h', staticSystemPrefix: 'stable prefix' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'stable prefix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+          {
+            type: 'text',
+            text: 'volatile suffix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
       });
     });
   });

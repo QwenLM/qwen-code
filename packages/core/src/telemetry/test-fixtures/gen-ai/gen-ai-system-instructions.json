@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "GenericPart": {
+      "additionalProperties": true,
+      "description": "Represents an arbitrary message part with any type and properties.\nThis allows for extensibility with custom message part types.",
+      "properties": {
+        "type": {
+          "description": "The type of the content captured in this part.",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "GenericPart",
+      "type": "object"
+    },
+    "TextPart": {
+      "additionalProperties": true,
+      "description": "Represents text content sent to or received from the model.",
+      "properties": {
+        "type": {
+          "const": "text",
+          "description": "The type of the content captured in this part.",
+          "title": "Type",
+          "type": "string"
+        },
+        "content": {
+          "description": "Text content sent to or received from the model.",
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": ["type", "content"],
+      "title": "TextPart",
+      "type": "object"
+    }
+  },
+  "description": "Represents the system instructions provided to the model.",
+  "items": {
+    "anyOf": [
+      {
+        "$ref": "#/$defs/TextPart"
+      },
+      {
+        "$ref": "#/$defs/GenericPart"
+      }
+    ]
+  },
+  "title": "SystemInstructions",
+  "type": "array"
+}

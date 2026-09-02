@@ -43,13 +43,16 @@ const initializeI18n = vi.fn();
 const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
-vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
+vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
+  checkForUpdatesDetailed,
+}));
 vi.mock('../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
   getInstallationInfo,
   resolveUpdateCommand,
 }));
-vi.mock('../utils/standalone-update.js', () => ({ performStandaloneUpdate }));
+vi.mock('../ui/standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine,
@@ -66,6 +69,14 @@ vi.mock('../i18n/index.js', () => ({
 }));
 
 const { updateCommand } = await import('./update.js');
+
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 const updateArgs: ArgumentsCamelCase<object> = {
   _: [],
@@ -235,7 +246,7 @@ describe('update command', () => {
     await updateCommand.handler(updateArgs);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
-      'Failed to check for updates. Please check your network or registry configuration.',
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();

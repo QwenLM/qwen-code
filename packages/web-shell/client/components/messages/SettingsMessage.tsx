@@ -20,7 +20,7 @@ import type {
   DaemonSettingDescriptor,
   DaemonSettingUpdateResult,
   DaemonWorkspaceSettingsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_LANGUAGES,
   languageLabel,
@@ -28,6 +28,8 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
+import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
   WEB_SHELL_THEMES,
   WebShellThemeId,
@@ -42,6 +44,7 @@ import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
+import { LocalControlSettingsCard } from './LocalControlSettingsCard';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -86,6 +89,8 @@ interface SettingsMessageProps {
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
+  /** Category to select on open (deep link, e.g. 'Daemon'). */
+  initialCategory?: string;
 }
 
 export interface SettingsMessageSettingsState {
@@ -99,6 +104,7 @@ export interface SettingsMessageSettingsState {
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
+  liveSetup?: UseLiveVoiceSetupResult;
 }
 
 const SUB_DIALOG_KEYS = new Set([
@@ -110,9 +116,15 @@ const SUB_DIALOG_KEYS = new Set([
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
+  // Compact behavior is fixed on in the web shell; the daemon schema still
+  // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
-  'ui.compactInline',
   'mcpServers',
+  'model.reasoningEffort',
+]);
+const LIVE_SETTING_KEYS = new Set([
+  'experimental.liveVoice.enabled',
+  'experimental.liveVoice.shortcut',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -238,7 +250,9 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' }
+  | { type: 'local-control' }
+  | { type: 'live' };
 
 interface SettingsPageCategory {
   id: string;
@@ -408,10 +422,12 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagement,
   embedded = false,
+  initialCategory,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
-  const { status, settings, loading, error, reload, setValue } = settingsState;
+  const { status, settings, loading, error, reload, setValue, liveSetup } =
+    settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -421,7 +437,9 @@ export function SettingsMessage({
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
-      (setting) => !HIDDEN_SETTING_KEYS.has(setting.key),
+      (setting) =>
+        !HIDDEN_SETTING_KEYS.has(setting.key) &&
+        !LIVE_SETTING_KEYS.has(setting.key),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -451,20 +469,51 @@ export function SettingsMessage({
       themeGroup.items.splice(themeIndex + 1, 0, localItem);
     } else {
       groups.push({
-        id: t('settings.category.UI'),
-        label: t('settings.category.UI'),
+        id: 'UI',
+        label: formatSettingCategory('UI', t),
         items: [localItem],
       });
     }
+    if (liveSetup?.supported) {
+      const experimental = groups.find((group) => group.id === 'Experimental');
+      if (experimental) {
+        experimental.items.unshift({ type: 'live' });
+      } else {
+        groups.push({
+          id: 'Experimental',
+          label: formatSettingCategory('Experimental', t),
+          items: [{ type: 'live' }],
+        });
+      }
+    }
+    const daemon = groups.find((group) => group.id === 'Daemon');
+    if (daemon) {
+      daemon.items.unshift({ type: 'local-control' });
+    } else {
+      groups.push({
+        id: 'Daemon',
+        label: formatSettingCategory('Daemon', t),
+        items: [{ type: 'local-control' }],
+      });
+    }
     return groups;
-  }, [settings, t]);
+  }, [liveSetup, settings, t]);
 
   useEffect(() => {
     if (categories.length === 0) return;
     if (!categories.some((category) => category.id === activeCategory)) {
-      setActiveCategory(categories[0]!.id);
+      // A deep link (initialCategory) only matters while no valid category
+      // is selected, so it wins on mount but never overrides a later manual
+      // switch. Keeping this in one effect avoids two effects racing to set
+      // the initial category under StrictMode double-invocation.
+      const preferred =
+        initialCategory &&
+        categories.some((category) => category.id === initialCategory)
+          ? initialCategory
+          : categories[0]!.id;
+      setActiveCategory(preferred);
     }
-  }, [activeCategory, categories]);
+  }, [activeCategory, categories, initialCategory]);
 
   useEffect(() => {
     if (error) setMessage(error.message);
@@ -783,6 +832,22 @@ export function SettingsMessage({
                                   false,
                                 )}
                               />
+                            </div>
+                          );
+                        }
+                        if (item.type === 'live') {
+                          return liveSetup ? (
+                            <div key="live-voice-setup">
+                              {separator}
+                              <LiveVoiceSettingsCard setup={liveSetup} />
+                            </div>
+                          ) : null;
+                        }
+                        if (item.type === 'local-control') {
+                          return (
+                            <div key="local-control">
+                              {separator}
+                              <LocalControlSettingsCard />
                             </div>
                           );
                         }

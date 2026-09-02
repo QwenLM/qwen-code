@@ -1,8 +1,10 @@
 import { useCallback, useMemo, useState, type Ref } from 'react';
 import { SearchIcon, ServerIcon } from 'lucide-react';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
+import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
+import { SkillsManagerPage } from '../skills/SkillsManagerPage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
 import {
@@ -17,12 +19,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { useI18n } from '../../i18n';
 import type { EmbeddedManagerPage } from './manager-page';
 
-type PluginTab = 'extensions' | 'mcp';
+type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 
 interface PluginManagerPageProps {
   mcpMessage: SerializedMcpStatusMessage | null;
   loadMcpMessage: () => Promise<void>;
   onClose: () => void;
+  onUseSkill: (name: string) => void;
   initialFocusRef?: Ref<HTMLButtonElement>;
 }
 
@@ -30,6 +33,7 @@ export function PluginManagerPage({
   mcpMessage,
   loadMcpMessage,
   onClose,
+  onUseSkill,
   initialFocusRef,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
@@ -77,6 +81,8 @@ export function PluginManagerPage({
               {t('plugins.extensions')}
             </TabsTrigger>
             <TabsTrigger value="mcp">{t('plugins.mcp')}</TabsTrigger>
+            <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
+            <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
           </TabsList>
         </div>
       ) : null}
@@ -85,6 +91,19 @@ export function PluginManagerPage({
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
+            onClose={onClose}
+            embedded={embedded}
+          />
+        ) : activeTab === 'skills' ? (
+          <SkillsManagerPage
+            key={`skills-${pageRevision}`}
+            onClose={onClose}
+            onUseSkill={onUseSkill}
+            embedded={embedded}
+          />
+        ) : activeTab === 'agents' ? (
+          <AgentsManagerPage
+            key={`agents-${pageRevision}`}
             onClose={onClose}
             embedded={embedded}
           />

@@ -153,10 +153,12 @@ export class HookSystem {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
+      submittedPrompt,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
@@ -266,6 +268,19 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('SessionEnd', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionDeleteEvent(
+      deletedSessionId,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionDelete', result.finalOutput)
       : undefined;
   }
 
@@ -626,7 +641,11 @@ export class HookSystem {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     return this.sessionHooksManager.addSessionHook(
       sessionId,

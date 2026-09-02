@@ -539,31 +539,4 @@ export function buildManagedAutoMemoryPrompt(
   return lines.join('\n');
 }
 
-export function appendManagedAutoMemoryToUserMemory(
-  userMemory: string,
-  memoryDir: string,
-  indexContent?: string | null,
-  userSection?: UserAutoMemorySection,
-  teamSection?: TeamAutoMemorySection,
-  options?: BuildMemoryPromptOptions,
-): string {
-  const managedPrompt = buildManagedAutoMemoryPrompt(
-    memoryDir,
-    indexContent,
-    userSection,
-    teamSection,
-    options,
-  );
-  const trimmedUserMemory = userMemory.trim();
-
-  if (!managedPrompt) {
-    return userMemory;
-  }
-  if (!trimmedUserMemory) {
-    return managedPrompt;
-  }
-
-  return `${trimmedUserMemory}\n\n---\n\n${managedPrompt}`;
-}
-
 export { MAX_MANAGED_AUTO_MEMORY_INDEX_LINES };

@@ -742,6 +742,66 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
+  // and the next segment's relative write lands in the *original* directory —
+  // which is exactly where a protected settings file lives. Attributing the
+  // write to the `cd` target instead would check the wrong path.
+  it.each([
+    ['cd /tmp & echo {} > settings.json'],
+    ['cd .qwen & echo {} > settings.json'],
+  ])('does not move the cwd for the backgrounded `cd` in %s', (command) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/settings.json' },
+    ]);
+  });
+
+  it('does not mark later paths uncertain for a backgrounded dynamic `cd`', () => {
+    // The foreground form below cannot know where it landed; the backgrounded
+    // one can, because it did not move the cwd at all.
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$TARGET" & echo {} > settings.json',
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/repo/settings.json' }]);
+  });
+
+  // Over-correction guards: only the backgrounded `cd` is exempt. Both of
+  // these pass before and after the change.
+  it('keeps a foreground `cd` moving the cwd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd /tmp && echo {} > settings.json',
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/settings.json' }]);
+  });
+
+  it('keeps a foreground dynamic `cd` marking later paths uncertain', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$TARGET" && echo {} > settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('applies a foreground `cd` that follows a backgrounded one', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd /tmp & cd /var && echo {} > settings.json',
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/var/settings.json' }]);
+  });
+
   it('recursively unwraps nested shell wrappers', () => {
     // The actual write is nested two wrapper levels deep.
     expect(

@@ -40,6 +40,8 @@ import {
   McpServerSpawnFailedError,
   InvalidMcpConfigError,
 } from './mcp-errors.js';
+import { listDescendantPids, sigtermPids } from './pid-descendants.js';
+import { mcpSessionMetadataKey } from './mcp-session-config.js';
 
 const debugLogger = createDebugLogger('MCP');
 export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
@@ -397,13 +399,13 @@ export class McpClientManager {
    * Per connected server, the single-session "connected config key" of the
    * config it was last connected with — see {@link singleSessionConnectedKeyOf}.
    * Single-session path only; pool mode tracks transport identity via
-   * `pooledConnections[].id` and its own `desiredIds` diff.
+   * `pooledConnections[].transportId` and its own `desiredIds` diff.
    * Lets `discoverAllMcpToolsIncremental` detect an in-place config change to an
    * already-connected server and reconnect it, instead of leaving it on the
    * stale config. Unlike the transport-only `connectionIdOf`, this key also
-   * covers the discovery-time filters (trust / includeTools / excludeTools) so
-   * editing those re-applies them. Set on successful connect; cleared on every
-   * teardown path so a stale key can't mask a later change.
+   * covers the discovery-time metadata (trust / alwaysLoadTools / includeTools /
+   * excludeTools) so editing those re-applies it. Set on successful connect;
+   * cleared on every teardown path so a stale key can't mask a later change.
    */
   private readonly connectedConfigKeys = new Map<string, string>();
 
@@ -1034,6 +1036,20 @@ export class McpClientManager {
   }
 
   /**
+   * Single source of truth for the effective server map: the configured
+   * servers plus the `mcpServerCommand`-derived `mcp` server, each stamped
+   * with the session target dir as its cwd. Every discovery entry point
+   * resolves servers through here so the recipe cannot diverge.
+   */
+  private getEffectiveMcpServers(): Record<string, MCPServerConfig> {
+    return populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
+    );
+  }
+
+  /**
    * Initiates the tool discovery process for all configured MCP servers.
    * It connects to each server, discovers its available tools, and registers
    * them with the `ToolRegistry`.
@@ -1055,10 +1071,7 @@ export class McpClientManager {
     }
     await this.stop();
 
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
+    const servers = this.getEffectiveMcpServers();
 
     // mark the bulk pass active
     // so per-server `emitRefusedBatchIfAny` calls (which the inner
@@ -1222,10 +1235,7 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
+    const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
     if (!serverConfig) {
       return;
@@ -1260,10 +1270,7 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
+    const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
     if (!serverConfig) {
       return;
@@ -1405,8 +1412,9 @@ export class McpClientManager {
       await client.discover(cliConfig);
       // Record the connected-config key of the config this client is now
       // connected with, so the incremental reconcile can detect a later
-      // in-place config change and reconnect (mirrors the pool path's `conn.id`
-      // tracking, plus the discovery filters — see singleSessionConnectedKeyOf).
+      // in-place config change and reconnect (mirrors the pool path's
+      // transport-identity tracking, plus the session metadata — see
+      // singleSessionConnectedKeyOf).
       this.connectedConfigKeys.set(
         serverName,
         this.singleSessionConnectedKeyOf(serverName, serverConfig),
@@ -1560,10 +1568,7 @@ export class McpClientManager {
       const sessionId = this.cliConfig.getSessionId();
       const promptRegistry = this.cliConfig.getPromptRegistry();
       const resourceRegistry = this.cliConfig.getResourceRegistry();
-      const servers = populateMcpServerCommand(
-        this.cliConfig.getMcpServers() || {},
-        this.cliConfig.getMcpServerCommand(),
-      );
+      const servers = this.getEffectiveMcpServers();
       // diff against the
       // current `pooledConnections` instead of releasing all then
       // re-acquiring everything. Pre-fix every incremental discovery
@@ -1574,12 +1579,12 @@ export class McpClientManager {
       // That left a brief window with zero MCP tools registered AND
       // bounced every pool entry's drain timer for no reason. Now:
       //   1. Build the desired (name, fingerprint) set from current
-      //      config + filters (skip disabled, skip SDK MCP).
+      //      transport config (skip disabled, skip SDK MCP).
       //   2. Release stale pooled connections (server removed,
       //      disabled, or fingerprint changed) — survivors stay
       //      attached, no tool registry churn.
-      //   3. Acquire only the desired connections we don't already
-      //      hold by id.
+      //   3. Refresh surviving session views, and acquire only desired
+      //      connections we don't already hold by transport identity.
       // SDK MCP servers always re-run via legacy
       // `discoverMcpToolsForServer` (idempotent on re-call; the
       // legacy path's `discoverMcpToolsForServer` purges existing
@@ -1601,7 +1606,7 @@ export class McpClientManager {
       // wanted but with a different fingerprint).
       for (const [name, conn] of [...this.pooledConnections]) {
         const desired = desiredIds.get(name);
-        if (desired === undefined || desired !== conn.id) {
+        if (desired === undefined || desired !== conn.transportId) {
           try {
             conn.release();
           } catch (err) {
@@ -1643,11 +1648,26 @@ export class McpClientManager {
             await this.discoverMcpToolsForServer(name, cliConfig);
             return;
           }
-          // R2 follow-on: skip if we already hold the exact desired
-          // connection (survived the diff above). Avoids the redundant
-          // `pool.acquire` call which would otherwise just bump the
-          // entry's refcount + trigger a snapshot replay.
-          if (this.pooledConnections.has(name)) return;
+          // A surviving transport still needs its per-session metadata
+          // refreshed. `updateConfig` canonicalizes equivalent filters and
+          // becomes a no-op when nothing semantically changed, avoiding both
+          // transport and registry churn.
+          const existingConnection = this.pooledConnections.get(name);
+          if (existingConnection) {
+            try {
+              existingConnection.updateConfig(config);
+            } catch (err) {
+              // Settings reconciliation is a bulk pass: one session-view
+              // refresh must not prevent sibling servers from refreshing or
+              // connecting. Runtime add/replace keeps its stricter error
+              // propagation because that operation has a single caller-owned
+              // outcome.
+              debugLogger.error(
+                `Pool metadata refresh failed for ${name}: ${getErrorMessage(err)}`,
+              );
+            }
+            return;
+          }
           try {
             const conn = await this.pool!.acquire(
               name,
@@ -1990,6 +2010,15 @@ export class McpClientManager {
     const timer = setInterval(async () => {
       await this.performHealthCheck(serverName);
     }, this.healthConfig.checkIntervalMs);
+    // Health monitoring is background bookkeeping — it must never hold the
+    // event loop open. Short-lived consumers (`qwen mcp reconnect`, other
+    // one-shot Config users) call `config.shutdown()` while an incremental
+    // discovery pass is still in flight; that pass's `finally` block then
+    // re-arms health checks AFTER `stop()` already cleared them, and a
+    // ref'd interval left the process hanging forever (issue #9944). Long-
+    // running sessions keep their own loop refs (TTY / server sockets), so
+    // unref'ing the monitor does not shorten its life where it matters.
+    timer.unref?.();
 
     this.healthCheckTimers.set(serverName, timer);
   }
@@ -2117,10 +2146,7 @@ export class McpClientManager {
       return this.discoverAllMcpToolsViaPool(cliConfig);
     }
 
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
+    const servers = this.getEffectiveMcpServers();
 
     // suppress per-server
     // length-1 batches inside this incremental pass — the
@@ -2235,9 +2261,10 @@ export class McpClientManager {
           serversToUpdate.push(name);
         } else {
           // Still-connected server: detect an in-place config change
-          // (command / url / env / headers / oauth, plus the discovery filters
-          // trust / includeTools / excludeTools) by comparing the connected-
-          // config key it was connected with against the desired one. This is
+          // (command / url / env / headers / oauth, plus the discovery metadata
+          // trust / alwaysLoadTools / includeTools / excludeTools) by comparing
+          // the connected-config key it was connected with against the desired
+          // one. This is
           // the single-session equivalent of the pool path's `desiredIds` diff
           // — without it, editing a live server's config at runtime would leave
           // it running on the stale config. `connectedConfigKeys` is set on
@@ -2392,6 +2419,34 @@ export class McpClientManager {
         const client = this.clients.get(serverName);
         if (client) {
           try {
+            const rootPid = client.getTransportPid?.();
+            if (rootPid !== undefined) {
+              const descendants = await listDescendantPids(rootPid);
+              if (descendants.length > 0) {
+                const signaled = sigtermPids(descendants);
+                debugLogger.debug(
+                  `Sent SIGTERM to ${signaled}/${descendants.length} descendants ` +
+                    `of pid ${rootPid} for timed-out server '${serverName}'`,
+                );
+                if (signaled < descendants.length) {
+                  debugLogger.warn(
+                    `Partial signal for timed-out server '${serverName}': ` +
+                      `${signaled}/${descendants.length} descendants of pid ${rootPid} signaled. ` +
+                      'Remaining processes may leak.',
+                  );
+                }
+              }
+            } else {
+              debugLogger.debug(
+                `Skipping descendant pid sweep for timed-out server '${serverName}': transport pid unavailable`,
+              );
+            }
+          } catch (err) {
+            debugLogger.warn(
+              `Descendant pid sweep for timed-out server '${serverName}' threw: ${getErrorMessage(err)}. Proceeding with disconnect.`,
+            );
+          }
+          try {
             await client.disconnect();
           } catch (err) {
             debugLogger.debug(
@@ -2510,21 +2565,14 @@ export class McpClientManager {
    * intentionally transport-only (it excludes the per-session discovery filters
    * so the shared pool can reuse a transport across sessions with different
    * filters). But the single-session reconcile must ALSO reconnect when only a
-   * discovery filter changes — `trust`, `includeTools`, `excludeTools` are
-   * applied during `discover()` and baked into the registered tools, so a
-   * config edit to them otherwise never takes effect mid-session. Append a
-   * stable hash of those fields (arrays sorted so order alone doesn't churn).
+   * discovery metadata changes. Append the same canonical metadata identity
+   * used by pooled session views so equivalent filters do not reconnect.
    */
   private singleSessionConnectedKeyOf(
     serverName: string,
     config: MCPServerConfig,
   ): string {
-    const discovery = JSON.stringify({
-      trust: config.trust ?? null,
-      includeTools: [...(config.includeTools ?? [])].sort(),
-      excludeTools: [...(config.excludeTools ?? [])].sort(),
-    });
-    return `${connectionIdOf(serverName, config)}|${discovery}`;
+    return `${connectionIdOf(serverName, config)}|${mcpSessionMetadataKey(config)}`;
   }
 
   /**
@@ -2592,10 +2640,7 @@ export class McpClientManager {
     uri: string,
     options?: { signal?: AbortSignal },
   ): Promise<ReadResourceResult> {
-    const servers = populateMcpServerCommand(
-      this.cliConfig.getMcpServers() || {},
-      this.cliConfig.getMcpServerCommand(),
-    );
+    const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
     if (this.cliConfig.isMcpServerDisabled(serverName)) {
       throw new Error(`MCP server '${serverName}' is disabled.`);
@@ -2935,10 +2980,16 @@ export class McpClientManager {
       }
     }
     const existingConn = this.pooledConnections.get(name);
-    if (existingConn && existingConn.id === newConnId) {
-      // Same fingerprint — no transport churn, just update Config overlay
+    if (existingConn && existingConn.transportId === newConnId) {
+      // Same fingerprint — refresh the session projection, then persist the
+      // Config overlay. Refreshing first leaves the overlay untouched when
+      // the refresh throws, mirroring the spawn-failure rollback below.
+      existingConn.updateConfig(config);
       this.cliConfig.addRuntimeMcpServer(name, config);
-      const toolCount = existingConn.toolsSnapshot.length;
+      // Session-visible count, matching the standalone branch below: the
+      // refresh above re-filtered the session, so the unfiltered snapshot
+      // size would misreport what clients can actually invoke.
+      const toolCount = this.toolRegistry.getToolsByServer(name).length;
       return {
         name,
         transport,

@@ -1,18 +1,15 @@
 import {
   forwardRef,
-  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
-  useState,
   type KeyboardEvent,
 } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { isComposerTask } from '../utils/composerTasks';
 import styles from './StatusBar.module.css';
-
-const GOAL_PILL_INTERVAL_MS = 1000;
 
 export interface StatusBarHandle {
   focusTaskPill(): boolean;
@@ -50,10 +47,6 @@ interface StatusBarProps {
   onOpenTasks?: () => void;
   onReturnToInput?: (text?: string) => void;
   tasks: readonly DaemonSessionTaskStatus[];
-  activeGoal?: {
-    condition: string;
-    setAt: number;
-  } | null;
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
@@ -96,23 +89,20 @@ export function getTaskPillLabel(
   tasks: readonly DaemonSessionTaskStatus[],
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (tasks.length === 0) return '';
+  const composerTasks = tasks.filter(isComposerTask);
+  if (composerTasks.length === 0) return '';
 
-  const running = tasks.filter((task) => task.status === 'running');
+  const running = composerTasks.filter((task) => task.status === 'running');
   if (running.length > 0) {
-    const counts = { agent: 0, shell: 0, monitor: 0 };
+    const counts = { shell: 0, monitor: 0 };
     for (const task of running) {
-      counts[task.kind]++;
+      if (task.kind === 'shell') counts.shell += 1;
+      if (task.kind === 'monitor') counts.monitor += 1;
     }
     const parts: string[] = [];
     if (counts.shell > 0) {
       parts.push(
         formatCount(counts.shell, 'tasks.pill.shell', 'tasks.pill.shells', t),
-      );
-    }
-    if (counts.agent > 0) {
-      parts.push(
-        formatCount(counts.agent, 'tasks.pill.agent', 'tasks.pill.agents', t),
       );
     }
     if (counts.monitor > 0) {
@@ -128,31 +118,12 @@ export function getTaskPillLabel(
     return parts.join(', ');
   }
 
-  const pausedAgents = tasks.filter(
-    (task) => task.kind === 'agent' && task.status === 'paused',
+  return t(
+    composerTasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany',
+    {
+      count: composerTasks.length,
+    },
   );
-  if (pausedAgents.length > 0) {
-    return t(
-      pausedAgents.length === 1
-        ? 'tasks.pill.agentPaused'
-        : 'tasks.pill.agentsPaused',
-      { count: pausedAgents.length },
-    );
-  }
-
-  return t(tasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany', {
-    count: tasks.length,
-  });
-}
-
-function formatGoalElapsed(ms: number): string {
-  if (ms < 1000) return '';
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
 }
 
 export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
@@ -165,7 +136,6 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onOpenTasks,
       onReturnToInput,
       tasks,
-      activeGoal,
       hideSettings,
       onToggleShortcuts,
       compact = false,
@@ -182,31 +152,15 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
     const pctDisplay = pct.toFixed(1);
     const modeIndicator = getModeIndicator(currentMode, t);
-    const [, setGoalTick] = useState(0);
     const taskPillRef = useRef<HTMLButtonElement>(null);
-
-    useEffect(() => {
-      if (!activeGoal) return;
-      const id = setInterval(
-        () => setGoalTick((tick) => (tick + 1) % 1_000_000),
-        GOAL_PILL_INTERVAL_MS,
-      );
-      return () => clearInterval(id);
-    }, [activeGoal]);
 
     const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
     const hasLeftPrefix = !compact && (connected || !!modeIndicator);
-    const goalElapsed = activeGoal
-      ? formatGoalElapsed(Date.now() - activeGoal.setAt)
-      : '';
-    const goalLabel = activeGoal
-      ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
-      : '';
     const hasLeftContent = !!taskPillLabel || !compact;
     const hasRightContent =
       (!compact && !!currentModel) ||
       (!compact && contextWindow > 0 && tokenCount > 0) ||
-      !!goalLabel;
+      false;
 
     useImperativeHandle(
       ref,
@@ -355,11 +309,6 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
                 {t('status.contextUsed', { pct: pctDisplay })}
               </span>
             </button>
-          )}
-          {goalLabel && (
-            <span className={styles.goal} title={activeGoal?.condition}>
-              {goalLabel}
-            </span>
           )}
         </div>
       </div>

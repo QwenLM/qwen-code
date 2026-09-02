@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
@@ -111,11 +112,18 @@ function makeChannel(): QQChannelClass {
   return ch;
 }
 
-const statePath = '/tmp/test-qwen/channels/test-bot-state.json';
-const sessionsPath = '/tmp/test-qwen/channels/test-bot-sessions.json';
-const globalSessionsPath = '/tmp/test-qwen/channels/sessions.json';
-const sessionsBackupPath =
-  '/tmp/test-qwen/channels/test-bot-sessions-backup.json';
+const statePath = join('/tmp/test-qwen', 'channels', 'test-bot-state.json');
+const sessionsPath = join(
+  '/tmp/test-qwen',
+  'channels',
+  'test-bot-sessions.json',
+);
+const globalSessionsPath = join('/tmp/test-qwen', 'channels', 'sessions.json');
+const sessionsBackupPath = join(
+  '/tmp/test-qwen',
+  'channels',
+  'test-bot-sessions-backup.json',
+);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -281,6 +289,7 @@ describe('restoreQQState', () => {
 
   it('restores msgSeqMap from disk', () => {
     fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg_abc']],
       msgSeqMap: [['msg_abc', 5]],
     });
     const ch = makeChannel();
@@ -289,6 +298,23 @@ describe('restoreQQState', () => {
     const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
       .msgSeqMap;
     expect(msgSeqMap.get('msg_abc')).toBe(5);
+  });
+
+  it('discards sequence counters without a restored reply context', () => {
+    fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg-current']],
+      msgSeqMap: [
+        ['msg-current', 2],
+        ['msg-orphan', 7],
+      ],
+    });
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.get('msg-current')).toBe(2);
+    expect(msgSeqMap.has('msg-orphan')).toBe(false);
   });
 
   it('restores groupActiveMsgEnabled from disk', () => {
@@ -354,6 +380,7 @@ describe('restoreQQState', () => {
 
   it('filters invalid msgSeqMap values (negative or non-number)', () => {
     fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'a']],
       msgSeqMap: [
         ['a', 3],
         ['b', -1],

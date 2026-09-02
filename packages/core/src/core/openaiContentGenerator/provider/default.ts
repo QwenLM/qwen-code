@@ -4,6 +4,7 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
@@ -11,6 +12,30 @@ import {
   defaultOutputCeiling,
   parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import {
+  REASONING_EFFORT_TIERS,
+  clampReasoningEffort,
+} from '../../reasoning-effort.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
+
+/**
+ * Tiers a generic OpenAI-compatible endpoint accepts. `max` is a vendor
+ * extension rather than part of the shared contract: DeepSeek, GLM-5.2+ and
+ * newer Anthropic models take it natively, but a generic endpoint's ladder
+ * stops at `xhigh` and 400s on anything above it. Matches the OpenAI column
+ * of the effort ladder in
+ * docs/design/2026-06-30-unified-reasoning-effort-cli.md. Subclasses whose
+ * endpoint does accept `max` override `supportedReasoningEfforts`.
+ */
+const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+];
 
 type AssistantMessageWithReasoningFields =
   OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -18,7 +43,7 @@ type AssistantMessageWithReasoningFields =
     reasoning?: string | null;
   };
 
-function shouldMirrorReasoningContentForQwen3(model: string): boolean {
+function isQwen3Model(model: string): boolean {
   return model.toLowerCase().includes('qwen3');
 }
 
@@ -52,6 +77,12 @@ export class DefaultOpenAICompatibleProvider
 {
   protected contentGeneratorConfig: ContentGeneratorConfig;
   protected cliConfig: Config;
+  /**
+   * Latch so an effort-clamp warning fires once per provider lifetime. Shared
+   * with subclasses that clamp on their own wire shape (see DashScope) so one
+   * provider instance never repeats the notice.
+   */
+  protected effortClampWarned = false;
 
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -99,6 +130,70 @@ export class DefaultOpenAICompatibleProvider
     });
   }
 
+  /**
+   * Effort tiers this endpoint accepts for `model`. Takes the wire model
+   * rather than reading the configured one, because a request may override it
+   * (`pipeline.ts` resolves `request.model || contentGeneratorConfig.model`),
+   * and a capability answered for the wrong model is how an unaccepted tier
+   * reaches the wire. Override in a subclass whose endpoint takes `max`; the
+   * clamp calls it through `this`, so a subclass answer applies even on the
+   * `super.buildRequest` path.
+   */
+  protected supportedReasoningEffortsFor(
+    _model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return OPENAI_COMPATIBLE_EFFORTS;
+  }
+
+  /**
+   * Cap the pipeline-injected `reasoning.effort` at what this endpoint accepts.
+   * The tier is configured once (`/effort`) and persisted, so an unaccepted
+   * value is not a one-off rejection: it 400s every later request in the
+   * session too.
+   *
+   * Only the pipeline-injected tier is capped. A `reasoning` object the user
+   * put in `samplingParams` ships verbatim (the pipeline hands those keys
+   * straight to the wire and skips the injection entirely), and `extra_body`
+   * merges after this, so both explicit overrides survive unchanged.
+   */
+  protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined
+    ) {
+      return request;
+    }
+    const loose = request as unknown as Record<string, unknown>;
+    const reasoning = loose['reasoning'] as { effort?: unknown } | undefined;
+    const effort = reasoning?.effort;
+    if (
+      typeof effort !== 'string' ||
+      !REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort)
+    ) {
+      return request;
+    }
+    const clamped = clampReasoningEffort(
+      effort as ReasoningEffort,
+      this.supportedReasoningEffortsFor(
+        (loose['model'] as string | undefined) ??
+          this.contentGeneratorConfig.model,
+      ),
+    );
+    if (clamped === effort) {
+      return request;
+    }
+    if (!this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by this ` +
+          `OpenAI-compatible endpoint; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return {
+      ...loose,
+      reasoning: { ...reasoning, effort: clamped },
+    } as unknown as T;
+  }
+
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
@@ -107,8 +202,10 @@ export class DefaultOpenAICompatibleProvider
 
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
-    const requestWithTokenLimits = this.applyOutputTokenLimit(request);
-    const messages = shouldMirrorReasoningContentForQwen3(request.model)
+    const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
+      this.applyOutputTokenLimit(request),
+    );
+    const messages = isQwen3Model(request.model)
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
@@ -121,6 +218,18 @@ export class DefaultOpenAICompatibleProvider
 
   getDefaultGenerationConfig(): GenerateContentConfig {
     return {};
+  }
+
+  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
+    // Hybrid-thinking models occasionally bypass the reasoning channel and
+    // emit their thinking as literal <think>/<thinking> tags inside content
+    // (observed in production on qwen3-class models, issue #6666).
+    return {
+      contentOnlyThinkingTagLeaks: true,
+      ...(model && isQwen3Model(model)
+        ? { taggedThinkingTagsAfterReasoning: true }
+        : {}),
+    };
   }
 
   /**

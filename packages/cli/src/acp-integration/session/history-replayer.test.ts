@@ -4,12 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Deliberately NOT mocked: `writeStderrLineSafe` is the thing under test in
+// "survives a broken stderr" below, and a mocked stand-in would re-implement the
+// very try/catch it is supposed to prove exists. Tests that trigger a stderr
+// line spy on `process.stderr.write` instead.
+
 import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
+import {
+  collectHistoryReplayUpdates,
+  createReplayCumulativeUsage,
+} from './history-replay-page.js';
 import type { SessionContext } from './types.js';
+import { ChatRecordingService } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ChatRecord,
@@ -58,6 +72,14 @@ describe('HistoryReplayer', () => {
   });
 
   const toEpochMs = (ts: string) => new Date(ts).getTime();
+  const replayMeta = (
+    record: ChatRecord,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    ...extra,
+    timestamp: toEpochMs(record.timestamp),
+    qwenTranscript: { sourceRecordIds: [record.uuid] },
+  });
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -161,7 +183,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'Hello, world!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -190,7 +212,10 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record, {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        }),
       });
     });
   });
@@ -205,7 +230,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'I can help with that.' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -218,7 +243,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Thinking about this...' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -241,17 +266,17 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy.mock.calls[0][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'First part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[1][0]).toEqual({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Second part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[2][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Third part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
   });
@@ -275,24 +300,31 @@ describe('HistoryReplayer', () => {
 
       await replayer.replay([record]);
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           sessionUpdate: 'tool_call',
           status: 'in_progress',
           title: 'read_file',
           rawInput: { path: '/test.ts' },
-          _meta: {
+          _meta: replayMeta(record, {
             toolName: 'read_file',
             // #4175 F4 prereq — ToolCallEmitter now stamps provenance
             // on every tool_call / tool_call_update event so the UI can
             // dispatch on builtin / mcp / subagent without string-
             // matching toolName.
             provenance: 'builtin',
-            timestamp: toEpochMs(record.timestamp),
-          },
+          }),
         }),
       );
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+          status: 'failed',
+        }),
+      );
     });
 
     it('should use function call id as callId when available', async () => {
@@ -372,6 +404,61 @@ describe('HistoryReplayer', () => {
         activeRecordId: record.uuid,
         activeRecordTimestamp: record.timestamp,
       });
+    });
+
+    it('does not fail a skipped ask_user_question dangling call', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, {
+        skipFinalizeCallIds: new Set(['call-auq']),
+      });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+    });
+
+    it('keeps a dangling call in flight when finalizeDangling is false', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-inflight',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, { finalizeDangling: false });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+      expect(replayer.getPendingToolCalls()).toEqual([
+        expect.objectContaining({ callId: 'call-inflight' }),
+      ]);
     });
 
     it('should carry dangling function calls across replay pages', async () => {
@@ -520,7 +607,7 @@ describe('HistoryReplayer', () => {
       ]);
     });
 
-    it('should not synthesize missing-result failures for calls without source ids', async () => {
+    it('should not guess correlation between synthesized and explicit call ids', async () => {
       const records: ChatRecord[] = [
         {
           ...createAssistantRecord(''),
@@ -545,10 +632,15 @@ describe('HistoryReplayer', () => {
       expect(updates.map((update) => update['sessionUpdate'])).toEqual([
         'tool_call',
         'tool_call_update',
+        'tool_call_update',
       ]);
       expect(updates[1]).toMatchObject({
         toolCallId: 'call-123',
         status: 'completed',
+      });
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+        status: 'failed',
       });
     });
 
@@ -816,32 +908,99 @@ describe('HistoryReplayer', () => {
         ],
         // resultDisplay is included as rawOutput
         rawOutput: 'File contents here',
-        _meta: {
+        _meta: replayMeta(record, {
           toolName: 'read_file',
           // #4175 F4 prereq — provenance stamped on update events too.
           provenance: 'builtin',
-          timestamp: toEpochMs(record.timestamp),
-        },
+        }),
       });
     });
 
-    it('should replay structured artifacts from stored tool results', async () => {
-      const record = createToolResultRecord('read_file', 'File contents here');
-      const artifacts = [
-        {
-          title: 'Replay artifact',
-          url: 'https://example.com/replayed',
-        },
-      ];
-      record.toolCallResult!.artifacts = artifacts;
+    it('preserves vision bridge disclosures on replay', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 1-2',
+        notice: 'Converted 2 images via qwen3-vl-plus.',
+      };
+      const record = createToolResultRecord('read_file', resultDisplay);
 
       await replayer.replay([record]);
 
       expect(sentUpdates()[0]).toMatchObject({
-        _meta: {
-          artifacts,
-        },
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+            },
+          },
+          {
+            type: 'content',
+            content: { type: 'text', text: '{"result":"ok"}' },
+          },
+        ],
       });
+    });
+
+    it('should replay structured artifacts persisted by the recorder', async () => {
+      const projectDir = mkdtempSync(join(tmpdir(), 'qwen-history-replay-'));
+      const sessionId = 'recorded-session';
+      const artifacts = [
+        {
+          kind: 'link' as const,
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
+      try {
+        const recorder = new ChatRecordingService(
+          {
+            getSessionId: () => sessionId,
+            getProjectRoot: () => projectDir,
+            getCliVersion: () => '1.0.0',
+            getResumedSessionData: () => undefined,
+            storage: { getProjectDir: () => projectDir },
+          } as unknown as Config,
+          undefined,
+          false,
+        );
+        const responseParts = [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { result: 'ok' },
+            },
+          },
+        ];
+        recorder.recordToolResult(responseParts, {
+          callId: 'call-123',
+          status: 'success',
+          resultDisplay: 'File contents here',
+          responseParts,
+          persistedOutputFiles: ['/private/tool-result.txt'],
+          artifacts,
+        });
+        await recorder.flush();
+
+        const jsonl = readFileSync(
+          join(projectDir, 'chats', `${sessionId}.jsonl`),
+          'utf8',
+        );
+        expect(jsonl).not.toContain('/private/tool-result.txt');
+        const storedRecord = JSON.parse(jsonl.trim()) as ChatRecord;
+        expect(storedRecord.toolCallResult?.artifacts).toEqual(artifacts);
+
+        await replayer.replay([storedRecord]);
+
+        expect(sentUpdates()[0]).toMatchObject({
+          _meta: {
+            artifacts,
+          },
+        });
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
     });
 
     it('should emit failed status for tool results with errors', async () => {
@@ -874,9 +1033,15 @@ describe('HistoryReplayer', () => {
     it('should emit plan update for TodoWriteTool results', async () => {
       const todoDisplay: TodoResultDisplay = {
         type: 'todo_list',
+        planId: 'plan-1',
         todos: [
           { id: '1', content: 'Task 1', status: 'pending' },
-          { id: '2', content: 'Task 2', status: 'completed' },
+          {
+            id: '2',
+            content: 'Task 2',
+            status: 'completed',
+            blockedBy: ['1'],
+          },
         ],
       };
       const record = createToolResultRecord('todo_write', todoDisplay);
@@ -898,13 +1063,38 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'plan',
         entries: [
-          { content: 'Task 1', priority: 'medium', status: 'pending' },
-          { content: 'Task 2', priority: 'medium', status: 'completed' },
+          {
+            content: 'Task 1',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: '1' } },
+          },
+          {
+            content: 'Task 2',
+            priority: 'medium',
+            status: 'completed',
+            _meta: { qwenTodo: { id: '2', blockedBy: ['1'] } },
+          },
         ],
+        _meta: {
+          ...replayMeta(record, {
+            stats: {
+              promptTokens: 0,
+              cachedTokens: 0,
+              candidateTokens: 0,
+              apiTimeMs: 0,
+            },
+          }),
+          qwenTranscript: {
+            sourceRecordIds: [record.uuid],
+            planToolCallId: 'call-123',
+          },
+          qwenTodoPlan: { id: 'plan-1' },
+        },
       });
     });
 
-    it('should use record uuid as callId when toolCallResult.callId is missing', async () => {
+    it('should synthesize a stable callId when a tool result has no callId', async () => {
       const record: ChatRecord = {
         ...createToolResultRecord('test_tool'),
         uuid: 'fallback-uuid',
@@ -921,7 +1111,7 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolCallId: 'fallback-uuid',
+          toolCallId: 'qwen-replay-tool:fallback-uuid:result',
         }),
       );
     });
@@ -979,6 +1169,24 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
+    it('skips session_model system records', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_model',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
     it('preserves slash-command provenance when replaying results', async () => {
       const systemRecord: ChatRecord = {
         uuid: 'system-uuid',
@@ -1003,11 +1211,206 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Context compressed.' },
-        _meta: {
+        _meta: replayMeta(systemRecord, {
           source: 'slash_command',
-          timestamp: toEpochMs(systemRecord.timestamp),
-        },
+        }),
       });
+    });
+  });
+
+  describe('goal card replay', () => {
+    const goalRecord = (
+      ...outputHistoryItems: Array<Record<string, unknown>>
+    ): ChatRecord =>
+      ({
+        uuid: 'goal-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/goal',
+          outputHistoryItems,
+        },
+      }) as unknown as ChatRecord;
+
+    const goalStatuses = () =>
+      sentUpdates()
+        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
+        .map((meta) => meta?.['goalStatus'])
+        .filter(Boolean);
+
+    it('re-emits a persisted goal card as _meta.goalStatus, without the type field', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+          setAt: 1234,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        { kind: 'set', condition: 'ship it', setAt: 1234 },
+      ]);
+    });
+
+    it('re-emits terminal goal cards', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        {
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        },
+      ]);
+    });
+
+    it('skips per-iteration checking cards so a long TUI goal loop does not flood replay', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 1,
+        }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 2,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('refuses to replay a goal card whose condition is empty', async () => {
+      // A transcript is a file: a corrupted or hand-edited condition would
+      // otherwise ride out to every client inside `_meta.goalStatus`.
+      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
+      // the hook survives — they stay consistent.
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+      ]);
+
+      expect(goalStatuses()).toEqual([]);
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('replays a goal card far longer than the old 4,000-char cap', async () => {
+      // `/goal` accepts any length (#6665); dropping the card here would hide a
+      // running goal from every client.
+      const condition = 'x'.repeat(10_000);
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition }]);
+    });
+
+    it('does not fall through to the plain-text path for goal cards', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      ]);
+
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]['content']).toEqual({ type: 'text', text: '' });
+    });
+
+    it('still replays non-goal output items as agent text', async () => {
+      await replayer.replay([
+        goalRecord(
+          { type: 'goal_status', kind: 'set', condition: 'ship it' },
+          { type: 'assistant', text: 'hello' },
+        ),
+      ]);
+
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+      expect(goalStatuses()).toHaveLength(1);
+    });
+
+    it('survives a broken stderr instead of abandoning the transcript', async () => {
+      // The empty-condition card writes a diagnostic. `process.stderr.write`
+      // throws on EPIPE (`qwen … | head`, or a daemon whose stderr reader went
+      // away), and a raw `writeStderrLine` would take that throw out through the
+      // item loop and the record loop, aborting the whole replay: the user loses
+      // their transcript because we failed to *complain* about one bad card.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        });
+
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        // Trips the diagnostic...
+        { type: 'goal_status', kind: 'set', condition: '' },
+        // ...and this must still be replayed afterwards.
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+        { type: 'assistant', text: 'hello' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+
+      expect(stderr).toHaveBeenCalled();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+
+      stderr.mockRestore();
+    });
+
+    it('survives a slash_command record whose outputHistoryItems is not an array', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = {
+        type: 'goal_status',
+        kind: 'set',
+        condition: 'ship it',
+      };
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([]);
+    });
+
+    it('survives null entries and still replays the valid cards after them', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        null,
+        'not an object',
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
     });
   });
 
@@ -1079,18 +1482,18 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Hello!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
         _meta: {
+          timestamp: toEpochMs(record.timestamp),
+          qwenTranscript: { sourceRecordIds: [record.uuid] },
           usage: {
             inputTokens: 100,
             outputTokens: 50,
             totalTokens: 150,
-            thoughtTokens: undefined,
-            cachedReadTokens: undefined,
           },
         },
       });
@@ -1139,5 +1542,102 @@ describe('HistoryReplayer', () => {
       });
       expect(hasGap).toBe(false);
     });
+  });
+
+  describe('qwen.session.recordId stamping', () => {
+    it('should stamp persisted updates with activeRecordId for user messages', async () => {
+      const userRecord = createUserRecord('Hello');
+      await replayer.replay([userRecord]);
+
+      expect(setActiveRecordIdSpy).toHaveBeenCalledWith(
+        userRecord.uuid,
+        userRecord.timestamp,
+      );
+    });
+
+    it('should stamp persisted updates with activeRecordId for assistant messages', async () => {
+      const assistantRecord = createAssistantRecord('Hi there');
+      await replayer.replay([assistantRecord]);
+
+      expect(setActiveRecordIdSpy).toHaveBeenCalledWith(
+        assistantRecord.uuid,
+        assistantRecord.timestamp,
+      );
+    });
+  });
+});
+
+describe('collectHistoryReplayUpdates restore skip', () => {
+  const AUQ_ARGS = {
+    questions: [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        options: [
+          { label: 'Polling', description: 'Poll the API' },
+          { label: 'Webhook', description: 'Use a webhook' },
+        ],
+      },
+    ],
+  };
+
+  const danglingRecord = (): ChatRecord => ({
+    uuid: 'assistant-auq',
+    parentUuid: 'user-uuid',
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    cwd: '/test',
+    version: '1.0.0',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: AUQ_ARGS,
+          },
+        },
+      ],
+    },
+  });
+
+  it('skips finalize from the transcript tail when chat is not initialized', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getLlmClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+    ]);
+  });
+
+  it('finalizes when restore skip is suppressed', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getLlmClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      suppressRestoreAskUserQuestion: true,
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+      'tool_call_update',
+    ]);
   });
 });

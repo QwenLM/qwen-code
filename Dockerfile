@@ -1,5 +1,10 @@
 # Build stage
-FROM docker.io/library/node:22-slim AS builder
+# Digest-pinned: integration_docker builds on the shared ECS pool, whose
+# docker daemon image store persists across jobs — a co-resident job can
+# retag a mutable base tag with a poisoned image, but a digest cannot be
+# moved by `docker tag`. Bump the digest together with the tag.
+# ratchet:docker.io/library/node:22-slim
+FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,15 +24,19 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 COPY . /home/node/app
 WORKDIR /home/node/app
 
-# Install dependencies, build workspaces, bundle into a single distributable, and pack
-RUN npm ci \
+# Install dependencies, build workspaces, bundle into a single distributable, and pack.
+# QWEN_SKIP_PREPARE=1 stops npm ci's prepare script from building and bundling —
+# the explicit build and bundle steps below already do that.
+RUN QWEN_SKIP_PREPARE=1 npm ci \
   && npm run build \
   && npm run bundle \
   && npm run prepare:package \
   && cd dist && npm pack
 
 # Runtime stage
-FROM docker.io/library/node:22-slim
+# Digest-pinned for the same reason as the builder stage above.
+# ratchet:docker.io/library/node:22-slim
+FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 ARG SANDBOX_NAME="qwen-code-sandbox"
 ARG CLI_VERSION_ARG

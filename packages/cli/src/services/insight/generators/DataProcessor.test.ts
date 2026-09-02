@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DataProcessor } from './DataProcessor.js';
+import { dayKey } from '../dates.js';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
@@ -74,26 +75,6 @@ describe('DataProcessor', () => {
     vi.restoreAllMocks();
   });
 
-  describe('formatDate', () => {
-    it('should format date as YYYY-MM-DD', () => {
-      const date = new Date('2025-01-15T10:30:00Z');
-      // Access private method through any cast for testing
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      expect(result).toBe('2025-01-15');
-    });
-
-    it('should handle different timezones correctly', () => {
-      const date = new Date('2025-12-31T23:59:59Z');
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      // Result depends on local timezone, but should be a valid date string
-      expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    });
-  });
-
   describe('formatRecordsForAnalysis', () => {
     it('should format empty records array', () => {
       const records: ChatRecord[] = [];
@@ -129,6 +110,108 @@ describe('DataProcessor', () => {
       ).formatRecordsForAnalysis(records);
       expect(result).toContain('Session: test-session');
       expect(result).toContain('[User]: Hello, world!');
+    });
+
+    it('should analyze clean user display text instead of hook context', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: raw @file prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
+    it('should keep notification model text instead of its display label', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: notification model text');
+      expect(result).not.toContain('Background agent completed');
+    });
+
+    it('should strip a complete final tag-only context part without metadata', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'user prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: user prompt');
+      expect(result).not.toContain('hook-only context');
     });
 
     it('should format assistant text messages correctly', () => {
@@ -247,7 +330,7 @@ describe('DataProcessor', () => {
       expect(result.dates).toEqual([]);
     });
 
-    it('should calculate streak of 1 for single date', () => {
+    it('reports a historical single date as longest 1 with no current streak', () => {
       const result = (
         dataProcessor as unknown as {
           calculateStreaks(dates: string[]): {
@@ -257,11 +340,13 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(['2025-01-15']);
-      expect(result.currentStreak).toBe(1);
+      // #6835: `currentStreak` means "the streak ending today or
+      // yesterday" — a months-old date is not a current streak.
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(1);
     });
 
-    it('should calculate consecutive day streak', () => {
+    it('keeps longestStreak for a historical run but zeroes currentStreak', () => {
       const dates = ['2025-01-15', '2025-01-16', '2025-01-17'];
       const result = (
         dataProcessor as unknown as {
@@ -272,7 +357,60 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(dates);
+      expect(result.currentStreak).toBe(0);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('reports the trailing run as current when it ends today', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(2), relKey(1), relKey(0)]);
       expect(result.currentStreak).toBe(3);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('still counts a streak ending yesterday as current', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(3), relKey(2), relKey(1)]);
+      expect(result.currentStreak).toBe(3);
+    });
+
+    it('zeroes currentStreak once the trailing run ended two days ago', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(4), relKey(3), relKey(2)]);
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(3);
     });
 
@@ -943,6 +1081,57 @@ describe('DataProcessor', () => {
       expect(paths.some((p) => p.includes('chat1.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat2.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat3.jsonl'))).toBe(true);
+    });
+
+    it('should skip prompt terminal ledger sidecars when scanning chat files', async () => {
+      mockedFs.readdir.mockResolvedValueOnce(['project1'] as unknown as Awaited<
+        ReturnType<typeof fs.readdir>
+      >);
+
+      mockedFs.stat.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.includes('project1') && !pathStr.includes('chats')) {
+          return Promise.resolve({
+            isDirectory: () => true,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        if (pathStr.endsWith('.jsonl')) {
+          return Promise.resolve({
+            isDirectory: () => false,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        throw new Error('Unexpected path: ' + pathStr);
+      });
+
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      mockedFs.readdir.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.endsWith('chats')) {
+          return Promise.resolve([
+            `${sessionId}.jsonl`,
+            `${sessionId}.ledger.jsonl`,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      const result = await (
+        dataProcessor as unknown as {
+          scanChatFiles(
+            baseDir: string,
+          ): Promise<Array<{ path: string; mtime: number }>>;
+        }
+      ).scanChatFiles('/base');
+
+      // The ledger sidecar is not a transcript: only the real session
+      // JSONL may be selected.
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toContain(`${sessionId}.jsonl`);
+      expect(result[0].path).not.toContain('.ledger.jsonl');
     });
 
     it('should skip projects without chats directory', async () => {

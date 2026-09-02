@@ -5,11 +5,11 @@
  */
 
 /**
- * Keeps scheduled-task-owned sessions resident against the bridge's idle
+ * Keeps sessions bound to scheduled tasks resident against the bridge's idle
  * reaper.
  *
  * A durable task created through the Web Shell management page is bound to a
- * dedicated session and fires ONLY inside it (its transcript is the task's run
+ * session and fires ONLY inside it (its transcript is the task's run
  * history). For that to keep happening the session must stay loaded so its
  * in-child scheduler ticks — but a session with no client / SSE subscriber is
  * closed by the bridge's idle reaper after the idle timeout, which would
@@ -36,9 +36,11 @@ import {
   getCronFilePath,
   createDebugLogger,
   SessionService,
+  Storage,
   taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
@@ -48,7 +50,9 @@ const log = createDebugLogger('SCHED_KEEPALIVE');
  * unbound, or a duplicate of one already collected. The heartbeat pass and the
  * boot rehydrate share this so the "which sessions to keep resident" filter lives
  * in exactly one place and can't drift between them. */
-function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
+export function collectBoundSessionIds(
+  tasks: readonly DurableCronTask[],
+): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
   for (const task of tasks) {
@@ -69,17 +73,16 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
 }
 
 /** The slice of the bridge the keepalive needs — narrowed for testability.
- * `recordHeartbeat` keeps a live session resident; `loadSession` revives one
+ * `recordHeartbeat` keeps a live session resident; `resumeSession` revives one
  * the reaper already let go (a re-enabled task's session). `spawnOrAttach`
  * and `updateSessionMetadata` bind unbound durable tasks to dedicated
  * sessions — the same flow the POST /scheduled-tasks route uses for
  * UI-created tasks, applied retroactively to cron_create tool tasks. */
 export interface KeepaliveBridge {
   recordHeartbeat(sessionId: string): unknown;
-  loadSession(req: {
+  resumeSession(req: {
     sessionId: string;
     workspaceCwd: string;
-    historyReplay?: 'stream' | 'response';
     sourceType?: string;
     sourceId?: string;
   }): Promise<unknown>;
@@ -90,14 +93,19 @@ export interface KeepaliveBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Advance the in-memory session-catalog revision after a successful
+   * persisted removal driven by keepalive cleanup. Optional so existing
+   * structural test fakes stay source-compatible; the production bridge
+   * always provides it. */
+  markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
   ): unknown;
 }
 
-/** Per-session revive-load timeout: a hung reload must not stall the sweep. */
-const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
+/** Default caller headroom above the bridge's 60-second restore deadline. */
+const KEEPALIVE_REVIVE_TIMEOUT_MS = 70_000;
 /** Per-task spawn timeout: a hung spawnOrAttach must not stall the sweep. */
 const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
 /** Upper bound on the per-session revive backoff, so a permanently-gone session
@@ -107,14 +115,14 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
- * sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * task-owned sessions that have not yet been named. The cron_create tool leaves
  * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
  * /headless). In daemon mode this keepalive mints a dedicated session per
  * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * For unbound tasks: mints a dedicated session, names it after the prompt,
  * writes sessionId to disk.
- * For bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ * For task-owned bound tasks not yet named: renames the session after the prompt.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -126,6 +134,7 @@ async function bindAndNameSessions(
   renamed: Set<string>,
   spawnTimeoutMs: number,
   binding: Set<string>,
+  cleanupSession: (sessionId: string) => Promise<unknown>,
 ): Promise<void> {
   const unbound = tasks.filter(
     (t) =>
@@ -137,6 +146,7 @@ async function bindAndNameSessions(
   const needsName = tasks.filter(
     (t) =>
       t.sessionId &&
+      t.sessionOwnedByTask !== false &&
       t.enabled !== false &&
       !taskHasLegacyCondition(t) &&
       !renamed.has(t.sessionId),
@@ -158,17 +168,14 @@ async function bindAndNameSessions(
       // binding guard on TRUE settlement so retries are possible.
       let timedOut = false;
       rawSpawn
-        .then(({ sessionId }) => {
+        .then(async ({ sessionId }) => {
           if (timedOut) {
             log.debug(
               'keepalive: late spawn resolved, cleaning up',
               task.id,
               sessionId,
             );
-            bridge.closeSession(sessionId).catch(() => {});
-            new SessionService(boundWorkspace)
-              .removeSession(sessionId)
-              .catch(() => {});
+            await cleanupSession(sessionId).catch(() => {});
           }
         })
         .catch(() => {})
@@ -226,10 +233,7 @@ async function bindAndNameSessions(
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
       if (spawnedSessionId !== undefined) {
-        await bridge.closeSession(spawnedSessionId).catch(() => {});
-        await new SessionService(boundWorkspace)
-          .removeSession(spawnedSessionId)
-          .catch(() => {});
+        await cleanupSession(spawnedSessionId).catch(() => {});
       }
     }
   }
@@ -257,12 +261,15 @@ export interface ScheduledTaskKeepalive {
 export interface StartScheduledTaskKeepaliveOptions {
   bridge: KeepaliveBridge;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
+  cleanupSession?: (sessionId: string) => Promise<unknown>;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
-  /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
+  /** Per-session revive timeout; values above the JS timer limit disable it. */
   reviveTimeoutMs?: number;
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }
 
 export function startScheduledTaskKeepalive(
@@ -271,6 +278,15 @@ export function startScheduledTaskKeepalive(
   const { bridge, boundWorkspace, intervalMs } = opts;
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
   const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
+  const cleanupSession =
+    opts.cleanupSession ??
+    (async (sessionId: string) => {
+      await bridge.closeSession(sessionId);
+      const removed = await new SessionService(boundWorkspace, {
+        runtimeBaseDir: opts.runtimeBaseDir,
+      }).removeSession(sessionId);
+      if (removed) bridge.markSessionCatalogChanged?.();
+    });
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
   // permanently-gone session isn't reloaded every interval; cleared on success.
@@ -278,9 +294,9 @@ export function startScheduledTaskKeepalive(
     string,
     { failures: number; nextAttemptAt: number }
   >();
-  // Sessions with a revive in flight. loadSession isn't abortable, so a
+  // Sessions with a revive in flight. resumeSession isn't abortable, so a
   // timed-out revive keeps running in the background; without this guard a later
-  // tick would spawn a SECOND loadSession (a duplicate child) for it. Cleared on
+  // tick would spawn a SECOND resumeSession (a duplicate child) for it. Cleared on
   // the load's TRUE settlement, not the timeout.
   const reviving = new Set<string>();
 
@@ -289,11 +305,11 @@ export function startScheduledTaskKeepalive(
   // until the raw spawn settles.
   const binding = new Set<string>();
 
-  // Tracks sessions the keepalive has already named with ⏰ prefix,
+  // Tracks sessions the keepalive has already named,
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
 
-  const tick = async (): Promise<void> => {
+  const tickInRuntime = async (): Promise<void> => {
     let tasks;
     try {
       tasks = await readCronTasks(boundWorkspace);
@@ -304,6 +320,11 @@ export function startScheduledTaskKeepalive(
       // is diagnosable rather than silent.
       log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
+    }
+    try {
+      opts.onTasksRead?.(tasks);
+    } catch (err) {
+      log.debug('keepalive: onTasksRead failed', err);
     }
     for (const sessionId of collectBoundSessionIds(tasks)) {
       try {
@@ -326,21 +347,24 @@ export function startScheduledTaskKeepalive(
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
-        const load = bridge.loadSession({
+        const resume = bridge.resumeSession({
           sessionId,
           workspaceCwd: boundWorkspace,
-          historyReplay: 'response',
           ...metadata,
         });
-        // Clear the in-flight guard on the load's TRUE settlement (not the
+        // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
-        void load
+        void resume
           .catch(() => {})
           .finally(() => {
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(load, reviveTimeoutMs, `loadSession(${sessionId})`);
+          await withTimeout(
+            resume,
+            reviveTimeoutMs,
+            `resumeSession(${sessionId})`,
+          );
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
@@ -382,12 +406,20 @@ export function startScheduledTaskKeepalive(
       renamed,
       spawnTimeoutMs,
       binding,
+      cleanupSession,
     );
   };
+  const tick = (): Promise<void> =>
+    opts.runtimeBaseDir === undefined
+      ? tickInRuntime()
+      : Storage.runWithResolvedRuntimeBaseDir(
+          opts.runtimeBaseDir,
+          tickInRuntime,
+        );
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
-  // overlapping passes would issue duplicate concurrent loadSession spawns for
+  // overlapping passes would issue duplicate concurrent resumeSession spawns for
   // the same dead sessions.
   let running = false;
   const timer: ReturnType<typeof setInterval> = setInterval(() => {
@@ -404,7 +436,12 @@ export function startScheduledTaskKeepalive(
   // dedicated session immediately, not after the next interval. Same
   // directory-watch + debounce pattern the scheduler uses.
   let bindDebounce: ReturnType<typeof setTimeout> | undefined;
-  const cronFilePath = getCronFilePath(boundWorkspace);
+  const cronFilePath =
+    opts.runtimeBaseDir === undefined
+      ? getCronFilePath(boundWorkspace)
+      : Storage.runWithResolvedRuntimeBaseDir(opts.runtimeBaseDir, () =>
+          getCronFilePath(boundWorkspace),
+        );
   const cronDir = path.dirname(cronFilePath);
   const cronFileName = path.basename(cronFilePath);
   let fileWatcher: ReturnType<typeof fsSync.watch> | undefined;
@@ -450,10 +487,9 @@ export function startScheduledTaskKeepalive(
 
 /** The slice of the bridge rehydration needs — narrowed for testability. */
 export interface RehydrateBridge {
-  loadSession(req: {
+  resumeSession(req: {
     sessionId: string;
     workspaceCwd: string;
-    historyReplay?: 'stream' | 'response';
     sourceType?: string;
     sourceId?: string;
   }): Promise<unknown>;
@@ -465,19 +501,18 @@ export interface RehydrateResult {
 }
 
 /**
- * Reloads every scheduled-task-owned session at daemon startup so its in-child
+ * Reloads every scheduled-task-bound session at daemon startup so its in-child
  * scheduler re-arms after a restart — nothing rehydrates sessions on boot
  * otherwise, so a bound task would sit dormant (its bound session dead, and the
  * lock owner deliberately never fires a bound task) until something loaded it.
  *
  * Best-effort: a session whose transcript is gone (deleted out-of-band) fails
- * its `loadSession` and is skipped rather than aborting the sweep. Distinct
+ * its `resumeSession` and is skipped rather than aborting the sweep. Distinct
  * session ids only; unbound tasks are ignored (they fire via the lock owner).
  */
-/** Per-session load timeout: one hung `loadSession` (cold start, blocked child
- * spawn, huge replay) must not stall the whole boot sweep. */
-const REHYDRATE_LOAD_TIMEOUT_MS = 30_000;
-/** Max sessions rehydrated at once. Each `loadSession` forks a real agent
+/** Default caller headroom above the bridge's 60-second restore deadline. */
+const REHYDRATE_RESUME_TIMEOUT_MS = 70_000;
+/** Max sessions rehydrated at once. Each `resumeSession` forks a real agent
  * child, so loading all of them (up to MAX_JOBS = 50) in one shot would spike
  * CPU/memory on boot and, on constrained hosts, hit spawn failures
  * (EAGAIN/ENOMEM) that strand healthy tasks. Load in small batches instead. */
@@ -487,16 +522,23 @@ export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
+  /** Values above the JS timer limit disable the caller-side watchdog. */
   loadTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
-  const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
+  const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_RESUME_TIMEOUT_MS;
   let tasks;
   try {
     tasks = await readCronTasks(boundWorkspace);
   } catch (err) {
     log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
+  }
+  try {
+    deps.onTasksRead?.(tasks);
+  } catch (err) {
+    log.debug('rehydrate: onTasksRead failed', err);
   }
 
   // Distinct sessions of enabled bound tasks — same filter the heartbeat uses.
@@ -508,18 +550,17 @@ export async function rehydrateScheduledTaskSessions(deps: {
     const metadata = await new SessionService(
       boundWorkspace,
     ).readCreationMetadata(sessionId);
-    const load = bridge.loadSession({
+    const resume = bridge.resumeSession({
       sessionId,
       workspaceCwd: boundWorkspace,
-      historyReplay: 'response',
       ...metadata,
     });
-    // loadSession isn't abortable, so a timed-out load keeps forking/replaying
+    // resumeSession isn't abortable, so a timed-out resume keeps running
     // in the background. Swallow its eventual settlement up front so it can't
     // raise an unhandled rejection once we've stopped awaiting it below.
-    void load.catch(() => {});
+    void resume.catch(() => {});
     try {
-      await withTimeout(load, timeoutMs, `loadSession(${sessionId})`);
+      await withTimeout(resume, timeoutMs, `resumeSession(${sessionId})`);
       loaded.push(sessionId);
     } catch (err) {
       // Timed out (or the load rejected). Do NOT await the raw `load` here: a
@@ -527,7 +568,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
       // enough loads hang, the whole boot sweep never completes (`Promise.all`
       // never settles) — later task sessions would then never rehydrate. Record
       // it as failed and free the worker to pull the next queued session; the
-      // background load, if it ever settles, just warms that session late.
+      // background resume, if it ever settles, just warms that session late.
       failed.push(sessionId);
       // The onError callback must never abort the sweep: if it throws (e.g. a
       // stderr EPIPE during log rotation) the rejection would escape loadOne,
@@ -566,6 +607,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
 
 /** Rejects with a clear error if `p` doesn't settle within `ms`. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  if (ms > MAX_SESSION_RESTORE_TIMEOUT_MS) return p;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`${label} timed out after ${ms}ms`));

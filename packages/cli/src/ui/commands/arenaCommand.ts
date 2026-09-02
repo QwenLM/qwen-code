@@ -144,17 +144,28 @@ function buildArenaExecutionInput(
   // Build ArenaModelConfig for each model, resolving display names from
   // the model registry when available.
   const modelsConfig = config.getModelsConfig();
-  const models: ArenaModelConfig[] = parsed.models.map((parsedModel) => {
+  const models: ArenaModelConfig[] = [];
+  for (const parsedModel of parsed.models) {
     const authType =
       (parsedModel.authType as AuthType | undefined) ?? defaultAuthType;
     const registryModels = modelsConfig.getAvailableModelsForAuthType(authType);
     const resolved = registryModels.find((m) => m.id === parsedModel.modelId);
-    return {
+    if (resolved?.imageOnly) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          "Image-only model '{{model}}' cannot be used in an Arena session.",
+          { model: parsedModel.modelId },
+        ),
+      };
+    }
+    models.push({
       modelId: parsedModel.modelId,
       authType,
       displayName: resolved?.label ?? parsedModel.modelId,
-    };
-  });
+    });
+  }
 
   return {
     task: parsed.task,
@@ -194,7 +205,7 @@ function executeArenaCommand(
   // its worktree directory — keeping the parent's would duplicate it.
   let chatHistory;
   try {
-    const fullHistory = config.getGeminiClient().getChat().getHistoryShallow();
+    const fullHistory = config.getLlmClient().getChat().getHistoryShallow();
     chatHistory = stripStartupContext(fullHistory);
   } catch {
     debugLogger.debug('Could not retrieve chat history for arena agents');

@@ -22,12 +22,13 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
-} from '../memory/const.js';
+} from '../utils/memory-constants.js';
 import type { PermissionDeniedReason } from '../hooks/types.js';
 export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
@@ -61,6 +62,7 @@ const RAW_PROTECTED_WRITE_COMMANDS =
 export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Read-only file / search
   ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.LS,
@@ -153,6 +155,7 @@ const SELF_MODIFICATION_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(^|\/)\.qwen\/agents(?:\/|$)/,
   /(^|\/)\.qwen\/skills(?:\/|$)/,
   /(^|\/)\.qwen\/hooks(?:\/|$)/,
+  /(^|\/)\.qwen\/fork-profiles(?:\/|$)/,
   /(^|\/)\.mcp\.json$/,
 ]);
 
@@ -169,7 +172,7 @@ function trimPathSlashes(filePath: string): string {
 }
 
 function matchesConfiguredContextFile(normalizedPath: string): boolean {
-  return [...getAllGeminiMdFilenames(), LOCAL_CONTEXT_FILENAME].some(
+  return [...getAllMemoryFilenames(), LOCAL_CONTEXT_FILENAME].some(
     (filename) => {
       const normalizedFilename = trimPathSlashes(
         normalizePathForAutoModePattern(filename),
@@ -224,7 +227,9 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
       /^settings(?:\.[^/]*)?\.json$/.test(relativePath) ||
       /^qwen\.local\.md$/.test(relativePath) ||
       /^\.mcp\.json$/.test(relativePath) ||
-      /^(rules|commands|agents|skills|hooks)(?:\/|$)/.test(relativePath)
+      /^(rules|commands|agents|skills|hooks|fork-profiles)(?:\/|$)/.test(
+        relativePath,
+      )
     ) {
       return true;
     }
@@ -450,8 +455,8 @@ function stripRawRedirectTargetToken(token: string): string {
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
- * workspace correctly fails this check and falls through to the classifier
- * — fail-safe by implementation.
+ * workspace correctly fails this check and falls through to the L5.2.6
+ * external_write manual fallback — fail-safe by implementation.
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
@@ -514,6 +519,8 @@ export type FallbackToAskReason =
   | 'ask_rule'
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
+  | 'classifier_unavailable'
+  | 'external_write'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -524,7 +531,11 @@ export type AutoModeOutcome =
       errorMessage: string;
       reason: PermissionDeniedReason;
     }
-  | { kind: 'fallback'; reason: FallbackToAskReason };
+  | {
+      kind: 'fallback';
+      reason: FallbackToAskReason;
+      message?: string;
+    };
 
 /**
  * Apply an AUTO decision and denial-tracking update. Shared by the scheduler
@@ -549,22 +560,32 @@ export function applyAutoModeDecision(
       };
     case 'classifier':
       if (decision.shouldBlock) {
-        config.setAutoModeDenialState(
-          decision.unavailable
-            ? recordUnavailable(denialState)
-            : recordBlock(denialState),
-        );
+        if (decision.unavailable) {
+          config.setAutoModeDenialState(recordUnavailable(denialState));
+          return {
+            kind: 'fallback',
+            reason: 'classifier_unavailable',
+            message: formatClassifierUnavailableFallbackMessage(decision),
+          };
+        }
+        config.setAutoModeDenialState(recordBlock(denialState));
         return {
           kind: 'blocked',
           errorMessage: formatClassifierBlockMessage(decision),
-          reason: decision.unavailable
-            ? 'classifier_unavailable'
-            : 'classifier_blocked',
+          reason: 'classifier_blocked',
         };
       }
       config.setAutoModeDenialState(recordAllow(denialState));
       return { kind: 'approved' };
     case 'fallback':
+      if (decision.reason === 'external_write') {
+        return {
+          kind: 'fallback',
+          reason: 'external_write',
+          message:
+            'Writes outside the workspace require manual approval in AUTO mode.',
+        };
+      }
       return { kind: 'fallback', reason: decision.reason };
     default: {
       const _exhaustive: never = decision;
@@ -598,21 +619,41 @@ export function getAutoModePermissionDeniedReason(
 }
 
 /**
- * Trailing guidance appended to every classifier-denial tool-result message.
+ * Trailing guidance appended to classifier policy-denial tool results.
  * Centralised so the policy boundary (no silent retries, no equivalent-path
- * workarounds, stop and ask the user) is identical for "blocked" and
- * "unavailable" verdicts and stays in sync with the main system prompt's
- * Denied Tool Calls rule.
+ * workarounds, stop and ask the user) stays in sync with the main system
+ * prompt's Denied Tool Calls rule.
  */
 export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
+export function formatClassifierUnavailableFallbackMessage(
+  decision: Extract<AutoModeDecision, { via: 'classifier' }>,
+): string {
+  const detail = decision.reason ? ` (${decision.reason})` : '';
+  return `Auto Mode couldn't classify this action${detail}. Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.`;
+}
+
+export function decorateClassifierUnavailableConfirmation(
+  confirmation: ToolCallConfirmationDetails,
+  message: string,
+): ToolCallConfirmationDetails {
+  return {
+    ...confirmation,
+    ...(confirmation.type === 'ask_user_question'
+      ? {}
+      : { hideAlwaysAllow: true }),
+    autoModeFallback: {
+      reason: 'classifier_unavailable',
+      message,
+    },
+  } as ToolCallConfirmationDetails;
+}
+
 /**
- * Build the tool-error message the scheduler / ACP session returns when
- * the classifier blocks or is unavailable. Shared between
- * `coreToolScheduler.ts` and `acp-integration/session/Session.ts` so the
- * CLI and ACP paths surface identical diagnostic signal to operators
- * (context overflow vs API timeout vs construction failure).
+ * Build the tool-error message the scheduler / ACP session returns when the
+ * classifier supplies a policy block. Keeping it here gives both paths the
+ * same denial guidance.
  *
  * Callers are responsible for only invoking this on classifier verdicts —
  * `decision.via === 'classifier'` with `decision.shouldBlock === true`.
@@ -620,12 +661,6 @@ export const AUTO_MODE_DENIAL_GUIDANCE =
 export function formatClassifierBlockMessage(
   decision: Extract<AutoModeDecision, { via: 'classifier' }>,
 ): string {
-  if (decision.unavailable) {
-    const message = decision.reason
-      ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
-      : `Auto mode classifier unavailable; action blocked for safety`;
-    return `${message}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
-  }
   return `Blocked by auto mode policy: ${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
 }
 
@@ -702,6 +737,19 @@ export async function evaluateAutoMode(
   // User `ask` rules require manual confirmation.
   if (input.pmForcedAsk) {
     return { via: 'fallback', reason: 'ask_rule' };
+  }
+
+  // L5.2.6: External writes must never be auto-approved by the classifier.
+  // If a write tool targets a path outside the workspace, force a fallback to
+  // manual approval (ask) instead of risking an LLM classifier auto-approval.
+  if (
+    PROTECTED_WRITE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.filePath &&
+    !input.config
+      .getWorkspaceContext()
+      .isPathWithinWorkspace(input.ctx.filePath)
+  ) {
+    return { via: 'fallback', reason: 'external_write' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that

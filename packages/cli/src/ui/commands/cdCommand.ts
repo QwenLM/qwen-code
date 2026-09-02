@@ -179,6 +179,15 @@ export const cdCommand: SlashCommand = {
           }`,
         );
       }
+      if (relocation.mcpRefreshError) {
+        warnings.push(
+          `MCP refresh failed: ${
+            relocation.mcpRefreshError instanceof Error
+              ? relocation.mcpRefreshError.message
+              : String(relocation.mcpRefreshError)
+          }`,
+        );
+      }
     } catch (error) {
       return {
         type: 'message' as const,
@@ -189,12 +198,21 @@ export const cdCommand: SlashCommand = {
       };
     }
     if (trustedTargetPath) {
-      loadTrustedFolders().setValue(trustedTargetPath, TrustLevel.TRUST_FOLDER);
+      try {
+        loadTrustedFolders().setValue(
+          trustedTargetPath,
+          TrustLevel.TRUST_FOLDER,
+        );
+      } catch (error) {
+        warnings.push(
+          `Trust setting update failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     try {
       await config
-        .getGeminiClient()
+        .getLlmClient()
         ?.addWorkingDirectoryChangedContext(realOldDir, realTargetPath);
     } catch (error) {
       warnings.push(

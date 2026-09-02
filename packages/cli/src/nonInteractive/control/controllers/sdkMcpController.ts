@@ -87,6 +87,11 @@ export class SdkMcpController extends BaseController {
       JSON.stringify(message),
     );
 
+    // Capture the current turn now. A later turn may become active while this
+    // request is still pending, but interrupt must continue to target the turn
+    // that created the request.
+    const signal = this.getTurnRequestAbortSignal();
+
     // Send control request to SDK with the MCP message
     const response = await this.sendControlRequest(
       {
@@ -95,7 +100,7 @@ export class SdkMcpController extends BaseController {
         message: message as CLIControlMcpMessageRequest['message'],
       },
       MCP_REQUEST_TIMEOUT,
-      this.context.abortSignal,
+      signal,
     );
 
     // Extract MCP response from control response

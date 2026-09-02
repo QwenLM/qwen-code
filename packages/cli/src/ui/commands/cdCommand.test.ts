@@ -55,7 +55,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => false,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,
@@ -164,7 +164,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => true,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,
@@ -339,6 +339,24 @@ describe('cdCommand', () => {
     });
   });
 
+  it('reports a successful move when MCP refresh fails afterward', async () => {
+    relocateWorkingDirectory.mockResolvedValue({
+      mcpRefreshError: new Error('MCP failed'),
+    });
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content: `Moved to ${realNextDir}. MCP refresh failed: MCP failed`,
+    });
+  });
+
   it('asks for confirmation before moving to an untrusted directory', async () => {
     context = createMockCommandContext({
       invocation: {
@@ -506,6 +524,52 @@ describe('cdCommand', () => {
       type: 'message',
       messageType: 'info',
       content: `Moved to ${realNextDir}.`,
+    });
+  });
+
+  it('reports a trust write failure after a confirmed move', async () => {
+    context = createMockCommandContext({
+      invocation: {
+        raw: '/cd ../next',
+        name: 'cd',
+        args: '../next',
+      },
+      services: {
+        config: context.services.config,
+        settings: {
+          merged: {
+            security: {
+              folderTrust: {
+                enabled: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    await cdCommand.action?.(context, '../next');
+    context.overwriteConfirmed = true;
+    fs.writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']!,
+      'invalid json',
+    );
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(relocateWorkingDirectory).toHaveBeenCalledWith(
+      realNextDir,
+      realNextDir,
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content: expect.stringContaining(
+        `Moved to ${realNextDir}. Trust setting update failed:`,
+      ),
     });
   });
 

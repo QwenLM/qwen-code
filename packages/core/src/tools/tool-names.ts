@@ -21,6 +21,7 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
+  ZOOM_IMAGE: 'zoom_image',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -31,6 +32,8 @@ export const ToolNames = {
   EXIT_PLAN_MODE: 'exit_plan_mode',
   ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
+  WEB_SEARCH: 'web_search',
+  IMAGE_GEN: 'image_gen',
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
@@ -39,6 +42,7 @@ export const ToolNames = {
   CRON_DELETE: 'cron_delete',
   LOOP_WAKEUP: 'loop_wakeup',
   CREATE_SUB_SESSION: 'create_sub_session',
+  LIST_AGENTS: 'list_agents',
   TASK_STOP: 'task_stop',
   TASK_CREATE: 'task_create',
   TASK_UPDATE: 'task_update',
@@ -46,6 +50,7 @@ export const ToolNames = {
   TEAM_CREATE: 'team_create',
   TEAM_DELETE: 'team_delete',
   TEAM_PLAN_APPROVAL: 'team_plan_approval',
+  REQUEST_SHUTDOWN: 'request_shutdown',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
@@ -54,15 +59,14 @@ export const ToolNames = {
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
-  // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
-  // Their full 35-tool surface is generated into computer-use/schemas.ts and
-  // registered via computer-use/index.ts (cast to ToolName). Duplicating a
-  // subset here only goes stale on every cua-driver version bump — review
-  // round 1 removed the old ocu-era 9-name list, which still carried
-  // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  REPORT_FINDINGS: 'report_findings',
+  GET_GOAL: 'get_goal',
+  UPDATE_GOAL: 'update_goal',
+  PROPOSE_GOAL: 'propose_goal',
+  DISPLAY_IMAGE: 'display_image',
 } as const;
 
 /**
@@ -74,6 +78,7 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
+  ZOOM_IMAGE: 'ZoomImage',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
@@ -84,6 +89,8 @@ export const ToolDisplayNames = {
   EXIT_PLAN_MODE: 'ExitPlanMode',
   ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
+  WEB_SEARCH: 'WebSearch',
+  IMAGE_GEN: 'ImageGen',
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
@@ -92,6 +99,7 @@ export const ToolDisplayNames = {
   CRON_DELETE: 'CronDelete',
   LOOP_WAKEUP: 'LoopWakeup',
   CREATE_SUB_SESSION: 'CreateSubSession',
+  LIST_AGENTS: 'ListAgents',
   TASK_STOP: 'TaskStop',
   TASK_CREATE: 'TaskCreate',
   TASK_UPDATE: 'TaskUpdate',
@@ -99,6 +107,7 @@ export const ToolDisplayNames = {
   TEAM_CREATE: 'TeamCreate',
   TEAM_DELETE: 'TeamDelete',
   TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
+  REQUEST_SHUTDOWN: 'RequestShutdown',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
@@ -107,10 +116,14 @@ export const ToolDisplayNames = {
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
-  // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  REPORT_FINDINGS: 'ReportFindings',
+  GET_GOAL: 'Goal',
+  UPDATE_GOAL: 'UpdateGoal',
+  PROPOSE_GOAL: 'ProposeGoal',
+  DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 
 // Migration from old tool names to new tool names
@@ -121,6 +134,18 @@ export const ToolNamesMigration = {
   replace: ToolNames.EDIT, // Legacy name from edit tool
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
 } as const;
+
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep_search`) to its canonical form. The single
+ * alias-resolution site: every caller that classifies or keys tool calls by
+ * name — the scheduler, loop detection, plan redaction, memory refresh, the
+ * headless partitioner in nonInteractiveCli, the daemon/ACP session — must
+ * use this so an aliased call is treated identically everywhere.
+ */
+export function canonicalToolName(toolName: string): string {
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
 
 // Migration from old tool display names to new tool display names
 // These legacy display names were used before the tool naming standardization

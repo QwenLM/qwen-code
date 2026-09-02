@@ -12,7 +12,10 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
-import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
+import {
+  RUNTIME_SNAPSHOT_PREFIX,
+  buildRuntimeSnapshotId,
+} from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 import { ModelRegistry } from './modelRegistry.js';
@@ -507,6 +510,11 @@ export class ModelsConfig {
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
+      if (model.imageOnly) {
+        throw new Error(
+          `Image-only model '${modelId}' cannot be used as the primary model`,
+        );
+      }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
       const previousModel =
@@ -573,7 +581,7 @@ export class ModelsConfig {
     authType: AuthType,
     modelId: string,
   ): string {
-    return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+    return buildRuntimeSnapshotId(authType, modelId);
   }
 
   /**
@@ -1013,9 +1021,7 @@ export class ModelsConfig {
     modelId?: string,
     providerBaseUrlOverride?: string,
   ): void {
-    this.strictModelProviderSelection = false;
     const previousAuthType = this.currentAuthType;
-    this.currentAuthType = authType;
 
     // Step 1: If modelId exists in registry, always use config from modelRegistry
     // Manual credentials won't have a modelId that matches a provider model (the /auth provider-setup flow prevents it),
@@ -1035,6 +1041,14 @@ export class ModelsConfig {
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
+    if (resolved?.imageOnly) {
+      throw new Error(
+        `Image-only model '${modelId}' cannot be used as the primary model`,
+      );
+    }
+
+    this.strictModelProviderSelection = false;
+    this.currentAuthType = authType;
     if (resolved) {
       // When authType and modelId haven't changed (startup/restart scenario),
       // the current apiKey was already correctly resolved by
@@ -1439,5 +1453,10 @@ export class ModelsConfig {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+  }
+
+  /** The raw providers config the registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelRegistry.getModelProvidersConfig();
   }
 }

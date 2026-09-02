@@ -111,7 +111,7 @@ async function listMarkdownFiles(root: string): Promise<string[]> {
 
 async function scanAutoMemoryDocumentsFromRoot(
   root: string,
-  opts: { deterministic?: boolean } = {},
+  opts: { deterministic?: boolean; uncapped?: boolean } = {},
 ): Promise<ScannedAutoMemoryDocument[]> {
   const relativePaths = await listMarkdownFiles(root);
   const docs = await Promise.all(
@@ -159,13 +159,23 @@ async function scanAutoMemoryDocumentsFromRoot(
     : valid.sort(
         (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
       );
-  return ordered.slice(0, MAX_SCANNED_MEMORY_FILES);
+  return opts.uncapped ? ordered : ordered.slice(0, MAX_SCANNED_MEMORY_FILES);
 }
 
 export async function scanAutoMemoryTopicDocuments(
   projectRoot: string,
 ): Promise<ScannedAutoMemoryDocument[]> {
   return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot));
+}
+
+export async function scanAllAutoMemoryTopicDocuments(
+  projectRoot: string,
+): Promise<ScannedAutoMemoryDocument[]> {
+  // ponytail: reuse the existing O(n) parsed scan; add a catalog only if
+  // measured topic counts make recall scanning too slow.
+  return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot), {
+    uncapped: true,
+  });
 }
 
 /**
@@ -177,6 +187,14 @@ export async function scanUserAutoMemoryTopicDocuments(): Promise<
   ScannedAutoMemoryDocument[]
 > {
   return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot());
+}
+
+export async function scanAllUserAutoMemoryTopicDocuments(): Promise<
+  ScannedAutoMemoryDocument[]
+> {
+  return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot(), {
+    uncapped: true,
+  });
 }
 
 /**

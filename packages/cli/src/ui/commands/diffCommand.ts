@@ -118,6 +118,7 @@ function toRow(filename: string, s: PerFileStats): DiffRenderRow {
   if (s.isBinary) {
     return {
       filename,
+      oldPath: s.oldPath,
       isBinary: true,
       isUntracked: Boolean(s.isUntracked),
       isDeleted: Boolean(s.isDeleted),
@@ -126,6 +127,7 @@ function toRow(filename: string, s: PerFileStats): DiffRenderRow {
   }
   return {
     filename,
+    oldPath: s.oldPath,
     added: s.added,
     removed: s.isUntracked ? 0 : s.removed,
     isBinary: false,
@@ -212,13 +214,18 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
     // moves, full screen clears, or layout-breaking newlines into CI logs and
     // any consumer's terminal.
     const safeName = sanitizeFilenameForDisplay(r.filename);
+    // Renames carry the pre-rename path; show `old → new` so the move is
+    // visible (the row is still addressed by the new path).
+    const displayName = r.oldPath
+      ? `${sanitizeFilenameForDisplay(r.oldPath)} → ${safeName}`
+      : safeName;
     if (r.isBinary) {
       const suffix = r.isUntracked
         ? ` ${t('(binary, new)')}`
         : r.isDeleted
           ? ` ${t('(binary, deleted)')}`
           : ` ${t('(binary)')}`;
-      out.push(`  ${padMarker('~', statColumnWidth)}  ${safeName}${suffix}`);
+      out.push(`  ${padMarker('~', statColumnWidth)}  ${displayName}${suffix}`);
       continue;
     }
     const added = `+${String(r.added ?? 0).padStart(addWidth)}`;
@@ -229,7 +236,7 @@ function formatRowsText(rows: DiffRenderRow[]): string[] {
     } else if (r.isDeleted) {
       suffix = ` ${t('(deleted)')}`;
     }
-    out.push(`  ${added} ${removed}  ${safeName}${suffix}`);
+    out.push(`  ${added} ${removed}  ${displayName}${suffix}`);
   }
   return out;
 }

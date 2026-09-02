@@ -64,5 +64,5 @@ public class Timeout {
     /**
      * A timeout of 30 minutes.
      */
-    public static final Timeout TIMEOUT_30_MINUTES = new Timeout(60L, TimeUnit.MINUTES);
+    public static final Timeout TIMEOUT_30_MINUTES = new Timeout(30L, TimeUnit.MINUTES);
 }

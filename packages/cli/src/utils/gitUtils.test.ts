@@ -271,4 +271,23 @@ describe('getLatestRelease', async () => {
     );
     await expect(getLatestGitHubRelease()).resolves.toBe('v1.2.3');
   });
+
+  it('uses ProxyAgent when a proxy is provided', async () => {
+    const mockProxyAgent = vi.fn();
+    vi.doMock('undici', () => ({
+      ProxyAgent: mockProxyAgent,
+    }));
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ tag_name: 'v1.2.4' }),
+      } as Response),
+    );
+    const { getLatestGitHubRelease } = await import('./gitUtils.js');
+    await expect(
+      getLatestGitHubRelease('http://proxy.local:8080'),
+    ).resolves.toBe('v1.2.4');
+    expect(mockProxyAgent).toHaveBeenCalledWith('http://proxy.local:8080');
+    vi.doUnmock('undici');
+  });
 });

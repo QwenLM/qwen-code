@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
@@ -14,11 +14,18 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  ChannelLoopToolHandler,
-  ChannelAgentBridge,
-  ToolCallEvent,
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  resolvePromptImages,
+  type AvailableCommand,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
@@ -32,6 +39,8 @@ import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -40,6 +49,7 @@ export interface AcpBridgeOptions {
 }
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+export const ACP_START_TIMEOUT_MS = 30 * 1000;
 export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
@@ -77,6 +87,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private _availableCommands: AvailableCommand[] = [];
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly knownSessionIds = new Set<string>();
+  private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -99,6 +111,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
+    // Private-parent capability: marks this bridge as a trusted ACP parent of
+    // the spawned child so trusted prompt metadata (e.g. the classifier's
+    // display projection) survives the child's untrusted-caller strip.
+    const privateParentCapability = randomBytes(32).toString('base64url');
 
     const args = [
       ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
@@ -112,7 +128,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, QWEN_CODE_DISABLE_CRON: '1' },
+      env: {
+        ...process.env,
+        QWEN_CODE_DISABLE_CRON: '1',
+        [ACP_PRIVATE_PARENT_CAPABILITY_ENV]: privateParentCapability,
+      },
       shell: false,
     });
 
@@ -131,6 +151,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
       this.resolvePendingPermissions();
+      this.knownSessionIds.clear();
+      this.sessionBindingTokens.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -171,11 +193,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       stream,
     );
 
-    await this.connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {},
-    });
-    await this.registerChannelLoopMcpServer();
+    try {
+      await withTimeout(
+        this.connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {},
+          _meta: {
+            [ACP_PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
+          },
+        }),
+        ACP_START_TIMEOUT_MS,
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await this.registerChannelLoopMcpServer();
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
   }
 
   registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
@@ -193,28 +227,67 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     void this.registerChannelLoopMcpServer();
   }
 
-  async newSession(cwd: string): Promise<string> {
+  private async applySessionApprovalMode(
+    conn: ClientSideConnection,
+    sessionId: string,
+    approvalMode: string | undefined,
+  ): Promise<void> {
+    if (!approvalMode) return;
+    try {
+      await conn.setSessionMode({ sessionId, modeId: approvalMode });
+    } catch (error) {
+      await conn
+        .extMethod('qwen/control/session/close', { sessionId })
+        .catch((closeError: unknown) => {
+          process.stderr.write(
+            `[AcpBridge] Failed to close session ${sanitizeLogText(sessionId, 128)} after approval mode error: ${sanitizeLogText(closeError instanceof Error ? closeError.message : String(closeError), 512)}\n`,
+          );
+        });
+      throw error;
+    }
+  }
+
+  async newSession(
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
+    await this.applySessionApprovalMode(
+      conn,
+      response.sessionId,
+      options?.approvalMode,
+    );
+    this.knownSessionIds.add(response.sessionId);
+    this.sessionBindingTokens.set(response.sessionId, bindingToken);
     return response.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<string> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
-    const response = await conn.loadSession({
+    await conn.unstable_resumeSession({
       sessionId,
       cwd,
       mcpServers: [],
     });
-    return response.sessionId;
+    await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
+    this.knownSessionIds.add(sessionId);
+    this.sessionBindingTokens.set(sessionId, bindingToken);
+    return sessionId;
   }
 
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
 
@@ -237,11 +310,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
+    for (const image of resolvePromptImages(options)) {
       prompt.push({
         type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
+        data: image.data,
+        mimeType: image.mimeType,
       });
     }
     prompt.push({ type: 'text', text });
@@ -250,6 +323,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.displayText !== undefined
+            ? {
+                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+              }
+            : {}),
+        },
       });
     } finally {
       this.off('textChunk', onChunk);
@@ -267,6 +348,25 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     } finally {
       this.resolvePendingPermissions(sessionId);
     }
+  }
+
+  async discardSession(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void> {
+    if (
+      expectedBindingToken !== undefined &&
+      this.sessionBindingTokens.get(sessionId) !== expectedBindingToken
+    ) {
+      return;
+    }
+    if (!this.knownSessionIds.delete(sessionId)) return;
+    this.sessionBindingTokens.delete(sessionId);
+    this.resolvePendingPermissions(sessionId);
+
+    const conn = this.connection;
+    if (!conn || !this.isConnected) return;
+    await conn.extMethod('qwen/control/session/close', { sessionId });
   }
 
   async respondToPermission(
@@ -289,6 +389,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   stop(): void {
     this.resolvePendingPermissions();
+    this.knownSessionIds.clear();
+    this.sessionBindingTokens.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -320,6 +422,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         const content = update['content'] as
           | { type?: string; text?: string }
           | undefined;
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('backgroundResponse', sessionId, content.text);
+          } else if (
+            meta['source'] === 'vision_bridge_notice' &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('textChunk', sessionId, content.text);
+          }
+          break;
+        }
         if (content?.type === 'text' && content.text) {
           this.emit(
             meta?.['source'] === 'slash_command'
@@ -508,7 +627,15 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return this.handleClientMcpMessage(params);
     }
     if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
-      return { messages: [] };
+      return { messages: [], hasQueuedPrompt: false };
+    }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      const sessionId =
+        typeof params['sessionId'] === 'string' ? params['sessionId'] : '';
+      return {
+        claimed: this.knownSessionIds.has(sessionId),
+        hasQueuedPrompt: false,
+      };
     }
     throw new Error(`Method not found: ${method}`);
   }
@@ -559,6 +686,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         ? 'No channel loop tool handler is registered.'
         : `No channel loop handler matched session ${sessionId}.`,
     );
+  }
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

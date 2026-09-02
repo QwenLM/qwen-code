@@ -121,6 +121,30 @@ describe('renameCommand', () => {
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
   });
 
+  it('passes channel display projections to automatic title generation', async () => {
+    tryGenerateSessionTitleMock.mockResolvedValue({
+      ok: false,
+      reason: 'empty_history',
+    });
+    const displayTexts = ['你好', '/rename   --auto'];
+    const mockConfig = {
+      getChatRecordingService: vi.fn().mockReturnValue({
+        getUserDisplayTextsForTitle: vi.fn().mockReturnValue(displayTexts),
+      }),
+    };
+    mockContext = createMockCommandContext({
+      services: { config: mockConfig as never },
+    });
+
+    await renameCommand.action!(mockContext, '--auto');
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['你好'],
+    );
+  });
+
   it('should return error when only whitespace is provided and auto-generate fails', async () => {
     tryGenerateSessionTitleMock.mockResolvedValue({
       ok: false,

@@ -4,10 +4,12 @@ import mcpIconUrl from '../assets/icons/at-mcp.svg';
 import skillIconUrl from '../assets/icons/at-skill.svg';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type {
+  UserMessageContentParser,
   WebShellBuiltinComposerTagKind,
   WebShellComposerTag,
   WebShellComposerTagIconMap,
   WebShellComposerTagKind,
+  WebShellUserMessagePart,
 } from '../customization';
 
 // Shared UI-facing shape for composer tags across React and CodeMirror.
@@ -22,6 +24,79 @@ export type ComposerTagContentSegment =
   | { type: 'text'; text: string }
   | { type: 'reference'; tag: WebShellComposerTag };
 
+export function isPreviewableFileComposerTag(
+  tag: WebShellComposerTag,
+): tag is WebShellComposerTag & { kind: 'file'; value: string } {
+  if (tag.kind !== 'file' || !tag.value) return false;
+  const fileKind = (tag.metadata as { fileKind?: unknown } | undefined)
+    ?.fileKind;
+  if (fileKind !== undefined) return fileKind === 'file';
+  return !(tag.serialized ?? tag.value).trim().endsWith('/');
+}
+
+function isValidComposerTag(tag: unknown): tag is WebShellComposerTag {
+  if (!tag || typeof tag !== 'object') return false;
+  const candidate = tag as Record<string, unknown>;
+  return (
+    typeof candidate.id === 'string' &&
+    (candidate.label === undefined || typeof candidate.label === 'string') &&
+    (candidate.value === undefined || typeof candidate.value === 'string') &&
+    (candidate.removable === undefined ||
+      typeof candidate.removable === 'boolean') &&
+    (candidate.kind === undefined || typeof candidate.kind === 'string') &&
+    (candidate.icon === undefined || typeof candidate.icon === 'string') &&
+    (candidate.serialized === undefined ||
+      typeof candidate.serialized === 'string')
+  );
+}
+
+function isValidUserMessagePart(
+  part: unknown,
+): part is WebShellUserMessagePart {
+  if (!part || typeof part !== 'object') return false;
+  const candidate = part as Record<string, unknown>;
+  if (candidate.type === 'text') return typeof candidate.text === 'string';
+  if (candidate.type !== 'tag') return false;
+  return isValidComposerTag(candidate.tag);
+}
+
+export interface ParseUserMessageContentOptions {
+  requireSourcePreservation?: boolean;
+}
+
+export function parseUserMessageContentSafely(
+  content: string,
+  parser: UserMessageContentParser | undefined,
+  warning: string,
+  options: ParseUserMessageContentOptions = {},
+): readonly WebShellUserMessagePart[] | null {
+  if (!parser) return null;
+  try {
+    const parts = parser(content);
+    if (
+      !Array.isArray(parts) ||
+      parts.length === 0 ||
+      !parts.every(isValidUserMessagePart)
+    ) {
+      return null;
+    }
+    if (
+      options.requireSourcePreservation &&
+      parts
+        .map((part) =>
+          part.type === 'text' ? part.text : getComposerTagSerialized(part.tag),
+        )
+        .join('') !== content
+    ) {
+      return null;
+    }
+    return parts;
+  } catch (error) {
+    console.warn(warning, error);
+    return null;
+  }
+}
+
 // Resolves tag kind metadata to asset URLs; it does not render icon components.
 const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
   extension: extensionIconUrl,
@@ -29,6 +104,7 @@ const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
   mcp: mcpIconUrl,
   skill: skillIconUrl,
 };
+const builtinTagIconUrlSet = new Set(Object.values(builtinTagIconUrls));
 
 function getOwnIconUrl(
   iconUrls: WebShellComposerTagIconMap | undefined,
@@ -58,6 +134,12 @@ export function getComposerTagIconUrl(
   );
 }
 
+export function isBuiltinComposerTagIconUrl(
+  iconUrl: string | undefined,
+): boolean {
+  return iconUrl !== undefined && builtinTagIconUrlSet.has(iconUrl);
+}
+
 export function createInputAnnotationsFromComposerTags(
   content: string,
   tags: readonly WebShellComposerTag[],
@@ -80,6 +162,7 @@ export function createInputAnnotationsFromComposerTags(
         ...(tag.kind ? { kind: tag.kind } : {}),
         ...(tag.label ? { label: tag.label } : {}),
         ...(tag.value ? { value: tag.value } : {}),
+        ...(tag.metadata !== undefined ? { metadata: tag.metadata } : {}),
         ...(tag.serialized ? { serialized: tag.serialized } : {}),
         ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
       },
@@ -118,6 +201,8 @@ export function splitComposerTagContentByAnnotations(
     if (cursor < start) {
       segments.push({ type: 'text', text: content.slice(cursor, start) });
     }
+    const metadata = (reference as typeof reference & { metadata?: unknown })
+      .metadata;
     segments.push({
       type: 'reference',
       tag: {
@@ -125,6 +210,7 @@ export function splitComposerTagContentByAnnotations(
         ...(reference.kind ? { kind: reference.kind } : {}),
         ...(reference.label ? { label: reference.label } : {}),
         ...(reference.value ? { value: reference.value } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
         serialized: reference.serialized ?? text,
         ...(reference.removable !== undefined
           ? { removable: reference.removable }

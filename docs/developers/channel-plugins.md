@@ -53,6 +53,7 @@ import type {
   ChannelAgentBridge,
   ChannelConfig,
   Envelope,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
@@ -105,6 +106,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `senderId`       | string       | Yes      | Must be stable across messages (used for session routing + access control) |
 | `senderName`     | string       | Yes      | Display name                                                               |
 | `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
+| `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
 | `text`           | string       | Yes      | Strip bot @mentions                                                        |
 | `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
@@ -197,9 +199,40 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 
 **Tool call hooks** — override `onToolCall()` to display agent activity (e.g., "Running shell command...").
 
-**Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId)` to customize final delivery.
+**Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId, segment)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId, segment)` to customize final delivery. In daemon-managed named-task mode, `segment.sourceLabel` is immutable delivery metadata for that segment. Render it once on each independently visible message or card, including a separately visible final response, but do not add it to raw buffers or model text. Clear adapter-owned segment state from `onOutputSegmentEnd()`.
 
 **Block streaming** — set `blockStreaming: "on"` in the channel config. The base class automatically splits responses into multiple messages at paragraph boundaries. No plugin code needed — it works alongside `onResponseChunk`.
+
+**Named-task attribution** — `sendThreadMessage(chatId, threadId, text, sourceLabel)` receives the same optional plain-text label for one-shot and proactive delivery boundaries. The default implementation handles plain messages. Adapters that override delivery, split messages, emit cards, or provide fallback sends must repeat the label at every independently visible boundary, escape only the label for the target markup dialect, and include its rendered size in platform limits. Run no-reply checks, media-marker projection, audit hashing, transcript persistence, and retry-body capture against the raw response before presentation; if delivery is persisted for restart-safe retry, persist the captured label separately.
+
+Interactive `ChannelUserInputRequestContext` also carries `sourceLabel`. Cards, terminal replacements, and plain fallbacks must retain it without weakening the existing request, session, run, owner, and target checks.
+
+**Proactive delivery** — override `supportsProactiveSend()` to return `true` when the adapter can send without an active inbound request. `ChannelBase` uses this capability for persistent channel loops, webhook tasks, background-agent results, and daemon delivery. The default target policy rejects threaded targets; override the protected target checks only for target shapes your platform can deliver safely:
+
+```typescript
+override supportsProactiveSend(): boolean {
+  return true;
+}
+
+protected override supportsProactiveTarget(target: SessionTarget): boolean {
+  return target.threadId === undefined;
+}
+
+protected override async pushProactive(
+  target: SessionTarget,
+  text: string,
+  sourceLabel?: string,
+): Promise<void> {
+  await this.sendThreadMessage(
+    target.chatId,
+    target.threadId,
+    text,
+    sourceLabel,
+  );
+}
+```
+
+Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a different target shape, and `supportsProactiveWebhookTarget()` when webhook delivery differs from loops and background results. Keep unsupported targets rejected rather than falling back to another conversation.
 
 **Media** — populate `envelope.attachments` with images/files. See [Attachments](#attachments) above.
 

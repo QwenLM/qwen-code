@@ -1,7 +1,9 @@
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
-} from '@qwen-code/webui/daemon-react-sdk';
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { ReasoningSelection } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
@@ -9,13 +11,24 @@ const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
+    sessionContext?: DaemonProductSessionContext;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
-  }) => Promise<{ sessionId: string }>;
+    worktree?: { slug?: string };
+    branch?: { name: string };
+  }) => Promise<{
+    sessionId: string;
+    worktree?: { slug: string; path: string; branch: string };
+    branch?: { name: string; baseBranch: string };
+  }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
+  setReasoningEffort: (
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
+  ) => Promise<void>;
 };
 
 export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -25,8 +38,13 @@ export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
+  reasoningEffort,
   modeId,
   workspaceCwd,
+  sessionContext,
+  worktree,
+  branch,
+  sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
   onSessionCreated,
   onSessionAllocated,
   getCurrentSessionId,
@@ -34,13 +52,25 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
+  reasoningEffort?: ReasoningSelection;
   modeId?: string;
   workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
+  worktree?: { slug?: string };
+  branch?: { name: string };
+  /**
+   * Creator attribution recorded on the session. Embedded hosts pass their own
+   * value so their sessions stay distinguishable from browser Web Shell ones.
+   */
+  sessionSourceType?: string;
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
-}): Promise<void> {
+}): Promise<{
+  worktree?: { slug: string; path: string; branch: string };
+  branch?: { name: string; baseBranch: string };
+}> {
   // Seed the approval mode in the create request itself so the daemon applies
   // it atomically at spawn (`POST /session` → `spawnOrAttach({ approvalMode })`),
   // saving a follow-up round-trip. Approval mode is fail-closed at spawn: if the
@@ -49,11 +79,25 @@ export async function createAndAttachSessionForPrompt({
   // The model, by contrast, stays a best-effort follow-up below.
   const approvalMode =
     modeId && isDaemonApprovalMode(modeId) ? modeId : undefined;
-  const { sessionId } = await sessionActions.createSession({
-    workspaceCwd,
-    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
-    ...(approvalMode ? { approvalMode } : {}),
-  });
+  const {
+    sessionId,
+    worktree: worktreeInfo,
+    branch: branchInfo,
+  } = await sessionActions.createSession(
+    sessionContext?.kind === 'standalone'
+      ? {
+          sessionContext,
+          ...(approvalMode ? { approvalMode } : {}),
+        }
+      : {
+          workspaceCwd,
+          sessionContext,
+          sourceType: sessionSourceType,
+          ...(approvalMode ? { approvalMode } : {}),
+          ...(worktree ? { worktree } : {}),
+          ...(branch ? { branch } : {}),
+        },
+  );
   onSessionAllocated?.(sessionId);
   let preparationStep = 'prepare new session';
   try {
@@ -96,6 +140,25 @@ export async function createAndAttachSessionForPrompt({
         `Session changed while attaching: expected ${sessionId}, found ${sessionIdAfterAttach}`,
       );
     }
+
+    // The model is normally best-effort because the composer may already match
+    // the daemon. An explicit model-bound reasoning choice is different: it
+    // must never be applied after a failed switch to an unknown model.
+    if (modelId) {
+      preparationStep = 'set model for new session';
+      try {
+        await sessionActions.setModel(modelId);
+      } catch (error) {
+        if (reasoningEffort) throw error;
+        warn('[WebShell] failed to set model for new session:', error);
+      }
+    }
+    if (reasoningEffort) {
+      preparationStep = 'set reasoning effort';
+      await sessionActions.setReasoningEffort(reasoningEffort, {
+        persist: true,
+      });
+    }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
     await sessionActions
@@ -115,13 +178,8 @@ export async function createAndAttachSessionForPrompt({
     }
     throw error;
   }
-  // The model still needs a post-create call: `POST /session` only accepts a
-  // `modelServiceId`, whereas the composer selects a plain `modelId`. The
-  // `POST /session/:id/model` route now resolves the owning workspace runtime,
-  // so this succeeds for non-primary workspaces too.
-  if (modelId) {
-    await sessionActions.setModel(modelId).catch((error: unknown) => {
-      warn('[WebShell] failed to set model for new session:', error);
-    });
-  }
+  return {
+    ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
+    ...(branchInfo ? { branch: branchInfo } : {}),
+  };
 }

@@ -22,7 +22,7 @@
  *   config.getMemoryManager().forget(projectRoot, query, options)
  *   config.getMemoryManager().getStatus(projectRoot)
  *   config.getMemoryManager().drain(options?)
- *   config.getMemoryManager().appendToUserMemory(userMemory, projectRoot)
+ *   config.getMemoryManager().buildAutoMemoryPrompt(projectRoot)
  *
  * # Task records
  * Each scheduled operation is tracked as a lightweight MemoryTaskRecord.
@@ -62,6 +62,7 @@ import {
   type AutoMemoryForgetMatch,
   type AutoMemoryForgetResult,
   type AutoMemoryForgetSelectionResult,
+  type AutoMemoryStorageScope,
 } from './forget.js';
 import {
   resolveRelevantAutoMemoryPromptForQuery,
@@ -70,7 +71,7 @@ import {
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
 import {
-  appendManagedAutoMemoryToUserMemory,
+  buildManagedAutoMemoryPrompt,
   type BuildMemoryPromptOptions,
   type UserAutoMemorySection,
   type TeamAutoMemorySection,
@@ -762,17 +763,21 @@ export class MemoryManager {
 
       const result = await runAutoMemoryExtract(params);
       const durationMs = Date.now() - t0;
+      const skippedReason = result.skippedReason;
+      const status = skippedReason ? 'skipped' : 'completed';
       this.update(record, {
-        status: result.skippedReason ? 'skipped' : 'completed',
+        status,
         progressText:
           result.systemMessage ??
-          (result.touchedTopics.length > 0
-            ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
-            : 'Managed auto-memory extraction completed without durable changes.'),
+          (skippedReason
+            ? `Skipped: ${skippedReason.replaceAll('_', ' ')}.`
+            : result.touchedTopics.length > 0
+              ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
+              : 'Managed auto-memory extraction completed without durable changes.'),
         metadata: {
           touchedTopics: result.touchedTopics,
           processedOffset: result.cursor.processedOffset,
-          skippedReason: result.skippedReason,
+          skippedReason,
         },
       });
       if (params.config) {
@@ -780,7 +785,8 @@ export class MemoryManager {
           params.config,
           new MemoryExtractEvent({
             trigger: 'auto',
-            status: 'completed',
+            status,
+            ...(skippedReason ? { skipped_reason: skippedReason } : {}),
             patches_count: result.touchedTopics.length,
             touched_topics: result.touchedTopics,
             duration_ms: durationMs,
@@ -1401,6 +1407,7 @@ export class MemoryManager {
       config?: Config;
       limit?: number;
       abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
@@ -1420,7 +1427,11 @@ export class MemoryManager {
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config; abortSignal?: AbortSignal } = {},
+    options: {
+      config?: Config;
+      abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
+    } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);
@@ -1433,24 +1444,24 @@ export class MemoryManager {
     return getManagedAutoMemoryStatus(projectRoot, this);
   }
 
-  // ─── Prompt append ────────────────────────────────────────────────────────────
+  // ─── Prompt build ─────────────────────────────────────────────────────────────
 
   /**
-   * Append the managed auto-memory section to a user memory string.
-   * When `userSection` is provided, the prompt teaches the model to route
-   * saves between the project dir and the user (cross-project) dir using
-   * the per-type scope guidance.
+   * Build the managed auto-memory section of the system prompt. This is the
+   * volatile prompt layer — it is rewritten in-session on every memory save,
+   * so callers must keep it after the stable/context layers. When
+   * `userSection` is provided, the prompt teaches the model to route saves
+   * between the project dir and the user (cross-project) dir using the
+   * per-type scope guidance.
    */
-  appendToUserMemory(
-    userMemory: string,
+  buildAutoMemoryPrompt(
     memoryDir: string,
     indexContent?: string | null,
     userSection?: UserAutoMemorySection,
     teamSection?: TeamAutoMemorySection,
     options?: BuildMemoryPromptOptions,
   ): string {
-    return appendManagedAutoMemoryToUserMemory(
-      userMemory,
+    return buildManagedAutoMemoryPrompt(
       memoryDir,
       indexContent,
       userSection,

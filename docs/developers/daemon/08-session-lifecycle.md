@@ -57,6 +57,8 @@ Under `sessionScope: 'thread'`, each thread can mint a distinct session. The cal
 
 `X-Qwen-Client-Id` is **optional** but **strongly recommended**. The daemon does not generate one on the caller's behalf — clients pick their own and reuse it across requests so the daemon can attribute votes, audit events, and detect reconnects.
 
+Each independent controller should use a distinct, stable ID. The WebUI generates IDs with a `webui_` prefix by default. A host and an embedded WebShell should share an ID only when they intentionally act as one logical controller; once shared, daemon logs cannot distinguish which one originated a request.
+
 Validation rules:
 
 - Charset: `[A-Za-z0-9._:-]`.
@@ -242,6 +244,26 @@ only a storage-state transition; clients must call `session/load` or
 load/resume, and mutations racing an archive transition return
 `409 session_archiving`.
 
+Empty, damaged, and orphaned regular transcript files remain eligible for these
+lifecycle operations even when they cannot be loaded as conversations.
+Ownership-safety checks can intentionally fail closed and require operator
+intervention. A file changed after a writer sealed its certified handoff proof
+fails with `SessionTranscriptChangedError` until the operator resolves the
+sealed lock and changed bytes. A JSON-shaped first physical record that exceeds
+the bounded ownership-read window fails with
+`SessionTranscriptIdentityUnavailableError` until the record is repaired or
+reduced; oversized damaged records with a non-object prefix remain eligible. A
+parseable recovered record must contain string `sessionId` and `cwd` ownership
+fields, and mixed local/foreign archive states also fail closed. When
+`session_storage_conflict_repair` is advertised, archive and unarchive accept
+`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
+the active copy. Without that option, active/archive conflicts do not move,
+remove, or overwrite either persisted copy and are returned in the batch
+`errors` array. Archive still strictly closes a live session before classifying
+the conflict, which may flush queued records to the active transcript.
+Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
+instead of their earlier HTTP `409 session_conflict` response.
+
 ### Context Usage (`session_context_usage` capability tag)
 
 `GET /session/:id/context-usage` returns structured context-window usage.
@@ -262,6 +284,10 @@ shell tasks, monitor tasks, and their lifecycle states. Agent entries spawned
 by another sub-agent carry optional lineage fields (`parentAgentId`,
 `parentName`, `depth`) so clients can render nested sub-agents as a tree; see
 the payload example in `qwen-serve-protocol.md`.
+
+The `session_monitor_tool_correlation` capability additionally guarantees that
+monitor entries carry `toolUseId`, allowing clients to correlate a transcript
+tool call with its task details.
 
 ### Session LSP Status (`session_lsp` capability tag)
 
@@ -294,19 +320,28 @@ normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 
-`bridge.preheat()` warms the ACP child process before the first session so that
-the first real session avoids cold-start latency. It pairs with
-`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch behavior, which reuses an already idle child when a
-new session arrives.
+`bridge.preheat()` remains available to explicit embedders, but `qwen serve`
+also attempts to preheat the trusted primary child after startup for
+compatibility. A failed preheat is non-fatal and the next runtime command or
+Session retries; trusted secondaries start on first use. The Workspace Runtime
+owns the child while work is active. After all Session and management leases
+drain, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately;
+plain preheat itself is preserved for first use and does not arm that reaper.
+A positive configured delay or active keepalive keeps the child reusable for
+the longer remaining window. The public Workspace Runtime `ensure`
+command adds a renewable ten-minute workspace lease; each successful call
+resets that window, including when the channel was already live.
 
 ## Configuration
 
-- `BridgeOptions.maxSessions` (default 20) — cap.
+- `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
-- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
+  deadline (Channel factory + `initialize` handshake) and default request
+  timeout.
+- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
+- `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
+- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

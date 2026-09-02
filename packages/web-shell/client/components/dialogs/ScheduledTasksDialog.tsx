@@ -14,20 +14,33 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  Clock3Icon,
+  FolderIcon,
+  HourglassIcon,
+  MessageSquarePlusIcon,
+  MessagesSquareIcon,
+  PencilIcon,
+  PlayIcon,
+  Trash2Icon,
+} from 'lucide-react';
+import {
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonExtensionEntry,
   DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
+  DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
+import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
+import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
-import { workspaceBasename } from '../../utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -65,7 +78,16 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const withheld = run.withheld
     ? ` · ${t('scheduledTasks.runKind.withheld')}`
     : '';
-  return `${safeLocaleString(run.at)}${kind}${withheld}`;
+  // A per-run fire whose fresh session could not be created: with a sessionId
+  // it fell back to the task session and ran there; without one nothing ran.
+  const dispatchFailed = run.sessionDispatchFailed
+    ? ` · ${t(
+        run.sessionId
+          ? 'scheduledTasks.runKind.sessionDispatchFallback'
+          : 'scheduledTasks.runKind.sessionDispatchFailed',
+      )}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}${dispatchFailed}`;
 }
 
 interface ScheduledTasksDialogProps {
@@ -89,6 +111,8 @@ interface ScheduledTasksDialogProps {
   workspaces?: DaemonWorkspaceCapability[];
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
+  currentSession?: DaemonSessionSummary;
+  currentSessionSchedulingAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -141,6 +165,7 @@ interface PromptReferenceItem {
   id: string;
   kind: PromptTagKind;
   label: string;
+  tagLabel?: string;
   description?: string;
   insertText: string;
 }
@@ -254,21 +279,25 @@ function appendPromptText(root: HTMLElement, text: string) {
   if (text) root.appendChild(document.createTextNode(text));
 }
 
-function setPromptEditorText(root: HTMLElement, text: string) {
+function setPromptEditorText(
+  root: HTMLElement,
+  text: string,
+  removeLabel: string,
+) {
   clearPromptEditor(root);
   if (!text) return;
   const lines = text.split('\n');
   lines.forEach((line, index) => {
     if (index > 0) root.appendChild(document.createElement('br'));
-    appendPromptLine(root, line);
+    appendPromptLine(root, line, removeLabel);
   });
 }
 
-function normalizePromptEditor(root: HTMLElement): string {
+function normalizePromptEditor(root: HTMLElement, removeLabel: string): string {
   let next = textFromPromptEditor(root);
   if (next.length > MAX_PROMPT_LENGTH) {
     next = next.slice(0, MAX_PROMPT_LENGTH);
-    setPromptEditorText(root, next);
+    setPromptEditorText(root, next, removeLabel);
   } else if (next.trim().length === 0) {
     clearPromptEditor(root);
     next = '';
@@ -296,7 +325,10 @@ function selectedPromptText(root: HTMLElement): {
   };
 }
 
-function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
+function makePromptTagElement(
+  item: PromptReferenceItem,
+  removeLabel: string,
+): HTMLElement {
   const tag = document.createElement('span');
   tag.className = styles.promptTag;
   tag.contentEditable = 'false';
@@ -313,12 +345,24 @@ function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
 
   const value = document.createElement('span');
   value.className = styles.promptTagValue;
-  value.textContent = item.label;
+  value.textContent = item.tagLabel ?? item.label;
   tag.appendChild(value);
+
+  const remove = document.createElement('span');
+  remove.className = styles.promptTagRemove;
+  remove.setAttribute('role', 'button');
+  remove.tabIndex = -1;
+  remove.dataset.promptTagRemove = '';
+  remove.setAttribute('aria-label', `${removeLabel} ${item.label}`);
+  tag.appendChild(remove);
   return tag;
 }
 
-function appendPromptLine(root: HTMLElement, line: string) {
+function appendPromptLine(
+  root: HTMLElement,
+  line: string,
+  removeLabel: string,
+) {
   let cursor = 0;
   PROMPT_REFERENCE_TOKEN.lastIndex = 0;
   for (const match of line.matchAll(PROMPT_REFERENCE_TOKEN)) {
@@ -328,15 +372,19 @@ function appendPromptLine(root: HTMLElement, line: string) {
     if (!item) continue;
     appendPromptText(root, line.slice(cursor, index));
     appendPromptText(root, prefix);
-    root.appendChild(makePromptTagElement(item));
+    root.appendChild(makePromptTagElement(item, removeLabel));
     cursor = index + matched.length;
   }
   appendPromptText(root, line.slice(cursor));
 }
 
-function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
+function insertPromptTagElement(
+  root: HTMLElement,
+  item: PromptReferenceItem,
+  removeLabel: string,
+) {
   const selection = window.getSelection();
-  const tag = makePromptTagElement(item);
+  const tag = makePromptTagElement(item, removeLabel);
   const spacer = document.createTextNode(' ');
 
   if (textFromPromptEditor(root).trim().length === 0) {
@@ -357,6 +405,26 @@ function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
   selection?.addRange(range);
 }
 
+function removePromptTag(tag: HTMLElement) {
+  const parent = tag.parentElement;
+  const previous = tag.previousSibling;
+  const next = tag.nextSibling;
+  tag.remove();
+
+  if (
+    next?.nodeType === Node.TEXT_NODE &&
+    /^[ \u00a0]/.test(next.textContent ?? '')
+  ) {
+    next.textContent = (next.textContent ?? '').slice(1);
+  } else if (
+    previous?.nodeType === Node.TEXT_NODE &&
+    /[ \u00a0]$/.test(previous.textContent ?? '')
+  ) {
+    previous.textContent = (previous.textContent ?? '').slice(0, -1);
+  }
+  parent?.normalize();
+}
+
 function PromptReferenceEditor({
   value,
   label,
@@ -372,27 +440,36 @@ function PromptReferenceEditor({
   insertItem: PromptReferenceItem | null;
   onInserted: () => void;
 }) {
+  const { t } = useI18n();
+  const removeLabel = t('scheduledTasks.reference.remove');
   const editorRef = useRef<HTMLDivElement | null>(null);
   const lastAppliedValueRef = useRef('');
+  const lastAppliedRemoveLabelRef = useRef('');
 
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
-    if (value === lastAppliedValueRef.current) return;
-    setPromptEditorText(editor, value);
+    if (
+      value === lastAppliedValueRef.current &&
+      removeLabel === lastAppliedRemoveLabelRef.current
+    ) {
+      return;
+    }
+    setPromptEditorText(editor, value, removeLabel);
     lastAppliedValueRef.current = value;
-  }, [value]);
+    lastAppliedRemoveLabelRef.current = removeLabel;
+  }, [removeLabel, value]);
 
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor || !insertItem) return;
-    insertPromptTagElement(editor, insertItem);
+    insertPromptTagElement(editor, insertItem, removeLabel);
     const next = textFromPromptEditor(editor);
     lastAppliedValueRef.current = next;
     onChange(next);
     editor.focus();
     onInserted();
-  }, [insertItem, onChange, onInserted]);
+  }, [insertItem, onChange, onInserted, removeLabel]);
 
   return (
     <div className={styles.promptEditorWrap}>
@@ -404,8 +481,29 @@ function PromptReferenceEditor({
         aria-label={label}
         aria-multiline="true"
         aria-placeholder={placeholder}
+        onMouseDown={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest('[data-prompt-tag-remove]')
+          ) {
+            event.preventDefault();
+          }
+        }}
+        onClick={(event) => {
+          if (!(event.target instanceof Element)) return;
+          const remove = event.target.closest('[data-prompt-tag-remove]');
+          const tag = remove?.closest<HTMLElement>(
+            '[data-prompt-tag-serialized]',
+          );
+          if (!tag || !event.currentTarget.contains(tag)) return;
+          removePromptTag(tag);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
+          lastAppliedValueRef.current = next;
+          onChange(next);
+          event.currentTarget.focus();
+        }}
         onInput={(event) => {
-          const next = normalizePromptEditor(event.currentTarget);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
           lastAppliedValueRef.current = next;
           onChange(next);
         }}
@@ -435,7 +533,7 @@ function PromptReferenceEditor({
           event.preventDefault();
           event.clipboardData.setData('text/plain', selected.text);
           selected.selection.deleteFromDocument();
-          const next = normalizePromptEditor(event.currentTarget);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
           lastAppliedValueRef.current = next;
           onChange(next);
         }}
@@ -453,10 +551,13 @@ export function ScheduledTasksDialog({
   onOpenSession,
   workspaces,
   lockedWorkspace,
+  currentSession,
+  currentSessionSchedulingAvailable,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
+  const portalRoot = useWebShellPortalRoot();
 
   // Multi-workspace aggregation. `workspaces` mirrors the daemon capabilities;
   // with more than one the page lists every trusted workspace's tasks together
@@ -508,7 +609,17 @@ export function ScheduledTasksDialog({
   );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [runDestination, setRunDestination] = useState<
+    'per_run' | 'dedicated' | 'current'
+  >('per_run');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
+  useEffect(() => {
+    if (!currentSessionSchedulingAvailable) {
+      setRunDestination((current) =>
+        current === 'current' ? 'per_run' : current,
+      );
+    }
+  }, [currentSessionSchedulingAvailable]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
@@ -658,6 +769,43 @@ export function ScheduledTasksDialog({
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
+  const formWorkspace = lockedWorkspace
+    ? lockedWorkspace
+    : operableWorkspaces.find(
+        (workspace) => workspaceActionId(workspace) === formWorkspaceId,
+      );
+  const currentSessionDisabledReason = (() => {
+    if (!currentSessionSchedulingAvailable) {
+      return t('scheduledTasks.session.currentUnsupported');
+    }
+    if (!currentSession?.sessionId) {
+      return t('scheduledTasks.session.currentUnavailable');
+    }
+    if (
+      currentSession.hasActivePrompt ||
+      (currentSession.pendingInteractionCount ?? 0) > 0
+    ) {
+      return t('scheduledTasks.session.currentBusy');
+    }
+    if (
+      currentSession.parentSessionId !== undefined ||
+      currentSession.sourceId !== undefined ||
+      (currentSession.sourceType !== undefined &&
+        currentSession.sourceType !== 'default')
+    ) {
+      return t('scheduledTasks.session.currentIneligible');
+    }
+    if (
+      formWorkspace?.cwd !== undefined &&
+      currentSession.workspaceCwd !== formWorkspace.cwd
+    ) {
+      return t('scheduledTasks.session.currentWorkspaceMismatch');
+    }
+    if (tasks?.some((task) => task.sessionId === currentSession.sessionId)) {
+      return t('scheduledTasks.session.currentAlreadyBound');
+    }
+    return null;
+  })();
 
   const updateReferencePickerPosition = useCallback(() => {
     const anchor = referencePopoverRef.current;
@@ -730,6 +878,9 @@ export function ScheduledTasksDialog({
               id: extension.id || extension.name,
               kind,
               label: extension.name,
+              tagLabel:
+                sanitizeDisplayText(extension.displayName ?? '') ||
+                extension.name,
               description: extensionDescription(extension),
               insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
             }));
@@ -811,6 +962,7 @@ export function ScheduledTasksDialog({
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
+    setRunDestination('per_run');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(false);
@@ -826,6 +978,7 @@ export function ScheduledTasksDialog({
     setFormWorkspaceId(lockedWorkspaceId);
     setName('');
     setPrompt('');
+    setRunDestination('per_run');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     resetReferenceState();
@@ -840,6 +993,9 @@ export function ScheduledTasksDialog({
       setFormWorkspaceId(task.workspaceId);
       setName(task.name ?? '');
       setPrompt(task.prompt);
+      setRunDestination(
+        task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
+      );
       // Reverse the cron back onto the pickers; an expression the pickers can't
       // represent lands in the `custom` field, never silently rewritten.
       setBuilder(parseCronToBuilder(task.cron));
@@ -868,6 +1024,15 @@ export function ScheduledTasksDialog({
       );
       return;
     }
+    if (!editingId && runDestination === 'current') {
+      if (currentSessionDisabledReason || !currentSession?.sessionId) {
+        setFormError(
+          currentSessionDisabledReason ??
+            t('scheduledTasks.session.currentUnavailable'),
+        );
+        return;
+      }
+    }
     setSubmitting(true);
     setFormError(null);
     try {
@@ -881,6 +1046,8 @@ export function ScheduledTasksDialog({
             cron,
             prompt: prompt.trim(),
             name: name.trim() || null,
+            sessionMode:
+              runDestination === 'per_run' ? 'per_run' : 'persistent',
           },
           formWorkspaceId,
         );
@@ -892,6 +1059,11 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             recurring: true,
             enabled: true,
+            sessionMode:
+              runDestination === 'per_run' ? 'per_run' : 'persistent',
+            ...(runDestination === 'current' && currentSession?.sessionId
+              ? { sessionId: currentSession.sessionId }
+              : {}),
           },
           formWorkspaceId,
         );
@@ -908,12 +1080,15 @@ export function ScheduledTasksDialog({
   }, [
     actions,
     builder,
+    currentSession,
+    currentSessionDisabledReason,
     editingId,
     formWorkspaceId,
     name,
     prompt,
     reload,
     resetForm,
+    runDestination,
     t,
   ]);
 
@@ -961,6 +1136,14 @@ export function ScheduledTasksDialog({
           );
           return;
         }
+        if (fresh.sessionMode === 'per_run') {
+          // The daemon owns fresh-session creation and records the actual child
+          // session on this run. The client must not also enqueue the prompt in
+          // the persistent controller session.
+          await actions.runScheduledTask(fresh.id, task.workspaceId);
+          await reload();
+          return;
+        }
         if (fresh.recurring) {
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue
@@ -977,9 +1160,9 @@ export function ScheduledTasksDialog({
           // One-shot: /run IS its single fire — it deletes the task. Consume it
           // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
           // silent double execution). The trade-off is that a failed delivery
-          // leaves the task gone AND un-run — and reload() has already dropped it
-          // from the list — so surface THAT explicitly rather than the generic
-          // "run failed", which would hide the deletion.
+          // leaves the task gone AND un-run — and reload() has already dropped
+          // it from the list — so surface THAT explicitly rather than the
+          // generic "run failed", which would hide the deletion.
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
@@ -1037,6 +1220,11 @@ export function ScheduledTasksDialog({
                 maxHeight: referencePickerPosition.maxHeight,
               } as CSSProperties
             }
+            onWheel={(event) => {
+              // Stop before Radix's document-level scroll lock cancels it.
+              event.stopPropagation();
+            }}
+            onTouchMove={(event) => event.stopPropagation()}
           >
             {referenceLoading ? (
               <div className={styles.referenceEmpty}>
@@ -1074,7 +1262,7 @@ export function ScheduledTasksDialog({
               ))
             )}
           </div>,
-          document.body,
+          portalRoot ?? document.body,
         )
       : null;
 
@@ -1140,7 +1328,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceBasename(ws.cwd)}
+                      {workspaceLabel(ws)}
                     </option>
                   ))}
                 </select>
@@ -1208,6 +1396,49 @@ export function ScheduledTasksDialog({
                 })}
               </div>
             </div>
+
+            <label className={styles.field}>
+              <span className={styles.fieldLabel}>
+                {t('scheduledTasks.runIn')}
+              </span>
+              <select
+                className={styles.select}
+                value={runDestination}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setRunDestination(
+                    value === 'current' || value === 'dedicated'
+                      ? value
+                      : 'per_run',
+                  );
+                }}
+              >
+                <option value="per_run">
+                  {t('scheduledTasks.sessionMode.perRun')}
+                </option>
+                <option value="dedicated">
+                  {t('scheduledTasks.sessionMode.persistent')}
+                </option>
+                {!editingId && currentSessionSchedulingAvailable && (
+                  <option
+                    value="current"
+                    disabled={currentSessionDisabledReason !== null}
+                  >
+                    {t('scheduledTasks.session.current')}
+                  </option>
+                )}
+              </select>
+              <span className={styles.fieldHint}>
+                {runDestination === 'current'
+                  ? (currentSessionDisabledReason ??
+                    t('scheduledTasks.session.currentHint'))
+                  : t(
+                      runDestination === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun.hint'
+                        : 'scheduledTasks.sessionMode.persistent.hint',
+                    )}
+              </span>
+            </label>
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -1415,7 +1646,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >
-                    ▶
+                    <PlayIcon aria-hidden="true" />
                   </button>
                   <button
                     type="button"
@@ -1425,7 +1656,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.edit')}
                     aria-label={t('scheduledTasks.edit')}
                   >
-                    ✎
+                    <PencilIcon aria-hidden="true" />
                   </button>
                   <button
                     type="button"
@@ -1435,7 +1666,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.delete')}
                     aria-label={t('scheduledTasks.delete')}
                   >
-                    ✕
+                    <Trash2Icon aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -1453,14 +1684,14 @@ export function ScheduledTasksDialog({
                     title={task.workspaceCwd}
                   >
                     <span className={styles.workspaceIcon} aria-hidden="true">
-                      ⌂
+                      <FolderIcon />
                     </span>
-                    {workspaceBasename(task.workspaceCwd)}
+                    {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>
                   <span className={styles.clockIcon} aria-hidden="true">
-                    ◷
+                    <Clock3Icon />
                   </span>
                   {describeCron(task.cron, t)}
                 </span>
@@ -1471,6 +1702,29 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
+                {/* Unbound tool-created / legacy tasks have no session at all,
+                    so neither mode label applies to them. */}
+                {(task.sessionMode === 'per_run' || task.sessionId) && (
+                  <span
+                    className={styles.sessionModeTag}
+                    title={t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun.hint'
+                        : 'scheduledTasks.sessionMode.persistent.hint',
+                    )}
+                  >
+                    {task.sessionMode === 'per_run' ? (
+                      <MessageSquarePlusIcon aria-hidden="true" />
+                    ) : (
+                      <MessagesSquareIcon aria-hidden="true" />
+                    )}
+                    {t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun'
+                        : 'scheduledTasks.sessionMode.persistent',
+                    )}
+                  </span>
+                )}
                 {task.nextRunAt != null && (
                   <span
                     className={styles.countdown}
@@ -1480,7 +1734,7 @@ export function ScheduledTasksDialog({
                     })}
                   >
                     <span className={styles.hourglassIcon} aria-hidden="true">
-                      ⏳
+                      <HourglassIcon />
                     </span>
                     {formatCountdown(task.nextRunAt - now, t)}
                   </span>
@@ -1488,7 +1742,9 @@ export function ScheduledTasksDialog({
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
                 </span>
-                {task.sessionId && onOpenSession ? (
+                {task.sessionMode !== 'per_run' &&
+                task.sessionId &&
+                onOpenSession ? (
                   // The task's bound session IS its run history — open its
                   // transcript. Always shown (empty state included) so the
                   // history is discoverable even before the first run.
@@ -1505,8 +1761,9 @@ export function ScheduledTasksDialog({
                       : t('scheduledTasks.viewHistoryEmpty')}
                   </button>
                 ) : (
-                  // Unbound (tool-created / legacy) task: no session to open, so
-                  // fall back to the inline fire-timestamp list.
+                  // Per-run tasks link each child session from the inline list.
+                  // Unbound tool-created / legacy tasks use the same timestamp
+                  // fallback, without links.
                   task.runs.length > 0 && (
                     <button
                       type="button"
@@ -1531,7 +1788,18 @@ export function ScheduledTasksDialog({
                   {/* Newest first — the ring is stored oldest-first. */}
                   {[...task.runs].reverse().map((run, idx) => (
                     <li key={`${run.at}-${idx}`} className={styles.runsItem}>
-                      {describeRun(run, t)}
+                      {run.sessionId && onOpenSession ? (
+                        <button
+                          type="button"
+                          className={styles.runLink}
+                          onClick={() => onOpenSession(run.sessionId!)}
+                          title={t('scheduledTasks.openRunSession')}
+                        >
+                          {describeRun(run, t)}
+                        </button>
+                      ) : (
+                        describeRun(run, t)
+                      )}
                     </li>
                   ))}
                 </ul>

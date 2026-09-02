@@ -23,10 +23,12 @@ import type {
 import {
   CoreToolScheduler,
   compactToolResultDisplayForHistory,
+  convertToFunctionErrorResponse,
   createDebugLogger,
   getToolResponseDisplayText,
   isAnyAutoMemPath,
   isShellProgressData,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
@@ -36,23 +38,25 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
+  modelOverride?: string,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
 export type TrackedScheduledToolCall = ScheduledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedValidatingToolCall = ValidatingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedWaitingToolCall = WaitingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 /**
  * NOTE on inherited fields: `pid?` and `promoteAbortController?` come
@@ -86,13 +90,13 @@ const _ASSERT_INHERITED_FIELDS_PRESENT: _AssertExecutingHasPid &
 void _ASSERT_INHERITED_FIELDS_PRESENT;
 
 export type TrackedExecutingToolCall = ExecutingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 
 export type TrackedToolCall =
@@ -108,6 +112,7 @@ export function useReactToolScheduler(
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
+  onToolResultFullTurnModel?: (model: string) => boolean,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -151,8 +156,8 @@ export function useReactToolScheduler(
           );
           // Start with the new core state, then layer on the existing UI state
           // to ensure UI-only properties like pid are preserved.
-          const responseSubmittedToGemini =
-            existingTrackedCall?.responseSubmittedToGemini ?? false;
+          const responseSubmittedToLlm =
+            existingTrackedCall?.responseSubmittedToLlm ?? false;
 
           if (coreTc.status === 'executing') {
             // `...coreTc` already spreads `pid` and
@@ -162,7 +167,7 @@ export function useReactToolScheduler(
             // version of this call.
             return {
               ...coreTc,
-              responseSubmittedToGemini,
+              responseSubmittedToLlm,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
             };
@@ -181,7 +186,7 @@ export function useReactToolScheduler(
           // tool call).
           return {
             ...coreTc,
-            responseSubmittedToGemini,
+            responseSubmittedToLlm,
             liveOutput: undefined,
             pid: undefined,
             promoteAbortController: undefined,
@@ -196,12 +201,12 @@ export function useReactToolScheduler(
     () =>
       new CoreToolScheduler({
         config,
-        chatRecordingService: config.getChatRecordingService(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
         getPreferredEditor,
         onEditorClose,
+        onToolResultFullTurnModel,
       }),
     [
       config,
@@ -210,6 +215,7 @@ export function useReactToolScheduler(
       toolCallsUpdateHandler,
       getPreferredEditor,
       onEditorClose,
+      onToolResultFullTurnModel,
     ],
   );
 
@@ -217,10 +223,67 @@ export function useReactToolScheduler(
     (
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
+      modelOverride?: string,
     ) => {
-      void scheduler.schedule(request, signal);
+      if (!modelOverride?.endsWith('\0')) {
+        void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (signal.aborted) return;
+          debugLogger.error(
+            `Tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        return;
+      }
+      void (async () => {
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(modelOverride.slice(0, -1), {
+              failClosed: true,
+            });
+          await scheduler.schedule(request, signal, runtimeView);
+        } catch (error) {
+          debugLogger.error(
+            `Full-turn tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          const message =
+            'Full-turn tool scheduling failed. The tool was not executed.';
+          const requests = Array.isArray(request) ? request : [request];
+          const completedCalls: CompletedToolCall[] = requests.map(
+            (toolRequest) => {
+              const toolError = new Error(message);
+              const responseParts = convertToFunctionErrorResponse(
+                toolRequest.name,
+                toolRequest.callId,
+                message,
+                message,
+              );
+              return {
+                status: 'error',
+                request: toolRequest,
+                response: {
+                  callId: toolRequest.callId,
+                  responseParts,
+                  resultDisplay: message,
+                  error: toolError,
+                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  executionStatus: 'not_started',
+                  contentLength: message.length,
+                },
+              };
+            },
+          );
+          setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
+          await allToolCallsCompleteHandler(completedCalls);
+          return;
+        }
+      })();
     },
-    [scheduler],
+    [allToolCallsCompleteHandler, config, scheduler],
   );
 
   const markToolsAsSubmitted: MarkToolsAsSubmittedFn = useCallback(
@@ -228,7 +291,7 @@ export function useReactToolScheduler(
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) =>
           callIdsToMark.includes(tc.request.callId)
-            ? { ...tc, responseSubmittedToGemini: true }
+            ? { ...tc, responseSubmittedToLlm: true }
             : tc,
         ),
       );
@@ -301,7 +364,11 @@ export function mapToDisplay(
       let description: string;
       let renderOutputAsMarkdown = false;
 
-      if (trackedCall.status === 'error') {
+      if (
+        trackedCall.status === 'error' ||
+        trackedCall.tool === undefined ||
+        trackedCall.invocation === undefined
+      ) {
         displayName =
           trackedCall.tool === undefined
             ? trackedCall.request.name
@@ -331,14 +398,26 @@ export function mapToDisplay(
             : undefined,
       };
 
+      const inlineImageCollection =
+        trackedCall.status === 'success' ||
+        trackedCall.status === 'error' ||
+        trackedCall.status === 'cancelled'
+          ? collectInlineImages(trackedCall.response.responseParts)
+          : null;
+
       switch (trackedCall.status) {
-        case 'success':
+        case 'success': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
             // Full detail for the Ctrl+O transcript (§4.9): derived from the
             // already-persisted functionResponse parts; NOT char-capped (the
             // bound is whatever core already applied). Consumed ONLY by the
@@ -351,26 +430,41 @@ export function mapToDisplay(
             detailedDisplay: isCollapsibleTool(displayName)
               ? getToolResponseDisplayText(trackedCall.response.responseParts)
               : undefined,
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'error':
+        case 'cancelled': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
-        case 'cancelled':
-          return {
-            ...baseDisplayProperties,
-            status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: compactToolResultDisplayForHistory(
-              trackedCall.response.resultDisplay,
-            ),
-            confirmationDetails: undefined,
-          };
+        }
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,

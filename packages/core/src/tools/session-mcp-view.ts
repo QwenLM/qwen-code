@@ -13,6 +13,11 @@ import type {
   DiscoveredMCPResource,
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
+import {
+  coerceMcpFilterEntries,
+  mcpSessionMetadataKey,
+  normalizeMcpIncludeEntry,
+} from './mcp-session-config.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 const debugLogger = createDebugLogger('McpPool:View');
@@ -45,15 +50,19 @@ function compileNameFilter(
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): CompiledNameFilter {
+  // Coerce malformed settings shapes exactly as `mcpSessionMetadataKey`
+  // does: the key commits before this filter runs, so a throw here would
+  // remove registrations and then block every retry with an equal key.
   return {
-    excludeSet: excludeTools ? new Set(excludeTools) : undefined,
-    includeSet: includeTools
-      ? new Set(
-          includeTools.map((entry) =>
-            entry.includes('(') ? entry.slice(0, entry.indexOf('(')) : entry,
-          ),
-        )
+    excludeSet: excludeTools
+      ? new Set(coerceMcpFilterEntries(excludeTools))
       : undefined,
+    includeSet:
+      includeTools != null
+        ? new Set(
+            coerceMcpFilterEntries(includeTools).map(normalizeMcpIncludeEntry),
+          )
+        : undefined,
   };
 }
 
@@ -130,8 +139,8 @@ export function passesSessionPromptFilter(
 }
 
 /**
- * Per-session, per-server projection of a pool entry's tool/prompt
- * snapshots into a session's own `ToolRegistry` + `PromptRegistry`.
+ * Per-session, per-server projection of a pool entry's tool, prompt, and
+ * resource snapshots into the session-owned registries.
  *
  * commit 2: one shared `McpClient` in the pool produces
  * canonical `toolsSnapshot` / `promptsSnapshot`; N `SessionMcpView`
@@ -140,28 +149,32 @@ export function passesSessionPromptFilter(
  *
  * Each view:
  *   - Filters by per-session `includeTools` / `excludeTools` (cfg)
- *   - Decorates tools with per-session `trust` via `tool.withTrust(...)`
- *     so two sessions on the same pool entry can have different
- *     trust values without cross-contamination
+ *   - Decorates tools with per-session `trust` and `alwaysLoadTools` via
+ *     `tool.withSessionConfig(...)` so two sessions on the same pool entry
+ *     can have different metadata without cross-contamination
  *   - Registers into the session's own registries (does NOT touch
  *     the pool's snapshot)
  *   - `teardown()` removes all this view's registrations, used on
  *     `/mcp disable`, session close, or `disconnected` event from pool
  */
 export class SessionMcpView {
+  private metadataKey: string;
+
   /**
    * @param sessionToolRegistry The session-owned ToolRegistry; receives
    *   filtered + trust-decorated `DiscoveredMCPTool` instances.
-   * @param sessionPromptRegistry The session-owned PromptRegistry;
-   *   receives the unfiltered prompt snapshot (prompts have no
-   *   per-session filter today — pool fans out the full set).
+   * @param sessionPromptRegistry The session-owned PromptRegistry; receives
+   *   prompts selected by the same name filter as tools.
+   * @param sessionResourceRegistry The session-owned ResourceRegistry;
+   *   receives the full resource snapshot because tool-name filters do not
+   *   apply to resource URIs.
    * @param sessionId Stamped onto debug logs for cross-session
    *   correlation; not used for routing (pool's reverse index handles that).
    * @param serverName Server name as advertised in the per-session
    *   merged mcpServers map; used as the key into the registries'
    *   `removeMcpToolsByServer` / `removePromptsByServer` cleanup paths.
    * @param cfg The session's view of this server's config, source of
-   *   `includeTools` / `excludeTools` / `trust`.
+   *   `includeTools` / `excludeTools` / `trust` / `alwaysLoadTools`.
    */
   constructor(
     private readonly sessionToolRegistry: ToolRegistry,
@@ -170,7 +183,11 @@ export class SessionMcpView {
     readonly sessionId: string,
     readonly serverName: string,
     private cfg: MCPServerConfig,
-  ) {}
+  ) {
+    // Capture the key independently of the caller-owned config object. Runtime
+    // settings reconciliation may mutate that object in place.
+    this.metadataKey = mcpSessionMetadataKey(cfg);
+  }
 
   /**
    * Replace this session's registered tools for `serverName` with a
@@ -193,10 +210,14 @@ export class SessionMcpView {
       if (!compiledFilterAccepts(filter, tool.serverToolName)) {
         continue;
       }
-      // Per-session trust copy. `withTrust` returns the same
-      // instance when value unchanged, so the common case (same trust)
+      // Per-session metadata copy. The shared snapshot must not bake in the
+      // first subscriber's trust or eager-loading choice. The helper returns
+      // the same instance when both values already match, so the common case
       // pays zero allocation.
-      const sessionTool = tool.withTrust(this.cfg.trust);
+      const sessionTool = tool.withSessionConfig(
+        this.cfg.trust,
+        this.cfg.alwaysLoadTools === true,
+      );
       try {
         this.sessionToolRegistry.registerTool(sessionTool);
         registered += 1;
@@ -311,14 +332,17 @@ export class SessionMcpView {
    * `/mcp` tweaks `includeTools` at runtime). Re-apply uses the new
    * filter against the most recent snapshot.
    *
-   * The caller (typically the `PoolEntry.attach` path or
-   * `pool.notifyConfigChanged`) is responsible for invoking
-   * `applyTools` / `applyPrompts` with the current snapshot after
-   * this update — `SessionMcpView` doesn't cache snapshots itself
-   * (single-source-of-truth is the pool entry).
+   * The caller is responsible for invoking `applyTools` / `applyPrompts` /
+   * `applyResources` with the current snapshots when this method returns true.
+   * The captured key also detects callers that mutate and resubmit the same
+   * config object.
    */
-  updateConfig(cfg: MCPServerConfig): void {
+  updateConfig(cfg: MCPServerConfig): boolean {
+    const nextKey = mcpSessionMetadataKey(cfg);
+    const changed = this.metadataKey !== nextKey;
     this.cfg = cfg;
+    this.metadataKey = nextKey;
+    return changed;
   }
 
   /**

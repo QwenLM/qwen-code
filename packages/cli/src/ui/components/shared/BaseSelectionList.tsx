@@ -10,6 +10,8 @@ import { Text, Box, type DOMElement } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useSelectionList } from '../../hooks/useSelectionList.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../../contexts/VirtualViewportContext.js';
+import { useMouseTrackingEnabled } from '../../hooks/use-mouse-tracking-enabled.js';
 import { RowMouseController } from './RowMouseController.js';
 
 import type { SelectionListItem } from '../../hooks/useSelectionList.js';
@@ -112,7 +114,10 @@ export function BaseSelectionList<
   // Read the context raw (not the throwing useSettings) so the component still
   // renders outside a SettingsProvider — e.g. in unit tests.
   const settings = useContext(SettingsContext);
-  const mouseEnabled = !!settings?.merged.ui?.useTerminalBuffer;
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const mouseEnabled =
+    useVirtualViewport(settings?.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
   const containerRef = useRef<DOMElement | null>(null);
   const itemRefs = useRef<Array<DOMElement | null>>([]);
 
