@@ -10,6 +10,15 @@
   overflow: hidden;
 }
 
+.paneEmbedded {
+  border: 0;
+  border-radius: 0;
+}
+
+.paneEmbedded .footer {
+  padding-bottom: 0;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -92,6 +101,57 @@
   color: var(--foreground);
 }
 
+.headerActions {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.headerActionsInline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.headerActionSlot {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Keep host actions mounted while collapsed so stateful actions survive
+   resize. Absolutely positioned so they do not affect flex layout. */
+.headerActionsHostHidden {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* The built-in maximize/close controls used to be direct children of `.header`
+   (gap 8px); keep that spacing now that they are grouped here. */
+.headerTrailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.headerOverflowPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 2px;
+}
+
+.headerActionButton,
 .closeButton,
 .maximizeButton {
   flex: 0 0 auto;
@@ -107,6 +167,7 @@
   cursor: pointer;
 }
 
+.headerActionButton:hover,
 .closeButton:hover,
 .maximizeButton:hover {
   color: var(--foreground);

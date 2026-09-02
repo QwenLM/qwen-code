@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -11,7 +11,11 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
-import type { SlashMenuState } from '../hooks/useComposerCore';
+import type {
+  MobileComposerBackend,
+  SlashMenuState,
+} from '../hooks/useComposerCore';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -21,13 +25,87 @@ Element.prototype.scrollIntoView = vi.fn();
 
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
+  pastedImages: [] as Array<{ data: string; media_type: string }>,
   removeTopTag: vi.fn(),
 }));
+
+// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      client: {
+        workspaceGitBranches: vi.fn().mockResolvedValue({
+          v: 1,
+          local: [],
+          remote: [],
+          tags: [],
+          recent: [],
+          head: 'main',
+          detached: false,
+        }),
+        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+        workspaceGitPush: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceGitPull: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceByCwd: () => ({
+          workspaceGit: vi.fn().mockResolvedValue({
+            v: 2,
+            branch: 'main',
+            detached: false,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            hasUpstream: false,
+            ahead: 0,
+            behind: 0,
+            stashCount: 0,
+            operation: null,
+            computedAt: 0,
+          }),
+          workspaceGitBranches: vi.fn().mockResolvedValue({
+            v: 1,
+            local: [],
+            remote: [],
+            tags: [],
+            recent: [],
+            head: 'main',
+            detached: false,
+          }),
+          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+          workspaceGitPush: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          workspaceGitPull: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      capabilities: { features: [] },
+    }),
+  };
+});
 
 const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
+  mobileComposer: null as unknown,
+  openHistorySearch: vi.fn(),
+  shellMode: false,
+}));
+
+const voiceButtonState = vi.hoisted(() => ({
+  onActiveChange: undefined as ((active: boolean) => void) | undefined,
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -48,11 +126,15 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
     useComposerCore: () => ({
       containerRef: React.createRef<HTMLDivElement>(),
       viewRef: { current: null },
+      mobileComposer: composerCoreState.mobileComposer,
       focus: composerCoreState.focus,
       submitText: vi.fn(),
       clearText: vi.fn(),
       getText: vi.fn(() => ''),
       hasInput: vi.fn(() => false),
+      hasAttachments:
+        mockComposerCoreState.pastedImages.length > 0 ||
+        mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
       handle: {
         focus: vi.fn(),
@@ -63,8 +145,11 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         addTags: vi.fn(),
         removeInlineTags: vi.fn(),
         submit: vi.fn(),
+        hasAttachments: () =>
+          mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.composerTags.length > 0,
       },
-      pastedImages: [],
+      pastedImages: mockComposerCoreState.pastedImages,
       removeImage: vi.fn(),
       composerTags: mockComposerCoreState.composerTags,
       removeTopTag: mockComposerCoreState.removeTopTag,
@@ -76,7 +161,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       clear: vi.fn(),
       retryLast: vi.fn(),
       replaceEditorText: vi.fn(),
-      shellMode: false,
+      shellMode: composerCoreState.shellMode,
       setShellMode: vi.fn(),
       toggleShellMode: vi.fn(),
       currentMode: 'default',
@@ -88,7 +173,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         searchActiveIndex: 0,
         searchInputRef: React.createRef<HTMLInputElement>(),
         searchUiRef: React.createRef<HTMLDivElement>(),
-        openHistorySearch: vi.fn(),
+        openHistorySearch: composerCoreState.openHistorySearch,
         closeSearch: vi.fn(),
         submitSearchMatch: vi.fn(),
         handleSearchKeyDown: vi.fn(),
@@ -118,6 +203,23 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
+vi.mock('../voice/VoiceButton', () => ({
+  VoiceButton: ({
+    onActiveChange,
+  }: {
+    onActiveChange?: (active: boolean) => void;
+  }) => {
+    voiceButtonState.onActiveChange = onActiveChange;
+    return <span data-testid="voice-button" />;
+  },
+}));
+
+vi.mock('./SpecularComposerEffect', () => ({
+  SpecularComposerEffect: () => (
+    <span data-web-shell-composer-specular aria-hidden="true" />
+  ),
+}));
+
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -126,19 +228,26 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
+  composerCoreState.shellMode = false;
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
+  composerCoreState.mobileComposer = null;
+  composerCoreState.openHistorySearch.mockReset();
+  voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
     portalRoot.remove();
   }
   mockComposerCoreState.composerTags = [];
+  mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
+  vi.useRealTimers();
 });
 
 function renderChatEditor(props: {
   composerTags?: WebShellComposerTag[];
+  pastedImages?: Array<{ data: string; media_type: string }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -150,10 +259,15 @@ function renderChatEditor(props: {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
+  placeholderText?: string;
+  disabled?: boolean;
+  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
 }) {
   const {
     composerTags,
+    pastedImages,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -161,6 +275,9 @@ function renderChatEditor(props: {
   } = props;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
+  }
+  if (pastedImages) {
+    mockComposerCoreState.pastedImages = pastedImages;
   }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -198,6 +315,199 @@ function renderChatEditor(props: {
 
   return container;
 }
+
+describe('ChatEditor voice toolbar integration', () => {
+  it('mounts voice only when the host toolbar allows it', () => {
+    expect(
+      renderChatEditor({}).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: ['voice'],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: [],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ChatEditor animation layers', () => {
+  it('mounts the inert specular layer without replacing composer controls', () => {
+    const container = renderChatEditor({});
+
+    expect(
+      container.querySelector('[data-web-shell-composer-specular]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-editor]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-submit]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the typewriter visible through automatic focus', () => {
+    const container = renderChatEditor({});
+    const editor = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-editor]',
+    );
+    const outside = document.createElement('button');
+    container.appendChild(outside);
+    editor!.tabIndex = 0;
+
+    act(() => editor!.focus());
+    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
+
+    act(() => {
+      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
+    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
+
+    act(() => outside.focus());
+    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
+  });
+
+  it('plays the typewriter twice and then keeps the completed text', () => {
+    vi.useFakeTimers();
+    const container = renderChatEditor({ placeholderText: 'abc' });
+    const typewriter = () =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+
+    act(() => vi.advanceTimersByTime(3000));
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+
+    act(() => vi.advanceTimersByTime(3001));
+    expect(typewriter()?.textContent).toBe('abc_');
+  });
+
+  it('does not mount the typewriter for an empty placeholder', () => {
+    const container = renderChatEditor({ placeholderText: '' });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-typewriter]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
+  });
+
+  it('shows the full placeholder without a caret under prefers-reduced-motion', () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn(
+      (query: string) =>
+        ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({ placeholderText: 'abc' });
+      const typewriter = container.querySelector(
+        '[data-web-shell-composer-typewriter]',
+      );
+
+      expect(typewriter?.textContent).toBe('abc');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it('replays the typewriter sequence after the empty editor loses focus', () => {
+    vi.useFakeTimers();
+    const container = renderChatEditor({ placeholderText: 'abc' });
+    const editor = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-editor]',
+    );
+    const outside = document.createElement('button');
+    container.appendChild(outside);
+    editor!.tabIndex = 0;
+    const typewriter = () =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    act(() => editor!.focus());
+    act(() => {
+      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
+    expect(typewriter()).toBeNull();
+
+    act(() => outside.focus());
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+  });
+
+  it('hides the typewriter when disabled, in shell mode, or during a followup', () => {
+    const typewriterOf = (container: HTMLElement) =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    expect(
+      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
+    ).not.toBeNull();
+
+    expect(
+      typewriterOf(
+        renderChatEditor({ placeholderText: 'abc', disabled: true }),
+      ),
+    ).toBeNull();
+
+    composerCoreState.shellMode = true;
+    expect(
+      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
+    ).toBeNull();
+    composerCoreState.shellMode = false;
+
+    expect(
+      typewriterOf(
+        renderChatEditor({
+          placeholderText: 'abc',
+          followupState: { suggestion: 'next', isVisible: true, shownAt: 0 },
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('ChatEditor attachment reporting', () => {
+  it('reports whether the composer has tags or pasted images', () => {
+    const onEmptyAttachmentsChange = vi.fn();
+    renderChatEditor({
+      onAttachmentsChange: onEmptyAttachmentsChange,
+    });
+    expect(onEmptyAttachmentsChange).toHaveBeenLastCalledWith(false);
+
+    const onTaggedAttachmentsChange = vi.fn();
+    renderChatEditor({
+      composerTags: [
+        {
+          id: 'file:reference',
+          kind: 'file',
+          value: 'reference',
+        },
+      ],
+      onAttachmentsChange: onTaggedAttachmentsChange,
+    });
+    expect(onTaggedAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const onImageAttachmentsChange = vi.fn();
+    renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onAttachmentsChange: onImageAttachmentsChange,
+    });
+    expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
+  });
+});
 
 describe('ChatEditor composer tag icons', () => {
   it('renders built-in icons for top composer tags', () => {
@@ -605,6 +915,30 @@ describe('ChatEditor toolbar popovers', () => {
     expect(button?.textContent).not.toContain(routeId);
   });
 
+  it('exposes the complete model name on dropdown items for hover', () => {
+    const modelLabel =
+      'Qwen Very Long Model Name For Web Shell Reproduction 2026';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'long-model',
+      availableModels: [{ id: 'long-model', label: modelLabel }],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes(modelLabel));
+    expect(option).not.toBeUndefined();
+    expect(option?.title).toBe(modelLabel);
+  });
+
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['approvalMode', 'model'],
@@ -703,5 +1037,127 @@ describe('ChatEditor slash command popovers', () => {
       detail?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(composerCoreState.closeSlashMenu).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatEditor mobile composer quick actions', () => {
+  const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
+    Navigator.prototype,
+    'maxTouchPoints',
+  );
+
+  function withTouchDevice(run: () => void) {
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      value: 5,
+      configurable: true,
+    });
+    try {
+      run();
+    } finally {
+      if (originalMaxTouchPoints) {
+        Object.defineProperty(
+          Navigator.prototype,
+          'maxTouchPoints',
+          originalMaxTouchPoints,
+        );
+      } else {
+        delete (navigator as unknown as Record<string, unknown>)[
+          'maxTouchPoints'
+        ];
+      }
+    }
+  }
+
+  function mobileComposerStub(): MobileComposerBackend {
+    return {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: '',
+      onChange: vi.fn(),
+      onPaste: vi.fn(),
+      placeholder: '',
+    };
+  }
+
+  function openQuickActions(container: HTMLElement) {
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="more actions"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle!.click());
+  }
+
+  it('maps the history quick action to the search UI on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+
+      const historyButton = Array.from(
+        container.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Question history');
+      expect(historyButton).not.toBeUndefined();
+      act(() => historyButton!.click());
+
+      expect(composerCoreState.openHistorySearch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const mobileContainer = renderChatEditor({});
+      openQuickActions(mobileContainer);
+      expect(
+        Array.from(mobileContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(false);
+
+      composerCoreState.mobileComposer = null;
+      const desktopContainer = renderChatEditor({});
+      openQuickActions(desktopContainer);
+      expect(
+        Array.from(desktopContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('hides other toolbar actions while mobile voice capture is active', () => {
+    withTouchDevice(() => {
+      const container = renderChatEditor({
+        currentModel: 'qwen-test',
+        availableModels: [{ id: 'qwen-test' }],
+      });
+
+      expect(
+        container.querySelector('[data-web-shell-toolbar-leading]'),
+      ).toBeTruthy();
+      expect(
+        container.querySelector(
+          'button[aria-label="more actions"][data-hide-during-mobile-voice]',
+        ),
+      ).toBeTruthy();
+      expect(
+        container.querySelector('[data-web-shell-composer-submit]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(true);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(false);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeFalsy();
+    });
   });
 });

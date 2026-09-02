@@ -174,6 +174,7 @@ describe('Turn', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'prompt-id-1',
+        undefined,
       );
 
       expect(events).toEqual([

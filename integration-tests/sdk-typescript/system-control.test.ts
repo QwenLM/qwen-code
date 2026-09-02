@@ -6,7 +6,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   query,
-  isSDKAssistantMessage,
   isSDKSystemMessage,
   isSDKResultMessage,
   type SDKUserMessage,
@@ -18,7 +17,9 @@ import {
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
-const MODEL_RESPONSE_TIMEOUT_MS = process.env['CI'] ? 30000 : 15000;
+// Per-turn cap. CI model responses can exceed 30s under load, and the
+// suite budget is 5 minutes, so give each turn more of that headroom.
+const MODEL_RESPONSE_TIMEOUT_MS = process.env['CI'] ? 60000 : 15000;
 
 /**
  * Factory function that creates a streaming input with a control point.
@@ -139,8 +140,8 @@ describe('System Control (E2E)', () => {
             }
             if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
-            }
-            if (isSDKAssistantMessage(message)) {
+              // Resolve on result (one per turn), not assistant message
+              // (which may fire multiple times per turn: thinking + text)
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();

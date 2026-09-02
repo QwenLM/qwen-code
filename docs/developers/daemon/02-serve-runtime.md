@@ -113,25 +113,25 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 
 ## Configuration
 
-| Source          | Key                                                                                             | Effect                                                                                                |
-| --------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Env             | `QWEN_SERVER_TOKEN`                                                                             | Bearer token after trim.                                                                              |
-| Env             | `QWEN_SERVE_NO_MCP_POOL=1`                                                                      | Forces `mcpPoolActive=false`.                                                                         |
-| ACP child env   | `QWEN_SERVE_MCP_CLIENT_BUDGET` / `QWEN_SERVE_MCP_BUDGET_MODE`                                   | Generated from `--mcp-client-budget` / `--mcp-budget-mode` and forwarded through `childEnvOverrides`. |
-| Env             | `QWEN_SERVE_PROMPT_DEADLINE_MS` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS`                           | Default prompt / SSE idle timeouts.                                                                   |
-| Env             | `QWEN_SERVE_RATE_LIMIT*`                                                                        | Rate-limit switch, prompt / mutation / read caps, and window default.                                 |
-| Env             | `QWEN_SERVE_DEBUG=1`                                                                            | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                              |
-| Flags           | `--hostname`, `--port`                                                                          | Listen binding.                                                                                       |
-| Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                           | Bearer token, loopback auth hardening, and explicit shell execution switch.                           |
-| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                 |
-| Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size` | Bridge / Express caps.                                                                                |
-| Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                 | Forwarded to the ACP child.                                                                           |
-| Flags           | `--allow-origin`, `--allow-private-auth-base-url`                                               | Browser CORS allowlist and localhost/private auth provider installation switch.                       |
-| Flags           | `--prompt-deadline-ms`, `--writer-idle-timeout-ms`, `--channel-idle-timeout-ms`                 | Prompt, SSE writer, and ACP child idle lifecycle control.                                             |
-| Flags           | `--session-reap-interval-ms`, `--session-idle-timeout-ms`                                       | Disconnected-session reaping control.                                                                 |
-| Flags           | `--rate-limit*`                                                                                 | Per-tier HTTP rate limit.                                                                             |
-| `settings.json` | `policy.permissionStrategy`, `policy.consensusQuorum`                                           | `MultiClientPermissionMediator` policy and quorum.                                                    |
-| `settings.json` | `context.fileName`                                                                              | `getCurrentGeminiMdFilename` override for the bridge.                                                 |
+| Source          | Key                                                                                                        | Effect                                                                                                |
+| --------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Env             | `QWEN_SERVER_TOKEN`                                                                                        | Bearer token after trim.                                                                              |
+| Env             | `QWEN_SERVE_NO_MCP_POOL=1`                                                                                 | Forces `mcpPoolActive=false`.                                                                         |
+| ACP child env   | `QWEN_SERVE_MCP_CLIENT_BUDGET` / `QWEN_SERVE_MCP_BUDGET_MODE`                                              | Generated from `--mcp-client-budget` / `--mcp-budget-mode` and forwarded through `childEnvOverrides`. |
+| Env             | `QWEN_SERVE_PROMPT_DEADLINE_MS` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS`                                      | Default prompt / SSE idle timeouts.                                                                   |
+| Env             | `QWEN_SERVE_RATE_LIMIT*`                                                                                   | Rate-limit switch, prompt / mutation / read caps, and window default.                                 |
+| Env             | `QWEN_SERVE_DEBUG=1`                                                                                       | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                              |
+| Flags           | `--hostname`, `--port`                                                                                     | Listen binding.                                                                                       |
+| Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                                      | Bearer token, loopback auth hardening, and explicit shell execution switch.                           |
+| Flag            | `--workspace`                                                                                              | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                 |
+| Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size`            | Bridge / Express caps.                                                                                |
+| Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                            | Forwarded to the ACP child.                                                                           |
+| Flags           | `--allow-origin`, `--allow-private-auth-base-url`                                                          | Browser CORS allowlist and localhost/private auth provider installation switch.                       |
+| Flags           | `--prompt-deadline-ms`, `--writer-idle-timeout-ms`, `--channel-idle-timeout-ms`, `--initialize-timeout-ms` | Prompt, SSE writer, ACP child idle lifecycle, and ACP child request timeout control.                  |
+| Flags           | `--session-reap-interval-ms`, `--session-idle-timeout-ms`                                                  | Disconnected-session reaping control.                                                                 |
+| Flags           | `--rate-limit*`                                                                                            | Per-tier HTTP rate limit.                                                                             |
+| `settings.json` | `policy.permissionStrategy`, `policy.consensusQuorum`                                                      | `MultiClientPermissionMediator` policy and quorum.                                                    |
+| `settings.json` | `context.fileName`                                                                                         | `getCurrentGeminiMdFilename` override for the bridge.                                                 |
 
 See [`17-configuration.md`](./17-configuration.md) for the merged reference.
 

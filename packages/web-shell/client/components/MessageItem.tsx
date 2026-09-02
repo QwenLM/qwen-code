@@ -32,6 +32,8 @@ interface MessageItemProps {
   isLatest?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
+  sendFailed?: boolean;
+  onRetrySend?: () => void;
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
@@ -48,6 +50,8 @@ export const MessageItem = memo(function MessageItem({
   isLatest = false,
   showRetryHint = false,
   onRetryClick,
+  sendFailed = false,
+  onRetrySend,
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
@@ -65,6 +69,8 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
+            sendFailed={sendFailed}
+            onRetrySend={onRetrySend}
           />
         );
       case 'assistant':
@@ -262,6 +268,8 @@ function areMessageItemPropsEqual(
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.sendFailed !== next.sendFailed) return false;
+  if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;

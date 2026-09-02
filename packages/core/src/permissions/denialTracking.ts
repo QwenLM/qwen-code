@@ -190,9 +190,18 @@ export function recordFallbackApprove(
 export function isApproveOutcome(outcome: string): boolean {
   return (
     outcome === 'proceed_once' ||
+    outcome === 'proceed_once_and_switch_to_default' ||
     outcome === 'proceed_always' ||
     outcome === 'proceed_always_project' ||
     outcome === 'proceed_always_user' ||
+    // The per-server and per-tool "always allow" buttons. They are older than
+    // the project/user pair above but still reach here -- web-shell's
+    // ToolApproval sends them, and background-tasks, tool-call-decision and
+    // the ACP Session all count them as approvals. Omitting them here meant a
+    // user who approved a fallen-back call with one of these two buttons did
+    // not clear the AUTO denial counters, so the session kept prompting.
+    outcome === 'proceed_always_server' ||
+    outcome === 'proceed_always_tool' ||
     outcome === 'modify_with_editor'
   );
 }

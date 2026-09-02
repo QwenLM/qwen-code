@@ -131,7 +131,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Task: 'Task',
   TodoWrite: 'TodoList',
   WebFetch: 'WebFetch',
-  WebSearch: 'None',
+  WebSearch: 'WebSearch',
   Write: 'WriteFile',
   LS: 'ListFiles',
 };

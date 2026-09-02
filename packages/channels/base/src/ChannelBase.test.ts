@@ -6,9 +6,13 @@ import { join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryEntry,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   Envelope,
   SessionTarget,
+  UserInputPresentationResult,
 } from './types.js';
 import type {
   ChannelAgentBridge,
@@ -26,6 +30,10 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -57,13 +65,35 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     messageIds: string[];
   }> = [];
-  responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
-    [];
-  responseBoundaries: Array<{ chatId: string; sessionId: string }> = [];
+  responseChunks: Array<{
+    chatId: string;
+    chunk: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
+  responseBoundaries: Array<{
+    chatId: string;
+    sessionId: string;
+    segment?: unknown;
+    reason?: unknown;
+  }> = [];
+  responseCompletions: Array<{
+    chatId: string;
+    text: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
   proactiveError?: Error;
+  userInputPresentations: ChannelUserInputRequestContext[] = [];
+  userInputPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  userInputPresentationHandler?: (
+    context: ChannelUserInputRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -84,6 +114,16 @@ class TestChannel extends ChannelBase {
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.taskEvents.push(event);
+  }
+
+  protected async presentUserInputRequest(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.userInputPresentations.push(context);
+    if (this.userInputPresentationHandler) {
+      return this.userInputPresentationHandler(context);
+    }
+    return this.userInputPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -128,6 +168,18 @@ class TestChannel extends ChannelBase {
 
   cancelPromptForTest(sessionId: string): Promise<boolean> {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
+  cancelRunForTest(sessionId: string, runId: string): Promise<boolean> {
+    return this.requestPromptRunCancellation(
+      sessionId,
+      runId,
+      'cancel_command',
+    );
+  }
+
+  stateDirForTest(): string | undefined {
+    return this.stateDir;
   }
 
   debugPayloadForTest(platform: string, payload: unknown): void {
@@ -183,22 +235,32 @@ class TestChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: unknown,
   ): void {
-    this.responseChunks.push({ chatId, chunk, sessionId });
+    this.responseChunks.push({ chatId, chunk, sessionId, segment });
   }
 
   protected override onResponseBoundary(
     chatId: string,
     sessionId: string,
+    segment?: unknown,
+    reason?: unknown,
   ): void {
-    this.responseBoundaries.push({ chatId, sessionId });
+    this.responseBoundaries.push({ chatId, sessionId, segment, reason });
   }
 
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: unknown,
   ): Promise<void> {
+    this.responseCompletions.push({
+      chatId,
+      text: fullText,
+      sessionId,
+      segment,
+    });
     await this.responseCompleteGate;
     await super.onResponseComplete(chatId, fullText, sessionId);
   }
@@ -236,6 +298,7 @@ function createBridge(): ChannelAgentBridge {
     loadSession: vi.fn(),
     prompt: vi.fn().mockResolvedValue('agent response'),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
@@ -353,6 +416,145 @@ describe('ChannelBase', () => {
     );
   }
 
+  it('exposes runtime-owned state to adapters', () => {
+    expect(
+      createChannel({}, { stateDir: '/tmp/channel-state' }).stateDirForTest(),
+    ).toBe('/tmp/channel-state');
+  });
+
+  describe('proactive delivery boundary', () => {
+    it('recognizes typed delivery errors across module instances', () => {
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'permanent',
+          message: 'invalid recipient',
+        }),
+      ).toBe(true);
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'unknown',
+          message: 'invalid recipient',
+        }),
+      ).toBe(false);
+    });
+
+    it('derives chat and user session targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+        'group result',
+      );
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'user', id: 'user-1' },
+        'user result',
+      );
+
+      expect(ch.proactiveTargets).toEqual([
+        {
+          channelName: 'test-chan',
+          senderId: 'group-1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        {
+          channelName: 'test-chan',
+          senderId: 'user-1',
+          chatId: 'user-1',
+          isGroup: false,
+        },
+      ]);
+    });
+
+    it('rejects invalid and unsupported proactive targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: '  ' },
+          'result',
+        ),
+      ).rejects.toThrow('invalid proactive target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          '  ',
+        ),
+      ).rejects.toThrow('empty proactive text');
+
+      ch.proactiveTargetSupported = false;
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support this proactive target');
+    });
+
+    it('rejects delivery owned by another channel or without send support', async () => {
+      const ch = createChannel();
+      ch.proactiveTargetSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'other', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not own delivery target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support proactive delivery');
+    });
+
+    it('normalizes untyped adapter failures as transient delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const cause = new Error('provider request failed');
+      ch.proactiveError = cause;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toMatchObject({
+        code: 'channel_proactive_delivery_error',
+        disposition: 'transient',
+        message: 'provider request failed',
+        cause,
+      });
+    });
+
+    it('preserves typed adapter delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const error = new ChannelProactiveDeliveryError(
+        'permanent',
+        'recipient rejected',
+      );
+      ch.proactiveError = error;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toBe(error);
+    });
+  });
+
   describe('gate integration', () => {
     it('silently drops group messages when groupPolicy=disabled', async () => {
       const ch = createChannel();
@@ -445,6 +647,7 @@ describe('ChannelBase', () => {
           senderId: 'sender-123',
           senderNick: 'Alice',
           senderName: 'Bob',
+          atUsers: [{ dingtalkId: 'dingtalk-123', staffId: 'staff-at-123' }],
           nested: { aeskey: 'media-key' },
         });
         logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
@@ -473,6 +676,10 @@ describe('ChannelBase', () => {
       expect(logged).toContain('"senderId":"[redacted]"');
       expect(logged).toContain('"senderNick":"[redacted]"');
       expect(logged).toContain('"senderName":"[redacted]"');
+      expect(logged).toContain('"dingtalkId":"[redacted]"');
+      expect(logged).toContain('"staffId":"[redacted]"');
+      expect(logged).not.toContain('dingtalk-123');
+      expect(logged).not.toContain('staff-at-123');
       expect(logged).toContain('"aeskey":"[redacted]"');
       expect(logged).not.toContain('\\n');
       expect(logged).not.toContain('secret-token');
@@ -570,6 +777,26 @@ describe('ChannelBase', () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('appends envelope.metadata to the prompt text', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          text: 'fix the bug',
+          metadata:
+            'Type: Issue | Title: Bug | URL: https://github.com/o/r/issues/1',
+        }),
+      );
+      const prompts = bridge.prompt.mock.calls.map((call) => String(call[1]));
+      const prompt = prompts.find(
+        (p) =>
+          p.includes('fix the bug') && p.includes('Type: Issue | Title: Bug'),
+      );
+      expect(prompt).toBeDefined();
+      expect(prompt!.indexOf('fix the bug')).toBeLessThan(
+        prompt!.indexOf('Type: Issue | Title: Bug'),
+      );
     });
 
     it('silently drops DM messages when dmPolicy=disabled', async () => {
@@ -857,6 +1084,66 @@ describe('ChannelBase', () => {
       });
     }
 
+    function emitUserQuestion(sessionId: string, requestId: string): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 1 question',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+    }
+
     async function startSession(
       ch: TestChannel,
       env: Partial<Envelope> = {},
@@ -866,6 +1153,837 @@ describe('ChannelBase', () => {
         .results;
       return results[results.length - 1]!.value as string;
     }
+
+    async function startActiveSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<{
+      sessionId: string;
+      finish(response?: string): Promise<void>;
+    }> {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const running = ch.handleInbound(
+        envelope({ text: 'run tests', messageId: 'active-message', ...env }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      return {
+        sessionId,
+        async finish(response = '') {
+          resolvePrompt(response);
+          await running;
+        },
+      };
+    }
+
+    const inputCorrelationCases = (
+      ['user', 'thread', 'chat_thread', 'single'] as const
+    ).flatMap((sessionScope) =>
+      (['collect', 'steer', 'followup'] as const).map((dispatchMode) => ({
+        sessionScope,
+        dispatchMode,
+        first: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: 'alice',
+          isGroup: true,
+          isMentioned: true,
+        },
+        second: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: sessionScope === 'user' ? 'alice' : 'bob',
+          isGroup: true,
+          isMentioned: true,
+        },
+      })),
+    );
+
+    it.each(inputCorrelationCases)(
+      'keeps input correlation for $sessionScope + $dispatchMode',
+      async ({ sessionScope, dispatchMode, first, second }) => {
+        const promptResolvers: Array<(value: string) => void> = [];
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          () =>
+            new Promise<string>((resolve) => {
+              promptResolvers.push(resolve);
+            }),
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+          () => {
+            promptResolvers[0]?.('');
+            return Promise.resolve();
+          },
+        );
+        const ch = createChannel({
+          sessionScope,
+          dispatchMode,
+          groupPolicy: 'open',
+        });
+        ch.userInputPresentationResult = { kind: 'presented' };
+
+        const firstTurn = ch.handleInbound(
+          envelope({ ...first, messageId: 'matrix-1', text: 'first' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const firstSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+        emitUserQuestion(firstSessionId, 'matrix-request-1');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        const firstContext = ch.userInputPresentations[0]!;
+        const firstSettled = vi.fn();
+        firstContext.onSettled(firstSettled);
+        const cancellationVisibleAtSettlement = vi.fn(() =>
+          ch.taskEvents.some(
+            (event) =>
+              event.type === 'cancelled' &&
+              event.runId === firstContext.runId &&
+              event.reason === 'steer',
+          ),
+        );
+        firstContext.onSettled(cancellationVisibleAtSettlement);
+
+        const secondTurn = ch.handleInbound(
+          envelope({ ...second, messageId: 'matrix-2', text: 'second' }),
+        );
+        if (dispatchMode !== 'steer') {
+          await firstContext.respond({
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+            answers: { '0': 'Beijing' },
+          });
+          promptResolvers[0]?.('');
+        }
+        await firstTurn;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const secondSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1]![0] as string;
+        emitUserQuestion(secondSessionId, 'matrix-request-2');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(2),
+        );
+        const secondContext = ch.userInputPresentations[1]!;
+
+        expect(secondSessionId).toBe(firstSessionId);
+        expect(secondContext.runId).not.toBe(firstContext.runId);
+        expect(firstContext.owner.id).toBe(first.senderId);
+        expect(secondContext.owner.id).toBe(second.senderId);
+        expect(firstContext.target).toMatchObject({
+          chatId: first.chatId,
+          threadId: first.threadId,
+          senderId: first.senderId,
+          isGroup: first.isGroup,
+        });
+        expect(secondContext.target).toMatchObject({
+          chatId: second.chatId,
+          threadId: second.threadId,
+          senderId: second.senderId,
+          isGroup: second.isGroup,
+        });
+        if (dispatchMode === 'steer') {
+          expect(firstSettled).toHaveBeenCalledWith('run_cancelled');
+          expect(cancellationVisibleAtSettlement).toHaveReturnedWith(true);
+          await expect(
+            firstContext.respond({
+              outcome: { outcome: 'selected', optionId: 'proceed_once' },
+              answers: { '0': 'late' },
+            }),
+          ).resolves.toBe(false);
+        } else {
+          expect(respondToPermissionMock()).toHaveBeenCalledWith(
+            'matrix-request-1',
+            expect.objectContaining({ answers: { '0': 'Beijing' } }),
+          );
+        }
+        expect(respondToPermissionMock()).not.toHaveBeenCalledWith(
+          'matrix-request-2',
+          expect.anything(),
+        );
+
+        promptResolvers[1]?.('');
+        await secondTurn;
+      },
+    );
+
+    it('presents canonical semantic user input with normalized questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-question',
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 2 questions',
+            rawInput: { questions: [{ question: 'stale legacy question' }] },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+                {
+                  header: 'Signals',
+                  question: 'Which signals?',
+                  options: [
+                    { label: 'Logs', description: 'Collect logs.' },
+                    { label: 'Metrics', description: 'Collect metrics.' },
+                  ],
+                  multiSelect: true,
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]).toMatchObject({
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        submitOptionId: 'proceed_once',
+        questions: [
+          {
+            answerKey: '0',
+            header: 'Region',
+            question: 'Which region?',
+            options: [
+              {
+                label: 'Beijing',
+                description: 'Use Beijing staging.',
+              },
+              {
+                label: 'Shanghai',
+                description: 'Use Shanghai staging.',
+              },
+            ],
+            multiSelect: false,
+          },
+          {
+            answerKey: '1',
+            header: 'Signals',
+            question: 'Which signals?',
+            options: [
+              { label: 'Logs', description: 'Collect logs.' },
+              { label: 'Metrics', description: 'Collect metrics.' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it.each([
+      {
+        sessionScope: 'user',
+        inbound: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'thread',
+        inbound: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'single',
+        inbound: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+        expectedTarget: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+      },
+    ] as const)(
+      'captures the active owner and target for $sessionScope scope',
+      async ({ sessionScope, inbound, expectedTarget }) => {
+        const ch = createChannel({ sessionScope, groupPolicy: 'open' });
+        ch.userInputPresentationResult = { kind: 'presented' };
+        const active = await startActiveSession(ch, inbound);
+
+        emitUserQuestion(active.sessionId, `req-${sessionScope}`);
+
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        expect(ch.userInputPresentations[0]).toMatchObject({
+          requestId: `req-${sessionScope}`,
+          sessionId: active.sessionId,
+          owner: { kind: 'channel_user', id: inbound.senderId },
+          target: {
+            channelName: 'test-chan',
+            ...expectedTarget,
+          },
+        });
+
+        await active.finish();
+      },
+    );
+
+    it('presents direct user input without allocating an output segment', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-direct-question');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBeUndefined();
+
+      await active.finish();
+    });
+
+    it('ends visible output before presenting user input without projecting a legacy boundary', async () => {
+      const ch = createChannel();
+      const order: string[] = [];
+      Object.assign(ch, {
+        onOutputSegmentEnd: async (
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => {
+          order.push(reason);
+        },
+      });
+      ch.userInputPresentationHandler = async () => {
+        order.push('present');
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        active.sessionId,
+        'Need more information.',
+      );
+      await vi.waitFor(() => expect(ch.responseChunks).toHaveLength(1));
+      emitUserQuestion(active.sessionId, 'req-after-output');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const segment = ch.responseChunks[0]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(segment?.segmentId).toEqual(expect.any(String));
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(order).toEqual(['input_requested', 'present']);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBe(segment?.segmentId);
+
+      await active.finish();
+    });
+
+    it('presents identified legacy user input from rawInput questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-legacy-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-legacy-question',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', name: 'Submit' },
+            { optionId: 'cancel', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]!.questions).toEqual([
+        {
+          answerKey: '0',
+          header: 'Region',
+          question: 'Which region?',
+          options: [
+            { label: 'A', description: 'Use A.' },
+            { label: 'B', description: 'Use B.' },
+          ],
+          multiSelect: false,
+        },
+      ]);
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('does not fall back to legacy input when canonical questions are malformed', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-malformed-canonical',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-malformed-canonical',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', kind: 'allow_once', name: 'Submit' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('does not present unrelated tools that happen to contain questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-unrelated',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-unrelated',
+            kind: 'other',
+            title: 'Configure survey',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Allow once',
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('falls back when handled is returned without responding', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'handled' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-unhandled');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('accepts handled only when the hook synchronously invokes respond', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationHandler = async (context) => {
+        void context.respond({
+          outcome: { outcome: 'selected', optionId: 'cancel' },
+        });
+        return { kind: 'handled' };
+      };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-handled-response');
+
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledOnce(),
+      );
+      expect(ch.sent).toEqual([]);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-handled-response',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+
+      await active.finish();
+    });
+
+    it('does not let permission commands bypass an in-flight card presentation', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-presenting',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      finishPresentation({ kind: 'unsupported' });
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      await active.finish();
+    });
+
+    it('does not relay a fallback after an in-flight card request is denied', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting-deny');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-presenting-deny',
+        }),
+      );
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      finishPresentation({ kind: 'unsupported' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(ch.sent).toHaveLength(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      await active.finish();
+    });
+
+    it('uses one response promise and emits one typed user input settlement', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-one-shot');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementation(
+        async (requestId: string, response: { outcome: unknown }) => {
+          (bridge as unknown as EventEmitter).emit('permissionResolved', {
+            requestId,
+            outcome: response.outcome,
+          });
+          return true;
+        },
+      );
+      const response = {
+        outcome: { outcome: 'selected' as const, optionId: 'proceed_once' },
+        answers: { '0': 'Beijing' },
+      };
+
+      const first = context.respond(response);
+      const second = context.respond(response);
+
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
+
+      await active.finish();
+    });
+
+    it('settles a rejected user input response as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockRejectedValueOnce(
+        new Error('bridge response failed'),
+      );
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('bridge response failed');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles a synchronously throwing user input responder as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-sync-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementationOnce(() => {
+        throw new Error('synchronous bridge failure');
+      });
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('synchronous bridge failure');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles semantic user input when another client resolves it', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-external');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      const unsubscribed = vi.fn();
+      const context = ch.userInputPresentations[0]!;
+      context.onSettled(settled);
+      const unsubscribe = context.onSettled(unsubscribed);
+      unsubscribe();
+
+      (bridge as unknown as EventEmitter).emit('permissionResolved', {
+        requestId: 'req-external',
+        outcome: { outcome: 'cancelled' },
+      });
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+      expect(unsubscribed).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('settles semantic user input with run cancellation before bridge cleanup', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-run-cancel');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+
+      await expect(
+        ch.cancelRunForTest(active.sessionId, context.runId),
+      ).resolves.toBe(true);
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('run_cancelled');
+
+      await active.finish();
+    });
+
+    it('requires card-presented questions to be submitted or denied', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-card-command');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      ch.userInputPresentations[0]!.onSettled(settled);
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-card-command',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('rejects card-presented denial from another shared-session user', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'single',
+      });
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, {
+        chatId: 'group-1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'owner-1',
+      });
+      emitUserQuestion(active.sessionId, 'req-owner-only');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group-1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'other-user',
+          text: '/deny req-owner-only',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await active.finish();
+    });
 
     it('sends permission requests to the owning chat and approves with /approve', async () => {
       const ch = createChannel();
@@ -2123,10 +3241,88 @@ describe('ChannelBase', () => {
         ['回复前必须说 1122'],
         'alice',
       );
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('你记一下以后回复前要说 1122'),
+        expect.anything(),
+      );
+    });
+
+    it('classifier remember in a multi-task message saves memory and still runs the other tasks', async () => {
+      const channelMemory = createChannelMemory();
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: 'Code reviews should use inline comments',
+          confidence: 0.93,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const text =
+        'Review PR #123. Remember that code reviews should use inline ' +
+        'comments. Also check PR #456.';
+
+      await ch.handleInbound(envelope({ text, senderId: 'alice' }));
+
+      expect(channelMemory.addChannelMemoryEntries).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        ['Code reviews should use inline comments'],
+        'alice',
+      );
+      // The full message reaches the agent so the non-memory tasks run, and
+      // no bot-injected confirmation precedes the agent's reply.
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('Review PR #123'),
+        expect.anything(),
+      );
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+    });
+
+    it('classifier remember save failures report the error and still forward the message', async () => {
+      const channelMemory = createChannelMemory();
+      channelMemory.addChannelMemoryEntries.mockRejectedValue(
+        new Error('disk full'),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: 'Use staging.',
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: 'Deploy the fix and remember to use staging',
+          senderId: 'alice',
+        }),
+      );
+
       expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Channel memory m-000000000001 saved.' },
+        {
+          chatId: 'chat1',
+          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
+        },
+        { chatId: 'chat1', text: 'agent response' },
       ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      stderrSpy.mockRestore();
     });
 
     it('dispatches all validated classifier facts in one memory write', async () => {
@@ -2161,7 +3357,7 @@ describe('ChannelBase', () => {
         ['Use staging.', 'Run tests first.', 'Deploy after approval.'],
         'alice',
       );
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the validated snapshot when classifier memories getter mutates', async () => {
@@ -2199,7 +3395,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(memoriesReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the first indexed value when a classifier memory changes on a second read', async () => {
@@ -2240,7 +3436,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(secondFactReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the first indexed value when a classifier memory becomes non-string on a second read', async () => {
@@ -2281,7 +3477,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(secondFactReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it.each(['confidence', 'intent'] as const)(
@@ -2473,10 +3669,10 @@ describe('ChannelBase', () => {
         ['Use staging.'],
         'alice',
       );
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
-    it('reports saved and skipped IDs once for mixed batch results', async () => {
+    it('suppresses save confirmations for mixed batch results and forwards the message', async () => {
       const channelMemory = createChannelMemory();
       channelMemory.addChannelMemoryEntries.mockResolvedValue({
         changed: true,
@@ -2513,13 +3709,8 @@ describe('ChannelBase', () => {
       );
 
       expect(invalidateUnattendedMemory).toHaveBeenCalledTimes(1);
-      expect(ch.sent).toEqual([
-        {
-          chatId: 'chat1',
-          text: 'Channel memory saved: m-a31f0d82c7e4, m-b82c4e190a6f. Skipped duplicates: m-c93d5f20b7a8.',
-        },
-      ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('regex memory intent skips the llm classifier', async () => {
@@ -5444,6 +6635,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/clear' }));
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -5685,6 +6877,98 @@ describe('ChannelBase', () => {
           mode: 'metadata-only',
         },
       });
+    });
+
+    it('uses one run identity and owner across an attended prompt lifecycle', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async (sessionId: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sessionId,
+            'chunk',
+          );
+          return 'agent response';
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(
+        envelope({
+          messageId: 'm-run-1',
+          senderId: 'owner-1',
+          senderName: 'Owner 1',
+        }),
+      );
+
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events.map((event) => event.type)).toEqual([
+        'started',
+        'text_chunk',
+        'completed',
+      ]);
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(
+        events.every((event) => event.owner?.kind === 'channel_user'),
+      ).toBe(true);
+      expect(events.every((event) => event.owner?.id === 'owner-1')).toBe(true);
+    });
+
+    it('assigns a new run identity to the next prompt in one session', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'm-run-1' }));
+      await ch.handleInbound(envelope({ messageId: 'm-run-2' }));
+
+      const started = ch.taskEvents.filter(
+        (event) => event.type === 'started',
+      ) as Array<ChannelTaskLifecycleEvent & { runId?: string }>;
+      expect(started).toHaveLength(2);
+      expect(started[0]!.sessionId).toBe(started[1]!.sessionId);
+      expect(started[0]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).not.toBe(started[0]!.runId);
+    });
+
+    it('cancels only the current exact run identity', async () => {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-exact-run' }));
+      await vi.waitFor(() =>
+        expect(ch.taskEvents.some((event) => event.type === 'started')).toBe(
+          true,
+        ),
+      );
+      const started = ch.taskEvents.find(
+        (event) => event.type === 'started',
+      ) as ChannelTaskLifecycleEvent & { runId?: string };
+      expect(started.runId).toEqual(expect.any(String));
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, 'stale-run'),
+      ).resolves.toBe(false);
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, started.runId!),
+      ).resolves.toBe(true);
+      expect(bridge.cancelSession).toHaveBeenCalledWith(started.sessionId);
+
+      resolvePrompt('late response');
+      await prompt;
     });
 
     it('uses configured channel identity and memory namespace in lifecycle metadata', async () => {
@@ -7060,6 +8344,165 @@ describe('ChannelBase', () => {
       expect(router.handleSessionDied).toHaveBeenCalledWith('s-1');
     });
 
+    it('proactively delivers a completed background response to the session route', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+      ch.proactiveSupported = true;
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactiveTargets).toEqual([target]);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('falls back to sendResponseMessage when proactive send is unsupported', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(ch.sent).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactive).toEqual([]);
+    });
+
+    it('sendResponseMessage resolves threadId from router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'issue:42', text: 'reply text' },
+      ]);
+    });
+
+    it('sendResponseMessage prefers active prompt threadId over router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      // Seed an active prompt with a different threadId
+      (
+        ch as unknown as {
+          activePrompts: Map<string, { threadId?: string }>;
+        }
+      ).activePrompts.set('s-1', { threadId: 'pr:7' });
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'pr:7', text: 'reply text' },
+      ]);
+    });
+
     it('leaves supplied router bridge events to the gateway by default', () => {
       const router = {
         getTarget: vi.fn(),
@@ -7299,6 +8742,26 @@ describe('ChannelBase', () => {
       ch.sent = [];
 
       await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
+    it('/clear in a chat_thread group asks for confirmation (shared session)', async () => {
+      const ch = createChannel({
+        sessionScope: 'chat_thread',
+        groupPolicy: 'open',
+      });
+      const g = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+      });
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('/clear confirm');
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear confirm' });
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
@@ -8612,6 +10075,7 @@ describe('ChannelBase', () => {
 
     it('continues the user prompt and logs bounded metadata when entry listing fails', async () => {
       const channelMemory = createChannelMemory();
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries.mockRejectedValue(
         new Error(`EIO\n${'x'.repeat(400)}`),
       );
@@ -8620,7 +10084,7 @@ describe('ChannelBase', () => {
         .mockImplementation(() => true);
       const ch = createChannel(
         { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
@@ -8635,6 +10099,13 @@ describe('ChannelBase', () => {
       expect(log).not.toContain('EIO');
       expect(log).not.toContain('ship it');
       expect(log.length).toBeLessThan(350);
+      expect(channelMemoryRecallObserver).toHaveBeenCalledOnce();
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'read_error',
+        selectedCount: 0,
+      });
       writeSpy.mockRestore();
     });
 
@@ -8878,10 +10349,14 @@ describe('ChannelBase', () => {
       const first = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
       const second = { id: 'm-b82c4e190a6f', text: 'Use production.' };
       const channelMemory = createChannelMemory();
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries
         .mockResolvedValueOnce([first])
         .mockResolvedValueOnce([second]);
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -8894,6 +10369,24 @@ describe('ChannelBase', () => {
       expect(secondPrompt).toContain(relevantChannelMemoryPrompt([second]));
       expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
       expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemoryRecallObserver).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(1, {
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'selected',
+        selectedCount: 1,
+      });
+      expect(
+        Object.keys(channelMemoryRecallObserver.mock.calls[0]![0]).sort(),
+      ).toEqual(['cache', 'durationMs', 'result', 'selectedCount']);
+      expect(
+        Number.isFinite(
+          channelMemoryRecallObserver.mock.calls[0]![0].durationMs,
+        ),
+      ).toBe(true);
+      expect(
+        channelMemoryRecallObserver.mock.calls[0]![0].durationMs,
+      ).toBeGreaterThanOrEqual(0);
     });
 
     it('reuses a prepared recall index while the memory revision is unchanged', async () => {
@@ -8902,7 +10395,11 @@ describe('ChannelBase', () => {
         ...createChannelMemory([relevant]),
         getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -8915,6 +10412,14 @@ describe('ChannelBase', () => {
       );
       expect(promptMock.mock.calls[1]![1]).toContain(
         relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ cache: 'miss', result: 'selected' }),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ cache: 'hit', result: 'selected' }),
       );
     });
 
@@ -9020,7 +10525,11 @@ describe('ChannelBase', () => {
           .fn()
           .mockRejectedValue(new Error('revision unavailable')),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -9033,6 +10542,11 @@ describe('ChannelBase', () => {
       );
       expect(promptMock.mock.calls[1]![1]).toContain(
         relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ cache: 'bypass', result: 'selected' }),
       );
     });
 
@@ -9083,7 +10597,11 @@ describe('ChannelBase', () => {
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(
         envelope({ text: 'deploy secret-project', senderId: 'alice' }),
@@ -9097,6 +10615,12 @@ describe('ChannelBase', () => {
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
       ).toContain('Deploy secret-project to staging.');
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'miss',
+        durationMs: expect.any(Number),
+        result: 'revision_unstable',
+        selectedCount: 1,
+      });
       stderrSpy.mockRestore();
     });
 
@@ -9144,6 +10668,7 @@ describe('ChannelBase', () => {
         ...createChannelMemory(),
         getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
       };
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries
         .mockReturnValueOnce(firstRead)
         .mockImplementation(async () => entries);
@@ -9155,7 +10680,7 @@ describe('ChannelBase', () => {
       );
       const ch = createChannel(
         { instructions: 'Static instructions.', allowedUsers: ['alice'] },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       const first = ch.handleInbound(
@@ -9183,6 +10708,14 @@ describe('ChannelBase', () => {
         relevantChannelMemoryPrompt(entries),
       );
       expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          cache: 'miss',
+          result: 'stale',
+          selectedCount: 0,
+        }),
+      );
     });
 
     it('preserves a pending normal recall snapshot when another target mutates', async () => {
@@ -9232,19 +10765,70 @@ describe('ChannelBase', () => {
           text: `unrelated ${'x'.repeat(121)}`,
         },
       ]);
-      const ch = createChannel({}, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        {},
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy staging' }));
 
       expect((bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(
         'deploy staging',
       );
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'empty',
+        selectedCount: 0,
+      });
+    });
+
+    it('bounds the observed selected count to the recall entry budget', async () => {
+      const channelMemory = createChannelMemory(
+        Array.from({ length: 4 }, (_, index) => ({
+          id: `m-${String(index).padStart(12, '0')}`,
+          text: `deploy target ${index}`,
+        })),
+      );
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        {},
+        { channelMemory, channelMemoryRecallObserver },
+      );
+
+      await ch.handleInbound(envelope({ text: 'deploy target' }));
+
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith(
+        expect.objectContaining({ selectedCount: 3 }),
+      );
+    });
+
+    it('ignores channel memory recall observer failures', async () => {
+      const relevant = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const channelMemory = createChannelMemory([relevant]);
+      const ch = createChannel(
+        {},
+        {
+          channelMemory,
+          channelMemoryRecallObserver: () => {
+            throw new Error('observer unavailable');
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: 'deploy staging' }));
+
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
+      ).toContain(relevantChannelMemoryPrompt([relevant]));
     });
 
     it('does not list or inject recall for recognized agent slash commands', async () => {
       const channelMemory = createChannelMemory([
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
       ]);
+      const channelMemoryRecallObserver = vi.fn();
       (
         bridge as unknown as {
           availableCommands: Array<{ name: string; description: string }>;
@@ -9252,7 +10836,7 @@ describe('ChannelBase', () => {
       ).availableCommands = [{ name: 'compress', description: 'Compress' }];
       const ch = createChannel(
         { allowedUsers: ['alice'], instructions: 'Static instructions.' },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       await ch.handleInbound(
@@ -9261,6 +10845,7 @@ describe('ChannelBase', () => {
 
       expect(channelMemory.listChannelMemoryEntries).not.toHaveBeenCalled();
       expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemoryRecallObserver).not.toHaveBeenCalled();
       expect((bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(
         'Static instructions.\n\n/compress',
       );
@@ -10231,6 +11816,83 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('allocates output segments lazily and rotates them at response boundaries', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'first ');
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'second');
+          return Promise.resolve('second');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'segment-message' }));
+
+      expect(ch.taskEvents[0]).toMatchObject({ type: 'started' });
+      expect(ch.taskEvents[0]).not.toHaveProperty('segmentId');
+      expect(ch.responseChunks).toHaveLength(3);
+      const firstSegment = ch.responseChunks[0]!.segment as
+        | { runId?: string; segmentId?: string }
+        | undefined;
+      const repeatedSegment = ch.responseChunks[1]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      const secondSegment = ch.responseChunks[2]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(firstSegment).toMatchObject({
+        runId: expect.any(String),
+        segmentId: expect.any(String),
+      });
+      expect(repeatedSegment?.segmentId).toBe(firstSegment?.segmentId);
+      expect(secondSegment?.segmentId).not.toBe(firstSegment?.segmentId);
+      expect(ch.responseBoundaries).toEqual([
+        {
+          chatId: 'chat1',
+          sessionId: 's-1',
+          segment: undefined,
+          reason: undefined,
+        },
+      ]);
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'second',
+          segment: expect.objectContaining({
+            segmentId: secondSegment?.segmentId,
+          }),
+        }),
+      ]);
+    });
+
+    it('closes streamed output when the provider completes without a response body', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'streamed only',
+          );
+          return Promise.resolve('');
+        },
+      );
+      const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
+
+      await ch.handleInbound(envelope());
+
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'completed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
+    });
+
     it('does not expose mutable lifecycle metadata references', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
       const ch = createChannel({
@@ -10356,21 +12018,36 @@ describe('ChannelBase', () => {
     });
 
     it('emits failed lifecycle event when prompting rejects', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('agent boom'),
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'partial');
+          return Promise.reject(new Error('agent boom'));
+        },
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
 
       await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
 
-      expect(ch.taskEvents).toEqual([
-        expect.objectContaining({ type: 'started' }),
-        expect.objectContaining({
-          type: 'failed',
-          error: 'agent boom',
-          phase: 'agent',
-        }),
-      ]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({
+            type: 'failed',
+            error: 'agent boom',
+            phase: 'agent',
+          }),
+        ]),
+      );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'failed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('contains a throwing onTaskLifecycle hook and logs it', async () => {
@@ -10404,7 +12081,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('logs turn errors that arrive after cancellation', async () => {
+    it('logs and contains turn errors that arrive after cancellation', async () => {
       let rejectPrompt!: (error: Error) => void;
       (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise<string>((_resolve, reject) => {
@@ -10422,7 +12099,7 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/cancel' }));
         rejectPrompt(new Error('bridge crashed'));
 
-        await expect(prompt).rejects.toThrow('bridge crashed');
+        await expect(prompt).resolves.toBeUndefined();
         expect(
           ch.taskEvents.filter((event) => event.type === 'failed'),
         ).toEqual([]);
@@ -10498,10 +12175,19 @@ describe('ChannelBase', () => {
         pendingPrompt,
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
       ch.enableCancelCommand();
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'partial',
+      );
       await ch.handleInbound(envelope({ text: '/cancel' }));
       resolvePrompt('late');
       await prompt;
@@ -10520,6 +12206,14 @@ describe('ChannelBase', () => {
           expect.objectContaining({ type: 'completed' }),
         ]),
       );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'cancelled',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {
@@ -10761,7 +12455,7 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
       await ch.handleInbound(envelope({ text: '/cancel' }));
       rejectPrompt(new Error('bridge cancelled'));
-      await expect(prompt).rejects.toThrow('bridge cancelled');
+      await expect(prompt).resolves.toBeUndefined();
 
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
@@ -10791,7 +12485,7 @@ describe('ChannelBase', () => {
       const cancel = ch.cancelPromptForTest('s-1');
       expect(cancel).toBeDefined();
       rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-      await expect(prompt).rejects.toThrow('aborted');
+      await expect(prompt).resolves.toBeUndefined();
       await expect(cancel).resolves.toBe(true);
 
       expect(ch.taskEvents).toEqual([
@@ -11348,11 +13042,13 @@ describe('ChannelBase', () => {
       await prompt;
 
       expect(ch.responseBoundaries).toEqual([]);
-      expect(ch.responseChunks).toContainEqual({
-        chatId: 'chat1',
-        chunk: 'held while cancel pending',
-        sessionId: 's-1',
-      });
+      expect(ch.responseChunks).toContainEqual(
+        expect.objectContaining({
+          chatId: 'chat1',
+          chunk: 'held while cancel pending',
+          sessionId: 's-1',
+        }),
+      );
     });
 
     it('does not emit buffered stream text after cancellation', async () => {
@@ -11627,6 +13323,28 @@ describe('ChannelBase', () => {
         expect.stringContaining('pairing notification failed'),
       );
       stderr.mockRestore();
+    });
+
+    it('passes threadId through to sendThreadMessage', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await ch.handleInbound(
+        envelope({ senderId: 'stranger', threadId: 'issue:42' }),
+      );
+
+      expect(threadMessages).toHaveLength(1);
+      expect(threadMessages[0]!.threadId).toBe('issue:42');
+      expect(threadMessages[0]!.text).toContain('pairing code');
     });
   });
 
@@ -14007,7 +15725,7 @@ describe('ChannelBase', () => {
         }
       });
 
-      it('emits lifecycle events and response chunks for webhook bridge chunks', async () => {
+      it('emits lifecycle events with an unattended run identity for webhook bridge chunks', async () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
           (sid: string) => {
             (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -14037,6 +15755,17 @@ describe('ChannelBase', () => {
         expect(ch.responseChunks).toEqual([
           { chatId: 'group-1', chunk: 'part', sessionId: 's-1' },
         ]);
+        const events = ch.taskEvents as Array<
+          ChannelTaskLifecycleEvent & {
+            runId?: string;
+            owner?: { kind: string; id: string };
+          }
+        >;
+        expect(events[0]!.runId).toEqual(expect.any(String));
+        expect(new Set(events.map((event) => event.runId))).toEqual(
+          new Set([events[0]!.runId]),
+        );
+        expect(events.every((event) => event.owner === undefined)).toBe(true);
       });
 
       it('routes webhook permission requests to the configured thread target', async () => {
@@ -15027,7 +16756,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('emits lifecycle events for loop chunks and completion', async () => {
+    it('emits lifecycle events with an unattended run identity for loop chunks and completion', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -15067,6 +16796,17 @@ describe('ChannelBase', () => {
         }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(events.every((event) => event.owner === undefined)).toBe(true);
     });
 
     it('suppresses loop chunks while cancellation is pending', async () => {
@@ -15411,6 +17151,7 @@ describe('ChannelBase', () => {
           message: 'loop timed out',
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
         expect(
           (
             ch as unknown as {

@@ -13,6 +13,48 @@ describe('workspace actions', () => {
     vi.useRealTimers();
   });
 
+  it('forwards workspace updates to the daemon client', async () => {
+    const workspace = {
+      id: 'secondary',
+      cwd: '/ws/secondary',
+      displayName: 'Payments',
+      primary: false,
+      trusted: true,
+    };
+    const updateWorkspace = vi.fn().mockResolvedValue(workspace);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ updateWorkspace }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(
+      actions.updateWorkspace('secondary', { displayName: 'Payments' }),
+    ).resolves.toEqual(workspace);
+    expect(updateWorkspace).toHaveBeenCalledWith('secondary', {
+      displayName: 'Payments',
+    });
+  });
+
+  it('preheats ACP with the requested timeout', async () => {
+    const workspaceAcpPreheat = vi.fn().mockResolvedValue({
+      ready: true,
+      channelLive: true,
+      durationMs: 2,
+    });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceAcpPreheat }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.preheatAcp(5_000)).resolves.toMatchObject({
+      ready: true,
+      channelLive: true,
+    });
+    expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
@@ -111,6 +153,69 @@ describe('workspace actions', () => {
     expect(remove).toHaveBeenCalledWith({ timeoutMs: 0 });
   });
 
+  it('does not preempt SDK timeouts for channel mutations', async () => {
+    vi.useFakeTimers();
+    let resolveUpsert!: () => void;
+    let resolveApproval!: () => void;
+    const upsertWorkspaceChannel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUpsert = resolve;
+        }),
+    );
+    const approveWorkspaceChannelPairing = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveApproval = resolve;
+        }),
+    );
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          workspaceByCwd: () => ({
+            upsertWorkspaceChannel,
+            approveWorkspaceChannelPairing,
+          }),
+        }) as never,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+    let upsertStatus = 'pending';
+    let approvalStatus = 'pending';
+    const upsert = actions
+      .upsertChannel('bot', {
+        expectedRevision: '1',
+        config: { type: 'dingtalk' },
+      })
+      .then(
+        () => {
+          upsertStatus = 'resolved';
+        },
+        () => {
+          upsertStatus = 'rejected';
+        },
+      );
+    const approval = actions.channelPairing.approve('bot', 'ABCDEFGH').then(
+      () => {
+        approvalStatus = 'resolved';
+      },
+      () => {
+        approvalStatus = 'rejected';
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(upsertStatus).toBe('pending');
+    expect(approvalStatus).toBe('pending');
+
+    resolveUpsert();
+    resolveApproval();
+    await Promise.all([upsert, approval]);
+    expect(upsertStatus).toBe('resolved');
+    expect(approvalStatus).toBe('resolved');
+  });
+
   it('loads active extension operations from the daemon client', async () => {
     const activeExtensionOperations = vi
       .fn()
@@ -180,5 +285,191 @@ describe('workspace actions', () => {
         cancelled: true,
       }),
     ).rejects.toThrow('Respond to extension interaction failed');
+  });
+
+  it('routes Channel management and pairing through the current workspace', async () => {
+    let cwd = '/workspace-a';
+    const catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    const snapshot = { revision: '1', instances: {} };
+    const mutation = {
+      snapshot,
+      instance: {
+        name: 'bot',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' as const },
+      },
+    };
+    const pairing = { requests: [] };
+    const approval = {
+      ...pairing,
+      approved: {
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        code: 'ABCDEFGH',
+        createdAt: 1,
+      },
+    };
+    const pairingApprovals = { senderIds: ['sender-1', 'sender-2'] };
+    const pairingRevocation = {
+      revoked: 'sender-1',
+      senderIds: ['sender-2'],
+    };
+    const workspace = {
+      workspaceChannelTypes: vi.fn().mockResolvedValue(catalog),
+      workspaceChannels: vi.fn().mockResolvedValue(snapshot),
+      upsertWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
+      deleteWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
+      setWorkspaceChannelStartup: vi.fn().mockResolvedValue(mutation),
+      startWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
+      stopWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
+      restartWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
+      workspaceChannelPairingRequests: vi.fn().mockResolvedValue(pairing),
+      approveWorkspaceChannelPairing: vi.fn().mockResolvedValue(approval),
+      workspaceChannelPairingApprovals: vi
+        .fn()
+        .mockResolvedValue(pairingApprovals),
+      revokeWorkspaceChannelPairingApproval: vi
+        .fn()
+        .mockResolvedValue(pairingRevocation),
+    };
+    const workspaceByCwd = vi.fn(() => workspace);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => cwd,
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.loadChannels()).resolves.toEqual({
+      catalog,
+      snapshot,
+    });
+    cwd = '/workspace-b';
+    await actions.upsertChannel('bot', {
+      expectedRevision: '1',
+      config: { type: 'dingtalk' },
+    });
+    await actions.removeChannel('bot', { expectedRevision: '1' });
+    await actions.setChannelStartup('bot', {
+      expectedRevision: '1',
+      enabled: true,
+    });
+    await actions.startChannel('bot');
+    await actions.stopChannel('bot');
+    await actions.restartChannel('bot');
+    await expect(actions.channelPairing.list('bot')).resolves.toBe(pairing);
+    await expect(
+      actions.channelPairing.approve('bot', 'abcdefgh'),
+    ).resolves.toBe(approval);
+    await expect(actions.channelPairing.approvals('bot')).resolves.toBe(
+      pairingApprovals,
+    );
+    await expect(
+      actions.channelPairing.revoke('bot', 'sender-1'),
+    ).resolves.toBe(pairingRevocation);
+
+    expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
+    expect(workspaceByCwd).toHaveBeenLastCalledWith('/workspace-b');
+    expect(workspace.upsertWorkspaceChannel).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+      config: { type: 'dingtalk' },
+    });
+    expect(workspace.deleteWorkspaceChannel).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+    });
+    expect(workspace.setWorkspaceChannelStartup).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+      enabled: true,
+    });
+    expect(workspace.startWorkspaceChannel).toHaveBeenCalledWith('bot');
+    expect(workspace.stopWorkspaceChannel).toHaveBeenCalledWith('bot');
+    expect(workspace.restartWorkspaceChannel).toHaveBeenCalledWith('bot');
+    expect(workspace.approveWorkspaceChannelPairing).toHaveBeenCalledWith(
+      'bot',
+      { code: 'abcdefgh' },
+    );
+    expect(workspace.workspaceChannelPairingApprovals).toHaveBeenCalledWith(
+      'bot',
+    );
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { senderId: 'sender-1' });
+  });
+
+  it('rejects Channel management without a selected workspace', async () => {
+    const workspaceByCwd = vi.fn();
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.loadChannels()).rejects.toThrow(
+      'Daemon workspace is not connected',
+    );
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it('forwards the directory picker to the daemon client', async () => {
+    const pickerResult = {
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    };
+    const workspaceDirectoryPicker = vi.fn().mockResolvedValue(pickerResult);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).resolves.toEqual(
+      pickerResult,
+    );
+    expect(workspaceDirectoryPicker).toHaveBeenCalledOnce();
+  });
+
+  it('applies the 320s timeout to the directory picker', async () => {
+    vi.useFakeTimers();
+    const workspaceDirectoryPicker = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    const result = actions.pickWorkspaceDirectory().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(320_000);
+
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: 'Open directory picker timed out after 320000ms',
+    });
+  });
+
+  it('rejects the directory picker without a connected client', async () => {
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => undefined,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).rejects.toThrow(
+      'Open directory picker failed: DaemonClient is not connected',
+    );
   });
 });

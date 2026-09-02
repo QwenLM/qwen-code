@@ -145,6 +145,16 @@ describe('buildMarkdown section order', () => {
     expect(md).not.toContain('## Open inline comments');
     expect(md).toContain('## Already discussed');
   });
+
+  it('renders the root comment id in both open and already-discussed entries', () => {
+    // The id is the stable join key back to comment-status's per-thread
+    // rootId; two short roots at the same path:line by the same author are
+    // otherwise indistinguishable. `root` heads a discussed thread, `open`
+    // is an un-replied root.
+    const md = buildMarkdown('1', 'o/r', meta, [root, reply, open], [], []);
+    expect(md).toContain(`(comment ${open.id})`);
+    expect(md).toContain(`(comment ${root.id})`);
+  });
 });
 
 describe('fullBody', () => {

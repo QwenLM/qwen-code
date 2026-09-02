@@ -10,6 +10,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { createWorkspaceRegistry } from '../workspace-registry.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   setDaemonTelemetryWorkspace: vi.fn(),
@@ -55,12 +56,12 @@ function registry(opts: {
   resolveLiveSessionOwner: ReturnType<typeof vi.fn>;
 } {
   const resolveLiveSessionOwner = vi.fn(() => opts.resolution);
+  const workspaceRegistry = createWorkspaceRegistry(opts.runtimes);
+  vi.spyOn(workspaceRegistry, 'resolveLiveSessionOwner').mockImplementation(
+    resolveLiveSessionOwner,
+  );
   return {
-    registry: {
-      primary: opts.primary,
-      list: () => opts.runtimes,
-      resolveLiveSessionOwner,
-    } as unknown as WorkspaceRegistry,
+    registry: workspaceRegistry,
     resolveLiveSessionOwner,
   };
 }

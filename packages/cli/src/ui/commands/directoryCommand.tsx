@@ -82,7 +82,7 @@ function getPathCompletions(
   const namePrefix = endsWithSep ? '' : path.basename(expanded);
 
   try {
-    return fs
+    const children = fs
       .readdirSync(searchDir, { withFileTypes: true })
       .filter(
         (e) =>
@@ -93,8 +93,22 @@ function getPathCompletions(
       .map((e) => ({
         value: prefix + path.join(searchDir, e.name) + path.sep,
         isDirectory: true,
-      }))
-      .slice(0, 8);
+      }));
+
+    // When the input ends with a separator (e.g. "learn/"), also include
+    // the typed directory itself so the user can select it to cd into it
+    // rather than being forced to pick a child (#7318).
+    if (endsWithSep) {
+      const selfPath = prefix + searchDir;
+      const normalizedSelf = selfPath.endsWith(path.sep)
+        ? selfPath
+        : selfPath + path.sep;
+      if (!children.some((c) => c.value === normalizedSelf)) {
+        children.unshift({ value: normalizedSelf, isDirectory: true });
+      }
+    }
+
+    return children.slice(0, 8);
   } catch {
     return [];
   }

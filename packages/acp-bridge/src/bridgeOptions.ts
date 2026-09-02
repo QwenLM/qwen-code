@@ -177,7 +177,7 @@ export interface BridgeOptions {
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not
-   * counted. `0` / `Infinity` disable the cap. Defaults to 20 — see
+   * counted. `0` / `Infinity` disable the cap. Defaults to 32 — see
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
@@ -218,6 +218,19 @@ export interface BridgeOptions {
    * positive safe integer; there is no unlimited sentinel.
    */
   compactedReplayMaxBytes?: number;
+  /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal (the current unfinished turn). When exceeded, the oldest
+   * journal entries are dropped. Defaults to 10 000. Must be a positive
+   * safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. When exceeded, the
+   * oldest journal entries are dropped (at least one entry is always kept).
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   */
+  maxJournalBytes?: number;
   /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
@@ -451,6 +464,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles one child-initiated Channel delivery attempt. The bridge
+   * authenticates the session and publishes the sanitized result event. */
+  onChannelDelivery?: ChannelDeliveryHandler;
 }
 
 /**
@@ -461,9 +477,15 @@ export interface BridgeOptions {
  * package free of an MCP-SDK dependency; the serve layer passes a
  * `JSONRPCMessage`.
  */
+export interface ClientMcpMessageContext {
+  sessionId?: string;
+}
+
 export type ClientMcpMessageSender = (
   serverName: string,
-) => ((payload: unknown) => Promise<unknown>) | undefined;
+) =>
+  | ((payload: unknown, context?: ClientMcpMessageContext) => Promise<unknown>)
+  | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
  * separate process, so this is a trust boundary — mirrors the scheduled-task
@@ -515,3 +537,50 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+// Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
+// sdk-typescript events.ts carries an independent copy with a cross-check test.
+export type ChannelDeliveryErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_delivery_timeout'
+  | 'channel_delivery_invalid'
+  | 'channel_delivery_rejected'
+  | 'channel_delivery_queue_full'
+  | 'channel_delivery_failed';
+
+export const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_delivery_timeout',
+  'channel_delivery_invalid',
+  'channel_delivery_rejected',
+  'channel_delivery_queue_full',
+  'channel_delivery_failed',
+]);
+
+export interface ChannelDeliveryInfo {
+  sessionId: string;
+  deliveryId: string;
+  source: 'prompt' | 'scheduled';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+  text: string;
+  promptId?: string;
+  taskId?: string;
+  firedAt?: number;
+}
+
+export type ChannelDeliveryHostResult =
+  | { status: 'delivered' }
+  | { status: 'skipped' }
+  | {
+      status: 'failed';
+      code: ChannelDeliveryErrorCode;
+      error: string;
+    };
+
+export type ChannelDeliveryHandler = (
+  info: ChannelDeliveryInfo,
+) => Promise<ChannelDeliveryHostResult>;

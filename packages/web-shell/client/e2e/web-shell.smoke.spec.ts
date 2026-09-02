@@ -69,6 +69,32 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('pastes long plain text as editable composer content @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const pasted = `${'original '.repeat(151)}end`;
+  const edited = `${pasted} edited`;
+
+  await gotoSession(page, scenario, daemon);
+  await pasteComposerText(page, pasted);
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText(pasted);
+  await expect(editor).not.toContainText('Pasted Content');
+
+  await page.keyboard.type(' edited');
+  await expect(editor).toHaveText(edited);
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    requestBodyRecord(firstRequest(daemon.promptRequests())),
+    edited,
+  );
+});
+
 test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
   page,
 }, testInfo) => {
@@ -215,6 +241,198 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
     .locator('[data-web-shell-theme-option][data-theme-id="light"]')
     .click();
   await expect(page.locator('[data-web-shell-theme-dialog]')).toHaveCount(0);
+});
+
+test('selects and scrolls scheduled-task prompt references @smoke', async ({
+  page,
+}, testInfo) => {
+  const extensions = Array.from({ length: 20 }, (_, index) => ({
+    id: `extension-${index + 1}`,
+    name: `extension-${index + 1}`,
+    displayName: `Extension ${index + 1}`,
+    description: '',
+    version: '1.0.0',
+    isActive: true,
+    path: `/extensions/${index + 1}`,
+    capabilities: {},
+  }));
+  const scenario = createWebShellDaemonScenario({
+    extensions: { extensions },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.route('**/scheduled-tasks', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ tasks: [] }),
+    });
+  });
+
+  await gotoSession(page, scenario, daemon);
+  await page.getByRole('button', { name: 'Scheduled Tasks' }).click();
+  await page.getByRole('button', { name: 'New scheduled task' }).click();
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await expect
+    .poll(() => prompt.evaluate((element) => getComputedStyle(element).cursor))
+    .toBe('text');
+
+  const extensionsButton = page.getByRole('button', { name: 'Extensions' });
+  const promptStyles = await prompt.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { backgroundColor: style.backgroundColor, color: style.color };
+  });
+  const referenceButtonStyles = await page
+    .getByRole('button', { name: /^(Extensions|Skills|MCP)$/ })
+    .evaluateAll((elements) =>
+      elements.map((element) => {
+        const style = getComputedStyle(element);
+        return {
+          backgroundColor: style.backgroundColor,
+          borderColor: style.borderColor,
+          color: style.color,
+        };
+      }),
+    );
+  expect(referenceButtonStyles).toHaveLength(3);
+  for (const style of referenceButtonStyles) {
+    expect(style.backgroundColor).toBe(promptStyles.backgroundColor);
+    expect(style.borderColor).not.toBe(promptStyles.color);
+    expect(style.color).not.toBe(promptStyles.color);
+  }
+
+  await extensionsButton.hover();
+  await expect
+    .poll(() =>
+      extensionsButton.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { borderColor: style.borderColor, color: style.color };
+      }),
+    )
+    .toEqual({
+      borderColor: promptStyles.color,
+      color: promptStyles.color,
+    });
+  await extensionsButton.click();
+
+  const picker = page.getByRole('listbox', { name: 'Reference picker' });
+  await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate(
+        (element) => element.scrollHeight > element.clientHeight + 1,
+      ),
+    )
+    .toBe(true);
+
+  await picker.hover();
+  await page.mouse.wheel(0, 400);
+  await expect
+    .poll(() => picker.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+
+  await page.getByRole('option', { name: /extension-20 Extension 20/ }).click();
+  const tag = prompt.locator(
+    '[data-prompt-tag-serialized="@ext:extension-20"]',
+  );
+  await expect(tag).toBeVisible();
+  const promptBox = await prompt.boundingBox();
+  if (!promptBox) throw new Error('Prompt editor has no bounding box');
+  const blankPosition = {
+    x: promptBox.width - 40,
+    y: promptBox.height / 2,
+  };
+  const remove = tag.locator('[data-prompt-tag-remove]');
+
+  await prompt.hover({ position: blankPosition });
+  await expect(
+    remove.evaluate((element) => element.matches(':hover')),
+  ).resolves.toBe(false);
+  await prompt.click({ position: blankPosition });
+  await expect(tag).toBeVisible();
+
+  await remove.click();
+  await expect(tag).toHaveCount(0);
+});
+
+test('gates voice dictation on the workspace voice setting @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    voice: {
+      enabled: false,
+    },
+  });
+  scenario.capabilities.features = [
+    ...scenario.capabilities.features,
+    'voice_transcribe',
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  const voiceButton = page.getByRole('button', {
+    name: 'Start voice dictation',
+  });
+
+  await gotoSession(page, scenario, daemon);
+  await expect(voiceButton).toHaveCount(0);
+
+  scenario.voice.enabled = true;
+  await page.reload();
+  await completeReplay(page, daemon);
+  await expect(voiceButton).toBeVisible();
+});
+
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
@@ -489,6 +707,20 @@ async function replaceComposerText(page: Page, text: string): Promise<void> {
     process.platform === 'darwin' ? 'Meta+A' : 'Control+A',
   );
   await page.keyboard.insertText(text);
+}
+
+async function pasteComposerText(page: Page, text: string): Promise<void> {
+  const origin = new URL(page.url()).origin;
+  await page
+    .context()
+    .grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await page.evaluate((clipboardText) => {
+    return navigator.clipboard.writeText(clipboardText);
+  }, text);
+  await page.locator('[data-web-shell-composer-editor] .cm-content').click();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+V' : 'Control+V',
+  );
 }
 
 async function pasteComposerImages(page: Page, count: number): Promise<void> {

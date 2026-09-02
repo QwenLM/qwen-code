@@ -13,11 +13,14 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  zoom_image: 'ZoomImage',
   grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
   todo_write: 'TodoList',
+  get_goal: 'Goal',
+  update_goal: 'UpdateGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
@@ -34,6 +37,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
+  list_agents: 'ListAgents',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',
@@ -53,6 +57,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
   web_search: 'WebSearch',
+  image_gen: 'ImageGen',
   bash: 'Shell',
   shell: 'Shell Command',
   read: 'ReadFile',
@@ -504,6 +509,26 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+/**
+ * Locale-aware agent type display name. Looks up `agentType.<name>`
+ * (case-insensitive) via the translator; falls back to the raw name
+ * for user-defined agents that have no i18n entry.
+ */
+export function localizeAgentTypeName(
+  agentType: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const keys = [
+    `agentType.${agentType}`,
+    `agentType.${agentType.toLowerCase()}`,
+  ];
+  for (const key of keys) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
+  return agentType;
 }
 
 export function getAgentDescription(agent: ACPToolCall): string {

@@ -4,6 +4,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
@@ -58,7 +60,32 @@ function agentTask(
   };
 }
 
-function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
+function monitorTask(
+  overrides: Partial<DaemonSessionMonitorTaskStatus> = {},
+): DaemonSessionMonitorTaskStatus {
+  return {
+    kind: 'monitor',
+    id: 'monitor-1',
+    label: 'monitor-label',
+    description: 'watch server log',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'tail -f server.log',
+    eventCount: 3,
+    lastEventTime: 5_000,
+    droppedLines: 0,
+    ...overrides,
+  };
+}
+
+function renderPanel(
+  tasks: DaemonSessionTaskStatus[],
+  options: {
+    embedded?: boolean;
+    onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
+  } = {},
+): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
     v: 1,
     sessionId: 'session-1',
@@ -72,12 +99,53 @@ function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TasksStatusMessage message={{ snapshot }} manageActiveEvent={false} />
+        <TasksStatusMessage
+          message={{ snapshot }}
+          embedded={options.embedded}
+          manageActiveEvent={false}
+          onOpenMonitor={options.onOpenMonitor}
+        />
       </I18nProvider>,
     );
   });
   return container;
 }
+
+describe('TasksStatusMessage monitor details', () => {
+  it('opens an embedded monitor in the right-panel callback', () => {
+    const onOpenMonitor = vi.fn();
+    const task = monitorTask();
+    const container = renderPanel([task], {
+      embedded: true,
+      onOpenMonitor,
+    });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+    expect(label?.parentElement).not.toBeNull();
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(onOpenMonitor).toHaveBeenCalledOnce();
+    expect(onOpenMonitor).toHaveBeenCalledWith(task);
+    expect(container.textContent).not.toContain('tail -f server.log');
+  });
+
+  it('keeps the existing inline detail when no panel callback is provided', () => {
+    const container = renderPanel([monitorTask()], { embedded: true });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(container.textContent).toContain('tail -f server.log');
+  });
+});
 
 describe('TasksStatusMessage nested-agent tree', () => {
   it('groups a child directly beneath its parent across the sort order', () => {
@@ -148,15 +216,16 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     // The global keydown listener attaches after a 50 ms guard delay.
+    // Use 200 ms to keep a generous margin on slow CI runners.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('ArrowDown'); // select the child (row 2)
     await press('x');
@@ -177,14 +246,14 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('x'); // fully-foreground chain → arms the confirm instead
     expect(cancelTaskMock).not.toHaveBeenCalled();
@@ -224,12 +293,12 @@ describe('TasksStatusMessage nested-agent tree', () => {
     const container = renderPanel(tasks);
     // Global keydown listener attaches after a 50 ms guard delay.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     // Enter opens the detail view for the selected (only) task.
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const text = container.textContent ?? '';
     // Only the newest five (activity-3 … activity-7) render; older drop.

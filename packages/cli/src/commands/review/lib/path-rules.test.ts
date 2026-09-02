@@ -85,4 +85,21 @@ describe('pathRulesFor — scoped, or it is noise', () => {
     const out = pathRulesFor(['.github/workflows/x.yml']);
     expect(out).toContain('blast radius of the blocker above');
   });
+
+  it('asks whether a cache mechanism can fire at all, not only whether it is safe', () => {
+    // The checklist already covered a cache a fork can *poison*. It said nothing
+    // about one that can never *hit*, and on a real PR that gap held: the producer
+    // and the consumer shared a key and shared the `path:` line, so every
+    // YAML-shape assertion went green while `actions/cache` hashed two different
+    // `version`s — host path vs container path, zstd vs gzip — and no restore
+    // could ever match. Shape parity between the two sides is not identity parity,
+    // and no dimension agent asks which runner each side actually runs on.
+    const out = pathRulesFor(['.github/workflows/x.yml']);
+    expect(out).toContain('never agree on identity');
+    // What settles it is a comparison of environments, not of YAML strings.
+    expect(out).toMatch(/Compare the \*\*environments\*\*/);
+    expect(out).toContain('runs-on');
+    // And a miss nobody can observe is part of the finding, not a separate nit.
+    expect(out).toContain('$GITHUB_STEP_SUMMARY');
+  });
 });

@@ -16,6 +16,7 @@ import {
   captureScreenshot,
   completeReplay,
   fillComposer,
+  gotoNewSession,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -160,6 +161,197 @@ for (const theme of THEMES) {
         page.getByRole('button', { name: 'Local Notes' }),
       ).toBeVisible();
       await captureScreenshot(page, `extensions-manager-${theme}`);
+    });
+
+    test(`Channel manager`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'dingtalk',
+            displayName: 'DingTalk',
+            manageable: true,
+            fields: [
+              {
+                key: 'clientId',
+                label: 'Client ID',
+                kind: 'string',
+                required: true,
+                envResolvable: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'Client Secret',
+                kind: 'secret',
+                required: true,
+                envResolvable: true,
+              },
+            ],
+          },
+          {
+            type: 'wecom',
+            displayName: 'WeCom',
+            manageable: true,
+            fields: [
+              {
+                key: 'botId',
+                label: 'Bot ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'secret',
+                label: 'Bot Secret',
+                kind: 'secret',
+                required: true,
+              },
+              {
+                key: 'wsUrl',
+                label: 'WebSocket URL',
+                kind: 'string',
+                required: false,
+                envResolvable: true,
+              },
+            ],
+          },
+          {
+            type: 'feishu',
+            displayName: 'Feishu',
+            manageable: true,
+            fields: [
+              {
+                key: 'clientId',
+                label: 'App ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'App Secret',
+                kind: 'secret',
+                required: true,
+              },
+            ],
+          },
+          {
+            type: 'telegram',
+            displayName: 'Telegram',
+            manageable: true,
+            fields: [],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            dingtalk: {
+              name: 'dingtalk',
+              config: {
+                type: 'dingtalk',
+                clientId: 'ding-visual-app',
+                senderPolicy: 'pairing',
+              },
+              secrets: {
+                clientSecret: { present: true, source: 'literal' },
+              },
+              startsWithServe: true,
+              runtime: { state: 'connected' },
+            },
+            feishu: {
+              name: 'release-notifier',
+              config: { type: 'feishu' },
+              secrets: {
+                clientSecret: { present: true, source: 'environment' },
+              },
+              startsWithServe: false,
+              runtime: {
+                state: 'error',
+                lastError: 'The app credentials were rejected.',
+              },
+            },
+            hidden: {
+              name: 'hidden-telegram',
+              config: { type: 'telegram' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+        pairingRequests: {
+          dingtalk: [
+            {
+              senderId: 'user-42',
+              senderName: 'Ada',
+              code: 'ABCD1234',
+              createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+            },
+            {
+              senderId: 'user-91',
+              senderName: 'Lin',
+              code: 'WXYZ5678',
+              createdAt: Date.parse('2026-07-28T00:04:00.000Z'),
+            },
+          ],
+        },
+        pairingApprovals: {
+          dingtalk: ['user-18', 'release-manager'],
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      const configuredChannels = page.getByLabel('Configured channels');
+      await expect(
+        configuredChannels.getByText('dingtalk', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        configuredChannels.getByText('release-notifier', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('hidden-telegram')).toHaveCount(0);
+      await captureScreenshot(page, `channel-manager-${theme}`);
+      await page.getByRole('button', { name: 'Configure DingTalk' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure DingTalk' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `channel-editor-${theme}`);
+      await page.keyboard.press('Escape');
+      await page.getByRole('button', { name: 'Edit dingtalk' }).click();
+      const editHeading = page.getByRole('heading', {
+        name: 'Edit DingTalk',
+      });
+      await expect(editHeading).toBeVisible();
+      await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await expect(page.getByText('user-18', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('release-manager', { exact: true }),
+      ).toBeVisible();
+      await editHeading.click();
+      await page
+        .getByRole('heading', { name: 'Pairing approvals' })
+        .scrollIntoViewIfNeeded();
+      await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
@@ -391,6 +583,62 @@ for (const theme of THEMES) {
       // screenshot and the capture differs between runs.
       await expect(sidebar.getByText(primarySessionName)).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
+    });
+
+    test(`git mode selector`, async ({ page }, testInfo) => {
+      // The new-session composer offers a git-mode selector (current branch /
+      // new branch / worktree) only when the workspace the next session would
+      // use is trusted AND a git repo, and App.tsx wires the intent props only
+      // while no session is loaded. So this empty state is the suite's only
+      // view of the popover — without a scenario the whole selector (and the
+      // empty-state composer around it) is invisible to the before/after
+      // preview.
+      const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        capabilities: {
+          workspaces: [
+            { id: 'primary', cwd: workspaceCwd, primary: true, trusted: true },
+          ],
+        },
+        gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+      });
+      await installScenario(page, scenario, resolveBaseURL(testInfo));
+      await gotoNewSession(page, theme);
+
+      // Closed: the composer chip advertising the current git mode.
+      const chip = page.locator('[data-testid="git-mode-chip"]');
+      await expect(chip).toBeVisible();
+      await captureScreenshot(page, `git-mode-chip-${theme}`);
+
+      // Open: the three-mode popover (current / new branch / worktree). Assert
+      // an option is visible (not just the chip's aria-label) so a regression
+      // that fails to open the popover fails here, not only in the visually
+      // reviewed screenshot.
+      await chip.click();
+      await expect(
+        page.getByText('Current branch', { exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `git-mode-popover-${theme}`);
+
+      // #7668 keeps this sub-state open. Match the option by role — its label
+      // spans a name + description span, so getByText is ambiguous.
+      const popover = page.locator('[data-slot="popover-content"]');
+      await popover.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await expect(branchInput).toBeVisible();
+      await branchInput.fill('feat/my-feature');
+      // Regression guard for #7668: the input flashes visible on click, but the
+      // pre-fix dismissal landed ~100ms later, so an immediate assertion still
+      // passed. Settle past that window and re-assert, so a re-dismissal hard-fails
+      // here — mirroring the functional web-shell.git-mode.spec.ts.
+      await page.waitForTimeout(300);
+      await expect(popover).toBeVisible();
+      await expect(branchInput).toBeVisible();
+      await expect(
+        page.locator('[data-testid="git-mode-confirm-branch"]'),
+      ).toBeEnabled();
+      await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {

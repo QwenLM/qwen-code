@@ -273,9 +273,29 @@ Reports include: timestamp, diff stats, build/test results, all findings with ve
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
-**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`fetch-pr`, `pr-context`, `presubmit`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
+**GitHub Enterprise:** reviewing a PR URL on a non-`github.com` host routes every GitHub call at that host — the review subcommands (`fetch-pr`, `pr-context`, `comment-status`, `presubmit`) accept `--host` and set it in code, so a forgotten host cannot silently retarget the review at `github.com`.
 
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
+
+## Headless runs (`qwen review run`)
+
+`/review` is interactive. When a script or CI job needs to run a review and act on its outcome, use the headless wrapper:
+
+```bash
+qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--quiet]
+```
+
+`target` is a PR number, a PR URL, or a file path; omit it to review the local working tree. The command runs this build's own CLI non-interactively (with stdin closed, so slash-command detection survives), streams the child's progress to **stderr**, and prints the verdict to **stdout** — or, with `--json`, the full result object. The verdict is read from the artifact `compose-review` writes (the same JSON the skill treats as the verdict authority), never parsed from the model's prose.
+
+The exit code is the contract a gate should read:
+
+| Exit | Meaning                                                                                           |
+| ---- | ------------------------------------------------------------------------------------------------- |
+| `0`  | The review completed (whatever it decided)                                                        |
+| `1`  | It never reached a verdict — the child failed, timed out, or left no composed artifact            |
+| `3`  | It completed with `REQUEST_CHANGES` **and** `--fail-on request-changes` was set (opt-in blocking) |
+
+`3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
 
 ## Cross-file Impact Analysis
 

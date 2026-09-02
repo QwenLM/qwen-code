@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import type { GrepToolParams } from './grep.js';
 import { GrepTool } from './grep.js';
 import path from 'node:path';
@@ -853,6 +854,82 @@ describe('GrepTool', () => {
 
       // sub/fileC.txt (or its absolute path equivalent) should appear only once
       expect(result.llmContent).toContain('Found 1 match');
+    });
+  });
+
+  describe('search binary arguments', () => {
+    // The pattern reaches git grep and system grep as an argv entry, so a
+    // pattern that begins with a dash is indistinguishable from an option
+    // unless it is introduced by `-e`. `validateToolParams` accepts it --
+    // `new RegExp('-n')` is a perfectly good regex -- so the tool has to be the
+    // one to disambiguate it.
+    const argsFor = (bin: string): string[][] =>
+      vi
+        .mocked(spawn)
+        .mock.calls.filter((call) => call[0] === bin)
+        .map((call) => call[1] as string[]);
+
+    // True only when `b` directly follows `a`, which is what distinguishes the
+    // pattern from the identically-spelled `-n` flag git grep already passes.
+    const hasAdjacent = (args: string[], a: string, b: string): boolean =>
+      args.some((value, i) => value === a && args[i + 1] === b);
+
+    beforeEach(async () => {
+      vi.mocked(spawn).mockClear();
+      // isGitRepository only looks for a .git entry, so this is enough to make
+      // the git grep strategy run before the system grep fallback.
+      await fs.mkdir(path.join(tempRootDir, '.git'), { recursive: true });
+    });
+
+    it.each([['-n'], ['-i'], ['--color']])(
+      'introduces the pattern "%s" with -e for git grep',
+      async (pattern) => {
+        await grepTool.build({ pattern }).execute(abortSignal);
+
+        const calls = argsFor('git');
+        expect(calls).not.toHaveLength(0);
+        for (const args of calls) {
+          expect(hasAdjacent(args, '-e', pattern)).toBe(true);
+        }
+      },
+    );
+
+    it.each([['-n'], ['-i'], ['--color']])(
+      'introduces the pattern "%s" with -e for system grep',
+      async (pattern) => {
+        await grepTool.build({ pattern }).execute(abortSignal);
+
+        const calls = argsFor('grep');
+        expect(calls).not.toHaveLength(0);
+        for (const args of calls) {
+          expect(hasAdjacent(args, '-e', pattern)).toBe(true);
+        }
+      },
+    );
+
+    // Guards against over-correcting: the surrounding argv has to keep its
+    // shape. These assertions hold both before and after the fix.
+    it('leaves the rest of the argument list unchanged', async () => {
+      await grepTool
+        .build({ pattern: 'world', glob: '*.ts' })
+        .execute(abortSignal);
+
+      for (const args of argsFor('git')) {
+        expect(args[0]).toBe('grep');
+        expect(args).toEqual(
+          expect.arrayContaining(['--untracked', '-z', '-E']),
+        );
+        // The glob stays a pathspec, behind the `--` separator.
+        expect(hasAdjacent(args, '--', '*.ts')).toBe(true);
+      }
+      for (const args of argsFor('grep')) {
+        expect(args).toEqual(
+          expect.arrayContaining(['-r', '-n', '-H', '-E', '--null']),
+        );
+        expect(args).toContain('--include=*.ts');
+        // The search path stays the final operand.
+        expect(args[args.length - 1]).toBe('.');
+      }
     });
   });
 

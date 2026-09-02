@@ -15,6 +15,62 @@ const { workspaceGit } = vi.hoisted(() => ({
   workspaceGit: vi.fn(),
 }));
 
+// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      client: {
+        workspaceGitBranches: vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/tmp/project',
+          available: true,
+          local: [],
+          remote: [],
+          tags: [],
+          recent: [],
+          head: 'main',
+          detached: false,
+        }),
+        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+        workspaceGitPush: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceGitPull: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceByCwd: () => ({
+          workspaceGit,
+          workspaceGitBranches: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/tmp/project',
+            available: true,
+            local: [],
+            remote: [],
+            tags: [],
+            recent: [],
+            head: 'main',
+            detached: false,
+          }),
+          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+          workspaceGitPush: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          workspaceGitPull: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      capabilities: { features: [] },
+    }),
+  };
+});
+
 // A stable client whose `workspaceByCwd` always returns the same `workspaceGit`
 // mock, so call assertions accumulate regardless of how often the component
 // re-resolves the workspace handle.
@@ -22,6 +78,25 @@ function makeClient(): DaemonClient {
   return {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit,
+      workspaceGitBranches: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        local: [],
+        remote: [],
+        tags: [],
+        recent: [],
+        head: 'main',
+        detached: false,
+      }),
+      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+      workspaceGitPush: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPull: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
       listWorkspaceSessions: vi.fn().mockResolvedValue([]),
       listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     })),
@@ -70,6 +145,7 @@ function renderSection(
     onOpenGitDiff: (cwd: string) => void;
     client: DaemonClient;
     reloadToken: number;
+    expanded: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -79,6 +155,7 @@ function renderSection(
           workspace={overrides.workspace ?? trustedWorkspace}
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
+          expanded={overrides.expanded}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
@@ -120,8 +197,50 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('WorkspaceSection label', () => {
+  it('prefers the workspace display name over the cwd basename', () => {
+    renderSection({
+      workspace: {
+        ...trustedWorkspace,
+        displayName: 'Payments API',
+      },
+    });
+
+    expect(container.textContent).toContain('Payments API');
+    expect(container.textContent).not.toContain('project');
+  });
+
+  it('shows the complete read-only session name in a native tooltip', async () => {
+    const listWorkspaceSessions = vi.fn().mockResolvedValue([
+      {
+        sessionId: 'session-1',
+        displayName: 'A very long session name',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      } as DaemonSessionSummary,
+    ]);
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[title="A very long session name"]'),
+    ).not.toBeNull();
+  });
+});
+
 describe('WorkspaceSection git chip', () => {
-  it('renders a clickable git chip for a trusted repo and opens its diff', async () => {
+  it('renders a clickable git chip for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -136,17 +255,25 @@ describe('WorkspaceSection git chip', () => {
 
     const chip = gitChip();
     expect(chip).not.toBeNull();
-    expect(chip?.tagName).toBe('BUTTON');
+    // The chip is a read-only OUTPUT inside a button that opens the changes
+    // view on click.
+    expect(chip?.tagName).toBe('OUTPUT');
     expect(chip?.getAttribute('data-dirty')).toBe('true');
-    // Icon-only (compact) form: the branch name is not shown as inline text but
-    // stays reachable via the accessible name (the hover tooltip).
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
 
+    // The chip itself is a read-only OUTPUT; the wrapping button opens the
+    // branch picker popover on click (which contains a "View Changes" action
+    // that calls onOpenGitDiff). Verify the button is wired and clickable.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
     act(() => {
-      chip?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
+    // Clicking the chip opens the branch picker popover, not the diff dialog
+    // directly. The diff dialog is accessible via "View Changes" inside the
+    // popover.
+    expect(button?.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
@@ -205,6 +332,23 @@ describe('WorkspaceSection git chip', () => {
     renderSection({ client, reloadToken: 1, onOpenGitDiff });
     await flush();
     expect(workspaceGit).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-fetch git status when only the diff handler changes', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const client = makeClient();
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
   });
 
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {

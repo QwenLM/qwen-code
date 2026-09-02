@@ -310,6 +310,132 @@ describe('copyCommand', () => {
     });
   });
 
+  // The argument hint is `[N] [<lang>|code|latex|mermaid] [<index>]`, every
+  // group optional, so "message N, block M" is a documented form. The leading
+  // N is stripped as the message index, leaving a bare number as the whole
+  // selector argument.
+  it('should copy a numbered code block with /copy 1 2', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 2');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('{"second": true}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy the first code block with /copy 1 1', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('const first = 1;');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 1 copied to the clipboard',
+    });
+  });
+
+  // Passes before the fix as well, but for the wrong reason: the old code
+  // filtered for a language named "9" and found nothing. Pinned so the
+  // out-of-range path keeps reporting a miss now that the index is real.
+  it('should report a missing block for an out-of-range index with /copy 1 9', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ text: ['```ts', 'const only = 1;', '```'].join('\n') }],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 9');
+
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'No matching code block found in the last AI output.',
+    });
+  });
+
+  // Over-correction guard: dropping the pre-assignment must not stop a bare
+  // language from selecting. Passes both before and after.
+  it('should still select by language with /copy 1 json', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 json');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('{"second": true}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'json code block 1 copied to the clipboard',
+    });
+  });
+
   it('should copy the last matching language code block with /copy code mermaid', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
@@ -539,6 +665,63 @@ describe('copyCommand', () => {
       messageType: 'info',
       content: 'Inline LaTeX expression 2 copied to the clipboard',
     });
+  });
+
+  it('should copy single-character inline math and skip escaped/code spans', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: 'Literal \\$xy$, code `$xy$`, longer ``a `$zz$` b``, then $x$ and $\\alpha$.',
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const first = await copyCommand.action(mockContext, 'inline-latex 1');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('x');
+    expect(first).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 1 copied to the clipboard',
+    });
+
+    const second = await copyCommand.action(mockContext, 'inline-latex 2');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('\\alpha');
+    expect(second).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy formulas containing or adjacent to escaped dollars', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: String.raw`literal \$x$
+formula $x + \$5$
+literal then math: \$$x^2$
+math then literal: $x^2\$$`,
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const expected = [String.raw`x + \$5`, 'x^2', String.raw`x^2\$`];
+    for (const [offset, expression] of expected.entries()) {
+      await copyCommand.action(mockContext, `inline-latex ${offset + 1}`);
+      expect(mockCopyToClipboard).toHaveBeenLastCalledWith(expression);
+    }
   });
 
   it('should copy a numbered inline LaTeX expression with /copy latex inline 1', async () => {

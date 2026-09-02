@@ -10,6 +10,8 @@ import { DiffRenderer } from './DiffRenderer.js';
 import * as CodeColorizer from '../../utils/CodeColorizer.js';
 import { vi } from 'vitest';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
 
 const mockSettings: LoadedSettings = {
   merged: {
@@ -440,6 +442,32 @@ index 0000001..0000002 100644
       expect(output).toContain('1 -');
       expect(output).toContain('1 +');
       expect(output).toContain('2  ');
+    });
+
+    it('excludes line numbers but keeps diff markers when copied', () => {
+      const { stdout } = render(
+        <OverflowProvider>
+          <DiffRenderer
+            diffContent={diffContent}
+            filename="test.txt"
+            contentWidth={80}
+            settings={mockSettings}
+          />
+        </OverflowProvider>,
+      );
+      const frame = getScreenBuffer(
+        stdout as unknown as NodeJS.WriteStream,
+      )!.frame!;
+      const copied = getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      });
+
+      expect(copied).toContain('- old line 1');
+      expect(copied).toContain('+ new line 1');
+      expect(copied).not.toMatch(/^\d+ [-+]/mu);
     });
 
     it('should hide line numbers when showLineNumbers is false', () => {

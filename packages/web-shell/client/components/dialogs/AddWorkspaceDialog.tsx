@@ -12,6 +12,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
+import { FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -27,15 +28,19 @@ export interface WorkspacePathSuggestions {
 
 interface AddWorkspaceDialogProps {
   onClose: () => void;
-  onAdd: (cwd: string, persist: boolean) => Promise<void>;
+  onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  displayNameEnabled?: boolean;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
+  onPick?: () => Promise<string | undefined>;
+  persistenceSupported?: boolean;
 }
 
 const HINT_ID = 'add-workspace-hint';
+const DISPLAY_NAME_HINT_ID = 'add-workspace-display-name-hint';
 const ERROR_ID = 'add-workspace-error';
 const LISTBOX_ID = 'add-workspace-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
@@ -47,10 +52,14 @@ function isAbsoluteLike(value: string): boolean {
 export function AddWorkspaceDialog({
   onClose,
   onAdd,
+  displayNameEnabled = false,
   onSuggest,
+  onPick,
+  persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [persist, setPersist] = useState(true);
@@ -58,6 +67,7 @@ export function AddWorkspaceDialog({
   const [listOpen, setListOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const [hostSep, setHostSep] = useState('/');
+  const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
@@ -137,6 +147,25 @@ export function AddWorkspaceDialog({
     [hostSep, closeList],
   );
 
+  const pickDirectory = useCallback(async () => {
+    if (!onPick) return;
+    setBrowsing(true);
+    setError(null);
+    try {
+      const selectedPath = await onPick();
+      if (selectedPath) {
+        ++suggestSeqRef.current;
+        setPath(selectedPath);
+        setSuggestions([]);
+        closeList();
+      }
+    } catch {
+      setError(t('sidebar.addWorkspaceBrowseError'));
+    } finally {
+      setBrowsing(false);
+    }
+  }, [onPick, closeList, t]);
+
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
       const open = listOpen && suggestions.length > 0;
@@ -192,7 +221,13 @@ export function AddWorkspaceDialog({
       setSubmitting(true);
       closeList();
       try {
-        await onAdd(trimmed, persist);
+        const effectivePersist = persistenceSupported ? persist : false;
+        const trimmedDisplayName = displayNameEnabled ? displayName.trim() : '';
+        if (trimmedDisplayName) {
+          await onAdd(trimmed, effectivePersist, trimmedDisplayName);
+        } else {
+          await onAdd(trimmed, effectivePersist);
+        }
         onClose();
       } catch (err) {
         setError(
@@ -202,7 +237,17 @@ export function AddWorkspaceDialog({
         setSubmitting(false);
       }
     },
-    [path, persist, onAdd, onClose, closeList, t],
+    [
+      path,
+      displayName,
+      displayNameEnabled,
+      persist,
+      persistenceSupported,
+      onAdd,
+      onClose,
+      closeList,
+      t,
+    ],
   );
 
   const showList = listOpen && suggestions.length > 0;
@@ -220,40 +265,54 @@ export function AddWorkspaceDialog({
               {t('sidebar.addWorkspacePath')}
             </FieldLabel>
             <div className="relative">
-              <Input
-                ref={inputRef}
-                id="add-workspace-path"
-                type="text"
-                placeholder="/absolute/path/to/project"
-                value={path}
-                onChange={(e) => {
-                  setPath(e.target.value);
-                  if (error) setError(null);
-                }}
-                onKeyDown={handleInputKeyDown}
-                onBlur={() => {
-                  // Delay so a mousedown on a suggestion wins over blur.
-                  setTimeout(() => {
-                    suppressNextFetchOpenRef.current = true;
-                    closeList();
-                  }, 100);
-                }}
-                disabled={submitting}
-                autoCapitalize="off"
-                autoCorrect="off"
-                autoComplete="off"
-                spellCheck={false}
-                role="combobox"
-                aria-expanded={showList}
-                aria-controls={showList ? LISTBOX_ID : undefined}
-                aria-activedescendant={
-                  showList && highlight >= 0
-                    ? `${LISTBOX_ID}-${highlight}`
-                    : undefined
-                }
-                aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
-                aria-invalid={error ? true : undefined}
-              />
+              <div className="flex gap-2">
+                <Input
+                  ref={inputRef}
+                  id="add-workspace-path"
+                  type="text"
+                  placeholder="/absolute/path/to/project"
+                  value={path}
+                  onChange={(e) => {
+                    setPath(e.target.value);
+                    if (error) setError(null);
+                  }}
+                  onKeyDown={handleInputKeyDown}
+                  onBlur={() => {
+                    // Delay so a mousedown on a suggestion wins over blur.
+                    setTimeout(() => {
+                      suppressNextFetchOpenRef.current = true;
+                      closeList();
+                    }, 100);
+                  }}
+                  disabled={submitting || browsing}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  role="combobox"
+                  aria-expanded={showList}
+                  aria-controls={showList ? LISTBOX_ID : undefined}
+                  aria-activedescendant={
+                    showList && highlight >= 0
+                      ? `${LISTBOX_ID}-${highlight}`
+                      : undefined
+                  }
+                  aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
+                  aria-invalid={error ? true : undefined}
+                />
+                {onPick && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => void pickDirectory()}
+                    disabled={submitting || browsing}
+                  >
+                    <FolderOpenIcon aria-hidden="true" />
+                    {t('sidebar.addWorkspaceBrowse')}
+                  </Button>
+                )}
+              </div>
               {showList && (
                 <ul
                   id={LISTBOX_ID}
@@ -292,22 +351,44 @@ export function AddWorkspaceDialog({
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="add-workspace-persist">
-                {t('sidebar.addWorkspacePersist')}
+          {displayNameEnabled && (
+            <Field>
+              <FieldLabel htmlFor="add-workspace-display-name">
+                {t('sidebar.addWorkspaceDisplayName')}
               </FieldLabel>
-              <FieldDescription>
-                {t('sidebar.addWorkspacePersistHint')}
+              <Input
+                id="add-workspace-display-name"
+                type="text"
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={submitting}
+                maxLength={256}
+                autoComplete="off"
+                aria-describedby={DISPLAY_NAME_HINT_ID}
+              />
+              <FieldDescription id={DISPLAY_NAME_HINT_ID}>
+                {t('sidebar.addWorkspaceDisplayNameHint')}
               </FieldDescription>
-            </FieldContent>
-            <Switch
-              id="add-workspace-persist"
-              checked={persist}
-              onCheckedChange={setPersist}
-              disabled={submitting}
-            />
-          </Field>
+            </Field>
+          )}
+          {persistenceSupported && (
+            <Field orientation="horizontal">
+              <FieldContent>
+                <FieldLabel htmlFor="add-workspace-persist">
+                  {t('sidebar.addWorkspacePersist')}
+                </FieldLabel>
+                <FieldDescription>
+                  {t('sidebar.addWorkspacePersistHint')}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                id="add-workspace-persist"
+                checked={persist}
+                onCheckedChange={setPersist}
+                disabled={submitting}
+              />
+            </Field>
+          )}
         </FieldGroup>
         <div className="flex justify-end gap-2">
           <Button

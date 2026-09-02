@@ -83,6 +83,61 @@ function getInteractiveInteractionModePrompt(): {
   };
 }
 
+/**
+ * Default leading identity sentence of the core system prompt.
+ * Factored out so `QWEN_SYSTEM_IDENTITY_MD` can replace this single unit
+ * without fragile splicing of the large base-prompt template.
+ */
+function getDefaultCoreIdentitySentence(role: string): string {
+  return `You are Qwen Code, ${role} developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.`;
+}
+
+/**
+ * Resolve an opt-in identity override from `QWEN_SYSTEM_IDENTITY_MD`.
+ *
+ * This is a **trusted distributor-level** system-prompt fragment: the file is
+ * inserted verbatim as the leading identity paragraph of the default core
+ * prompt (not a sanitized branding field). Only a real file path enables it
+ * (unlike `QWEN_SYSTEM_MD`, there is no default identity file, so switch
+ * values like `1`/`true` are ignored). Missing files, empty/whitespace-only
+ * files, and path-resolution failures fail loud.
+ */
+function resolveCoreIdentityOverride(): string | null {
+  const rawEnv = process.env['QWEN_SYSTEM_IDENTITY_MD'];
+  const trimmed = rawEnv?.trim();
+  // Unset or whitespace → no override.
+  if (!trimmed) {
+    return null;
+  }
+
+  const resolution = resolvePathFromEnv(rawEnv);
+  // Boolean-like switches → no override (no default identity file).
+  if (resolution.isSwitch) {
+    return null;
+  }
+
+  // Env was set to a path-like value but resolution produced no path
+  // (e.g. `~/...` when `os.homedir()` fails). Do not silently fall back to
+  // the default Qwen identity when an explicit override was configured.
+  if (!resolution.value) {
+    throw new Error(`failed to resolve system identity path '${trimmed}'`);
+  }
+
+  const identityPath = resolution.value;
+  if (!fs.existsSync(identityPath)) {
+    throw new Error(`missing system identity file '${identityPath}'`);
+  }
+
+  const contents = fs.readFileSync(identityPath, 'utf8');
+  if (!contents.trim()) {
+    throw new Error(`empty system identity file '${identityPath}'`);
+  }
+
+  // Trim trailing whitespace/newlines so the blank line before
+  // `# Core Mandates` stays a clean paragraph separator.
+  return contents.trimEnd();
+}
+
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
   value: string | null;
@@ -138,8 +193,13 @@ export function resolvePathFromEnv(envVar?: string): {
  * This function should only be used when there is actually a custom instruction.
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
- * @param userMemory - User memory to append
- * @param appendInstruction - Extra instructions to append after user memory
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCustomSystemPrompt(instruction), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
  * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
@@ -169,11 +229,26 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix = buildSystemPromptSuffix(userMemory);
-
-  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return assembleSystemPrompt({
+    base: instructionText,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
+/**
+ * Builds the stable base system prompt (identity, mandates, tool guidance).
+ *
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCoreSystemPrompt(undefined, model), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param model - Model id, used to select model-specific prompt variants.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
+ * @param interactionMode - Interactive vs. headless prompt variant.
+ */
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
@@ -209,10 +284,18 @@ export function getCoreSystemPrompt(
   // purpose of the override. Custom prompts are responsible for their own mode
   // awareness (e.g. not instructing the model to ask questions in headless
   // runs). `appendInstruction` below still applies in both branches.
-  const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
-    : `
-You are Qwen Code, ${interaction.role} developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
+  //
+  // `QWEN_SYSTEM_IDENTITY_MD` only applies on the default-prompt branch and is
+  // ignored whenever `QWEN_SYSTEM_MD` is in effect (including empty-file clear).
+  let basePrompt: string;
+  if (systemMdEnabled) {
+    basePrompt = fs.readFileSync(systemMdPath, 'utf8');
+  } else {
+    const coreIdentity =
+      resolveCoreIdentityOverride() ??
+      getDefaultCoreIdentitySentence(interaction.role);
+    basePrompt = `
+${coreIdentity}
 
 # Core Mandates
 
@@ -361,6 +444,7 @@ Your core function is efficient and safe assistance. Balance conciseness with th
 
 Interaction mode reminder: ${interaction.questions}
 `.trim();
+  }
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -378,18 +462,59 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? buildSystemPromptSuffix(userMemory)
-      : '';
-  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
-
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+  return assembleSystemPrompt({
+    base: basePrompt,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
 function buildSystemPromptSuffix(text?: string): string {
   const trimmed = text?.trim();
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
+}
+
+/**
+ * System prompt segments, one slot per segment, ordered stable → context →
+ * volatile. Callers only classify content into slots; `assembleSystemPrompt`
+ * is the single place that knows the order, so a segment cannot be appended
+ * in the wrong position at a call site.
+ */
+export interface SystemPromptLayers {
+  /**
+   * Stable layer: the base prompt (identity, mandates, tool guidance) —
+   * fixed for the whole session.
+   */
+  base: string;
+  /**
+   * Context layer: concatenated context files (QWEN.md hierarchy, baseline
+   * rules, extension files). Reloaded only on explicit refresh.
+   */
+  contextFiles?: string;
+  /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
+  appendPrompt?: string;
+  /**
+   * Context layer: repo snapshot (branch + recent commits), computed once
+   * per session. Joined without a `---` separator — it carries its own
+   * heading.
+   */
+  gitStatus?: string | null;
+  /**
+   * Volatile layer: the managed auto-memory section, rewritten in-session on
+   * every memory save. Always last, so a save invalidates the shortest
+   * possible cached prompt prefix.
+   */
+  autoMemory?: string;
+}
+
+export function assembleSystemPrompt(layers: SystemPromptLayers): string {
+  return (
+    layers.base +
+    buildSystemPromptSuffix(layers.contextFiles) +
+    buildSystemPromptSuffix(layers.appendPrompt) +
+    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
+    buildSystemPromptSuffix(layers.autoMemory)
+  );
 }
 
 /**
@@ -985,7 +1110,7 @@ function getToolCallExamples(model?: string): string {
  */
 export function getPlanModeSystemReminder(planOnly = false): string {
   return `<system-reminder>
-Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits).
+Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
 
 ## Iterative Planning Workflow
 
@@ -1021,13 +1146,33 @@ Start by quickly scanning a few key files to form an initial understanding of th
 
 If a non-read-only tool is blocked:
 - Do NOT retry the blocked tool or repeatedly attempt similar non-read-only tools
+- Do NOT use wrappers, quoting tricks, aliases, or obfuscation to make a blocked write look unknown
 - Do NOT immediately call exit_plan_mode just to unblock it — continue gathering context with read-only tools first
 - Pivot to read-only tools (read_file, grep_search, glob, list_directory, agents) to gather the information the blocked tool would have provided
 - Once you have enough context to form a complete plan, call exit_plan_mode
 
+An exact one-off approval for an unknown shell command approves only that invocation. It does not approve the plan, authorize related commands, or exit Plan mode.
+
 ### When to Converge
 
 Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes. Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+</system-reminder>`;
+}
+
+/**
+ * One-shot reminder injected on the first model-bound turn after Plan mode
+ * changes outside the approved `exit_plan_mode` flow. While Plan mode is
+ * active {@link getPlanModeSystemReminder} is re-injected every turn, so the
+ * reminder silently disappearing is not a signal models reliably notice
+ * (#7671).
+ *
+ * @param currentMode - The approval mode active when delivery is claimed
+ */
+export function getManualPlanExitSystemReminder(currentMode: string): string {
+  return `<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: ${currentMode}.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
 </system-reminder>`;
 }
 

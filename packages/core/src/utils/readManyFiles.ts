@@ -9,9 +9,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { getErrorMessage, isAbortError } from './errors.js';
-import type { ProcessedFileReadResult } from './fileUtils.js';
+import type {
+  ProcessedFileReadResult,
+  ProcessSingleFileContentOptions,
+} from './fileUtils.js';
 import {
+  detectFileType,
   isCacheableReadResult,
   processSingleFileContent,
 } from './fileUtils.js';
@@ -46,6 +51,12 @@ export interface ReadManyFilesOptions {
    * replaced symlink or file is dropped instead of entering model context.
    */
   validatedPathIdentities?: ReadonlyMap<string, ReadManyFilesPathIdentity>;
+
+  /**
+   * User-facing labels for canonical paths. Callers that validate a realpath'd
+   * target can keep the original @ reference in content delimiters.
+   */
+  displayPaths?: ReadonlyMap<string, string>;
 }
 
 export interface ReadManyFilesPathIdentity {
@@ -100,6 +111,14 @@ const DEFAULT_OUTPUT_HEADER = '\n--- Content from referenced files ---';
 const DEFAULT_OUTPUT_TERMINATOR = '\n--- End of content ---';
 
 /**
+ * Upper bound on the size of a file we will snapshot-copy for a validated
+ * read. Files larger than this are always rejected by the downstream
+ * `processSingleFileContent` inline-data caps (100 MB for images, ≤ 10 MB
+ * for other binary types), so copying them to a temp file is wasted I/O.
+ */
+const SNAPSHOT_MAX_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+/**
  * Reads content from multiple files and directories specified by paths.
  *
  * For directories, returns the folder structure.
@@ -122,6 +141,7 @@ export async function readManyFiles(
     preserveUnsupportedImageForBridge,
     signal,
     validatedPathIdentities,
+    displayPaths,
   } = options;
 
   const seenFiles = new Set<string>();
@@ -135,7 +155,9 @@ export async function readManyFiles(
       signal?.throwIfAborted();
       const normalizedPattern = rawPattern.replace(/\\/g, '/');
       const fullPath = path.resolve(projectRoot, normalizedPattern);
+      const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
+      if (validatedPathIdentities && !validatedIdentity) continue;
       if (
         validatedIdentity &&
         !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
@@ -148,6 +170,7 @@ export async function readManyFiles(
         const { contentParts: dirParts, info } = await readDirectory(
           config,
           fullPath,
+          displayPath,
           signal,
         );
         if (
@@ -163,22 +186,69 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const snapshot = validatedIdentity
-          ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
+        let shouldUseTextHandle = false;
+        let shouldSnapshot = false;
+        if (validatedIdentity) {
+          const standardFileSystem =
+            config.getFileSystemService() instanceof StandardFileSystemService;
+          const fileType = await detectFileType(fullPath);
+          shouldUseTextHandle = standardFileSystem && fileType === 'text';
+          shouldSnapshot =
+            !shouldUseTextHandle &&
+            (standardFileSystem || fileType !== 'text') &&
+            stats.size <= SNAPSHOT_MAX_SIZE_BYTES;
+        }
+        const snapshot = shouldSnapshot
+          ? await snapshotValidatedFile(fullPath, validatedIdentity!, signal)
           : undefined;
-        if (validatedIdentity && !snapshot) continue;
+        if (shouldSnapshot && !snapshot) continue;
         let readResult;
-        try {
-          readResult = await readFileContent(
-            config,
-            snapshot?.filePath ?? fullPath,
-            preserveUnsupportedImageForBridge,
-            signal,
-            fullPath,
-            snapshot?.stats,
-          );
-        } finally {
-          await snapshot?.cleanup();
+        const validateAfterRead =
+          validatedIdentity && !snapshot && !shouldUseTextHandle
+            ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
+            : undefined;
+        if (shouldUseTextHandle) {
+          try {
+            readResult = await readValidatedTextFileContent(
+              config,
+              fullPath,
+              validatedIdentity!,
+              preserveUnsupportedImageForBridge,
+              signal,
+              displayPath,
+            );
+          } catch (error) {
+            if (signal?.aborted || isAbortError(error)) throw error;
+            const errorMessage = getErrorMessage(error);
+            readResult = {
+              contentParts: [
+                { text: `\nContent from ${displayPath}:\n` },
+                { text: `Error reading ${displayPath}: ${errorMessage}` },
+              ],
+              info: {
+                filePath: displayPath,
+                content: `Error reading ${displayPath}: ${errorMessage}`,
+                isDirectory: false,
+                error: errorMessage,
+              },
+            };
+          }
+        } else {
+          try {
+            readResult = await readFileContent(
+              config,
+              snapshot?.filePath ?? fullPath,
+              preserveUnsupportedImageForBridge,
+              signal,
+              displayPath,
+              snapshot?.stats,
+              validateAfterRead,
+              undefined,
+              fullPath,
+            );
+          } finally {
+            await snapshot?.cleanup();
+          }
         }
         if (readResult) {
           contentParts.push(...readResult.contentParts);
@@ -210,20 +280,56 @@ export async function readManyFiles(
   return { contentParts: contentParts as PartListUnion, files };
 }
 
+async function readValidatedTextFileContent(
+  config: Config,
+  filePath: string,
+  expected: ReadManyFilesPathIdentity,
+  preserveUnsupportedImage = false,
+  signal: AbortSignal | undefined,
+  displayPath: string,
+): ReturnType<typeof readFileContent> {
+  const source = await fs.promises.open(
+    filePath,
+    (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const stats = await source.stat();
+    if (
+      !stats.isFile() ||
+      stats.dev !== expected.dev ||
+      stats.ino !== expected.ino
+    ) {
+      return null;
+    }
+    return await readFileContent(
+      config,
+      filePath,
+      preserveUnsupportedImage,
+      signal,
+      displayPath,
+      stats,
+      undefined,
+      {
+        textFileHandle: source,
+        textFileStats: stats,
+        textFileMaxScanBytes: Math.max(1, stats.size),
+      },
+      filePath,
+    );
+  } finally {
+    await source.close();
+  }
+}
+
 async function matchesValidatedPathIdentity(
   filePath: string,
   expected: ReadManyFilesPathIdentity,
 ): Promise<boolean> {
   try {
-    const [canonicalPath, stats] = await Promise.all([
-      fs.promises.realpath(filePath),
-      fs.promises.stat(filePath),
-    ]);
-    return (
-      canonicalPath === filePath &&
-      stats.dev === expected.dev &&
-      stats.ino === expected.ino
-    );
+    const canonicalPath = await fs.promises.realpath(filePath);
+    if (canonicalPath !== filePath) return false;
+    const stats = await fs.promises.stat(canonicalPath);
+    return stats.dev === expected.dev && stats.ino === expected.ino;
   } catch {
     return false;
   }
@@ -242,11 +348,14 @@ async function snapshotValidatedFile(
   | undefined
 > {
   let snapshotDir: string | undefined;
+  let result:
+    | { filePath: string; stats: fs.Stats; cleanup: () => Promise<void> }
+    | undefined;
   try {
     signal?.throwIfAborted();
     const source = await fs.promises.open(
       filePath,
-      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
     );
     try {
       const stats = await source.stat();
@@ -255,6 +364,9 @@ async function snapshotValidatedFile(
         stats.dev !== expected.dev ||
         stats.ino !== expected.ino
       ) {
+        return undefined;
+      }
+      if (stats.size > SNAPSHOT_MAX_SIZE_BYTES) {
         return undefined;
       }
 
@@ -270,50 +382,63 @@ async function snapshotValidatedFile(
       try {
         const buffer = Buffer.allocUnsafe(64 * 1024);
         let sourcePosition = 0;
-        while (true) {
+        while (sourcePosition < stats.size) {
           signal?.throwIfAborted();
+          const remaining = stats.size - sourcePosition;
           const { bytesRead } = await source.read(
             buffer,
             0,
-            buffer.length,
+            Math.min(buffer.length, remaining),
             sourcePosition,
           );
-          if (bytesRead === 0) break;
+          if (bytesRead === 0) return undefined;
           let written = 0;
           while (written < bytesRead) {
-            const result = await target.write(
+            const writeResult = await target.write(
               buffer,
               written,
               bytesRead - written,
             );
-            written += result.bytesWritten;
+            written += writeResult.bytesWritten;
           }
           sourcePosition += bytesRead;
         }
+        const growthProbe = Buffer.allocUnsafe(1);
+        const { bytesRead: extraBytes } = await source.read(
+          growthProbe,
+          0,
+          1,
+          sourcePosition,
+        );
+        if (extraBytes !== 0) return undefined;
       } finally {
         await target.close();
       }
-      return {
+      result = {
         filePath: snapshotPath,
         stats,
         cleanup: () =>
           fs.promises.rm(snapshotDir!, { recursive: true, force: true }),
       };
+      return result;
     } finally {
       await source.close();
     }
   } catch (error) {
-    if (snapshotDir) {
-      await fs.promises.rm(snapshotDir, { recursive: true, force: true });
-    }
+    result = undefined;
     if (signal?.aborted || isAbortError(error)) throw error;
     return undefined;
+  } finally {
+    if (snapshotDir && !result) {
+      await fs.promises.rm(snapshotDir, { recursive: true, force: true });
+    }
   }
 }
 
 async function readDirectory(
   config: Config,
   directoryPath: string,
+  displayPath = directoryPath,
   signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo }> {
   signal?.throwIfAborted();
@@ -324,14 +449,14 @@ async function readDirectory(
   signal?.throwIfAborted();
 
   const contentParts: Part[] = [
-    { text: `\nContent from ${directoryPath}:\n` },
+    { text: `\nContent from ${displayPath}:\n` },
     { text: structure },
   ];
 
   return {
     contentParts,
     info: {
-      filePath: directoryPath,
+      filePath: displayPath,
       content: structure,
       isDirectory: true,
     },
@@ -345,6 +470,12 @@ async function readFileContent(
   signal?: AbortSignal,
   displayPath = filePath,
   validatedStats?: fs.Stats,
+  validateAfterRead?: () => Promise<boolean>,
+  processOptions?: Pick<
+    ProcessSingleFileContentOptions,
+    'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes'
+  >,
+  canonicalPath?: string,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
@@ -352,9 +483,13 @@ async function readFileContent(
       ...(signal !== undefined ? { signal } : {}),
       largePdfBehavior: 'reference',
       displayPath,
+      ...processOptions,
     });
     if (validatedStats && fileReadResult.stats) {
       fileReadResult.stats = validatedStats;
+    }
+    if (validateAfterRead && !(await validateAfterRead())) {
+      return null;
     }
 
     const prefixText: Part = { text: `\nContent from ${displayPath}:\n` };
@@ -381,8 +516,10 @@ async function readFileContent(
 
     // Record the successful read in the session FileReadCache so a later
     // Edit / WriteFile on an `@`-attached file passes prior-read enforcement
-    // without a redundant read_file (issue #6289).
-    recordAttachedFileRead(config, displayPath, fileReadResult);
+    // without a redundant read_file (issue #6289). Key by the canonical
+    // (resolved) path — not the display alias — because Edit / WriteFile
+    // looks up the cache by canonical path.
+    recordAttachedFileRead(config, canonicalPath ?? filePath, fileReadResult);
 
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';

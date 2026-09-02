@@ -34,6 +34,57 @@ interface RegisterWorkspaceMcpControlRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+interface McpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
+}
+
+function parseMcpReloadOptions(
+  body: Record<string, unknown>,
+  res: Response,
+): McpReloadOptions | null {
+  const forceReconnectAll = body['forceReconnectAll'];
+  if (
+    forceReconnectAll !== undefined &&
+    typeof forceReconnectAll !== 'boolean'
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectAll` must be a boolean',
+      code: 'invalid_force_reconnect_all_flag',
+    });
+    return null;
+  }
+  const forceReconnectWhich = body['forceReconnectWhich'];
+  if (
+    forceReconnectWhich !== undefined &&
+    (!Array.isArray(forceReconnectWhich) ||
+      forceReconnectWhich.some(
+        (serverName) =>
+          typeof serverName !== 'string' || serverName.length === 0,
+      ))
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectWhich` must be an array of server names',
+      code: 'invalid_force_reconnect_which',
+    });
+    return null;
+  }
+  if (forceReconnectAll === true && forceReconnectWhich !== undefined) {
+    res.status(400).json({
+      error:
+        '`forceReconnectAll` and `forceReconnectWhich` cannot be used together',
+      code: 'conflicting_force_reconnect_options',
+    });
+    return null;
+  }
+  return {
+    forceReconnectAll,
+    forceReconnectWhich,
+  };
 }
 
 export function registerWorkspaceMcpControlRoutes(
@@ -50,13 +101,41 @@ export function registerWorkspaceMcpControlRoutes(
     parseAndValidateClientId,
   } = deps;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
+  const requireTrusted = (res: Response): boolean => {
+    if (deps.isWorkspaceTrusted?.() !== false) return true;
+    res.status(403).json({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
+    });
+    return false;
+  };
+  const captureTrustedGeneration = (res: Response): (() => void) | null => {
+    const assertGenerationOpen =
+      deps.captureGenerationAssertion?.() ?? (() => {});
+    try {
+      assertGenerationOpen();
+    } catch {
+      res.set('Retry-After', '1');
+      res.status(503).json({
+        error: 'Workspace runtime is not active.',
+        code: 'workspace_runtime_unavailable',
+      });
+      return null;
+    }
+    if (!requireTrusted(res)) return null;
+    return assertGenerationOpen;
+  };
 
   app.post(
     '/workspace/mcp/initialize',
     mutate({ strict: true }),
     async (_req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(res);
+      if (!assertGenerationOpen) return;
       try {
+        assertGenerationOpen();
         const result = await bridge.initializeWorkspaceMcp();
+        assertGenerationOpen();
         res.status(202).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/mcp/initialize' });
@@ -67,9 +146,15 @@ export function registerWorkspaceMcpControlRoutes(
   app.post(
     '/workspace/mcp/reload',
     mutate({ strict: true }),
-    async (_req, res) => {
+    async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(res);
+      if (!assertGenerationOpen) return;
+      const options = parseMcpReloadOptions(safeBody(req), res);
+      if (!options) return;
       try {
-        const result = await bridge.reloadWorkspaceMcp();
+        assertGenerationOpen();
+        const result = await bridge.reloadWorkspaceMcp(options);
+        assertGenerationOpen();
         res.status(202).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/mcp/reload' });
@@ -81,6 +166,8 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(res);
+      if (!assertGenerationOpen) return;
       const serverName = req.params['server'];
       if (!serverName || typeof serverName !== 'string') {
         res.status(400).json({
@@ -121,6 +208,7 @@ export function registerWorkspaceMcpControlRoutes(
         entryIndex = parsed;
       }
       try {
+        assertGenerationOpen();
         const ctx = buildWorkspaceCtx(
           'POST /workspace/mcp/:server/restart',
           clientId,
@@ -130,6 +218,7 @@ export function registerWorkspaceMcpControlRoutes(
           serverName,
           entryIndex !== undefined ? { entryIndex } : undefined,
         );
+        assertGenerationOpen();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -150,6 +239,8 @@ export function registerWorkspaceMcpControlRoutes(
       `/workspace/mcp/:server/${routeAction}`,
       mutate({ strict: true }),
       async (req, res) => {
+        const assertGenerationOpen = captureTrustedGeneration(res);
+        if (!assertGenerationOpen) return;
         const serverName = req.params['server'];
         if (!serverName || typeof serverName !== 'string') {
           res.status(400).json({
@@ -168,11 +259,13 @@ export function registerWorkspaceMcpControlRoutes(
         const clientId = parseAndValidateClientId(req, res);
         if (clientId === null) return;
         try {
+          assertGenerationOpen();
           const result = await bridge.manageMcpServer(
             serverName,
             bridgeAction,
             clientId,
           );
+          assertGenerationOpen();
           res.status(200).json(result);
         } catch (err) {
           sendBridgeError(res, err, {
@@ -187,6 +280,8 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/servers',
     mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(res);
+      if (!assertGenerationOpen) return;
       const body = safeBody(req);
       const name = body['name'];
       if (!validateMcpRuntimeServerName(name, res)) return;
@@ -214,11 +309,13 @@ export function registerWorkspaceMcpControlRoutes(
         return;
       }
       try {
+        assertGenerationOpen();
         const result = await bridge.addRuntimeMcpServer(
           name,
           config as Record<string, unknown>,
           clientId,
         );
+        assertGenerationOpen();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -232,6 +329,8 @@ export function registerWorkspaceMcpControlRoutes(
     '/workspace/mcp/servers/:name',
     mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(res);
+      if (!assertGenerationOpen) return;
       const name = req.params['name'] ?? '';
       if (!validateMcpRuntimeServerName(name, res)) return;
       const clientId = parseAndValidateClientId(req, res);
@@ -245,7 +344,9 @@ export function registerWorkspaceMcpControlRoutes(
         return;
       }
       try {
+        assertGenerationOpen();
         const result = await bridge.removeRuntimeMcpServer(name, clientId);
+        assertGenerationOpen();
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -287,7 +388,9 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       if (!runtime) return;
       const route = 'POST /workspaces/:workspace/mcp/initialize';
       try {
+        runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.initializeWorkspaceMcp();
+        runtime.generationGuard?.assertOpen();
         res.status(202).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -305,9 +408,13 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         res,
       );
       if (!runtime) return;
+      const options = parseMcpReloadOptions(deps.safeBody(req), res);
+      if (!options) return;
       const route = 'POST /workspaces/:workspace/mcp/reload';
       try {
-        const result = await runtime.bridge.reloadWorkspaceMcp();
+        runtime.generationGuard?.assertOpen();
+        const result = await runtime.bridge.reloadWorkspaceMcp(options);
+        runtime.generationGuard?.assertOpen();
         res.status(202).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -369,6 +476,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       }
       const route = 'POST /workspaces/:workspace/mcp/:server/restart';
       try {
+        runtime.generationGuard?.assertOpen();
         const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(
           route,
           clientId,
@@ -378,6 +486,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
           serverName,
           entryIndex !== undefined ? { entryIndex } : undefined,
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -425,11 +534,13 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         if (clientId === null) return;
         const route = `POST /workspaces/:workspace/mcp/:server/${routeAction}`;
         try {
+          runtime.generationGuard?.assertOpen();
           const result = await runtime.bridge.manageMcpServer(
             serverName,
             bridgeAction,
             clientId,
           );
+          runtime.generationGuard?.assertOpen();
           res.status(200).json(result);
         } catch (err) {
           deps.sendBridgeError(res, err, { route });
@@ -480,11 +591,13 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       }
       const route = 'POST /workspaces/:workspace/mcp/servers';
       try {
+        runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.addRuntimeMcpServer(
           name,
           config as Record<string, unknown>,
           clientId,
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
@@ -520,10 +633,12 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       }
       const route = 'DELETE /workspaces/:workspace/mcp/servers/:name';
       try {
+        runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.removeRuntimeMcpServer(
           name,
           clientId,
         );
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });

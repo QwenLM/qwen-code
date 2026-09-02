@@ -134,6 +134,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    imageModelMode?: boolean;
     persistScope?: 'workspace' | 'user';
   }) => void;
   openTrustDialog: () => void;
@@ -1116,6 +1117,12 @@ export const useSlashCommandProcessor = (
                     case 'vision-model':
                       actions.openModelDialog({
                         visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'image-model':
+                      actions.openModelDialog({
+                        imageModelMode: true,
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };

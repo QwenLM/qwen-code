@@ -8,12 +8,22 @@
   min-height: 0;
 }
 
+.panelDrawer {
+  border-left: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
 .header {
   flex: 0 0 auto;
   display: flex;
+  min-height: 52px;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px 0 14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
 }
 
 .title {
@@ -37,11 +47,11 @@
 .tabItem {
   appearance: none;
   border: 1px solid transparent;
-  background: transparent;
-  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--foreground);
   border-radius: 6px;
-  max-width: 180px;
-  min-width: 0;
+  flex: 0 0 150px;
+  width: 150px;
   display: inline-flex;
   align-items: center;
 }
@@ -52,16 +62,21 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
+  flex: 1 1 auto;
   font: inherit;
   font-size: 13px;
   min-width: 0;
-  overflow: hidden;
   padding: 5px 4px 5px 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.tabTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tabIcon {
@@ -107,12 +122,22 @@
   justify-content: center;
   width: 24px;
   height: 24px;
+  flex: 0 0 24px;
   padding: 0;
   border-radius: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.tabItem:hover .tabCloseButton,
+.tabItem:focus-within .tabCloseButton,
+.tabActive .tabCloseButton {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .tabCloseButton:hover {
-  background: var(--background);
   color: var(--foreground);
 }
 
@@ -124,6 +149,7 @@
 
 .iconButton {
   appearance: none;
+  margin-left: auto;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--foreground);
@@ -144,6 +170,39 @@
   background: var(--accent);
 }
 
+.headerActions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.headerActions .iconButton {
+  margin-left: 0;
+}
+
+.addButton {
+  border-color: transparent;
+}
+
+.panelToggleButton {
+  width: 30px;
+  height: 30px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: var(--accent);
+}
+
+.panelToggleButton:hover {
+  border-color: transparent;
+}
+
+.panelToggleIcon {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}
+
 .toolbarIcon {
   width: 16px;
   height: 16px;
@@ -157,10 +216,105 @@
   padding: 12px;
 }
 
+.bodySideTask {
+  overflow: hidden;
+  padding: 0;
+}
+
 .empty {
   color: var(--muted-foreground);
   font-size: 13px;
   padding: 16px 4px;
+}
+
+.emptyActions {
+  display: grid;
+  gap: 2px;
+}
+
+.emptyAction {
+  appearance: none;
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.emptyAction:hover:not(:disabled),
+.emptyAction:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.emptyAction:disabled {
+  color: var(--muted-foreground);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.emptyActionIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.emptyActionIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.emptyActionTitle {
+  flex: 0 0 auto;
+}
+
+.emptyActionHint {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyActionChevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.sideTaskListTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sideTaskListTime {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.sideTaskNewIcon {
+  width: 14px;
+  height: 14px;
 }
 
 .list {
@@ -387,9 +541,56 @@
   align-items: center;
   padding: 8px 10px;
   text-align: left;
+  position: relative;
 }
 
 .reviewRow:hover {
+  background: var(--accent);
+}
+
+.reviewRowToggle {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reviewRowToggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.reviewRow > :not(.reviewRowToggle) {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.reviewFileName {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewOpenButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 7px;
+  pointer-events: auto;
+}
+
+.reviewOpenButton:hover {
   background: var(--accent);
 }
 
@@ -731,6 +932,60 @@ button.treeRow:hover {
   flex-direction: column;
 }
 
+.markdownPreviewWrap {
+  min-height: 100%;
+  padding: 4px 8px 24px;
+  overflow-wrap: anywhere;
+}
+
+.imagePreviewWrap {
+  position: relative;
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.imagePreview {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  object-fit: contain;
+}
+
+.imageDownloadButton {
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  text-decoration: none;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+.imagePreviewWrap:hover .imageDownloadButton,
+.imageDownloadButton:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.imageDownloadButton:hover {
+  background: var(--accent);
+}
+
 .htmlPreview {
   width: 100%;
   flex: 1 1 auto;
@@ -777,7 +1032,7 @@ button.treeRow:hover {
 }
 
 @media (max-width: 900px) {
-  .panel {
+  .panel:not(.panelDrawer) {
     position: fixed;
     inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
     z-index: 60;

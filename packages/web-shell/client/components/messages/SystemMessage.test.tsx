@@ -20,12 +20,12 @@ afterEach(() => {
   }
 });
 
-function render(node: ReactNode): HTMLElement {
+function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language="en">{node}</I18nProvider>);
+    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
   });
   mounted.push({ root, container });
   return container;
@@ -59,6 +59,78 @@ describe('SystemMessage — prompt_cancelled marker', () => {
     );
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(container.textContent).toContain('a plain note');
+  });
+});
+
+describe('SystemMessage — background notification label', () => {
+  it('labels background task notifications and preserves display text', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    const icon = container.querySelector('[role="img"][data-tone="success"]');
+    expect(icon?.getAttribute('aria-label')).toBe('Background task completed');
+    expect(icon?.nextElementSibling?.textContent).toContain(
+      'Background agent "worker" completed.',
+    );
+    expect(icon?.querySelector('svg')).not.toBeNull();
+  });
+
+  it('localizes the label', () => {
+    const container = render(
+      <SystemMessage
+        content="后台代理已完成。"
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(
+      container
+        .querySelector('[role="img"][data-tone="success"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('后台任务执行完成');
+  });
+
+  it.each([
+    ['failed', '后台任务执行失败', 'error'],
+    ['cancelled', '后台任务已取消', 'neutral'],
+    ['unknown', '后台任务通知', 'neutral'],
+  ])(
+    'uses the matching label and tone for %s status',
+    (status, label, tone) => {
+      const container = render(
+        <SystemMessage
+          content="任务结果"
+          variant="info"
+          source="background_notification"
+          data={{ status }}
+        />,
+        'zh-CN',
+      );
+
+      const icon = container.querySelector(`[role="img"][data-tone="${tone}"]`);
+      expect(icon?.getAttribute('aria-label')).toBe(label);
+      expect(icon?.querySelector('svg')).not.toBeNull();
+    },
+  );
+
+  it('does not label generic system information', () => {
+    const container = render(
+      <SystemMessage content="Connected." variant="info" />,
+    );
+
+    expect(container.textContent).toBe('Connected.');
   });
 });
 

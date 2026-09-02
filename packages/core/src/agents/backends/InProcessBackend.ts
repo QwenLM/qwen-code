@@ -624,6 +624,12 @@ function createApprovalModeConfigOverride(
   };
 
   override.approvalMode = initialMode;
+  override.manualPlanExitNoticeEventState = {
+    ...(override.manualPlanExitNoticeEventState ?? {
+      version: 0,
+      kind: 'clear',
+    }),
+  };
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     initialMode === ApprovalMode.PLAN

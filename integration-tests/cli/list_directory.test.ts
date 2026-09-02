@@ -4,16 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
   TestRig,
-  printDebugInfo,
-  validateModelOutput,
 } from '../test-helper.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('list_directory', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should be able to list a directory', async () => {
     const rig = new TestRig();
     await rig.setup('should be able to list a directory');
@@ -21,50 +27,93 @@ describe('list_directory', () => {
     rig.mkdir('subdir');
     rig.sync();
 
-    // Poll for filesystem changes to propagate in containers
     await rig.poll(
       () => {
-        // Check if the files exist in the test directory
         const file1Path = join(rig.testDir!, 'file1.txt');
         const subdirPath = join(rig.testDir!, 'subdir');
         return existsSync(file1Path) && existsSync(subdirPath);
       },
-      1000, // 1 second max wait
-      50, // check every 50ms
+      1000,
+      50,
     );
 
-    const prompt = `Use the list_directory tool to list the files in the current directory.`;
+    const noProxy = IS_CONTAINER_SANDBOX
+      ? CONTAINER_SANDBOX_NO_PROXY
+      : '127.0.0.1,localhost';
 
-    const result = await rig.run(prompt);
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      const requestIndex = streamingRequestIndex++;
+      if (requestIndex === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall('list_directory', { path: rig.testDir! }, 'list-dir'),
+          ],
+        };
+      }
+      return { content: 'The directory contains file1.txt and subdir.' };
+    }, fakeServerHostOptions());
 
-    const foundToolCall = await rig.waitForToolCall('list_directory');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+    vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+    vi.stubEnv('OPENAI_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('NO_PROXY', noProxy);
+    vi.stubEnv('no_proxy', noProxy);
 
-    // Add debugging information
-    if (
-      !foundToolCall ||
-      !result.includes('file1.txt') ||
-      !result.includes('subdir')
-    ) {
-      const allTools = printDebugInfo(rig, result, {
-        'Found tool call': foundToolCall,
-        'Contains file1.txt': result.includes('file1.txt'),
-        'Contains subdir': result.includes('subdir'),
-      });
-
-      console.error(
-        'List directory calls:',
-        allTools
-          .filter((t) => t.toolRequest.name === 'list_directory')
-          .map((t) => t.toolRequest.args),
+    try {
+      const prompt = `Call the list_directory tool on the current directory.`;
+      // Explicit CLI flags outrank a developer's ~/.qwen/settings.json
+      // (settings.model.name beats the OPENAI_MODEL env var and can silently
+      // route the run to a real model endpoint instead of the fake server).
+      await rig.run(
+        prompt,
+        '--auth-type',
+        'openai',
+        '--model',
+        'fake-model',
+        '--openai-base-url',
+        fakeServer.baseUrl,
+        '--openai-api-key',
+        'fake-key',
       );
+
+      const foundToolCall = await rig.waitForToolCall('list_directory');
+
+      expect(foundToolCall, 'Expected a list_directory tool call').toBe(true);
+
+      const toolResultRequest = fakeServer.requests.find(({ body }) => {
+        const messages = body['messages'];
+        return (
+          Array.isArray(messages) &&
+          messages.some(
+            (message) =>
+              typeof message === 'object' &&
+              message !== null &&
+              'role' in message &&
+              message.role === 'tool',
+          )
+        );
+      });
+      expect(
+        toolResultRequest,
+        'Expected a model request containing the list_directory result',
+      ).toBeDefined();
+      const messages = toolResultRequest?.body['messages'] as
+        | Array<{ role?: string; content?: unknown }>
+        | undefined;
+      const toolResultContent = JSON.stringify(
+        messages?.find((message) => message.role === 'tool')?.content ?? '',
+      );
+      expect(toolResultContent).toContain('file1.txt');
+      expect(toolResultContent).toContain('subdir');
+    } finally {
+      await fakeServer.close();
     }
-
-    expect(
-      foundToolCall,
-      'Expected to find a list_directory tool call',
-    ).toBeTruthy();
-
-    // Validate model output - will throw if no output, warn if missing expected content
-    validateModelOutput(result, ['file1.txt', 'subdir'], 'List directory test');
   });
 });

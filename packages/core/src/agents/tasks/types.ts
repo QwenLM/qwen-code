@@ -98,6 +98,8 @@ export interface TaskBase {
   outputOffset: number;
   /** True once the kind's terminal notification has fired. */
   notified: boolean;
+  /** Todo work chain that created this task, when it was model-launched. */
+  todoWorkChainId?: string;
   /** Unified cancellation handle. */
   abortController: AbortController;
 }

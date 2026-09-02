@@ -43,8 +43,18 @@ describe('Prompt Hook Integration', () => {
         embedContent: vi.fn(),
         useSummarizedThinking: vi.fn().mockReturnValue(false),
       }),
+      getBaseLlmClient: vi.fn().mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: {
+            generateContent: mockGenerateContent,
+          },
+          contentGeneratorConfig: { model: 'qwen-max' },
+          model: 'qwen-max',
+        }),
+      }),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getAllowedHttpHookUrls: vi.fn().mockReturnValue([]),
+      getAllowPrivateNetworkHooks: vi.fn().mockReturnValue(false),
       getHooks: vi.fn().mockReturnValue({}),
     } as unknown as Config;
 

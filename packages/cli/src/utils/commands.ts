@@ -24,6 +24,36 @@ export type ParsedStackedSkillCommands = {
   exceededMax: boolean;
 };
 
+/** Returns whether a command can be offered in a stacked skill completion. */
+export const isStackedSkillCompletableCommand = (
+  command: SlashCommand,
+): boolean =>
+  command.kind === CommandKind.SKILL &&
+  command.userInvocable !== false &&
+  !command.hidden;
+
+/**
+ * Returns whether the text before a partial slash token is a valid stacked
+ * skill prefix. A further skill can only be completed while the existing
+ * leading tokens are user-invocable skills and the stack is below its limit.
+ */
+export const isValidStackedSkillPrefix = (
+  prefix: string,
+  commands: readonly SlashCommand[],
+): boolean => {
+  const trimmed = prefix.trim();
+  if (!trimmed) return false;
+
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length >= MAX_STACKED_SKILLS) return false;
+
+  return tokens.every((token) => {
+    if (!token.startsWith('/')) return false;
+    const command = findCommandByName(token.slice(1), commands);
+    return command !== undefined && isStackedSkillCompletableCommand(command);
+  });
+};
+
 /**
  * Parses a raw slash command string into its command, arguments, and canonical path.
  * If no valid command is found, the `commandToExecute` property will be `undefined`.

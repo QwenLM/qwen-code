@@ -59,6 +59,49 @@
   overflow: hidden;
 }
 
+.contextShell {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatHeaderRow {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+
+.customChatHeader {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.contextBody {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.contextBodyWithEnvironmentPanel .chatPane,
+.contextBodyWithEnvironmentPanel .content {
+  overflow: visible;
+}
+
+.contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
+  box-sizing: border-box;
+  width: calc(100% + 332px);
+  padding-right: 356px;
+}
+
 .chatPane {
   flex: 1 1 auto;
   min-width: 0;
@@ -83,6 +126,39 @@
   position: absolute;
   inset: 0 3px;
   background: transparent;
+}
+
+.artifactPanelDock {
+  flex: 0 0 var(--artifact-panel-dock-width);
+  width: var(--artifact-panel-dock-width);
+  min-width: 0;
+  display: flex;
+  animation: artifactPanelDockOpen 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.artifactPanelClip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+@keyframes artifactPanelDockOpen {
+  from {
+    flex-basis: 0;
+    width: 0;
+  }
+
+  to {
+    flex-basis: var(--artifact-panel-dock-width);
+    width: var(--artifact-panel-dock-width);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifactPanelDock {
+    animation: none;
+  }
 }
 
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
@@ -305,37 +381,12 @@
   overflow-y: auto;
 }
 
-.app,
-.app * {
-  box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.app *::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar-thumb {
-  border: 2px solid var(--scrollbar-track);
-  border-radius: 999px;
-  background: var(--scrollbar-thumb);
-}
-
-.app *::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
-}
-
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;
   --card: #161616;
   --card-foreground: #fafafa;
+  --table-section-bg: var(--subtle-bg);
   --popover: #1a1a1a;
   --popover-foreground: #fafafa;
   --primary: #fafafa;
@@ -397,6 +448,11 @@
   --scrollbar-track: transparent;
   --scrollbar-thumb: #3a3a3a;
   --scrollbar-thumb-hover: #525252;
+  --git-mode-current: #3ddc97;
+  --git-mode-branch: #f5a623;
+  --git-mode-worktree: #b48eff;
+  --git-mode-valid: #48bb78;
+  --git-mode-invalid: #fc8181;
 }
 
 .themeLight {
@@ -404,6 +460,7 @@
   --foreground: #0a0a0b;
   --card: #ffffff;
   --card-foreground: #0a0a0b;
+  --table-section-bg: #f3f4f6;
   --popover: #ffffff;
   --popover-foreground: #0a0a0b;
   --primary: #151517;
@@ -465,6 +522,11 @@
   --scrollbar-track: transparent;
   --scrollbar-thumb: #c7c9cc;
   --scrollbar-thumb-hover: #aeb1b5;
+  --git-mode-current: #1a7a4a;
+  --git-mode-branch: #9a6a00;
+  --git-mode-worktree: #6b3fa0;
+  --git-mode-valid: #1f7a3a;
+  --git-mode-invalid: #c0362c;
 }
 
 .content {
@@ -629,8 +691,14 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
+  position: relative;
+  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
+}
+
+.appChatEmpty .chatPane {
+  position: relative;
 }
 
 .footer {
@@ -663,7 +731,7 @@
   right: 20px;
   bottom: calc(100% + 8px);
   left: 20px;
-  z-index: 6;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   pointer-events: auto;
 }
 

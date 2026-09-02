@@ -113,6 +113,47 @@ describe('qwen resolve workflow', () => {
     'utf8',
   );
 
+  it('serialises /resolve against the autofix conflict path on the same PR head', () => {
+    // Both jobs merge the base branch and push to the PR's head. They live in
+    // different workflows, so a per-workflow concurrency name guards each only
+    // against itself. Observed on #7355: /resolve pushed at 03:51, the autofix
+    // leg pushed at 04:05 and was rejected `fetch first`, throwing away a full
+    // agent run. GitHub concurrency groups are repository-scoped, so an
+    // IDENTICAL prefix in both files is what makes them mutually exclusive.
+    const autofix = readFileSync(
+      path.join(repoRoot, '.github/workflows/qwen-autofix.yml'),
+      'utf8',
+    );
+    const groupOf = (text, jobName) =>
+      job(text, jobName).match(
+        /\n {4}concurrency:\n {6}group: '([a-z-]+?)-\$\{\{/,
+      )?.[1];
+
+    const resolveLock = groupOf(workflow, 'resolve-pr');
+    const autofixLock = groupOf(autofix, 'review-address');
+    expect(resolveLock).toBeTruthy();
+    // The invariant: renaming one side alone silently re-opens the race, and
+    // nothing else in the suite would notice.
+    expect(autofixLock).toBe(resolveLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
+    expect(job(workflow, 'resolve-pr')).toContain(
+      `group: '${resolveLock}-\${{ github.event.issue.number || github.event.inputs.pr_number }}'`,
+    );
+    expect(job(autofix, 'review-address')).toContain(
+      `group: '${autofixLock}-\${{ matrix.target.pr }}'`,
+    );
+    // Queue, never cancel: the loser of the race must run after the winner and
+    // re-check, not be discarded (or discard the winner's in-flight work).
+    for (const [text, name] of [
+      [workflow, 'resolve-pr'],
+      [autofix, 'review-address'],
+    ]) {
+      expect(job(text, name)).toContain('cancel-in-progress: false');
+    }
+  });
+
   it('uses the existing PR command workflow', () => {
     expect(
       existsSync(
@@ -200,6 +241,88 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain("- name: 'Refresh dependencies'");
   });
 
+  it('asks the resolution report for what the diff cannot show', () => {
+    // Measured before this contract existed: every substantive /resolve
+    // summary was a file-by-file inventory that hit the byte cap exactly and
+    // stopped mid-word (#2993, #4256, #6206 all ended at 2100 bytes total).
+    // The inventory duplicates the diff; what only the resolver knows is the
+    // root cause, whether the merge was semantic, and what it could not check.
+    const prompt = step(resolveJob, 'Resolve conflicts');
+    expect(prompt).toContain('Keep the summary under 4000 bytes');
+    expect(prompt).toContain(
+      'A file-by-file inventory is the first thing to cut',
+    );
+    expect(prompt).toContain('**Root cause.**');
+    expect(prompt).toContain('**Textual or semantic.**');
+    expect(prompt).toContain('**What is load-bearing.**');
+    expect(prompt).toContain('**What you could not verify.**');
+    // /resolve runs no tests AND may not edit non-conflicted files, so a merge
+    // that breaks an untouched test can only be reported, never fixed here.
+    expect(prompt).toContain('NON-conflicted test');
+    // Project convention for anything posted as a PR comment.
+    expect(prompt).toContain('<summary>中文说明</summary>');
+  });
+
+  it('truncates an over-long report visibly, on a character boundary', () => {
+    const helper = resolveJob.match(
+      /(SUMMARY_MAX_BYTES=\d+\n[\s\S]*?append_safe_file\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(helper).toBeTruthy();
+    // The instructed limit must sit BELOW the enforced one, or a report that
+    // obeys the prompt still gets cut.
+    const cap = Number(helper.match(/SUMMARY_MAX_BYTES=(\d+)/)[1]);
+    expect(cap).toBeGreaterThan(4000);
+
+    const run = (body) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'resolve-summary-'));
+      writeFileSync(path.join(dir, 'address-summary.md'), body);
+      const out = spawnSync(
+        'bash',
+        [
+          '-c',
+          `${helper.replace(/^ {10}/gm, '')}\nappend_safe_file "$WORKDIR/address-summary.md"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            RUN_URL: 'https://github.com/test/repo/actions/runs/1',
+          },
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      expect(out.status).toBe(0);
+      return out.stdout;
+    };
+
+    // A report inside the budget is passed through whole and unannotated.
+    const short = new TextDecoder().decode(
+      run('# Merge report\n\nRoot cause: #7351 touched the same chain.\n'),
+    );
+    expect(short).toContain('Root cause: #7351 touched the same chain.');
+    expect(short).not.toContain('truncated at');
+
+    // An over-long one is cut AND says so — the silent stop is the bug.
+    const long = new TextDecoder().decode(run(`${'x'.repeat(cap + 500)}\n`));
+    expect(long).toContain(`truncated at ${cap} bytes`);
+    expect(long).toContain('attached to this [workflow run](');
+
+    // The cut lands on a byte boundary, so a multi-byte character straddling
+    // it must be dropped rather than emitted as a broken tail. One leading
+    // ASCII byte offsets the 3-byte characters so the cap falls INSIDE one —
+    // without the offset the cut would land cleanly and prove nothing.
+    const wideBuf = run(`x${'中'.repeat(Math.ceil(cap / 3) + 2)}`);
+    // Fatal-decode the raw bytes bash emitted: a split multi-byte character
+    // would throw here. Re-encoding a JS string first (TextEncoder) can never
+    // produce invalid UTF-8, so that round-trip would make this assertion inert.
+    expect(() =>
+      new TextDecoder('utf-8', { fatal: true }).decode(wideBuf),
+    ).not.toThrow();
+    const wide = new TextDecoder().decode(wideBuf);
+    expect(wide).not.toContain('�');
+    expect(wide).toContain(`truncated at ${cap} bytes`);
+  });
+
   it('uses resolve naming for run artifacts', () => {
     expect(workflow).toContain('qwen-resolve-');
     expect(workflow).toContain('/tmp/qwen-resolve');
@@ -241,8 +364,9 @@ describe('qwen resolve workflow', () => {
     const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
 
     expect(runStep).toContain('failure_kind=$kind');
+    expect(runStep).toContain("OUTCOME='timeout'");
     expect(runStep).toContain(
-      'fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"',
+      'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
     expect(fallbackStep).toContain('FAILURE_KIND:');

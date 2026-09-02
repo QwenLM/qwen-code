@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { CSSProperties, ReactNode, RefObject } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
@@ -22,6 +22,8 @@ import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
+import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
+import { SpecularComposerEffect } from './SpecularComposerEffect';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -50,17 +52,20 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
-import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
+import type {
+  VoiceStatusRevision,
+  VoiceWorkspaceTarget,
+} from '../voice/voice-workspace-target';
+import {
+  GitBranchChipContent,
+  GitBranchIndicator,
+  gitBranchAriaLabel,
+} from './GitBranchIndicator';
+import { GitModePopover, type SessionGitIntent } from './GitModePopover';
+import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
+import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
   PopoverAnchor,
@@ -113,6 +118,7 @@ interface ChatEditorProps {
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -131,10 +137,20 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Whether the session is in a worktree (styles the git chip purple). */
+  gitWorktree?: boolean;
+  /** Git working directory for worktree sessions; targets git operations. */
+  gitCwd?: string;
+  /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
+  gitModeIntent?: SessionGitIntent;
+  /** Callback when the user changes the git mode intent via the composer chip popover. */
+  onGitModeIntentChange?: (intent: SessionGitIntent) => void;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
   onOpenGitDiff?: () => void;
+  /** Opens the commit dialog. */
+  onOpenCommit?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -156,10 +172,16 @@ interface ChatEditorProps {
     cwd: string;
     label: string;
     primary: boolean;
+    trusted: boolean;
   }>;
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  scratchWorkspaceSupported?: boolean;
+  existingFolderWorkspaceSupported?: boolean;
+  workspaceMutationBusy?: boolean;
+  onCreateScratchWorkspace?: () => void;
+  onOpenExistingWorkspace?: () => void;
   atWorkspaceCwd?: string;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
@@ -167,12 +189,15 @@ interface ChatEditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -383,89 +408,63 @@ function QuickActionsIcon() {
   );
 }
 
-function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
-  let glowRaf: number | undefined;
-  let pulseRaf: number | undefined;
-  let pulseDecayTimer: number | undefined;
-  let typingTimer: number | undefined;
-  let glowCurrent = 0;
-  let pulseCurrent = 0;
+function TypewriterPlaceholder({ text }: { text: string }) {
+  const totalRuns = 2;
+  const replayDelay = 3000;
+  const reducedMotion = usePrefersReducedMotion();
+  const [visibleText, setVisibleText] = useState(reducedMotion ? text : '');
+  const [finished, setFinished] = useState(false);
 
-  const apply = (on: number, pulse: number) => {
-    glowRootEl.style.setProperty('--dac-glow-on', on.toFixed(4));
-    glowRootEl.style.setProperty('--dac-glow-pulse', pulse.toFixed(4));
-  };
-
-  const animateGlow = (target: number) => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    const start = glowCurrent;
-    const diff = target - start;
-    if (Math.abs(diff) < 0.001) {
-      glowCurrent = target;
-      apply(target, pulseCurrent);
-      return;
+  useEffect(() => {
+    if (reducedMotion) {
+      setVisibleText(text);
+      setFinished(false);
+      return undefined;
     }
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 220, 1);
-      glowCurrent = start + diff * (1 - (1 - t) ** 2);
-      apply(glowCurrent, pulseCurrent);
-      glowRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
+
+    let run = 0;
+    let timer = 0;
+    const startRun = () => {
+      let index = 0;
+      setVisibleText('');
+      setFinished(false);
+      const typeNextCharacter = () => {
+        index += 1;
+        setVisibleText(text.slice(0, index));
+        if (index === text.length) {
+          run += 1;
+          setFinished(true);
+          if (run < totalRuns) {
+            timer = window.setTimeout(startRun, replayDelay);
+          }
+          return;
+        }
+        timer = window.setTimeout(typeNextCharacter, 45);
+      };
+      timer = window.setTimeout(typeNextCharacter, 45);
     };
-    glowRaf = window.requestAnimationFrame(tick);
-  };
+    startRun();
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion, text]);
 
-  const animatePulseDecay = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    const start = pulseCurrent;
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 300, 1);
-      pulseCurrent = start * (1 - t);
-      apply(glowCurrent, pulseCurrent);
-      pulseRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
-    };
-    pulseRaf = window.requestAnimationFrame(tick);
-  };
-
-  const setTyping = (on: boolean) => {
-    if (on) glowRootEl.setAttribute('data-dac-typing', '');
-    else glowRootEl.removeAttribute('data-dac-typing');
-  };
-
-  const onFocus = () => animateGlow(1);
-  const onBlur = () => {
-    animateGlow(0);
-    setTyping(false);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-  };
-  const onKeydown = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    pulseCurrent = 1;
-    apply(glowCurrent, 1);
-    pulseDecayTimer = window.setTimeout(animatePulseDecay, 100);
-    setTyping(true);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    typingTimer = window.setTimeout(() => setTyping(false), 650);
-  };
-
-  inputEl.addEventListener('focus', onFocus);
-  inputEl.addEventListener('blur', onBlur);
-  inputEl.addEventListener('keydown', onKeydown);
-  if (document.activeElement === inputEl) animateGlow(1);
-
-  return () => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    inputEl.removeEventListener('focus', onFocus);
-    inputEl.removeEventListener('blur', onBlur);
-    inputEl.removeEventListener('keydown', onKeydown);
-    apply(0, 0);
-    setTyping(false);
-  };
+  return (
+    <span
+      className={styles.typewriterPlaceholder}
+      data-web-shell-composer-typewriter
+      aria-hidden="true"
+    >
+      {visibleText}
+      {!reducedMotion && (
+        <span
+          className={`${styles.typewriterCaret} ${
+            finished ? styles.typewriterCaretFinished : ''
+          }`}
+        >
+          _
+        </span>
+      )}
+    </span>
+  );
 }
 
 function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
@@ -773,6 +772,7 @@ function ToolbarPopover({
               className={`${styles.dropdownItem} ${
                 item.id === activeId ? styles.dropdownItemActive : ''
               }`}
+              title={item.label}
               onClick={() => {
                 selectionRef.current = true;
                 onSelect(item.id);
@@ -837,6 +837,7 @@ function SlashCommandPanel({
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
+    side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
 
   useEffect(() => {
@@ -884,25 +885,6 @@ function SlashCommandPanel({
   }, []);
 
   const rowPlans = planSlashSectionRows(menu.items, menu.kind);
-  const maxLabelLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.label).length),
-    0,
-  );
-  const maxDetailLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.detail ?? '').length),
-    0,
-  );
-  const hasDetailColumn = maxDetailLength > 0;
-  const panelStyle = {
-    '--slash-command-col': `${Math.min(
-      Math.max(maxLabelLength + 1, 10),
-      24,
-    )}ch`,
-    '--slash-desc-col': hasDetailColumn
-      ? `${Math.min(Math.max(maxDetailLength + 1, 18), 36)}ch`
-      : '0px',
-    '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
-  } as CSSProperties;
 
   return (
     <>
@@ -923,11 +905,12 @@ function SlashCommandPanel({
           align="start"
           alignOffset={16}
           sideOffset={8}
+          avoidCollisions={false}
           collisionPadding={12}
           collisionBoundary={collisionBoundary ?? undefined}
+          className="duration-0 data-open:animate-none data-closed:animate-none"
           role="listbox"
           data-web-shell-slash-menu
-          style={panelStyle}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1000,9 +983,29 @@ function SlashCommandPanel({
                             return;
                           }
                           hoverAnchorRef.current = event.currentTarget;
+                          const rowRect =
+                            event.currentTarget.getBoundingClientRect();
+                          const boundaryRect =
+                            collisionBoundary?.getBoundingClientRect();
+                          const left = boundaryRect?.left ?? 0;
+                          const right =
+                            boundaryRect?.right ?? window.innerWidth;
+                          const top = boundaryRect?.top ?? 0;
+                          const bottom =
+                            boundaryRect?.bottom ?? window.innerHeight;
+                          const detailWidth = Math.min(320, right - left - 24);
+                          const side =
+                            right - rowRect.right >= detailWidth + 8
+                              ? 'right'
+                              : rowRect.left - left >= detailWidth + 8
+                                ? 'left'
+                                : rowRect.top - top >= bottom - rowRect.bottom
+                                  ? 'top'
+                                  : 'bottom';
                           setHoverDetail({
                             label: item.label,
                             detail: item.detail,
+                            side,
                           });
                         }}
                         onMouseDown={(event) => {
@@ -1042,11 +1045,12 @@ function SlashCommandPanel({
         {hoverDetail && (
           <PopoverContent
             ref={detailRef}
-            side="right"
+            side={hoverDetail.side}
             align="start"
             sideOffset={8}
             collisionPadding={12}
             collisionBoundary={collisionBoundary ?? undefined}
+            className="duration-0 data-open:animate-none data-closed:animate-none"
             data-web-shell-slash-detail
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={(event) => event.preventDefault()}
@@ -1078,10 +1082,14 @@ function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
+  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
+  // The keyboard shortcut grid is pointless without a hardware keyboard, so
+  // the mobile textarea backend hides it.
+  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -1105,20 +1113,22 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        <div className={styles.quickKeysGrid}>
-          {QUICK_KEY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={styles.quickKey}
-              title={t(item.descriptionKey)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onPressKey(item)}
-            >
-              <span className={styles.quickKeyLabel}>{item.label}</span>
-            </button>
-          ))}
-        </div>
+        {showKeyHints && (
+          <div className={styles.quickKeysGrid}>
+            {QUICK_KEY_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={styles.quickKey}
+                title={t(item.descriptionKey)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onPressKey(item)}
+              >
+                <span className={styles.quickKeyLabel}>{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1129,6 +1139,7 @@ export const ChatEditor = memo(
     const {
       onSubmit,
       onInputTextChange,
+      onAttachmentsChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1145,8 +1156,13 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      gitWorktree,
+      gitCwd,
+      gitModeIntent,
+      onGitModeIntentChange,
       gitStatus,
       onOpenGitDiff,
+      onOpenCommit,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -1161,6 +1177,11 @@ export const ChatEditor = memo(
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
       onSelectWorkspace,
+      scratchWorkspaceSupported = false,
+      existingFolderWorkspaceSupported = false,
+      workspaceMutationBusy = false,
+      onCreateScratchWorkspace,
+      onOpenExistingWorkspace,
       atWorkspaceCwd,
       onChatWidthModeChange,
       onFocusFooter,
@@ -1168,12 +1189,15 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
       builtinAtProviders,
       atProviders,
       composerTagIcons,
+      voiceTarget,
+      voiceStatusRevision,
     } = props;
 
     const {
@@ -1183,6 +1207,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      parseUserMessageContent,
     } = useWebShellCustomization();
 
     const core = useComposerCore({
@@ -1203,6 +1228,7 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
@@ -1210,6 +1236,7 @@ export const ChatEditor = memo(
       atProviders,
       atWorkspaceCwd,
       composerTagIcons,
+      parseUserMessageContent,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1220,11 +1247,16 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
+    useEffect(() => {
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
+
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
-    const [workspaceTooltipOpen, setWorkspaceTooltipOpen] = useState(false);
+    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
+    const [typewriterSuppressed, setTypewriterSuppressed] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const slashDetailRef = useRef<HTMLDivElement>(null);
@@ -1236,10 +1268,8 @@ export const ChatEditor = memo(
     const toolbarEndRef = useRef<HTMLDivElement>(null);
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
-    const workspaceSelectTriggerRef = useRef<HTMLButtonElement>(null);
-    const suppressWorkspaceTooltipRef = useRef(false);
-    const workspaceSelectPointerInsideRef = useRef(false);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
+    const [voiceActive, setVoiceActive] = useState(false);
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
@@ -1254,7 +1284,13 @@ export const ChatEditor = memo(
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
-    const editorViewRef = core.viewRef;
+    const showTypewriterPlaceholder =
+      !disabled &&
+      Boolean(placeholderText) &&
+      !core.hasInput() &&
+      !typewriterSuppressed &&
+      !core.shellMode &&
+      !followupState?.isVisible;
 
     useEffect(() => {
       if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -1293,13 +1329,6 @@ export const ChatEditor = memo(
         window.removeEventListener('touchstart', onPointerOutside);
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
-
-    useEffect(() => {
-      const glowRoot = containerRef.current;
-      const inputEl = editorViewRef.current?.contentDOM;
-      if (!glowRoot || !inputEl) return undefined;
-      return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
 
     useEffect(() => {
       const container = containerRef.current;
@@ -1494,6 +1523,15 @@ export const ChatEditor = memo(
     );
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
+        if (core.mobileComposer) {
+          // No CodeMirror to dispatch into. History search is the one key
+          // action with a non-keyboard equivalent; the rest are hidden on
+          // the textarea backend.
+          if (event.ctrlKey && event.key === 'r') {
+            core.searchState.openHistorySearch();
+          }
+          return;
+        }
         const view = core.viewRef.current;
         if (!view) return;
         view.focus();
@@ -1548,6 +1586,7 @@ export const ChatEditor = memo(
       searchInputRef,
       searchUiRef,
       closeSearch,
+      restoreSearchMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,
@@ -1608,7 +1647,11 @@ export const ChatEditor = memo(
     );
     const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
-      workspaces && workspaces.length > 1 && onSelectWorkspace,
+      workspaces &&
+        onSelectWorkspace &&
+        (workspaces.length > 1 ||
+          scratchWorkspaceSupported ||
+          existingFolderWorkspaceSupported),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -1629,6 +1672,11 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const mobileVoiceActive = showQuickActions && voiceActive;
+
+    useEffect(() => {
+      if (mobileVoiceActive) setQuickActionsOpen(false);
+    }, [mobileVoiceActive]);
 
     useLayoutEffect(() => {
       const toolbar = toolbarRef.current;
@@ -1816,7 +1864,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
-          data-dac-glow
+          data-typewriter-visible={showTypewriterPlaceholder || undefined}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -1824,8 +1872,7 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          <SpecularComposerEffect targetRef={containerRef} />
           {searchMode && (
             <div
               ref={searchUiRef}
@@ -1861,7 +1908,11 @@ export const ChatEditor = memo(
                         }`}
                         onMouseDown={(event) => {
                           event.preventDefault();
-                          core.replaceEditorText(match);
+                          if (restoreSearchMatch) {
+                            restoreSearchMatch(match);
+                          } else {
+                            core.replaceEditorText(match);
+                          }
                           closeSearch(false);
                         }}
                       >
@@ -1989,16 +2040,59 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            <div className={styles.editorArea}>
+            <div
+              className={styles.editorArea}
+              onPointerDownCapture={() => setTypewriterSuppressed(true)}
+              onKeyDownCapture={() => setTypewriterSuppressed(true)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) {
+                  setTypewriterSuppressed(false);
+                }
+              }}
+            >
+              {showTypewriterPlaceholder && (
+                <TypewriterPlaceholder text={placeholderText} />
+              )}
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
                   !
                 </span>
               )}
-              <div ref={core.containerRef} data-web-shell-composer-editor />
+              {core.mobileComposer ? (
+                // Touch devices get a plain textarea instead of CodeMirror:
+                // mobile virtual keyboards and IMEs interact poorly with the
+                // contenteditable editor (#5958). Enter inserts a newline
+                // natively; submission goes through the Send button.
+                <textarea
+                  ref={core.mobileComposer.textareaRef}
+                  className={styles.mobileTextarea}
+                  value={core.mobileComposer.value}
+                  onChange={core.mobileComposer.onChange}
+                  onBlur={core.mobileComposer.onBlur}
+                  onPaste={core.mobileComposer.onPaste}
+                  placeholder={core.mobileComposer.placeholder}
+                  disabled={core.disabled}
+                  rows={1}
+                  enterKeyHint="enter"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-web-shell-composer-editor
+                />
+              ) : (
+                <div ref={core.containerRef} data-web-shell-composer-editor />
+              )}
             </div>
-            <div ref={toolbarRef} className={styles.toolbar}>
-              <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
+            <div
+              ref={toolbarRef}
+              className={styles.toolbar}
+              data-mobile-voice-active={mobileVoiceActive || undefined}
+            >
+              <div
+                ref={toolbarLeadingRef}
+                className={styles.toolbarLeading}
+                data-web-shell-toolbar-leading
+              >
                 {ToolbarStart && (
                   <div ref={toolbarStartRef} className={styles.toolbarStart}>
                     <ToolbarStart
@@ -2014,95 +2108,26 @@ export const ChatEditor = memo(
                   {workspaceSelectVisible &&
                     workspaces &&
                     onSelectWorkspace && (
-                      <Select
-                        value={selectedWorkspace?.id}
+                      <WorkspaceSelector
+                        workspaces={workspaces}
+                        selectedWorkspaceCwd={selectedWorkspaceCwd}
                         disabled={workspaceSelectionDisabled}
-                        onValueChange={(value) => {
-                          const nextWorkspace = workspaces.find(
-                            (entry) => entry.id === value,
-                          );
-                          if (!nextWorkspace) return;
-                          onSelectWorkspace(
-                            nextWorkspace.primary
-                              ? undefined
-                              : nextWorkspace.cwd,
-                          );
-                          suppressWorkspaceTooltipRef.current = true;
-                          setWorkspaceTooltipOpen(false);
-                          requestAnimationFrame(() => {
-                            workspaceSelectTriggerRef.current?.blur();
-                          });
-                        }}
-                      >
-                        <TooltipProvider delayDuration={300}>
-                          <Tooltip
-                            open={workspaceTooltipOpen}
-                            onOpenChange={(open) => {
-                              if (
-                                open &&
-                                (suppressWorkspaceTooltipRef.current ||
-                                  !workspaceSelectPointerInsideRef.current)
-                              ) {
-                                return;
-                              }
-                              setWorkspaceTooltipOpen(open);
-                            }}
-                          >
-                            <TooltipTrigger asChild>
-                              <span
-                                className={`${styles.workspaceSelectTooltipTrigger} ${
-                                  showWorkspaceSelectLabel
-                                    ? ''
-                                    : styles.workspaceSelectTooltipTriggerCompact
-                                }`}
-                                onPointerEnter={() => {
-                                  workspaceSelectPointerInsideRef.current = true;
-                                }}
-                                onPointerLeave={() => {
-                                  workspaceSelectPointerInsideRef.current = false;
-                                  suppressWorkspaceTooltipRef.current = false;
-                                }}
-                                onBlur={() => {
-                                  if (
-                                    !workspaceSelectPointerInsideRef.current
-                                  ) {
-                                    suppressWorkspaceTooltipRef.current = false;
-                                  }
-                                }}
-                              >
-                                <SelectTrigger
-                                  ref={workspaceSelectTriggerRef}
-                                  size="sm"
-                                  className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
-                                    showWorkspaceSelectLabel
-                                      ? ''
-                                      : styles.workspaceSelectTriggerCompact
-                                  }`}
-                                  aria-label={t('sidebar.workspaceSelectLabel')}
-                                >
-                                  <FolderClosedIcon
-                                    size={16}
-                                    strokeWidth={1.2}
-                                  />
-                                  <SelectValue />
-                                </SelectTrigger>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              {selectedWorkspaceLabel}
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                        <SelectContent position="popper" align="start">
-                          <SelectGroup>
-                            {workspaces.map((entry) => (
-                              <SelectItem key={entry.id} value={entry.id}>
-                                {entry.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
+                        busy={workspaceMutationBusy}
+                        scratchSupported={scratchWorkspaceSupported}
+                        existingFolderSupported={
+                          existingFolderWorkspaceSupported
+                        }
+                        className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+                          showWorkspaceSelectLabel
+                            ? ''
+                            : styles.workspaceSelectTriggerCompact
+                        }`}
+                        onSelectWorkspace={onSelectWorkspace}
+                        onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
+                        onOpenExistingFolder={
+                          onOpenExistingWorkspace ?? (() => {})
+                        }
+                      />
                     )}
                   {workspaceIndicatorVisible && workspaceName && (
                     <WorkspaceIndicator
@@ -2115,14 +2140,42 @@ export const ChatEditor = memo(
                       })}
                     />
                   )}
-                  {gitBranchVisible && gitBranch && (
-                    <GitBranchIndicator
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact={!showGitBranchLabel}
-                      onOpenDiff={onOpenGitDiff}
-                    />
-                  )}
+                  {gitBranchVisible &&
+                    gitBranch &&
+                    (gitModeIntent && onGitModeIntentChange ? (
+                      <GitModePopover
+                        branch={gitBranch}
+                        compact={!showGitBranchLabel}
+                        intent={gitModeIntent}
+                        onIntentChange={onGitModeIntentChange}
+                      />
+                    ) : (
+                      <BranchPickerPopover
+                        open={branchPickerOpen}
+                        onOpenChange={setBranchPickerOpen}
+                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
+                        gitCwd={gitCwd}
+                        onOpenDiff={onOpenGitDiff}
+                        onOpenCommit={onOpenCommit}
+                      >
+                        <button
+                          type="button"
+                          className={styles.gitBranchChipButton}
+                          aria-label={gitBranchAriaLabel(
+                            gitBranch,
+                            gitStatus,
+                            t,
+                          )}
+                        >
+                          <GitBranchIndicator
+                            branch={gitBranch}
+                            status={gitStatus}
+                            compact={!showGitBranchLabel}
+                            worktree={gitWorktree}
+                          />
+                        </button>
+                      </BranchPickerPopover>
+                    ))}
                   {showModeAction && (
                     <div
                       className={`${styles.dropdownWrapper} ${
@@ -2205,7 +2258,8 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={t('model.select')}
+                            aria-label={`${t('model.select')}: ${modelLabel}`}
+                            title={modelLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />
@@ -2240,6 +2294,7 @@ export const ChatEditor = memo(
                 {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
+                    data-hide-during-mobile-voice
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
@@ -2262,6 +2317,7 @@ export const ChatEditor = memo(
                   <div
                     ref={toolbarRightCustomRef}
                     className={styles.toolbarRightCustom}
+                    data-hide-during-mobile-voice
                   >
                     <ToolbarRight
                       disabled={disabled}
@@ -2277,6 +2333,7 @@ export const ChatEditor = memo(
                   showToolbarAction('widthMode') && (
                     <button
                       className={`${styles.toolBtn} ${styles.widthModeBtn}`}
+                      data-hide-during-mobile-voice
                       onClick={(e) => {
                         e.stopPropagation();
                         onChatWidthModeChange?.(
@@ -2308,6 +2365,9 @@ export const ChatEditor = memo(
                 {showToolbarAction('voice') && (
                   <VoiceButton
                     disabled={disabled}
+                    onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
                     onInsert={(text) => {
                       const existing = core.getText();
                       const sep = existing && !/\s$/.test(existing) ? ' ' : '';
@@ -2446,6 +2506,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact
+                      worktree={gitWorktree}
                     />
                   </span>
                   <span
@@ -2456,6 +2517,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact={false}
+                      worktree={gitWorktree}
                     />
                   </span>
                 </>
@@ -2516,6 +2578,7 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
+            showKeyHints={!core.mobileComposer}
           />
         )}
       </div>

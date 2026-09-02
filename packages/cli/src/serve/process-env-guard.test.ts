@@ -53,6 +53,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/acp-bridge/src/workspacePaths.ts',
+    {
+      reason:
+        'Whether the daemon runs inside a container sandbox is process-scoped: ' +
+        'the sandbox launcher marks the whole process via the SANDBOX env, and ' +
+        'workspace canonicalization uses it to map Windows-shaped host paths ' +
+        'to their bind-mount location (#7139).',
+      accesses: { 'key:SANDBOX': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/acp-http-enabled.ts',
     {
       reason:

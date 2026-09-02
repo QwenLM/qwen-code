@@ -56,6 +56,7 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -365,7 +366,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
         env: {
-          ...process.env,
+          ...sanitizeChildEnv(process.env),
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
           ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {

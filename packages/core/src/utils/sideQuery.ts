@@ -24,8 +24,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
-   * Pass an explicit value to pin to the main model (e.g. long-form
-   * summarization in web-fetch).
+   * Pass an explicit value to pin a specific model.
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
@@ -72,8 +71,7 @@ export interface SideQueryTextOptions {
    * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
-   * Pass an explicit value to pin to the main model (e.g. long-form
-   * summarization in web-fetch).
+   * Pass an explicit value to pin a specific model.
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;

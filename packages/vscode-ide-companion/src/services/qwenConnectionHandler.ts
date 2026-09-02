@@ -47,7 +47,8 @@ export class QwenConnectionHandler {
    *
    * @param connection - ACP connection instance
    * @param workingDir - Working directory
-   * @param cliPath - CLI path (optional, if provided will override the path in configuration)
+   * @param cliEntryPath - CLI entry path (if provided will override the path in configuration)
+   * @param options - Optional connection settings
    */
   async connect(
     connection: AcpConnection,

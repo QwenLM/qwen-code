@@ -1,0 +1,224 @@
+.page {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 28px;
+  padding-block-end: 32px;
+}
+
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block-end: 18px;
+  border-block-end: 1px solid var(--border);
+}
+
+.titleGroup {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.titleCopy {
+  min-width: 0;
+}
+
+.title {
+  outline: none;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.summary {
+  overflow: hidden;
+  margin-block-start: 5px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sectionTitle {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.channelGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.channelCard {
+  position: relative;
+  overflow: hidden;
+}
+
+.channelCard::before {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: var(--muted-foreground);
+  content: '';
+}
+
+.channelCard[data-runtime-state='connected']::before {
+  background: var(--success-color);
+}
+
+.channelCard[data-runtime-state='starting']::before,
+.channelCard[data-runtime-state='partial']::before {
+  background: var(--warning-color);
+}
+
+.channelCard[data-runtime-state='error']::before {
+  background: var(--destructive);
+}
+
+.channelActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lifecycleActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.startupControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.errorAlert [data-slot='alert-description'] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+.platformGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platformCard {
+  display: flex;
+  min-width: 0;
+  cursor: pointer;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.platformCard:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--foreground) 38%, var(--border));
+  background: color-mix(in srgb, var(--muted) 46%, var(--card));
+}
+
+.platformCard:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--ring) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.platformCard:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.platformMark {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+
+.platformCopy {
+  min-width: 0;
+}
+
+.platformName {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platformHint {
+  margin-block-start: 2px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+@container panel-body (max-width: 620px) {
+  .platformGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@container panel-body (max-width: 440px) {
+  .pageHeader {
+    flex-direction: column;
+  }
+
+  .channelGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .channelCard,
+  .channelCard *,
+  .platformCard {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

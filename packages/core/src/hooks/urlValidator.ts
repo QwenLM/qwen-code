@@ -5,7 +5,7 @@
  */
 
 import { isIPv4, isIPv6 } from 'net';
-import { isBlockedAddress } from './ssrfGuard.js';
+import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('URL_VALIDATOR');
@@ -32,13 +32,21 @@ const BLOCKED_HOSTS = [
 export class UrlValidator {
   private readonly allowedPatterns: string[];
   private readonly compiledPatterns: RegExp[];
+  private readonly allowPrivateNetworkHosts: boolean;
 
   /**
    * Create a new URL validator
    * @param allowedPatterns - Array of allowed URL patterns (supports * wildcard)
+   * @param allowPrivateNetworkHosts - When true, skip the private/link-local
+   *   IP-range check (the metadata endpoint checks — BLOCKED_HOSTS and the
+   *   metadata IPs — still apply). Only enable from trusted settings scopes.
    */
-  constructor(allowedPatterns: string[] = []) {
+  constructor(
+    allowedPatterns: string[] = [],
+    allowPrivateNetworkHosts: boolean = false,
+  ) {
     this.allowedPatterns = allowedPatterns;
+    this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
     this.compiledPatterns = allowedPatterns.map((pattern) =>
       this.compilePattern(pattern),
     );
@@ -97,11 +105,25 @@ export class UrlValidator {
         return true;
       }
 
-      // Check if hostname is an IP address - use ssrfGuard for authoritative check
+      // Check if hostname is an IP address
       if (this.isIpAddress(hostname)) {
-        // Remove brackets from IPv6 addresses for isBlockedAddress
+        // Remove brackets from IPv6 addresses for the IP checks
         const cleanHostname = hostname.replace(/^\[|\]$/g, '');
-        if (isBlockedAddress(cleanHostname)) {
+
+        // Cloud metadata endpoints (169.254.169.254, 100.100.100.200, in
+        // any serialized form including IPv4-mapped IPv6) stay blocked in
+        // every configuration — this check is never relaxed.
+        if (isMetadataAddress(cleanHostname)) {
+          debugLogger.debug(
+            `URL blocked: IP ${hostname} is a cloud metadata endpoint`,
+          );
+          return true;
+        }
+
+        // General private/link-local range check - use ssrfGuard for the
+        // authoritative implementation. Skipped when private-network hooks
+        // are explicitly allowed (trusted scopes only).
+        if (!this.allowPrivateNetworkHosts && isBlockedAddress(cleanHostname)) {
           debugLogger.debug(`URL blocked: IP ${hostname} is blocked`);
           return true;
         }
@@ -157,6 +179,9 @@ export class UrlValidator {
  * @param allowedUrls - Array of allowed URL patterns from config
  * @returns Configured URL validator
  */
-export function createUrlValidator(allowedUrls?: string[]): UrlValidator {
-  return new UrlValidator(allowedUrls || []);
+export function createUrlValidator(
+  allowedUrls?: string[],
+  allowPrivateNetworkHosts?: boolean,
+): UrlValidator {
+  return new UrlValidator(allowedUrls || [], allowPrivateNetworkHosts);
 }

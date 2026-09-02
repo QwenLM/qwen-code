@@ -22,11 +22,14 @@ import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js'
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 export interface WorkspacePermissionsRouteDeps {
   boundWorkspace: string;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   workspace: DaemonWorkspaceService;
@@ -50,10 +53,21 @@ export function registerWorkspacePermissionsRoutes(
 
   app.get('/workspace/permissions', (_req: Request, res: Response) => {
     try {
-      res
-        .status(200)
-        .json(buildPermissionSettings(loadSettings(boundWorkspace)));
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      assertGenerationOpen();
+      const workspaceTrusted = deps.isWorkspaceTrusted?.();
+      res.status(200).json(
+        buildPermissionSettings(
+          loadSettings(boundWorkspace, {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: workspaceTrusted === false,
+            workspaceTrusted,
+          }),
+        ),
+      );
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/permissions error: ${
           err instanceof Error ? err.message : String(err)
@@ -70,6 +84,14 @@ export function registerWorkspacePermissionsRoutes(
     '/workspace/permissions',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        throw err;
+      }
       const body = safeBody(req);
       const scope = body['scope'];
       const ruleType = body['ruleType'];
@@ -82,6 +104,16 @@ export function registerWorkspacePermissionsRoutes(
         return;
       }
       const permissionScope: PermissionSettingsScope = scope;
+      if (
+        permissionScope === 'workspace' &&
+        deps.isWorkspaceTrusted?.() === false
+      ) {
+        res.status(403).json({
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        });
+        return;
+      }
 
       if (!isPermissionRuleType(ruleType)) {
         res.status(400).json({
@@ -93,7 +125,12 @@ export function registerWorkspacePermissionsRoutes(
 
       let rules: string[];
       try {
-        const settings = loadSettings(boundWorkspace);
+        const workspaceTrusted = deps.isWorkspaceTrusted?.();
+        const settings = loadSettings(boundWorkspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
+        });
         const scopeSettings =
           permissionScope === 'workspace'
             ? settings.workspace.settings
@@ -126,6 +163,7 @@ export function registerWorkspacePermissionsRoutes(
           { scope: permissionScope, ruleType, rules },
         );
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
           res.status(409).json({
             error:
@@ -168,7 +206,11 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     try {
       res
         .status(200)
-        .json(buildPermissionSettings(loadSettings(runtime.workspaceCwd)));
+        .json(
+          buildPermissionSettings(
+            loadSettings(runtime.workspaceCwd, { workspaceTrusted: true }),
+          ),
+        );
     } catch (err) {
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/permissions error: ${
@@ -216,7 +258,9 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
 
       let rules: string[];
       try {
-        const settings = loadSettings(runtime.workspaceCwd);
+        const settings = loadSettings(runtime.workspaceCwd, {
+          workspaceTrusted: true,
+        });
         const existingRules = readPermissionRuleSet(
           settings.workspace.settings,
         )[ruleType];
@@ -251,6 +295,7 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
           );
         res.status(200).json(liveResponse);
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
           res.status(409).json({
             error:

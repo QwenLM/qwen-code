@@ -14,6 +14,8 @@ const cell = (value: string, fullWidth = false): FrameCell => ({
   value,
   fullWidth,
   styles: [],
+  selectable: true,
+  flowId: 1,
 });
 
 /** Build a frame from plain strings, expanding wide glyphs into cell + spacer. */
@@ -32,7 +34,26 @@ function frameFromLines(lines: string[]): ReadonlyFrame {
     return row;
   });
   const width = Math.max(0, ...cells.map((r) => r.length));
-  return { width, height: cells.length, cells };
+  return {
+    width,
+    height: cells.length,
+    cells,
+    boundaries: cells.map(() => Array.from({ length: width }, () => null)),
+  };
+}
+
+function setBoundary(
+  frame: ReadonlyFrame,
+  y: number,
+  kind: 'soft' | 'hard',
+  joiner: string,
+): void {
+  const row = frame.boundaries[y] as Array<
+    ReadonlyFrame['boundaries'][number][number]
+  >;
+  for (let x = 0; x < row.length; x++) {
+    row[x] = { kind, joiner, selectable: true, flowId: 1 };
+  }
 }
 
 describe('SelectionState', () => {
@@ -90,14 +111,81 @@ describe('getSelectedText', () => {
     expect(getSelectedText(frame, { sx: 1, sy: 0, ex: 2, ey: 0 })).toBe('中');
   });
 
-  it('trims trailing whitespace per line', () => {
+  it('preserves selectable source whitespace', () => {
     const frame = frameFromLines(['hi   ', 'bye']);
     expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
-      'hi\nbye',
+      'hi   \nbye',
+    );
+  });
+
+  it('skips non-selectable layout padding', () => {
+    const frame = frameFromLines(['hi   ']);
+    for (let x = 2; x < 5; x++) {
+      (frame.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 0 })).toBe('hi');
+  });
+
+  it('replaces a soft visual break with its source joiner', () => {
+    const frame = frameFromLines(['hello', 'world']);
+    setBoundary(frame, 0, 'soft', ' ');
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello world',
+    );
+  });
+
+  it('does not use boundary claims to override selected row content', () => {
+    const frame = frameFromLines(['abc', 'xyz']);
+    setBoundary(frame, 0, 'soft', '');
+    for (const currentCell of frame.cells[1]) {
+      (currentCell as FrameCell).flowId = 2;
+    }
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 2, ey: 1 })).toBe(
+      'abc\nxyz',
+    );
+  });
+
+  it('preserves a newline for a one-sided partial flow overlap', () => {
+    const frame = frameFromLines(['abc', 'def']);
+    setBoundary(frame, 0, 'soft', '');
+    (frame.cells[0][1] as FrameCell).flowId = 2;
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 2, ey: 1 })).toBe(
+      'abc\ndef',
+    );
+  });
+
+  it('preserves hard and ambiguous visual breaks', () => {
+    const hard = frameFromLines(['hello', 'world']);
+    setBoundary(hard, 0, 'hard', '\n');
+    expect(getSelectedText(hard, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello\nworld',
+    );
+
+    const ambiguous = frameFromLines(['hello', 'world']);
+    expect(getSelectedText(ambiguous, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello\nworld',
     );
   });
 
   it('returns empty string for a null frame', () => {
     expect(getSelectedText(null, { sx: 0, sy: 0, ex: 1, ey: 0 })).toBe('');
+  });
+
+  it('does not duplicate whitespace across a separator carrier row', () => {
+    // Simulates wrapping 'hello \tworld' at width 5: the separator carrier
+    // row (non-selectable spaces) must use a joiner limited to the source
+    // bytes the carrier actually consumed — not the full \s+ run.
+    const frame = frameFromLines(['hello', '   ', 'world']);
+    for (let x = 0; x < 3; x++) {
+      (frame.cells[1][x] as FrameCell).selectable = false;
+    }
+    setBoundary(frame, 0, 'soft', ' ');
+    setBoundary(frame, 1, 'soft', '');
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 2 })).toBe(
+      'hello world',
+    );
   });
 });

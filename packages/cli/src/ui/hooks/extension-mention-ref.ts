@@ -65,5 +65,6 @@ export function getExtensionSuggestions(
         : undefined,
       sourceBadge: t('Extension'),
       isDirectory: false,
+      category: 'extension' as const,
     }));
 }

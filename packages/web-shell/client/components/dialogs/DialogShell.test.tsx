@@ -117,4 +117,49 @@ describe('DialogShell', () => {
 
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('ignores backdrop clicks and Escape when not dismissible', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onClose = vi.fn();
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell title="Locked" onClose={onClose} dismissible={false}>
+              <button type="button" data-testid="locked-focus">
+                locked
+              </button>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const backdrop = document.querySelector<HTMLElement>(
+      '[data-slot="dialog-overlay"]',
+    )!;
+    act(() => {
+      backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    const target = document.querySelector<HTMLElement>(
+      '[data-testid="locked-focus"]',
+    )!;
+    act(() =>
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      ),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

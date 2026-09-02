@@ -451,6 +451,46 @@ describe('package scripts', () => {
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 
+  it('skips npm packages whose release version is already published', () => {
+    const workflow = readWorkflow('.github/workflows/release.yml');
+    const publishJob = getWorkflowJob(workflow, 'publish');
+
+    for (const stepName of [
+      'Publish @qwen-code/audio-capture',
+      'Publish @qwen-code/qwen-code',
+      'Publish @qwen-code/channel-base',
+      'Publish remaining channel packages',
+    ]) {
+      const publishStep = getWorkflowStep(publishJob, stepName);
+      expect(publishStep).toContain(
+        "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
+      );
+      expect(publishStep).toContain(
+        'PACKAGE_NAME="$(node -p "require(\'./package.json\').name")"',
+      );
+      expect(publishStep).toContain('PUBLISH_ARGS+=(--dry-run)');
+      expect(publishStep).toContain(
+        'npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version',
+      );
+      expect(publishStep).toContain('already published; skipping');
+      expect(publishStep).toContain('exit 0');
+      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
+    }
+
+    // The channel loop must wrap each iteration in a subshell so that
+    // `exit 0` skips only the current channel, not the entire step.
+    const channelStep = getWorkflowStep(
+      publishJob,
+      'Publish remaining channel packages',
+    );
+    expect(channelStep).toContain('(\n');
+    expect(channelStep).toContain(')');
+    // A fully-skipped publish must be visible, not silently green.
+    expect(channelStep).toContain(
+      'Every channel package was already published; nothing shipped',
+    );
+  });
+
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
     const issueJob = getWorkflowJob(workflow, 'issue-autofix');
@@ -498,20 +538,33 @@ describe('package scripts', () => {
 
   it('runs changed autofix tests instead of full touched-package suites', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
+    const reviewVerificationRunner = readWorkflow(
+      '.github/scripts/run-autofix-review-verification.sh',
+    );
+    const reviewJob = getWorkflowJob(workflow, 'review-address');
 
-    for (const jobName of ['issue-autofix', 'review-address']) {
-      const job = getWorkflowJob(workflow, jobName);
-      const verifyStep = getWorkflowStep(job, 'Verification gate');
-
-      expect(verifyStep).toContain(
+    for (const verificationBody of [
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'issue-autofix'),
+        'Verification gate',
+      ),
+      reviewVerificationRunner,
+    ]) {
+      expect(verificationBody).toContain(
         'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
       );
-      expect(verifyStep).toContain("grep -oE '^packages/[^/]+'");
-      expect(verifyStep).toContain('pkg.scripts?.test');
-      expect(verifyStep).toContain('!= *vitest*');
-      expect(verifyStep).not.toContain(
+      expect(verificationBody).toContain(
+        'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
+      );
+      expect(verificationBody).toContain('pkg.scripts?.test');
+      expect(verificationBody).toContain('!= *vitest*');
+      expect(verificationBody).not.toContain(
         'npm run test --workspace "${p}" --if-present\n',
       );
     }
+
+    expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
   });
 });

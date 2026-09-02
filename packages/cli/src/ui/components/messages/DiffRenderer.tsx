@@ -308,6 +308,7 @@ const renderDiffContent = (
           <Box key={lineKey} flexDirection="row">
             {showLineNumbers && (
               <Text
+                selectable={false}
                 color={semanticTheme.text.secondary}
                 backgroundColor={
                   line.type === 'add'

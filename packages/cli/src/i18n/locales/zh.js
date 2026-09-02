@@ -172,11 +172,14 @@ export default {
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
+  'toolDisplayName.ZoomImage': '缩放图像',
   'toolDisplayName.Grep': 'Grep',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '运行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',
   'toolDisplayName.TodoList': '任务清单',
+  'toolDisplayName.Goal': '目标',
+  'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
@@ -194,6 +197,7 @@ export default {
   'toolDisplayName.CronDelete': '删除定时任务',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
+  'toolDisplayName.ListAgents': '列出 Agent',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
@@ -210,6 +214,7 @@ export default {
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
+  'toolDisplayName.ImageGen': '图像生成',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -276,6 +281,7 @@ export default {
     '正在连接到 MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
   '? for shortcuts': '按 ? 查看快捷键',
+  'Pasting…': '正在粘贴…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
   'Cancel operation / Clear input (double press)':
@@ -464,6 +470,12 @@ export default {
   'Create a new subagent with guided setup.': '通过引导式设置创建新的子智能体',
   'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
     '从知识源（文件、URL、对话或文本）创建可复用的技能。',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    '当前模型或提供商不支持 /learn 的原生视频输入。请切换到 OpenAI 兼容提供商上的视频模型后重试。',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube 页面链接不能作为原生视频输入发送。请将视频下载到工作区内，再将本地视频文件路径传给 /learn。',
+  'The local video could not be attached for /learn.':
+    '无法为 /learn 附加本地视频。',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -1108,8 +1120,8 @@ export default {
     '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令输入为包含通知消息和类型的 JSON。',
-  'Input to command is JSON with original user prompt text.':
-    '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（受支持交互式 TUI 的提交文本投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -1422,6 +1434,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--image 图像生成模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1434,16 +1448,20 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Set the model used to generate images': '设置用于生成图像的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '将模型选择持久化到项目设置（工作区）',
   'Persist the model selection to the user settings (global scope)':
     '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
+  'Select Image Model': '选择图像模型',
   'Select Voice Model': '选择语音模型',
   'Vision Model': '视觉模型',
+  'Image Model': '图像模型',
   'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
+  'Selected image model is unavailable.': '所选图像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "语音模型 '{{model}}' 被配置了多次。请先移除重复的模型 ID，再将其选为语音转写模型。",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1677,8 +1695,16 @@ export default {
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "图像模型 '{{modelName}}' 匹配了多个已配置的端点。请运行 /model --image（不带参数）并选择确切的端点。",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "图像模型 '{{modelName}}' 必须声明有效的 HTTPS baseUrl 和凭据环境变量。",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' 必须声明有效的 HTTPS baseUrl 和凭据环境变量。",
   none: '无',
   unknown: '未知',
   // ============================================================================
@@ -1858,6 +1884,11 @@ export default {
   reviewed: '已审核',
   'Code Changes:': '代码变更：',
   Performance: '性能',
+  'Generation Metrics': '生成指标',
+  'Latest Request': '最近请求',
+  'Generation Time': '生成时间',
+  'Average TTFT': '平均 TTFT',
+  'Session TPS': '会话 TPS',
   'Wall Time:': '总耗时：',
   'Agent Active:': '智能体活跃时间：',
   'API Time:': 'API 时间：',
@@ -2399,8 +2430,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    '检查更新失败。请检查网络或 registry 配置。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    '检查更新失败（{{reason}}）。请检查网络或 registry 配置。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    '已跳过更新检查（{{reason}}）— 可运行 /update 重试。',
+  'registry did not respond within {{seconds}}s':
+    'registry 在 {{seconds}} 秒内未响应',
+  'registry unreachable': 'registry 无法连接',
+  'registry error': 'registry 错误',
   'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本将在下次运行时生效。',

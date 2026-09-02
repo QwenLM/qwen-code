@@ -16,6 +16,7 @@ import {
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
   truncateToWidth,
+  wrapToVisualLines,
 } from './textUtils.js';
 
 describe('textUtils', () => {
@@ -395,5 +396,51 @@ describe('textUtils', () => {
       // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
       expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
     });
+  });
+});
+
+describe('visual row counting agrees between wrap and slice', () => {
+  // Both functions are documented as measuring visual rows at a given width,
+  // and callers mix them (scroll offsets, pending-render height). They
+  // disagreed on anything `string-width` reports as zero width, because only
+  // one of them clamped the per-character width to 1.
+  // `hiddenLinesCount + visible` only recovers the true row count when the
+  // text actually overflows `visible`, so every case below is chosen to.
+  const rowsFromSlice = (text: string, width: number): number => {
+    const visible = 3;
+    return (
+      sliceTextByVisualHeight(text, visible, width).hiddenLinesCount + visible
+    );
+  };
+
+  it.each([
+    ['tabs', '\t'.repeat(50)],
+    ['combining marks', '́'.repeat(50)],
+    ['zero-width joiners', '‍'.repeat(50)],
+    ['a letter then combining marks', 'e' + '́'.repeat(49)],
+  ])('agrees on a run of %s', (_label, text) => {
+    expect(wrapToVisualLines(text, 10).length).toBe(rowsFromSlice(text, 10));
+  });
+
+  // Guards against over-correcting: ordinary and wide characters were always
+  // consistent and must stay so. These pass before and after.
+  it.each([
+    ['ascii', 'a'.repeat(50), 10],
+    ['wide CJK', '漢'.repeat(25), 10],
+    ['mixed', 'ab漢cd'.repeat(10), 10],
+  ])('still agrees on %s', (_label, text, width) => {
+    expect(wrapToVisualLines(text, width).length).toBe(
+      rowsFromSlice(text, width),
+    );
+  });
+
+  it('still wraps a string shorter than the width to one row', () => {
+    expect(wrapToVisualLines('abc', 10)).toEqual(['abc']);
+  });
+
+  it('counts a run of tabs as more than one row', () => {
+    // The concrete regression: 50 zero-width characters at width 10 used to
+    // wrap to a single row.
+    expect(wrapToVisualLines('\t'.repeat(50), 10).length).toBe(5);
   });
 });

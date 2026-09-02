@@ -176,17 +176,36 @@ function detectRollbackAndGetBaseline(npmDistTag) {
   };
 }
 
+/**
+ * All packages that share the same release version. A version is considered
+ * "taken" if it exists on *any* of them — not just the main package.
+ */
+const PUBLISHED_PACKAGES = [
+  '@qwen-code/qwen-code',
+  '@qwen-code/audio-capture',
+  '@qwen-code/channel-base',
+  '@qwen-code/channel-dingtalk',
+  '@qwen-code/channel-feishu',
+  '@qwen-code/channel-github',
+  '@qwen-code/channel-qqbot',
+  '@qwen-code/channel-telegram',
+  '@qwen-code/channel-wecom',
+  '@qwen-code/channel-weixin',
+];
+
 function doesVersionExist(version) {
-  // Check NPM
-  try {
-    const command = `npm view @qwen-code/qwen-code@${version} version 2>/dev/null`;
-    const output = execSync(command).toString().trim();
-    if (output === version) {
-      console.error(`Version ${version} already exists on NPM.`);
-      return true;
+  // Check NPM across all published packages
+  for (const pkg of PUBLISHED_PACKAGES) {
+    try {
+      const command = `npm view ${pkg}@${version} version 2>/dev/null`;
+      const output = execSync(command).toString().trim();
+      if (output === version) {
+        console.error(`Version ${version} already exists on NPM (${pkg}).`);
+        return true;
+      }
+    } catch (_error) {
+      // This is expected if the version doesn't exist on this package.
     }
-  } catch (_error) {
-    // This is expected if the version doesn't exist.
   }
 
   // Check Git tags
@@ -335,8 +354,28 @@ function getPreviewVersion(args) {
     );
     releaseVersion = overrideVersion;
   } else if (tagResult) {
-    releaseVersion =
-      tagResult.latestVersion.replace(/-nightly.*/, '') + '-preview.0';
+    let baseVersion = tagResult.latestVersion.replace(/-nightly.*/, '');
+    // When the nightly base is already published as stable, the preview must
+    // target the next patch — otherwise the scheduled Tuesday release derives
+    // a version whose channel packages already exist on npm (E403).
+    // Use the rollback-aware lookup so a rolled-back dist-tag doesn't produce
+    // a retrograde preview base.
+    const latestTagResult = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
+    const latestStable = latestTagResult?.latestVersion ?? '';
+    if (
+      latestStable &&
+      semver.valid(latestStable) &&
+      semver.valid(baseVersion)
+    ) {
+      if (semver.gte(latestStable, baseVersion)) {
+        const bumped = semver.inc(latestStable, 'patch');
+        console.error(
+          `Nightly base ${baseVersion} is at or below published latest ${latestStable}; bumping preview base to ${bumped}.`,
+        );
+        baseVersion = bumped;
+      }
+    }
+    releaseVersion = baseVersion + '-preview.0';
     validateVersion(
       releaseVersion,
       'X.Y.Z-preview.N',

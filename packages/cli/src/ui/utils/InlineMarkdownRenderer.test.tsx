@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { RenderInline } from './InlineMarkdownRenderer.js';
+import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<RenderInline />', () => {
@@ -55,6 +55,89 @@ describe('<RenderInline />', () => {
 
     expect(lastFrame()).toContain('α');
     expect(lastFrame()).not.toContain('$\\alpha$');
+  });
+
+  it('renders single-character and CJK-adjacent inline math', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text="Values $x$、$α$。" enableInlineMath />,
+    );
+
+    const output = (lastFrame() ?? '').replace(/\n/g, '');
+    expect(output).toContain('Valuesx、α。');
+    expect(output).not.toContain('$x$');
+  });
+
+  it('renders escaped dollars as prose while keeping inline code verbatim', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline
+        text={'Literal \\$xy$ and code `$xy$ and \\$xy$`'}
+        enableInlineMath
+      />,
+    );
+
+    expect((lastFrame() ?? '').replace(/\n/g, '')).toContain(
+      'Literal $xy$ and code$xy$ and \\$xy$',
+    );
+  });
+
+  it('renders escaped dollars inside and next to inline math', () => {
+    const text = String.raw`$x^2$ is valid math
+it costs $5 and $10
+$5-$10
+literal \$x$
+formula $x + \$5$
+literal then math: \$$x^2$
+math then literal: $x^2\$$`;
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={text} enableInlineMath />,
+    );
+
+    const output = (lastFrame() ?? '').replace(/\n/g, '');
+    expect(output).toContain('x² is valid math');
+    expect(output).toContain('it costs $5 and $10');
+    expect(output).toContain('$5-$10');
+    expect(output).toContain('literal $x$');
+    expect(output).toContain('x + $5');
+    expect(output).toContain('literal then math:');
+    expect(output).toContain('$x²');
+    expect(output).toContain('math then literal:');
+    expect(output).toContain('x²$');
+    expect(output).not.toContain('\\$');
+  });
+
+  it('keeps math literal inside multi-backtick code spans', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={'Use ``a `$xy$` b`` then $y$'} enableInlineMath />,
+    );
+
+    expect(lastFrame()).toContain('$xy$');
+    expect(lastFrame()).not.toContain('$y$');
+  });
+
+  it('keeps longer backtick runs inside single-backtick code spans', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={'Use `a `` $xy$ `` b` then $y$'} enableInlineMath />,
+    );
+
+    expect(lastFrame()).toContain('$xy$');
+    expect(lastFrame()).not.toContain('$y$');
+  });
+
+  it('measures recognized single-character math without delimiters', () => {
+    expect(getPlainTextLength('value $x$', true)).toBe('value x'.length);
+    expect(getPlainTextLength('code `$xy$`', true)).toBe('code $xy$'.length);
+    expect(getPlainTextLength('code ``a `$xy$` b``', true)).toBe(
+      'code a `$xy$` b'.length,
+    );
+    expect(getPlainTextLength(String.raw`literal \$x$`, true)).toBe(
+      'literal $x$'.length,
+    );
+    expect(getPlainTextLength(String.raw`formula $x + \$5$`, true)).toBe(
+      'formula x + $5'.length,
+    );
+    expect(getPlainTextLength(String.raw`even \\$x$`, true)).toBe(
+      'even \\x'.length,
+    );
   });
 
   it('does not parse ordinary dollar amounts as inline math', () => {

@@ -73,6 +73,9 @@ export { useDaemonAgents as useAgents } from './daemon/index.js';
 /** Authentication state for the daemon connection. */
 export { useDaemonAuth as useAuth } from './daemon/index.js';
 
+/** Channel catalog, configuration, lifecycle, and pairing management. */
+export { useDaemonChannels as useChannels } from './daemon/index.js';
+
 /** Language diagnostics (errors, warnings) from the workspace. */
 export { useDaemonDiagnostics as useDiagnostics } from './daemon/index.js';
 
@@ -258,6 +261,8 @@ export type {
 export type {
   /** All workspace-level actions: MCP, tools, memory, agents, files, auth. */
   DaemonWorkspaceActions,
+  DaemonChannelPairingActions,
+  DaemonChannelsResource,
   /** Internal workspace context value (client + actions + status + error). */
   DaemonWorkspaceContextValue,
   /** Props accepted by `<DaemonWorkspaceProvider>`. */
@@ -338,6 +343,7 @@ export type {
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */
   DaemonWorkspaceAgentSummary,
+  DaemonWorkspaceGenerationEvent,
   /** MCP server status: name, transport, connection state, disabled reason. */
   DaemonWorkspaceMcpServerStatus,
   /** Single MCP tool: name, description, JSON schema, validity. */
@@ -364,6 +370,26 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceProviderStatus,
   DaemonWorkspaceProviderModel,
+  DaemonChannelConfigFieldKind,
+  DaemonChannelConfigFieldDescriptor,
+  DaemonChannelTypeDescriptor,
+  DaemonChannelTypeCatalog,
+  DaemonChannelRuntimeState,
+  DaemonChannelSecretState,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelsSnapshot,
+  DaemonChannelSecretUpdate,
+  DaemonRevisionRequest,
+  DaemonChannelUpsertRequest,
+  DaemonChannelStartupRequest,
+  DaemonChannelMutationResult,
+  DaemonChannelPairingRequest,
+  DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingApprovalRequest,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   /** Request/result for DELETE /workspace/models. */
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,

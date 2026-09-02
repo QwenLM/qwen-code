@@ -35,7 +35,20 @@ type AnthropicMessageParam = Anthropic.MessageParam;
 // model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
 // shape here for the fields where we actually attach it (tool params and
 // the system text block).
-type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
+//
+// `ttl` is the Anthropic spec's extended-cache-tier field
+// (`ttl?: '5m' | '1h'`). Anthropic's current docs describe the 1h tier as
+// GA with no beta requirement; `extended-cache-ttl-2025-04-11` is sent
+// defensively for older Anthropic-compatible backends that may still gate
+// the field on it (see `hasExtendedCacheTtlOnWire` in
+// anthropicContentGenerator.ts). Omitting `ttl` means the spec default
+// (5m). It composes freely with `scope`: the two are independent and
+// Anthropic accepts both on the same cache_control entry.
+type AnthropicCacheControl = {
+  type: 'ephemeral';
+  scope?: 'global';
+  ttl?: '5m' | '1h';
+};
 type AnthropicToolParam = Anthropic.Tool & {
   cache_control?: AnthropicCacheControl;
 };
@@ -45,6 +58,41 @@ type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 const debugLogger = createDebugLogger('AnthropicConverter');
+
+/**
+ * Internal token for "how long should a cache anchor live?", resolved from
+ * `ContentGeneratorConfig.cacheRetention` (settings.json:
+ * `model.generationConfig.cacheRetention`), threaded into the converter
+ * per-call alongside `enableCacheControl`/`useGlobalCacheScope`.
+ *
+ * `'ephemeral'` (default) omits `ttl` on the wire — spec default is 5m.
+ * `'1h'` requests the extended cache tier (`ttl: '1h'`) unconditionally --
+ * live verification against the Anthropic Messages API found every
+ * currently-active model (Haiku 4.5 through Opus 4.8 and Sonnet 5) accepts
+ * it, so there is no known model-specific allowlist to gate on. If a future
+ * model rejects it, the 400 from Anthropic surfaces directly to the caller
+ * rather than being silently masked by an incomplete allowlist.
+ */
+export type CacheRetention = 'ephemeral' | '1h';
+
+/**
+ * Per-anchor override of {@link CacheRetention}. Keys are the three cache
+ * anchors this converter places `cache_control` on — the system text
+ * block, the last tool definition, and the trailing user message (a
+ * single anchor; this converter marks only one trailing user message with
+ * cache_control, not a sliding multi-turn window). Missing keys inherit
+ * the top-level retention.
+ *
+ * These render on the wire in a fixed order — `tool` -> `system` ->
+ * `user.last` — and Anthropic requires cache entries with a longer TTL to
+ * appear before shorter ones. Resolution (see `resolveCacheRetention`)
+ * normalizes for this automatically: setting one anchor to `'1h'`
+ * promotes every anchor before it on the wire to `'1h'` as well, so any
+ * combination of overrides here produces a legal request body.
+ */
+export type CacheRetentionByBlock = Partial<
+  Record<'system' | 'tool' | 'user.last', CacheRetention>
+>;
 
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
@@ -90,6 +138,35 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Strip a trailing assistant message that would otherwise be sent as an
+   * "assistant-turn prefill" (a request whose final message has
+   * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
+   * family — Fable 5, Mythos 5, …) reject prefill outright:
+   *
+   *   "This model does not support assistant message prefill. The
+   *    conversation must end with a user message."
+   *
+   * Per Anthropic's own migration guidance this is a model-generation
+   * change, not a backend quirk — it 400s identically on the native API,
+   * Vertex AI, and Bedrock for every 4.6+ model.
+   *
+   * A trailing assistant message reaches the converter when Gemini history
+   * ends on a model turn with no follow-up (e.g. context-window trimming
+   * drops the next user turn, or a subagent's transcript is replayed
+   * mid-turn). Two cases are handled:
+   *   - The trailing assistant message is empty/whitespace-only (a
+   *     leftover prefill artifact with no real content) — drop it.
+   *   - The trailing assistant message carries real content (text,
+   *     tool_use, thinking) — keep it in history but append a synthetic
+   *     user turn so the request satisfies "must end with a user message"
+   *     without discarding anything the model already said.
+   *
+   * Only meaningful when the active model requires adaptive thinking
+   * (Claude 4.6+); older models accept prefill on every backend, so this
+   * should be gated on `modelSupportsAdaptiveThinking()` in the caller.
+   */
+  stripTrailingAssistantPrefill?: boolean;
+  /**
    * Per-call override for `enableCacheControl`. Falls back to the value
    * captured at construction. The generator passes the live
    * `contentGeneratorConfig.enableCacheControl` here so a hot
@@ -111,19 +188,50 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * cross-session caching support don't see an unrecognized scope field.
    */
   useGlobalCacheScope?: boolean;
+  /**
+   * The cross-session-stable prefix of the system prompt (everything the
+   * client assembles before appending volatile tails like git status or
+   * session-start context). When it exactly matches the beginning of the
+   * request's system text and a suffix follows, the system prompt is split
+   * into two text blocks with one cache breakpoint each, making the stable
+   * prefix independently cacheable. No match (subagent prompts, stale
+   * prefix) falls back to the single-block layout — fail-open, never worse
+   * than before. Only meaningful when `enableCacheControl` is on.
+   */
+  staticSystemPrefix?: string;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier. See {@link CacheRetention}.
+   */
+  cacheRetention?: CacheRetention;
+  /**
+   * Per-anchor override of {@link cacheRetention}. See
+   * {@link CacheRetentionByBlock}.
+   */
+  cacheRetentionByBlock?: CacheRetentionByBlock;
 }
 
 export class AnthropicContentConverter {
-  private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
+  /**
+   * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
+   * The converter instance is long-lived across requests (constructed once
+   * per generator), so this state is reset at the top of every
+   * `convertGeminiRequestToAnthropic` call rather than at construction.
+   */
+  private readonly toolIdMap = new Map<string, string>();
+  private readonly usedToolIds = new Set<string>();
+  private generatedToolIdCounter = 0;
 
   constructor(
-    model: string,
+    _model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
   ) {
-    this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
   }
@@ -135,6 +243,7 @@ export class AnthropicContentConverter {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
+    this.resetToolIdState();
     let messages: AnthropicMessageParam[] = [];
 
     const systemText = this.extractTextFromContentUnion(
@@ -174,6 +283,9 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -187,11 +299,29 @@ export class AnthropicContentConverter {
     const enableCacheControl =
       options.enableCacheControl ?? this.enableCacheControl;
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    const cacheRetention = options.cacheRetention ?? 'ephemeral';
+    const cacheRetentionByBlock = options.cacheRetentionByBlock ?? {};
     const system = enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
+      ? this.buildSystemWithCacheControl(
+          systemText,
+          useGlobalCacheScope,
+          options.staticSystemPrefix,
+          this.resolveCacheRetention(
+            'system',
+            cacheRetention,
+            cacheRetentionByBlock,
+          ),
+        )
       : systemText;
     if (enableCacheControl) {
-      this.addCacheControlToMessages(messages);
+      this.addCacheControlToMessages(
+        messages,
+        this.resolveCacheRetention(
+          'user.last',
+          cacheRetention,
+          cacheRetentionByBlock,
+        ),
+      );
     }
 
     return {
@@ -205,6 +335,8 @@ export class AnthropicContentConverter {
     options: {
       enableCacheControl?: boolean;
       useGlobalCacheScope?: boolean;
+      cacheRetention?: CacheRetention;
+      cacheRetentionByBlock?: CacheRetentionByBlock;
     } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
@@ -272,11 +404,18 @@ export class AnthropicContentConverter {
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
+      const resolvedRetention = this.resolveCacheRetention(
+        'tool',
+        options.cacheRetention ?? 'ephemeral',
+        options.cacheRetentionByBlock ?? {},
+      );
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: {
+          type: 'ephemeral',
+          ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+          ...(resolvedRetention === '1h' ? { ttl: '1h' as const } : {}),
+        },
       };
     }
 
@@ -353,7 +492,7 @@ export class AnthropicContentConverter {
     geminiResponse.candidates = [candidate];
     geminiResponse.responseId = response.id;
     geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || this.model;
+    geminiResponse.modelVersion = response.model || undefined;
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
@@ -362,6 +501,10 @@ export class AnthropicContentConverter {
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
         outputTokens: response.usage.output_tokens || 0,
+        cacheReadTokensReported:
+          typeof response.usage.cache_read_input_tokens === 'number',
+        cacheCreationTokensReported:
+          typeof response.usage.cache_creation_input_tokens === 'number',
       });
     }
 
@@ -397,7 +540,6 @@ export class AnthropicContentConverter {
     const parts = content.parts || [];
     const role = content.role === 'model' ? 'assistant' : 'user';
     const contentBlocks: AnthropicContentBlockParam[] = [];
-    let toolCallIndex = 0;
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -435,11 +577,10 @@ export class AnthropicContentConverter {
         if (role === 'assistant') {
           contentBlocks.push({
             type: 'tool_use',
-            id: part.functionCall.id || `tool_${toolCallIndex}`,
+            id: this.resolveToolUseId(part.functionCall.id),
             name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
-          toolCallIndex += 1;
         }
       }
 
@@ -454,6 +595,24 @@ export class AnthropicContentConverter {
     }
 
     if (contentBlocks.length > 0) {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use -- it doesn't scan past a leading
+      // non-tool_result block to find the result later in the same
+      // message. The source Gemini parts can arrive in any order (e.g. a
+      // text part preceding the functionResponse part within the same
+      // Content), so move tool_result blocks to the front of a user
+      // message whenever any are present. A stable sort preserves the
+      // relative order of multiple tool_result blocks against each other.
+      if (
+        role === 'user' &&
+        contentBlocks.some((b) => b.type === 'tool_result')
+      ) {
+        contentBlocks.sort((a, b) => {
+          if (a.type === 'tool_result' && b.type !== 'tool_result') return -1;
+          if (a.type !== 'tool_result' && b.type === 'tool_result') return 1;
+          return 0;
+        });
+      }
       messages.push({ role, content: contentBlocks });
     }
   }
@@ -487,13 +646,82 @@ export class AnthropicContentConverter {
 
     return {
       type: 'tool_result',
-      tool_use_id: response.id || '',
+      tool_use_id: this.resolveToolUseId(response.id),
       content,
       ...(response.response &&
       Object.prototype.hasOwnProperty.call(response.response, 'error')
         ? { is_error: true }
         : {}),
     };
+  }
+
+  private resetToolIdState(): void {
+    this.toolIdMap.clear();
+    this.usedToolIds.clear();
+    this.generatedToolIdCounter = 0;
+  }
+
+  /**
+   * Resolve a `functionCall.id` / `functionResponse.id` into a wire-safe
+   * `tool_use.id` / `tool_result.tool_use_id`. Anthropic validates both
+   * fields against `^[a-zA-Z0-9_-]+$` server-side (HTTP 400 otherwise) and
+   * rejects the empty string the same way, since `+` requires at least one
+   * character. The Gemini lingua-franca's `id` field has no such
+   * constraint -- it can carry another provider's ID scheme, a
+   * composite/namespaced ID, or be entirely absent.
+   *
+   * The same source ID always resolves to the same wire ID within a
+   * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
+   * that shares a source ID still links up correctly after sanitization.
+   * State is scoped to a single `convertGeminiRequestToAnthropic` call
+   * (reset via {@link resetToolIdState}), since the converter instance
+   * itself is long-lived across requests.
+   */
+  private resolveToolUseId(rawId?: string): string {
+    const sourceId = typeof rawId === 'string' ? rawId.trim() : '';
+    const existingId = sourceId ? this.toolIdMap.get(sourceId) : undefined;
+    if (existingId) {
+      return existingId;
+    }
+
+    const baseId = sourceId
+      ? this.sanitizeToolUseId(sourceId)
+      : this.nextGeneratedToolId();
+    const uniqueId = this.makeUniqueToolUseId(baseId);
+
+    if (sourceId) {
+      this.toolIdMap.set(sourceId, uniqueId);
+    }
+
+    return uniqueId;
+  }
+
+  private sanitizeToolUseId(id: string): string {
+    const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return cleaned || this.nextGeneratedToolId();
+  }
+
+  private nextGeneratedToolId(): string {
+    const id = `tool_${this.generatedToolIdCounter}`;
+    this.generatedToolIdCounter += 1;
+    return id;
+  }
+
+  private makeUniqueToolUseId(baseId: string): string {
+    if (!this.usedToolIds.has(baseId)) {
+      this.usedToolIds.add(baseId);
+      return baseId;
+    }
+
+    let suffix = 1;
+    let candidate = `${baseId}_${suffix}`;
+    while (this.usedToolIds.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseId}_${suffix}`;
+    }
+
+    this.usedToolIds.add(candidate);
+    return candidate;
   }
 
   private createMediaBlockFromPart(
@@ -679,6 +907,49 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Resolve the effective {@link CacheRetention} for one cache anchor,
+   * normalized so retention is monotonically non-increasing in wire order.
+   *
+   * Render order is `tools` -> `system` -> `messages`, so this converter's
+   * three anchors sit on the wire in exactly that order: `tool` -> `system`
+   * -> `user.last`. Anthropic requires "cache entries with longer TTL must
+   * appear before shorter TTLs" — an anchor at the spec's 5-minute default
+   * (no `ttl`) is a short-TTL entry for this rule's purposes, so a raw
+   * per-anchor override like `cacheRetentionByBlock: { system: '1h' }`
+   * would otherwise leave the (still 5m-default) `tool` anchor ahead of a
+   * 1h `system` anchor on the wire — an ordering violation Anthropic 400s
+   * on.
+   *
+   * Resolving with a scan instead of a straight per-anchor lookup avoids
+   * that: `anchor` resolves to `'1h'` if `anchor` itself OR any anchor
+   * later on the wire resolves to `'1h'`. That makes every
+   * `cacheRetentionByBlock` configuration legal — anchors before a `'1h'`
+   * anchor are promoted to `'1h'` too — without adding a new error surface
+   * or rejecting any input. `{ tool: '1h' }` alone is unaffected (nothing
+   * follows it that needs promoting); `{ system: '1h' }` alone now also
+   * promotes `tool` to `'1h'`, which is exactly the "cache my big system
+   * prompt for an hour" usage the per-anchor override exists for.
+   */
+  private resolveCacheRetention(
+    anchor: 'system' | 'tool' | 'user.last',
+    cacheRetention: CacheRetention,
+    cacheRetentionByBlock: CacheRetentionByBlock,
+  ): CacheRetention {
+    const wireOrder: ReadonlyArray<'tool' | 'system' | 'user.last'> = [
+      'tool',
+      'system',
+      'user.last',
+    ];
+    const anchorIndex = wireOrder.indexOf(anchor);
+    for (let i = wireOrder.length - 1; i >= anchorIndex; i--) {
+      if ((cacheRetentionByBlock[wireOrder[i]] ?? cacheRetention) === '1h') {
+        return '1h';
+      }
+    }
+    return 'ephemeral';
+  }
+
+  /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
    * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
@@ -686,22 +957,72 @@ export class AnthropicContentConverter {
    * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
    * per-session shape so non-Anthropic baseURLs aren't sent a scope
    * extension they may not recognize.
+   *
+   * When `staticSystemPrefix` matches the beginning of the system text and
+   * a suffix follows (git status, session-start context — the volatile
+   * tails the client appends after the stable prompt), the text is split
+   * into two blocks carrying one breakpoint each:
+   *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
+   *      sessions reuse it even though their suffix differs;
+   *   2. the end of the full system prompt — always the per-session
+   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      so a global-scope entry here would churn cache for zero hits
+   *      (same reasoning as `addCacheControlToMessages`). Within a session
+   *      it still caches the suffix, and when the suffix changes mid-session
+   *      (/cd refreshes git status, session-start context lands) the prefix
+   *      breakpoint keeps the big block from re-billing.
+   * The split only shapes the outgoing request; stored history and
+   * non-Anthropic transports keep seeing a single system string.
    */
   private buildSystemWithCacheControl(
     systemText: string,
     useGlobalCacheScope: boolean,
+    staticSystemPrefix?: string,
+    cacheRetention: CacheRetention = 'ephemeral',
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
+    }
+
+    const scopedCacheControl: AnthropicCacheControl = {
+      type: 'ephemeral',
+      ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+      ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+    };
+
+    if (
+      staticSystemPrefix &&
+      systemText.length > staticSystemPrefix.length &&
+      systemText.startsWith(staticSystemPrefix)
+    ) {
+      return [
+        {
+          type: 'text',
+          text: staticSystemPrefix,
+          cache_control: scopedCacheControl,
+        },
+        {
+          type: 'text',
+          text: systemText.slice(staticSystemPrefix.length),
+          // Deliberately never carries `scope: 'global'` (see class doc
+          // above — the suffix varies per session, cross-session reuse
+          // has ~zero hit rate). `cacheRetention` still applies: the
+          // suffix is cached within a session, and a caller that asked
+          // for the 1h tier benefits from it surviving longer gaps
+          // between turns even on this volatile block.
+          cache_control: {
+            type: 'ephemeral',
+            ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+          },
+        },
+      ];
     }
 
     return [
       {
         type: 'text',
         text: systemText,
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: scopedCacheControl,
       },
     ];
   }
@@ -901,6 +1222,58 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Strip a trailing empty-content assistant message, or append a
+   * synthetic user turn to satisfy Anthropic's "must end with a user
+   * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
+   * conversation would otherwise end on a non-empty assistant message.
+   * See {@link ConvertGeminiRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   */
+  private stripTrailingAssistantPrefill(
+    messages: AnthropicMessageParam[],
+  ): void {
+    // Phase 1: drop genuinely empty trailing assistant messages (no real
+    // content — a leftover prefill artifact from history trimming/replay).
+    while (messages.length > 0) {
+      const last = messages[messages.length - 1]!;
+      if (last.role !== 'assistant') return;
+      if (!this.isEmptyAssistantMessage(last)) break;
+      messages.pop();
+    }
+
+    // Phase 2: a real-content assistant message is still trailing — keep
+    // it in history (it may carry tool_use/thinking the model needs to see
+    // again) and append a synthetic user turn instead of dropping it.
+    if (
+      messages.length > 0 &&
+      messages[messages.length - 1]!.role === 'assistant'
+    ) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'Continue.' }],
+      });
+    }
+  }
+
+  private isEmptyAssistantMessage(message: AnthropicMessageParam): boolean {
+    const content = message.content;
+    if (!content) return true;
+    if (typeof content === 'string') return content.trim().length === 0;
+    if (!Array.isArray(content) || content.length === 0) return true;
+
+    for (const block of content) {
+      const type = (block as { type?: string }).type;
+      if (type === 'text') {
+        const text = (block as { text?: string }).text;
+        if (typeof text === 'string' && text.trim().length > 0) return false;
+      } else {
+        // Any non-text block (tool_use, thinking, etc.) is real content.
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
    *
@@ -908,11 +1281,14 @@ export class AnthropicContentConverter {
    * no `scope: 'global'`. The last user message changes every turn (it's
    * the live prompt and any tool_result blocks from the immediately prior
    * round), so cross-session reuse here has effectively zero hit rate and
-   * paying the global-scope overhead would just churn cache. System text
-   * and tool prefixes (which DO repeat across sessions) carry
+   * paying the global-scope overhead would just churn cache. The static
+   * system prefix and tool prefixes (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
-  private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
+  private addCacheControlToMessages(
+    messages: Anthropic.MessageParam[],
+    cacheRetention: CacheRetention = 'ephemeral',
+  ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
     // explicitly list both `text` and `tool_result` blocks as cacheable in
@@ -939,6 +1315,7 @@ export class AnthropicContentConverter {
             if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
               lastContent.cache_control = {
                 type: 'ephemeral',
+                ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
               };
             }
           }
@@ -1024,6 +1401,15 @@ function mergeConsecutiveAssistantMessages(
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
  *
+ * A `tool_use` in the very last message (no message follows it at all) is
+ * never condemned as orphaned here -- "no result yet" isn't the same as
+ * "no result ever": the tool may simply not have finished executing yet,
+ * or this conversion may not be building the completed turn to send to
+ * Anthropic at all (token counting, a resumed/replayed session snapshot,
+ * a retry issued before tool execution completes, ...). Only a `tool_use`
+ * whose subsequent message was actually scanned and found lacking a
+ * matching `tool_result` is a genuine orphan.
+ *
  * Empty messages produced by the cleanup are dropped entirely. A subsequent
  * mergeConsecutiveAssistantMessages call fixes any alternation issues
  * created by dropped messages.
@@ -1051,6 +1437,20 @@ function cleanOrphanedToolCalls(
       }
     }
     if (toolUseBlocks.size === 0) continue;
+
+    // No message follows this assistant turn at all -- these tool_use
+    // blocks are unresolved (the tool hasn't finished executing yet, or
+    // this conversion isn't building the completed turn for Anthropic at
+    // all, e.g. a token-count pass or a mid-tool-call snapshot), not
+    // orphaned. Protect them from the filter below. A genuine orphan
+    // requires a subsequent message that was actually scanned and found
+    // to lack a matching tool_result -- "history ends here" is not that.
+    if (i === messages.length - 1) {
+      for (const block of toolUseBlocks.values()) {
+        validToolUseBlocks.add(block as object);
+      }
+      continue;
+    }
 
     for (let j = i + 1; j < messages.length; j++) {
       const nextMessage = messages[j];

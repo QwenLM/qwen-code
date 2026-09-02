@@ -15,12 +15,20 @@ describe('PromptHookRunner', () => {
   let promptRunner: PromptHookRunner;
   let mockConfig: Config;
   let mockGenerateContent: ReturnType<typeof vi.fn>;
+  let mockResolveForModel: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     // Create mock generateContent function
     mockGenerateContent = vi.fn();
+    mockResolveForModel = vi.fn().mockResolvedValue({
+      contentGenerator: {
+        generateContent: mockGenerateContent,
+      },
+      contentGeneratorConfig: { model: 'qwen-max' },
+      model: 'qwen-max',
+    });
 
     // Create mock config
     mockConfig = {
@@ -35,6 +43,9 @@ describe('PromptHookRunner', () => {
         countTokens: vi.fn(),
         embedContent: vi.fn(),
         useSummarizedThinking: vi.fn().mockReturnValue(false),
+      }),
+      getBaseLlmClient: vi.fn().mockReturnValue({
+        resolveForModel: mockResolveForModel,
       }),
     } as unknown as Config;
 
@@ -201,6 +212,31 @@ describe('PromptHookRunner', () => {
 
       const callArg = mockGenerateContent.mock.calls[0][0];
       expect(callArg.model).toBe('qwen-max');
+      expect(mockResolveForModel).toHaveBeenCalledWith('qwen-max', {
+        failClosed: true,
+      });
+    });
+
+    it('should shape requests for the resolved override model', async () => {
+      mockResolveForModel.mockResolvedValue({
+        contentGenerator: { generateContent: mockGenerateContent },
+        contentGeneratorConfig: {
+          model: 'qwen-max',
+          reasoning: { effort: 'high' },
+        },
+        model: 'qwen-max',
+      });
+      mockGenerateContent.mockResolvedValue(createMockResponse('{"ok": true}'));
+
+      await promptRunner.execute(
+        createMockConfig({ model: 'fast' }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      const callArg = mockGenerateContent.mock.calls[0][0];
+      expect(callArg.model).toBe('qwen-max');
+      expect(callArg.config?.temperature).toBeUndefined();
     });
 
     it('should handle response wrapped in markdown code block', async () => {
@@ -331,6 +367,39 @@ describe('PromptHookRunner', () => {
 
       expect(result.success).toBe(false);
       expect(result.outcome).toBe('cancelled');
+    });
+
+    it('should time out while resolving an override model', async () => {
+      vi.useFakeTimers();
+      let finishResolution: (() => void) | undefined;
+      mockResolveForModel.mockReturnValue(
+        new Promise((resolve) => {
+          finishResolution = () =>
+            resolve({
+              contentGenerator: { generateContent: mockGenerateContent },
+              contentGeneratorConfig: { model: 'qwen-max' },
+              model: 'qwen-max',
+            });
+        }),
+      );
+
+      try {
+        const execution = promptRunner.execute(
+          createMockConfig({ model: 'qwen-max', timeout: 0.1 }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await execution;
+
+        expect(result.outcome).toBe('cancelled');
+        finishResolution?.();
+        await Promise.resolve();
+        expect(mockGenerateContent).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should handle abort signal (already aborted)', async () => {

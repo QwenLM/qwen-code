@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
 const METAFILE_BUILD_COMMAND =
   'node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle';
+const ENTRY_OUTPUT = 'dist/cli.js';
+const ENTRY_INPUT = 'packages/cli/src/cli.ts';
 const SERVE_PRE_LISTEN_ROOTS = [
   {
     label: 'serve fast path entry',
@@ -41,6 +43,19 @@ const ACP_RUNTIME_ROOT = {
   suffixes: [
     'packages/cli/src/acp-integration/acpAgent.ts',
     'packages/cli/dist/src/acp-integration/acpAgent.js',
+  ],
+};
+
+// The telemetry protocol split (issue #7264) keeps the OTLP exporter chains
+// behind dynamic import()s inside sdk-impl.ts itself. Its static closure may
+// keep NodeSDK and the instrumentations, but must not reach the gRPC cluster
+// or the shared OTLP serialization layer, which only the protocol modules
+// (sdk-exporters-grpc.ts / sdk-exporters-http.ts) are allowed to load.
+const SDK_IMPL_ROOT = {
+  label: 'telemetry sdk-impl',
+  suffixes: [
+    'packages/core/src/telemetry/sdk-impl.ts',
+    'packages/core/dist/src/telemetry/sdk-impl.js',
   ],
 };
 
@@ -129,6 +144,92 @@ const FORBIDDEN_ACP_UI_PACKAGES = [
   { label: 'React runtime', packageName: 'react' },
   { label: 'React reconciler runtime', packageName: 'react-reconciler' },
   { label: 'Yoga layout runtime', packageName: 'yoga-layout' },
+];
+
+// Heavy telemetry SDK packages must stay behind the dynamic import() in
+// packages/core/src/telemetry/sdk.ts (issue #4748). Cheap packages that are
+// legitimately eager (@opentelemetry/api, semantic-conventions, core,
+// resources, api-logs) are intentionally NOT listed.
+//
+// The protocol-chain subset is additionally forbidden from the sdk-impl
+// static closure (issue #7264). Both the gRPC and HTTP exporter packages are
+// listed explicitly so the guard is self-describing and survives upstream
+// dependency restructuring; @opentelemetry/otlp-transformer (the serialization
+// layer both chains share) and @opentelemetry/otlp-exporter-base stay listed as
+// belt-and-suspenders for a static re-import of either protocol module.
+const FORBIDDEN_OTLP_PROTOCOL_PACKAGES = [
+  { label: 'gRPC runtime', packageName: '@grpc/grpc-js' },
+  { label: 'gRPC proto loader', packageName: '@grpc/proto-loader' },
+  { label: 'protobufjs runtime', packageName: 'protobufjs' },
+  {
+    label: 'OTLP transformer',
+    packageName: '@opentelemetry/otlp-transformer',
+  },
+  {
+    label: 'OTLP exporter base',
+    packageName: '@opentelemetry/otlp-exporter-base',
+  },
+  {
+    label: 'OTLP gRPC trace exporter',
+    packageName: '@opentelemetry/exporter-trace-otlp-grpc',
+  },
+  {
+    label: 'OTLP gRPC log exporter',
+    packageName: '@opentelemetry/exporter-logs-otlp-grpc',
+  },
+  {
+    label: 'OTLP gRPC metric exporter',
+    packageName: '@opentelemetry/exporter-metrics-otlp-grpc',
+  },
+  {
+    label: 'OTLP HTTP trace exporter',
+    packageName: '@opentelemetry/exporter-trace-otlp-http',
+  },
+  {
+    label: 'OTLP HTTP log exporter',
+    packageName: '@opentelemetry/exporter-logs-otlp-http',
+  },
+  {
+    label: 'OTLP HTTP metric exporter',
+    packageName: '@opentelemetry/exporter-metrics-otlp-http',
+  },
+];
+
+const FORBIDDEN_ACP_TELEMETRY_PACKAGES = [
+  ...FORBIDDEN_OTLP_PROTOCOL_PACKAGES,
+  { label: 'OTel NodeSDK', packageName: '@opentelemetry/sdk-node' },
+  {
+    label: 'OTel HTTP instrumentation',
+    packageName: '@opentelemetry/instrumentation-http',
+  },
+  {
+    label: 'OTel undici instrumentation',
+    packageName: '@opentelemetry/instrumentation-undici',
+  },
+];
+
+const FORBIDDEN_ACP_PACKAGES = [
+  ...FORBIDDEN_ACP_UI_PACKAGES,
+  ...FORBIDDEN_ACP_TELEMETRY_PACKAGES,
+  // undici loads behind dynamic import()s at its use sites (issue #7264
+  // candidate 4); a static re-import anywhere in the ACP closure would pull
+  // ~1 MiB per bundled copy back into every cold start.
+  { label: 'undici vendor package', packageName: 'undici' },
+  // Provider implementations and MCP discovery load the Google GenAI SDK on
+  // first use (issue #7264 candidate 3). Keep the SDK out of the ACP bootstrap
+  // closure.
+  { label: 'Google GenAI SDK', packageName: '@google/genai' },
+  // Encoding tables, terminal emulation, and git orchestration load at their
+  // first real use (issue #7264 candidate 5).
+  { label: 'iconv-lite encoding tables', packageName: 'iconv-lite' },
+  { label: 'xterm headless runtime', packageName: '@xterm/headless' },
+  { label: 'simple-git runtime', packageName: 'simple-git' },
+  { label: 'comment-json parser', packageName: 'comment-json' },
+  { label: 'esprima parser', packageName: 'esprima' },
+  {
+    label: 'jsonc-parser UMD build',
+    packageName: 'jsonc-parser/lib/umd',
+  },
 ];
 
 export function normalizeMetafilePath(filePath) {
@@ -235,16 +336,28 @@ function buildImportPath(entryOutputs, outputPath, parent) {
 }
 
 export function findAcpImportBoundaryOffenders(metafile) {
+  return findRootClosureOffenders(
+    metafile,
+    ACP_RUNTIME_ROOT,
+    FORBIDDEN_ACP_PACKAGES,
+  );
+}
+
+export function findSdkImplProtocolOffenders(metafile) {
+  return findRootClosureOffenders(
+    metafile,
+    SDK_IMPL_ROOT,
+    FORBIDDEN_OTLP_PROTOCOL_PACKAGES,
+  );
+}
+
+function findRootClosureOffenders(metafile, root, forbiddenPackages) {
   const outputs = normalizeOutputs(metafile);
   let entryOutput;
 
   for (const [outputPath, output] of outputs) {
     const inputs = Object.keys(output.inputs ?? {});
-    if (
-      inputs.some((input) =>
-        inputMatchesAnySuffix(input, ACP_RUNTIME_ROOT.suffixes),
-      )
-    ) {
+    if (inputs.some((input) => inputMatchesAnySuffix(input, root.suffixes))) {
       entryOutput = outputPath;
       break;
     }
@@ -252,8 +365,8 @@ export function findAcpImportBoundaryOffenders(metafile) {
 
   if (!entryOutput) {
     throw new Error(
-      `Could not find bundled output for ${ACP_RUNTIME_ROOT.label} ` +
-        `(${ACP_RUNTIME_ROOT.suffixes.join(' or ')}).\n` +
+      `Could not find bundled output for ${root.label} ` +
+        `(${root.suffixes.join(' or ')}).\n` +
         `Run \`${METAFILE_BUILD_COMMAND}\` to produce the metafile.`,
     );
   }
@@ -266,7 +379,7 @@ export function findAcpImportBoundaryOffenders(metafile) {
   for (const outputPath of closure) {
     const output = outputs.get(outputPath);
     for (const input of Object.keys(output?.inputs ?? {})) {
-      const match = FORBIDDEN_ACP_UI_PACKAGES.find(({ packageName }) =>
+      const match = forbiddenPackages.find(({ packageName }) =>
         inputMatchesPackage(input, packageName),
       );
       if (!match) continue;
@@ -353,9 +466,7 @@ export function formatServeFastPathBundleOffenders(offenders) {
     .join('\n');
 }
 
-export function checkServeFastPathBundle({
-  metafilePath = DEFAULT_METAFILE_PATH,
-} = {}) {
+function readMetafile(metafilePath) {
   if (!existsSync(metafilePath)) {
     throw new Error(
       `Missing esbuild metafile at ${metafilePath}. ` +
@@ -363,9 +474,8 @@ export function checkServeFastPathBundle({
     );
   }
 
-  let metafile;
   try {
-    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
+    return JSON.parse(readFileSync(metafilePath, 'utf8'));
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -373,33 +483,55 @@ export function checkServeFastPathBundle({
         `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
     );
   }
-  const offenders = findServeFastPathBundleOffenders(metafile);
+}
+
+export function checkServeFastPathBundle({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const offenders = findServeFastPathBundleOffenders(
+    readMetafile(metafilePath),
+  );
   return { ok: offenders.length === 0, offenders };
 }
 
 export function checkAcpImportBoundary({
   metafilePath = DEFAULT_METAFILE_PATH,
 } = {}) {
-  if (!existsSync(metafilePath)) {
-    throw new Error(
-      `Missing esbuild metafile at ${metafilePath}. ` +
-        `Run \`${METAFILE_BUILD_COMMAND}\` to produce it.`,
-    );
-  }
+  const offenders = findAcpImportBoundaryOffenders(readMetafile(metafilePath));
+  return { ok: offenders.length === 0, offenders };
+}
 
-  let metafile;
-  try {
-    metafile = JSON.parse(readFileSync(metafilePath, 'utf8'));
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+export function checkSdkImplProtocolBoundary({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const offenders = findSdkImplProtocolOffenders(readMetafile(metafilePath));
+  return { ok: offenders.length === 0, offenders };
+}
+
+/**
+ * `cli.ts` bootstraps only when it is the main module, comparing
+ * `import.meta.url` against `process.argv[1]`. The bundle is built with
+ * `splitting: true`, so a *static* `import ... from './cli.js'` in any module
+ * the entry loads lazily (e.g. `gemini.tsx`) makes esbuild move the entry's
+ * body into a shared chunk and leave `dist/cli.js` as a re-export stub. Inside
+ * a chunk that comparison can never hold, so the bundled CLI exits 0 without
+ * running anything — with `tsc`, eslint and every src-based unit test still
+ * green. Assert the entry module still compiles into the entry output.
+ */
+export function checkEntryBootstrapIntact({
+  metafilePath = DEFAULT_METAFILE_PATH,
+} = {}) {
+  const metafile = readMetafile(metafilePath);
+  const output = metafile?.outputs?.[ENTRY_OUTPUT];
+  if (!output) {
     throw new Error(
-      `Invalid esbuild metafile at ${metafilePath}: ${reason}. ` +
+      `Missing ${ENTRY_OUTPUT} in the esbuild metafile at ${metafilePath}. ` +
         `Run \`${METAFILE_BUILD_COMMAND}\` to regenerate it.`,
     );
   }
 
-  const offenders = findAcpImportBoundaryOffenders(metafile);
-  return { ok: offenders.length === 0, offenders };
+  const inputs = Object.keys(output.inputs ?? {});
+  return { ok: inputs.includes(ENTRY_INPUT), inputs };
 }
 
 function main() {
@@ -416,13 +548,37 @@ function main() {
     const acpResult = checkAcpImportBoundary();
     if (!acpResult.ok) {
       console.error(
-        'ACP static import closure includes TUI runtime modules:\n' +
+        'ACP static import closure includes forbidden runtime modules:\n' +
           formatServeFastPathBundleOffenders(acpResult.offenders),
       );
       process.exitCode = 1;
     }
 
-    if (serveResult.ok && acpResult.ok) {
+    const sdkImplResult = checkSdkImplProtocolBoundary();
+    if (!sdkImplResult.ok) {
+      console.error(
+        'Telemetry sdk-impl static closure includes OTLP protocol chain modules:\n' +
+          formatServeFastPathBundleOffenders(sdkImplResult.offenders),
+      );
+      process.exitCode = 1;
+    }
+
+    const entryResult = checkEntryBootstrapIntact();
+    if (!entryResult.ok) {
+      console.error(
+        `${ENTRY_OUTPUT} no longer contains ${ENTRY_INPUT} — esbuild code ` +
+          'splitting hoisted the entry into a shared chunk, so its\n' +
+          '`import.meta.url === pathToFileURL(process.argv[1]).href` guard ' +
+          'can never match and the bundled CLI\nwould exit 0 without running. ' +
+          'Cause: a module the entry loads lazily now statically imports ' +
+          "'./cli.js'.\nMove the shared helper into a leaf module and import " +
+          `that from both sides instead.\nCurrent ${ENTRY_OUTPUT} inputs: ` +
+          `${entryResult.inputs.length === 0 ? '(none)' : entryResult.inputs.join(', ')}`,
+      );
+      process.exitCode = 1;
+    }
+
+    if (serveResult.ok && acpResult.ok && sdkImplResult.ok && entryResult.ok) {
       console.log('Startup bundle closure checks passed.');
     }
   } catch (error) {

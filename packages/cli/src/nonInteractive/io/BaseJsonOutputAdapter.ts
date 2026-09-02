@@ -34,6 +34,7 @@ import type {
   ContentBlock,
   ControlMessage,
   ExtendedUsage,
+  PermissionSuggestion,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
@@ -1101,6 +1102,7 @@ export abstract class BaseJsonOutputAdapter {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     const message: ControlMessage = {
       type: 'control_request',
@@ -1110,7 +1112,7 @@ export abstract class BaseJsonOutputAdapter {
         tool_name: toolName,
         tool_use_id: toolUseId,
         input,
-        permission_suggestions: null,
+        permission_suggestions: permissionSuggestions,
         blocked_path: blockedPath,
       },
     };
@@ -1403,6 +1405,15 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
+  }
   if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
     const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
     if (response.error) {

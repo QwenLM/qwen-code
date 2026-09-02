@@ -745,6 +745,39 @@ describe('MonitorTool', () => {
       expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
     });
 
+    it('strips Qwen-internal daemon secrets from the monitor child env (#6601)', async () => {
+      const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      try {
+        const invocation = createInvocation({
+          command: 'tail -f /var/log/app.log',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        const spawnOptions = mockSpawn.mock.calls[0][2];
+        // Internal daemon secrets must not leak into an agent-run monitor.
+        expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(spawnOptions.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+        // Benign inherited env is preserved and the monitor marker still applied.
+        expect(spawnOptions.env['PATH']).toBeDefined();
+        expect(spawnOptions.env['QWEN_CODE']).toBe('1');
+      } finally {
+        if (originalServerToken === undefined) {
+          delete process.env['QWEN_SERVER_TOKEN'];
+        } else {
+          process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalDaemonToken === undefined) {
+          delete process.env['QWEN_DAEMON_TOKEN'];
+        } else {
+          process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
+        }
+      }
+    });
+
     it('does not spawn when the turn signal is already aborted', async () => {
       const invocation = createInvocation({
         command: 'tail -f /var/log/app.log',

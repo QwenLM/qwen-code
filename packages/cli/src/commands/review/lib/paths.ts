@@ -15,6 +15,17 @@ export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
+/**
+ * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
+ * conventional name so a capture command can read back the effort the parser
+ * already resolved without the orchestrator threading the `--effort` value through
+ * by hand — see `resolveEffort`.
+ */
+export const PARSE_ARGS_REPORT = join(
+  REVIEW_TMP_DIR,
+  'qwen-review-parse-args.json',
+);
+
 /** Worktree path for a given PR review session. */
 export function worktreePath(prNumber: string | number): string {
   return join(REVIEW_TMP_DIR, `review-pr-${prNumber}`);

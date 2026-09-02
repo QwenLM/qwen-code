@@ -10,6 +10,7 @@ import {
   MonitorRegistry,
   type MonitorTaskRegistration,
 } from './monitorRegistry.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 function createEntry(
   overrides: Partial<MonitorTaskRegistration> = {},
@@ -49,6 +50,14 @@ describe('MonitorRegistry', () => {
     const entry = createEntry();
     registry.register(entry);
     expect(registry.get('mon-1')).toBe(entry);
+  });
+
+  it('captures the Todo work-chain owner at registration', () => {
+    const entry = todoWorkChainContext.run('work-chain-1', () =>
+      registry.register(createEntry()),
+    );
+
+    expect(entry.todoWorkChainId).toBe('work-chain-1');
   });
 
   it('emits event notification via callback', () => {

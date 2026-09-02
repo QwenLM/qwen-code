@@ -15,6 +15,7 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { SessionWriterLease } from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -31,6 +32,7 @@ vi.mock('../utils/jsonl-utils.js');
 describe('ChatRecordingService - recordParentSession', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
+  let mockLease: SessionWriterLease;
 
   let uuidCounter = 0;
 
@@ -78,10 +80,19 @@ describe('ChatRecordingService - recordParentSession', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
-
     // writeLine is async; mockResolvedValue lets the writeChain settle on flush.
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+    mockLease = {
+      sessionId: 'test-session-id',
+      ownerId: 'test-owner-id',
+      appendJsonLine: vi.fn((record: unknown) =>
+        jsonl.writeLine('/test/session.jsonl', record),
+      ),
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease;
+    chatRecordingService = new ChatRecordingService(mockConfig);
+    chatRecordingService.activate(mockLease);
   });
 
   afterEach(() => {

@@ -121,6 +121,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',
     AUTO_EDIT: 'auto-edit',
@@ -148,6 +149,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  Storage: {
+    getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+  },
   SESSION_TITLE_MAX_LENGTH: 200,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
@@ -328,6 +332,8 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue(undefined),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue([]),

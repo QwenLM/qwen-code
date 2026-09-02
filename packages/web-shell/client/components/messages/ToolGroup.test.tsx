@@ -6,6 +6,8 @@ import type { ACPToolCall } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -157,6 +159,39 @@ describe('tool group summary logic', () => {
 
     expect(hasActiveTool(tools)).toBe(true);
     expect(getActiveTool(tools).callId).toBe('active');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+  });
+
+  it('uses a static summary when only background agents remain active', () => {
+    const tools = [
+      makeTool({ callId: 'done', status: 'completed' }),
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t)).toBe('subagent.background');
+  });
+
+  it('keeps a foreground active tool ahead of a background agent', () => {
+    const tools = [
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ];
+
     expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
   });
 
@@ -555,6 +590,484 @@ describe('tool row rendering', () => {
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain('working through the issue');
     expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
+  });
+
+  it('opens a single foreground agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: false,
+      },
+      subContent: 'investigation complete',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('opens a running background agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: true,
+      },
+      rawOutput: { type: 'task_execution', status: 'background' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.textContent).toContain('background task');
+    expect(container.textContent).not.toContain('running');
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+    act(() => (container.querySelector('button') as HTMLButtonElement).click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('opens a single monitor from the tool summary', async () => {
+    const onOpen = vi.fn().mockResolvedValue(true);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('opens a monitor tool line from a mixed tool group', async () => {
+    const onOpen = vi.fn().mockResolvedValue(true);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('aria-expanded')).toBeNull();
+    expect(container.querySelector('[class*="lineChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="lineChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('falls back to the original summary expansion when monitor details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('resets summary expansion when the monitor identity changes', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="chatChevronDown"]'),
+    ).not.toBeNull();
+
+    const nextTool = makeTool({
+      callId: 'call-2',
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[nextTool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('deduplicates monitor summary clicks while details are loading', async () => {
+    let resolveOpen: ((opened: boolean) => void) | undefined;
+    const onOpen = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => {
+      summary.click();
+      summary.click();
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOpen?.(false);
+      await Promise.resolve();
+    });
+
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('falls back to the original tool-line expansion when monitor details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      rawOutput: 'Monitor started',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} forceExpandable />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('deduplicates monitor tool-line clicks while details are loading', async () => {
+    let resolveOpen: ((opened: boolean) => void) | undefined;
+    const onOpen = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      rawOutput: 'Monitor started',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} forceExpandable />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => {
+      line.click();
+      line.click();
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOpen?.(false);
+      await Promise.resolve();
+    });
+
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps a non-expandable monitor tool line static when details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('role')).toBeNull();
+    expect(line.getAttribute('aria-expanded')).toBeNull();
+  });
+
+  it('keeps a mixed group static when only its background agent is active', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'done', toolName: 'ReadFile', status: 'completed' }),
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('background task');
+    expect(container.textContent).not.toContain('Running');
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+  });
+
+  it('keeps a mixed group animated while a foreground tool is active', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ]);
+
+    expect(container.textContent).toContain('Running ReadFile');
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).not.toBeNull();
+  });
+
+  it('opens on-demand agent details without mounting inline content', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      subContent: 'large hidden result',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.textContent).not.toContain('large hidden result');
+    expect(container.querySelector('[class*="lineExpandable"]')?.tagName).toBe(
+      'BUTTON',
+    );
+    act(() => {
+      (
+        container.querySelector('[class*="lineExpandable"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} hideHeader forceExpanded />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
   });
 
   it('keeps glob details visible in the header after expanding', () => {

@@ -20,7 +20,9 @@ import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
+  type WorkspaceRememberRouteDeps,
 } from './workspace-remember.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 
@@ -226,6 +228,7 @@ function buildApp(
     requireAuth: false,
   },
   lane = new WorkspaceRememberTaskLane(bridge),
+  routeOverrides: Partial<WorkspaceRememberRouteDeps> = {},
 ) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
@@ -252,11 +255,59 @@ function buildApp(
       }
       return raw as Record<string, unknown>;
     },
+    ...routeOverrides,
   });
   return app;
 }
 
 describe('workspace memory remember routes', () => {
+  it('routes qualified remember tasks to the selected workspace lane', async () => {
+    const primary = buildBridgeStub({});
+    const secondary = buildBridgeStub({});
+    const secondaryLane = new WorkspaceRememberTaskLane(
+      secondary,
+      '/work/secondary',
+    );
+    const app = express();
+    app.use(express.json({ limit: '1mb' }));
+    const mutate = createMutationGate({
+      tokenConfigured: true,
+      requireAuth: false,
+    });
+    const common = {
+      parseClientId: () => undefined,
+      safeBody: (req: express.Request) => req.body as Record<string, unknown>,
+    };
+    mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+      mutate,
+      resolveRouteDeps: (req, res) => {
+        if (req.params['workspace'] !== 'secondary-id') {
+          res.status(400).json({ code: 'workspace_mismatch' });
+          return null;
+        }
+        return {
+          bridge: secondary,
+          lane: secondaryLane,
+          ...common,
+        };
+      },
+    });
+
+    const post = await request(app)
+      .post('/workspaces/secondary-id/memory/remember')
+      .send({ content: 'Secondary only' })
+      .expect(202);
+    await waitFor(() => secondary.rememberCalls.length === 1);
+
+    await request(app)
+      .get(`/workspaces/secondary-id/memory/remember/${post.body.taskId}`)
+      .expect(200);
+    expect(secondary.rememberCalls).toEqual([
+      { content: 'Secondary only', contextMode: 'workspace' },
+    ]);
+    expect(primary.rememberCalls).toEqual([]);
+  });
+
   it('queues and completes a hidden workspace remember task', async () => {
     const bridge = buildBridgeStub({ knownIds: ['client-1'] });
     const app = buildApp(bridge);
@@ -720,6 +771,35 @@ describe('workspace memory remember routes', () => {
     expect(bridge.events).toEqual([]);
   });
 
+  it('does not run a queued task after its runtime generation closes', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    let generationClosed = false;
+    const queued = lane.enqueue({
+      content: 'stale queued task',
+      contextMode: 'workspace',
+      assertGenerationOpen: () => {
+        if (generationClosed) throw new Error('generation closed');
+      },
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    generationClosed = true;
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+
+    await waitFor(() => lane.get(queued.taskId)?.status === 'failed');
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
+  });
+
   it('runs hidden remember tasks serially within the remember lane', async () => {
     const first = deferred<BridgeWorkspaceMemoryRememberResult>();
     const second = deferred<BridgeWorkspaceMemoryRememberResult>();
@@ -947,6 +1027,69 @@ describe('workspace memory remember routes', () => {
     expect(bridge.forgetCalls).toHaveLength(0);
     expect(bridge.dreamCalls).toBe(0);
   });
+
+  it('returns runtime unavailable when the generation closes during availability checking', async () => {
+    const availability = deferred<boolean>();
+    const availableImpl = vi.fn(() => availability.promise);
+    const bridge = buildBridgeStub({ availableImpl });
+    let closed = false;
+    const app = buildApp(bridge, undefined, undefined, {
+      captureGenerationAssertion: () => () => {
+        if (closed) {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+    });
+    const responsePromise = request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .then((response) => response);
+    await waitFor(() => availableImpl.mock.calls.length === 1);
+    closed = true;
+    availability.reject(new Error('bridge closed'));
+
+    const response = await responsePromise;
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects untrusted %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        isWorkspaceTrusted: () => false,
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('untrusted_workspace');
+    },
+  );
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects closed-generation %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        captureGenerationAssertion: () => () => {
+          throw new Error('closed');
+        },
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    },
+  );
 
   it('falls back to kind-specific codes when enqueue code extraction throws', async () => {
     mockDebugLogger.warn.mockClear();

@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -154,7 +154,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -212,7 +212,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -259,7 +259,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -340,12 +340,14 @@ jobs:
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
     permissions:
       contents: 'write'
+      issues: 'write'
       packages: 'write'
       id-token: 'write'
+      pull-requests: 'write'
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Persist the bot PAT for release-branch pushes so downstream CI
           # workflows are triggered.
@@ -436,27 +438,112 @@ jobs:
           ${{ github.repository == 'QwenLM/qwen-code' }}
         working-directory: 'packages/audio-capture'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/channel-base'
         working-directory: 'packages/channels/base'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+
+      - name: 'Publish remaining channel packages'
+        working-directory: 'packages/channels'
+        run: |-
+          # Explicit allowlist: new channel workspaces require release approval.
+          PUBLISH_MARKER="$(mktemp)"
+          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+            echo "::group::Publishing @qwen-code/channel-${channel}"
+            (
+              cd "${channel}"
+              PACKAGE_NAME="$(node -p "require('./package.json').name")"
+              PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+              if [[ "${IS_DRY_RUN}" == "true" ]]; then
+                PUBLISH_ARGS+=(--dry-run)
+              elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+                echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+                exit 0
+              fi
+              npm publish "${PUBLISH_ARGS[@]}"
+              echo "${channel}" >> "${PUBLISH_MARKER}"
+            )
+            echo "::endgroup::"
+          done
+          if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${PUBLISH_MARKER}" ]]; then
+            echo "::warning::Every channel package was already published; nothing shipped"
+          fi
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
         run: |-
           npm run verify:installation-release -- --dir dist/standalone
+
+      - name: 'Auto-label internal CI PRs for release notes exclusion'
+        continue-on-error: true
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+        run: |-
+          gh label create 'skip-changelog-auto' --repo "${GITHUB_REPOSITORY}" --color 'ededed' --description 'Automatically exclude internal CI changes from release notes' --force
+          commits="$(git rev-list "${PREVIOUS_RELEASE_TAG}..HEAD")" || {
+            echo "::error::Cannot enumerate commits since ${PREVIOUS_RELEASE_TAG}; skipping auto-labeling."
+            exit 1
+          }
+          while read -r commit; do
+            [[ -z "${commit}" ]] && continue
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${commit}/pulls" \
+              --jq '.[] | select(.merged_at != null) | {number, title, labels}' \
+              || echo "::warning::Failed to fetch PRs for commit ${commit}; skipping." >&2
+          done <<< "${commits}" | jq -s 'unique_by(.number)' | \
+            node .github/scripts/classify-release-notes.mjs
 
       - name: 'Create GitHub Release and Tag'
         if: |-
@@ -475,14 +562,53 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
+          # Always anchor the notes to the previous release. Every stable tag
+          # lives on its own release/* branch that is tagged before merging back
+          # to main, so the previous tag is normally NOT an ancestor of the
+          # branch being released; GitHub still diffs it correctly through the
+          # merge base. Dropping the anchor is what hurts: GitHub then falls
+          # back to the entire branch history, and the generated body blows past
+          # the 125000 character limit, failing the release after the npm
+          # packages have already been published.
+          NOTES_ARGS=()
+          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            NOTES_ARGS+=(-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}")
+          fi
+
+          # Generate the body up front so an unusable one can be repaired here
+          # instead of aborting `gh release create`. A failed call still prints
+          # the API error payload on stdout, so its output is discarded rather
+          # than published as release notes.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          generate_notes() {
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f "tag_name=${RELEASE_TAG}" \
+              -f "target_commitish=${RELEASE_BRANCH}" \
+              "$@" \
+              --jq '.body'
+          }
+          if ! generate_notes "${NOTES_ARGS[@]}" > "${NOTES_FILE}"; then
+            echo "::warning::Could not generate notes anchored at ${PREVIOUS_RELEASE_TAG:-<none>}; retrying without an anchor"
+            generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"
+          fi
+
+          # Caps the body below the 125000 character API limit and substitutes a
+          # minimal body when nothing was generated, so an oversized or missing
+          # changelog degrades the notes instead of the release.
+          node .github/scripts/cap-release-notes.mjs \
+            --file "${NOTES_FILE}" \
+            --tag "${RELEASE_TAG}" \
+            --previous-tag "${PREVIOUS_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --server-url "${GITHUB_SERVER_URL}"
+
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             dist/standalone/qwen-code-* \
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes \
+            --notes-file "${NOTES_FILE}" \
             ${PRERELEASE_FLAG}
 
   notify_failure:

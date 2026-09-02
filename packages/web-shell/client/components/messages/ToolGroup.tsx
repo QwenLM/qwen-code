@@ -12,7 +12,10 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
-import { isSubAgentToolCall } from '../../adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from '../../adapters/toolClassification';
 // Circular import with SubAgentPanel (its SubToolLine renders ToolLine
 // from this module). Safe only while both modules dereference each
 // other's exports at render time — never in top-level code.
@@ -24,6 +27,8 @@ import {
   isTodoWriteToolName,
 } from '../../utils/todos';
 import { useSharedNow } from '../../hooks/useSharedNow';
+import { useSubagentDetails } from '../../subagentDetailsContext';
+import { useMonitorDetails } from '../../monitorDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { Markdown } from './Markdown';
 import {
@@ -49,6 +54,7 @@ import {
   isAskUserQuestionToolName,
   isSkillToolName,
   isShellToolName,
+  localizeAgentTypeName,
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
@@ -67,6 +73,28 @@ interface ToolGroupProps {
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   isLocateFlashing?: boolean;
+}
+
+function openMonitorDetailsOnce(
+  requestRef: { current: object | null },
+  open: () => Promise<boolean>,
+  fallback: () => void,
+): void {
+  if (requestRef.current) return;
+  const request = {};
+  requestRef.current = request;
+  void open()
+    .then(
+      (opened) => {
+        if (requestRef.current === request && !opened) fallback();
+      },
+      () => {
+        if (requestRef.current === request) fallback();
+      },
+    )
+    .finally(() => {
+      if (requestRef.current === request) requestRef.current = null;
+    });
 }
 
 export function hasExpandableContent(tool: ACPToolCall): boolean {
@@ -571,9 +599,16 @@ export function formatToolGroupSummary(
   duration?: string,
 ): string {
   if (hasActiveTool(tools)) {
-    const activeTool = getActiveTool(tools);
+    const foregroundActiveTool = tools.find(
+      (tool) =>
+        isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+    );
+    const activeTool = foregroundActiveTool ?? getActiveTool(tools);
     if (isAskUserQuestionToolName(activeTool.toolName)) {
       return t('toolGroup.summary.provideInformation');
+    }
+    if (!foregroundActiveTool && isBackgroundSubAgentToolCall(activeTool)) {
+      return t('subagent.background');
     }
     return t('toolGroup.running', {
       name: localizeToolDisplayName(activeTool.toolName, t),
@@ -645,10 +680,13 @@ function SingleToolSummary({
 }) {
   const { t } = useI18n();
   const isAskUserQuestion = isAskUserQuestionToolName(tool.toolName);
+  const isActive = isActiveToolStatus(tool.status);
   const runningPrefix =
-    !isAskUserQuestion &&
-    isActiveToolStatus(tool.status) &&
-    t('toolGroup.runningPrefix').trim();
+    !isAskUserQuestion && isActive
+      ? isBackgroundSubAgentToolCall(tool)
+        ? t('subagent.background')
+        : t('toolGroup.runningPrefix').trim()
+      : '';
 
   if (isTodoWriteToolName(tool.toolName) || isAskUserQuestion) {
     return (
@@ -948,6 +986,8 @@ function CompactToolGroup({
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
+    (isActiveToolStatus(activeTool.status) &&
+      isBackgroundSubAgentToolCall(activeTool)) ||
     isShellToolName(activeTool.toolName) ||
     isWebFetchToolName(activeTool.toolName)
       ? ''
@@ -1099,9 +1139,15 @@ export const ToolLine = memo(function ToolLine({
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
+  const monitorDetails = useMonitorDetails();
+  const monitorDetailsAvailable = monitorDetails !== undefined;
+  const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
+    useState(false);
   const [expanded, setExpanded] = useState(
     () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
   );
+  const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
@@ -1111,11 +1157,19 @@ export const ToolLine = memo(function ToolLine({
       setExpanded(
         forceExpanded || (compactMode ? false : shouldAutoExpand(tool)),
       );
+      setMonitorDetailsUnavailable(false);
+      monitorDetailsRequestRef.current = null;
       // A new tool identity (or compact-mode toggle) resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [compactMode, forceExpanded, tool.callId, tool.toolName],
+    [
+      compactMode,
+      forceExpanded,
+      monitorDetailsAvailable,
+      tool.callId,
+      tool.toolName,
+    ],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1146,12 +1200,20 @@ export const ToolLine = memo(function ToolLine({
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
     const displayName = info.explicitAgentType
-      ? `${t('agent.label')} (${info.explicitAgentType})`
+      ? `${t('agent.label')} (${localizeAgentTypeName(info.explicitAgentType, t)})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
+    const isBackground = isBackgroundSubAgentToolCall(tool);
     const progressLabel =
-      tool.status === 'pending' ? t('subagent.pending') : t('subagent.running');
-    const runningMeta = [progressLabel, info.elapsed]
+      isBackground && !isComplete
+        ? t('subagent.background')
+        : tool.status === 'pending'
+          ? t('subagent.pending')
+          : t('subagent.running');
+    const runningMeta = [
+      progressLabel,
+      isBackground && !isComplete ? '' : info.elapsed,
+    ]
       .filter(Boolean)
       .join(' · ');
     const completeMeta = [
@@ -1169,6 +1231,34 @@ export const ToolLine = memo(function ToolLine({
     const panel = (
       <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
     );
+    if (subagentDetails && !hideHeader) {
+      return (
+        <div className={styles.line}>
+          <button
+            type="button"
+            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+            onClick={() => subagentDetails.onOpen(tool)}
+          >
+            <AgentIcon />
+            <StatusIcon status={isComplete ? info.status : tool.status} />
+            <span className={styles.lineName}>{displayName}</span>
+            <ToolHeaderExtra
+              info={{
+                kind: 'agent',
+                tool,
+                displayName,
+                description: info.description
+                  ? truncateText(info.description, 60)
+                  : '',
+                elapsed: isComplete ? completeMeta : runningMeta,
+                workspaceCwd,
+              }}
+            />
+            <span className={styles.lineChevronRight} aria-hidden="true" />
+          </button>
+        </div>
+      );
+    }
     return (
       <div className={styles.line}>
         {!hideHeader && (
@@ -1176,6 +1266,7 @@ export const ToolLine = memo(function ToolLine({
             className={`${styles.lineMain} ${styles.lineExpandable}`}
             onClick={() => setExpanded(!expanded)}
           >
+            <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
             <span className={styles.lineName}>{displayName}</span>
             <ToolHeaderExtra
@@ -1224,6 +1315,11 @@ export const ToolLine = memo(function ToolLine({
       : formatElapsed(tool.startTime, tool.endTime);
 
   const name = tool.toolName.toLowerCase();
+  const opensMonitorDetails =
+    name === 'monitor' &&
+    monitorDetailsAvailable &&
+    !monitorDetailsUnavailable &&
+    !hideHeader;
   const isTodo = isTodoWriteToolName(name);
   const todoItems = isTodo ? extractTodosFromToolCall(tool) : undefined;
   const hasTodoList = !!todoItems && todoItems.length > 0;
@@ -1246,6 +1342,21 @@ export const ToolLine = memo(function ToolLine({
     !forceExpanded &&
     (forceExpandable ||
       (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
+  const interactive = opensMonitorDetails || expandable;
+  const fallbackToMonitorInline = () => {
+    setMonitorDetailsUnavailable(true);
+    if (!expandable) return;
+    userToggledRef.current = true;
+    setExpanded((value) => !value);
+  };
+  const tryOpenMonitorDetails = () => {
+    if (!monitorDetails) return;
+    openMonitorDetailsOnce(
+      monitorDetailsRequestRef,
+      () => monitorDetails.onOpen(tool),
+      fallbackToMonitorInline,
+    );
+  };
   // Whether the expanded row renders a kind-specific detail view. When it does
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
   // summary visible instead of replacing it with an empty detail area.
@@ -1262,30 +1373,42 @@ export const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       {!hideHeader && (
         <div
-          className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
+          className={`${styles.lineMain} ${interactive ? styles.lineExpandable : ''}`}
           title={
-            expandable
-              ? expanded
-                ? t('tool.collapseHint')
-                : t('tool.expand')
-              : undefined
+            opensMonitorDetails
+              ? undefined
+              : expandable
+                ? expanded
+                  ? t('tool.collapseHint')
+                  : t('tool.expand')
+                : undefined
           }
-          aria-expanded={expandable ? expanded : undefined}
-          role={expandable ? 'button' : undefined}
-          tabIndex={expandable ? 0 : undefined}
+          aria-expanded={
+            opensMonitorDetails ? undefined : expandable ? expanded : undefined
+          }
+          role={interactive ? 'button' : undefined}
+          tabIndex={interactive ? 0 : undefined}
           onClick={
-            expandable
+            interactive
               ? () => {
+                  if (opensMonitorDetails) {
+                    tryOpenMonitorDetails();
+                    return;
+                  }
                   userToggledRef.current = true;
                   setExpanded((value) => !value);
                 }
               : undefined
           }
           onKeyDown={
-            expandable
+            interactive
               ? (event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
+                  if (opensMonitorDetails) {
+                    tryOpenMonitorDetails();
+                    return;
+                  }
                   userToggledRef.current = true;
                   setExpanded((value) => !value);
                 }
@@ -1312,10 +1435,12 @@ export const ToolLine = memo(function ToolLine({
               workspaceCwd,
             }}
           />
-          {expandable && (
+          {interactive && (
             <span
               className={
-                expanded ? styles.lineChevronDown : styles.lineChevronRight
+                !opensMonitorDetails && expanded
+                  ? styles.lineChevronDown
+                  : styles.lineChevronRight
               }
               aria-hidden="true"
             />
@@ -1403,26 +1528,66 @@ export const ToolGroup = memo(function ToolGroup({
 }: ToolGroupProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
+  const monitorDetails = useMonitorDetails();
+  const monitorDetailsAvailable = monitorDetails !== undefined;
+  const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
+    useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
+  const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveTool(tools);
   const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const singleSubagent =
+    singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
+  const singleMonitor =
+    singleTool && singleTool.toolName.toLowerCase() === 'monitor'
+      ? singleTool
+      : undefined;
+  const hasForegroundActiveTool = tools.some(
+    (tool) =>
+      isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+  );
+  const animateSummary = hasRunningTool && hasForegroundActiveTool;
+  const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
+  const opensMonitorDetails = Boolean(
+    singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
+  );
+  const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = tools[0] ?? activeTool;
   const liveStartedAtRef = useRef(Date.now());
-  const summaryNow = useSharedNow(hasRunningTool);
+  const summaryNow = useSharedNow(animateSummary);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
-  const runningDuration = hasRunningTool
+  const runningDuration = animateSummary
     ? formatLiveElapsed(summaryNow - liveStartedAtRef.current)
     : undefined;
 
   useEffect(() => {
-    if (!hasRunningTool) return;
+    if (!animateSummary) return;
     liveStartedAtRef.current = Date.now();
-  }, [hasRunningTool, activeTool?.callId]);
+  }, [animateSummary, activeTool?.callId]);
+
+  useEffect(() => {
+    setMonitorDetailsUnavailable(false);
+    setChatExpanded(false);
+    monitorDetailsRequestRef.current = null;
+  }, [monitorDetailsAvailable, singleMonitor?.callId]);
+
+  const tryOpenMonitorDetails = () => {
+    if (!singleMonitor || !monitorDetails) return;
+    openMonitorDetailsOnce(
+      monitorDetailsRequestRef,
+      () => monitorDetails.onOpen(singleMonitor),
+      () => {
+        setMonitorDetailsUnavailable(true);
+        setChatExpanded((value) => !value);
+      },
+    );
+  };
 
   if (showCompact) {
     return (
@@ -1440,9 +1605,25 @@ export const ToolGroup = memo(function ToolGroup({
         <button
           type="button"
           className={styles.chatSummary}
-          onClick={() => setChatExpanded((value) => !value)}
-          aria-expanded={chatExpanded}
-          title={chatExpanded ? t('tool.collapseHint') : t('tool.expand')}
+          onClick={() => {
+            if (singleSubagent && subagentDetails) {
+              subagentDetails.onOpen(singleSubagent);
+              return;
+            }
+            if (opensMonitorDetails && singleMonitor && monitorDetails) {
+              tryOpenMonitorDetails();
+              return;
+            }
+            setChatExpanded((value) => !value);
+          }}
+          aria-expanded={opensToolDetails ? undefined : chatExpanded}
+          title={
+            opensToolDetails
+              ? undefined
+              : chatExpanded
+                ? t('tool.collapseHint')
+                : t('tool.expand')
+          }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
             {summaryIconTool ? (
@@ -1454,7 +1635,7 @@ export const ToolGroup = memo(function ToolGroup({
           {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
-              hasRunningTool
+              animateSummary
                 ? `${styles.chatSummaryText} ${styles.chatSummaryTextActive}`
                 : styles.chatSummaryText
             }
@@ -1462,7 +1643,7 @@ export const ToolGroup = memo(function ToolGroup({
             {singleTool ? (
               <SingleToolSummary
                 tool={singleTool}
-                runningDuration={hasRunningTool ? runningDuration : undefined}
+                runningDuration={runningDuration}
                 workspaceCwd={workspaceCwd}
               />
             ) : (

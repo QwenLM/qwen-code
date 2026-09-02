@@ -26,6 +26,7 @@ export class RestSseTransport implements DaemonTransport {
   private readonly baseUrl: string;
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
+  private readonly activeSseRequests = new Set<AbortController>();
   private _disposed = false;
 
   readonly type = 'rest' as const;
@@ -75,102 +76,140 @@ export class RestSseTransport implements DaemonTransport {
       throw new DaemonTransportClosedError();
     }
 
-    const headers: Record<string, string> = { Accept: 'text/event-stream' };
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
-    }
-    if (opts.lastEventId !== undefined) {
-      headers['Last-Event-ID'] = String(opts.lastEventId);
-    }
+    // Request-lifetime controller. It drives the connect-phase timeout
+    // (request → headers received) AND owns teardown of the long-lived
+    // SSE body: aborting it in the `finally` below releases the
+    // underlying fetch/TCP connection when the consumer exits the
+    // iterator for any reason (break, return, throw, or normal end),
+    // even when no caller signal was supplied. Without this,
+    // `reader.cancel()` alone does not reliably close the connection on
+    // some runtimes (e.g. Bun), leaking the daemon-side EventBus
+    // subscriber. It is also tracked in `activeSseRequests` so
+    // `dispose()` can abort in-flight subscriptions. The SSE body must
+    // NOT be timed out, so the connect timer only fires before headers
+    // arrive.
+    const requestCtrl = new AbortController();
+    this.activeSseRequests.add(requestCtrl);
 
-    // Connect-phase timeout (request → headers received). The SSE
-    // body itself is long-lived and must NOT be timed out.
-    const connectCtrl = new AbortController();
-    let connectTimer: ReturnType<typeof setTimeout> | undefined;
-    const connectTimeoutMs = opts.connectTimeoutMs;
-    if (connectTimeoutMs && Number.isFinite(connectTimeoutMs)) {
-      connectTimer = setTimeout(
-        () =>
-          connectCtrl.abort(
-            new DOMException('Initial connect timed out', 'TimeoutError'),
-          ),
-        connectTimeoutMs,
-      );
-      if (
-        typeof connectTimer === 'object' &&
-        connectTimer &&
-        'unref' in connectTimer
-      ) {
-        (connectTimer as { unref: () => void }).unref();
-      }
-    }
-
-    const fetchSignal = opts.signal
-      ? composeAbortSignals([opts.signal, connectCtrl.signal])
-      : connectCtrl.signal;
-
-    // Build the SSE URL, optionally with `?maxQueued=N`.
-    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
-    if (opts.maxQueued !== undefined) {
-      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
-    }
-
-    let res: Response;
     try {
-      res = await this._fetch(url, { headers, signal: fetchSignal });
-    } finally {
-      if (connectTimer !== undefined) clearTimeout(connectTimer);
-    }
-
-    if (!res.ok) {
-      // Read the error body for the caller.
-      let body: unknown;
-      try {
-        const text = await res.text();
-        try {
-          body = JSON.parse(text);
-        } catch {
-          body = text;
+      const headers: Record<string, string> = { Accept: 'text/event-stream' };
+      if (this.token) {
+        headers['Authorization'] = `Bearer ${this.token}`;
+      }
+      if (opts.lastEventId !== undefined) {
+        headers['Last-Event-ID'] = String(opts.lastEventId);
+        // Pair the resume cursor with the epoch of the bus that produced
+        // it so a restarted daemon (new epoch) forces a resync instead of
+        // resuming from a stale cursor (DAEMON-001). Meaningless without
+        // a cursor, hence nested.
+        if (opts.epoch !== undefined) {
+          headers['X-Qwen-Event-Epoch'] = opts.epoch;
         }
-      } catch {
-        /* body unreadable */
       }
-      const detail =
-        body && typeof body === 'object' && 'error' in body
-          ? String((body as { error: unknown }).error)
-          : `HTTP ${res.status}`;
-      throw new DaemonHttpError(
-        res.status,
-        body,
-        `GET /session/:id/events: ${detail}`,
-      );
-    }
 
-    // Content-type validation — a misconfigured proxy that swallows
-    // the SSE response would otherwise silently produce zero frames.
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.toLowerCase().includes('text/event-stream')) {
+      const fetchSignal = opts.signal
+        ? composeAbortSignals([opts.signal, requestCtrl.signal])
+        : requestCtrl.signal;
+
+      // Build the SSE URL, optionally with `?maxQueued=N`.
+      let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
+      if (opts.maxQueued !== undefined) {
+        url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
+      }
+
+      // Connect-phase timeout (request → headers received). The SSE
+      // body itself is long-lived and must NOT be timed out.
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
+      const connectTimeoutMs = opts.connectTimeoutMs;
+      if (connectTimeoutMs && Number.isFinite(connectTimeoutMs)) {
+        connectTimer = setTimeout(
+          () =>
+            requestCtrl.abort(
+              new DOMException('Initial connect timed out', 'TimeoutError'),
+            ),
+          connectTimeoutMs,
+        );
+        if (
+          typeof connectTimer === 'object' &&
+          connectTimer &&
+          'unref' in connectTimer
+        ) {
+          (connectTimer as { unref: () => void }).unref();
+        }
+      }
+
+      let res: Response;
       try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
+        res = await this._fetch(url, { headers, signal: fetchSignal });
+      } finally {
+        if (connectTimer !== undefined) clearTimeout(connectTimer);
       }
-      throw new DaemonHttpError(
-        res.status,
-        ct,
-        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
-      );
-    }
 
-    if (!res.body) {
-      throw new Error('No SSE body');
-    }
+      if (!res.ok) {
+        // Read the error body for the caller.
+        let body: unknown;
+        try {
+          const text = await res.text();
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = text;
+          }
+        } catch {
+          /* body unreadable */
+        }
+        const detail =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : `HTTP ${res.status}`;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          `GET /session/:id/events: ${detail}`,
+        );
+      }
 
-    yield* parseSseStream(res.body, opts.signal);
+      // Content-type validation — a misconfigured proxy that swallows
+      // the SSE response would otherwise silently produce zero frames.
+      const ct = res.headers.get('content-type') ?? '';
+      if (!ct.toLowerCase().includes('text/event-stream')) {
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* body already consumed or no body */
+        }
+        throw new DaemonHttpError(
+          res.status,
+          ct,
+          `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
+        );
+      }
+
+      if (!res.body) {
+        throw new Error('No SSE body');
+      }
+
+      // Learn the daemon's current bus epoch so the caller can pair it
+      // with its resume cursor on the next reconnect (DAEMON-001).
+      const responseEpoch = res.headers.get('x-qwen-event-epoch');
+      if (responseEpoch) {
+        opts.onEpoch?.(responseEpoch);
+      }
+
+      yield* parseSseStream(res.body, fetchSignal);
+    } finally {
+      requestCtrl.abort();
+      this.activeSseRequests.delete(requestCtrl);
+    }
   }
 
   dispose(): void {
+    if (this._disposed) return;
     this._disposed = true;
+    for (const requestCtrl of this.activeSseRequests) {
+      requestCtrl.abort();
+    }
+    this.activeSseRequests.clear();
   }
 }
 

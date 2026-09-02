@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
-import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
+import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
 import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { ProcessRegistry } from './process-registry.js';
 
 let cachedMemoryArgs: string[] | undefined;
 export function getAcpMemoryArgs(): string[] {
@@ -105,6 +106,7 @@ export interface SpawnChannelFactoryOptions {
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
+  processRegistry?: ProcessRegistry;
 }
 
 /**
@@ -119,6 +121,7 @@ export interface SpawnChannelFactoryOptions {
 export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
+  const processRegistry = options.processRegistry ?? new ProcessRegistry();
   return async (workspaceCwd, childEnvOverrides) => {
     const sourceEnv = options.sourceEnv ?? process.env;
     const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
@@ -136,21 +139,29 @@ export function createSpawnChannelFactory(
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
-    const child = spawn(
-      process.execPath,
-      [
-        ...execArgs,
-        ...memoryArgs,
-        cliEntry,
-        '--acp',
-        ...(options.extraArgs ?? []),
-      ],
-      {
-        cwd: workspaceCwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: childEnv,
-      },
-    );
+    const reservation = processRegistry.reserve();
+    let child;
+    try {
+      child = spawn(
+        process.execPath,
+        [
+          ...execArgs,
+          ...memoryArgs,
+          cliEntry,
+          '--acp',
+          ...(options.extraArgs ?? []),
+        ],
+        {
+          cwd: workspaceCwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: childEnv,
+        },
+      );
+    } catch (error) {
+      reservation.cancel();
+      throw error;
+    }
+    const trackedChild = reservation.attach(child);
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
@@ -170,21 +181,8 @@ export function createSpawnChannelFactory(
       });
     }
 
-    const exited = new Promise<AcpChannelExitInfo | undefined>((resolve) => {
-      let resolved = false;
-      const finish = (info?: AcpChannelExitInfo) => {
-        if (resolved) return;
-        resolved = true;
-        resolve(info);
-      };
-      child.once('exit', (code, signal) =>
-        finish({ exitCode: code, signalCode: signal }),
-      );
-      child.once('error', () => finish(undefined));
-    });
-
     if (!child.stdin || !child.stdout) {
-      child.kill('SIGKILL');
+      trackedChild.killSync();
       throw new Error(
         'Spawned ACP child has no stdin/stdout — cannot establish NDJSON channel.',
       );
@@ -196,17 +194,9 @@ export function createSpawnChannelFactory(
 
     return {
       stream,
-      kill: () => killChild(child),
-      killSync: () => {
-        if (child.exitCode === null && child.signalCode === null) {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            /* already dead / pid recycled — ignore */
-          }
-        }
-      },
-      exited,
+      kill: () => trackedChild.terminate(),
+      killSync: () => trackedChild.killSync(),
+      exited: trackedChild.exited,
     };
   };
 }
@@ -236,8 +226,6 @@ export function createSpawnChannelFactory(
  */
 export const defaultSpawnChannelFactory: ChannelFactory =
   createSpawnChannelFactory();
-
-const KILL_HARD_DEADLINE_MS = 10_000;
 
 /**
  * Environment variables stripped from the spawned `qwen --acp` child's
@@ -312,64 +300,4 @@ export function scrubChildEnv(
     }
   }
   return childEnv;
-}
-
-function killChild(child: ChildProcess): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    let resolved = false;
-    const finish = () => {
-      if (resolved) return;
-      resolved = true;
-      child.removeListener('exit', finish);
-      resolve();
-    };
-    child.once('exit', finish);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      finish();
-      return;
-    }
-    setTimeout(() => {
-      if (!resolved && child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* swallow */
-        }
-      }
-    }, 5_000).unref();
-    // Even SIGKILL doesn't return if the child is in uninterruptible
-    // sleep (D-state, e.g. NFS read blocked on a dead server). Without
-    // this hard deadline, `bridge.shutdown()`'s `Promise.all` waits
-    // forever on that one wedged child and SHUTDOWN_FORCE_CLOSE_MS in
-    // `runQwenServe` only covers `server.close()`, not the bridge.
-    // After the deadline give up: the child is probably stuck in a
-    // kernel call we can't cancel, and `process.exit(0)` will reap it
-    // when the daemon returns to its caller.
-    //
-    // Emit a stderr line BEFORE we
-    // abandon the child so operators see a signal that a zombie
-    // exists. Without this, `shutdown()` returns "graceful" while a
-    // wedged `qwen --acp` process keeps holding FDs / memory / locks;
-    // under systemd/k8s supervision, the daemon respawn would then
-    // race the orphan for the same workspace. Single-line warning is
-    // intentionally noisy on the daemon's stderr so monitoring/log
-    // aggregators catch it.
-    setTimeout(() => {
-      if (!resolved) {
-        process.stderr.write(
-          `qwen serve: killChild hard deadline (${KILL_HARD_DEADLINE_MS}ms) ` +
-            `reached; child pid=${child.pid} still alive (uninterruptible sleep?) — ` +
-            `abandoning. Operator should check for zombie qwen --acp processes ` +
-            `holding workspace resources.\n`,
-        );
-        finish();
-      }
-    }, KILL_HARD_DEADLINE_MS).unref();
-  });
 }

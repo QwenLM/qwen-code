@@ -73,13 +73,9 @@ export function useSessionArtifacts(): SessionArtifactsState {
       loadedSessionIdRef.current = sessionId;
       setArtifacts(result.artifacts);
       setError(null);
-    } catch (err) {
+    } catch {
       if (requestIdRef.current !== requestId) return;
-      if (isSessionDisconnectedError(err)) {
-        setError(null);
-        return;
-      }
-      setError(err instanceof Error ? err.message : String(err));
+      setError(null);
     } finally {
       if (requestIdRef.current === requestId) {
         setLoading(false);
@@ -119,9 +115,4 @@ export function useSessionArtifacts(): SessionArtifactsState {
   );
 
   return { artifacts, artifactById, loading, error, refresh };
-}
-
-function isSessionDisconnectedError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes('session is not connected');
 }

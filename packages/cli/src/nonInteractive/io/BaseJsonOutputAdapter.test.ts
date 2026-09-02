@@ -1631,6 +1631,29 @@ describe('BaseJsonOutputAdapter', () => {
         );
       });
 
+      it('includes a tool-result vision notice without replacing content', () => {
+        const response = {
+          callId: 'image-tool',
+          resultDisplay: 'captured screen',
+          visionBridgeNotice:
+            'Converted 1 image via qwen3-vl-plus (dashscope.aliyuncs.com).',
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Screen says READY' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Converted 1 image via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
+            'captured screen',
+        );
+      });
+
       it('prefers a top-level tool error over content with a vision bridge disclosure', () => {
         const response = {
           callId: 'pdf-failure',

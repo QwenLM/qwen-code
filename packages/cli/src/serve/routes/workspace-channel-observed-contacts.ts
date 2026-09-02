@@ -13,12 +13,16 @@ import {
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterWorkspaceChannelObservedContactRoutesDeps {
   primaryWorkspace: string;
   workspaceRegistry: WorkspaceRegistry;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 const DEFAULT_FRESH_WITHIN_SECONDS = 7 * 24 * 60 * 60;
@@ -38,7 +42,12 @@ function parseFreshWithinSeconds(req: Request): number | undefined {
   return value;
 }
 
-function sendContacts(req: Request, res: Response, workspaceCwd: string): void {
+function sendContacts(
+  req: Request,
+  res: Response,
+  workspaceCwd: string,
+  assertGenerationOpen?: () => void,
+): void {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const freshWithinSeconds = parseFreshWithinSeconds(req);
@@ -50,11 +59,15 @@ function sendContacts(req: Request, res: Response, workspaceCwd: string): void {
     return;
   }
   try {
+    assertGenerationOpen?.();
     const store = new ObservedChannelContactStore(
       daemonObservedContactsPath(workspaceCwd),
     );
-    res.status(200).json(store.list({ freshWithinSeconds }));
-  } catch {
+    const contacts = store.list({ freshWithinSeconds });
+    assertGenerationOpen?.();
+    res.status(200).json(contacts);
+  } catch (error) {
+    if (sendGenerationClosedError(res, error)) return;
     process.stderr.write(
       'qwen serve: observed channel contacts unavailable.\n',
     );
@@ -70,7 +83,16 @@ export function registerWorkspaceChannelObservedContactRoutes(
   deps: RegisterWorkspaceChannelObservedContactRoutesDeps,
 ): void {
   app.get('/workspace/channel/observed-contacts', (req, res) => {
-    sendContacts(req, res, deps.primaryWorkspace);
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
+    sendContacts(
+      req,
+      res,
+      deps.primaryWorkspace,
+      deps.captureGenerationAssertion?.(),
+    );
   });
 
   app.get('/workspaces/:workspace/channel/observed-contacts', (req, res) => {
@@ -80,6 +102,8 @@ export function registerWorkspaceChannelObservedContactRoutes(
       res,
     );
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-    sendContacts(req, res, runtime.workspaceCwd);
+    sendContacts(req, res, runtime.workspaceCwd, () =>
+      runtime.generationGuard?.assertOpen(),
+    );
   });
 }

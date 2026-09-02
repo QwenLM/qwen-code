@@ -15,6 +15,8 @@ import {
   sessionIdContext,
   registerSessionProjectDir,
   unregisterSessionProjectDir,
+  registerSessionModel,
+  unregisterSessionModel,
 } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
@@ -41,6 +43,9 @@ describe('getShellContextEnvVars', () => {
   // here also cleans up after the per-session tests below, which assign it and
   // used to leak the assignment into every later test in the file.
   let originalProjectDir: string | undefined;
+  // And QWEN_CODE_MODEL — Config claims it into process.env, so a test run
+  // started from inside a qwen session inherits it too.
+  let originalModel: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -49,6 +54,8 @@ describe('getShellContextEnvVars', () => {
     delete process.env['QWEN_CODE_CLI'];
     originalProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
     delete process.env['QWEN_CODE_PROJECT_DIR'];
+    originalModel = process.env['QWEN_CODE_MODEL'];
+    delete process.env['QWEN_CODE_MODEL'];
   });
 
   afterEach(() => {
@@ -66,6 +73,11 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_PROJECT_DIR'] = originalProjectDir;
     } else {
       delete process.env['QWEN_CODE_PROJECT_DIR'];
+    }
+    if (originalModel !== undefined) {
+      process.env['QWEN_CODE_MODEL'] = originalModel;
+    } else {
+      delete process.env['QWEN_CODE_MODEL'];
     }
   });
 
@@ -303,6 +315,75 @@ describe('getShellContextEnvVars', () => {
 
       expect(envSeenByA['QWEN_CODE_SESSION_ID']).toBe('session-A');
       expect(envSeenByB['QWEN_CODE_SESSION_ID']).toBe('session-B');
+    });
+  });
+
+  describe('active model id (QWEN_CODE_MODEL)', () => {
+    it('passes the active model down from the Config-claimed slot', () => {
+      // A subprocess that must report which model ran (the /review compose
+      // step) has no other authoritative source — settings files miss /model
+      // switches and describe the wrong home under QWEN_HOME isolation.
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
+        'qwen3-coder-plus',
+      );
+    });
+
+    it('omits the key when no Config has claimed the slot', () => {
+      // Same rule as the session ID: nothing in process.env means the
+      // spawn-site spread has nothing stale to leak, so absence is correct.
+      expect('QWEN_CODE_MODEL' in getShellContextEnvVars()).toBe(false);
+    });
+
+    it('reflects a republished slot after a model switch', () => {
+      // publishModelEnv in config.ts rewrites the slot on set/switchModel and
+      // refreshAuth; spawn-time reads must see the CURRENT value, not one
+      // captured earlier.
+      process.env['QWEN_CODE_MODEL'] = 'model-before-switch';
+      getShellContextEnvVars();
+      process.env['QWEN_CODE_MODEL'] = 'model-after-switch';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
+        'model-after-switch',
+      );
+    });
+  });
+
+  describe('model is per-session, not per-process', () => {
+    it('hands each session its own active model', () => {
+      // One daemon process, two sessions, two /model selections. A single
+      // process-global slot holds whichever booted first — and every later
+      // session would then stamp a model that never ran the review, the exact
+      // bug this PR opens with, relocated to the consumer.
+      registerSessionModel('sess-A', 'model-A');
+      registerSessionModel('sess-B', 'model-B');
+      process.env['QWEN_CODE_MODEL'] = 'model-A'; // the first to boot
+
+      const a = sessionIdContext.run('sess-A', () => getShellContextEnvVars());
+      const b = sessionIdContext.run('sess-B', () => getShellContextEnvVars());
+
+      expect(a['QWEN_CODE_MODEL']).toBe('model-A');
+      expect(b['QWEN_CODE_MODEL']).toBe('model-B'); // NOT A's
+    });
+
+    it('drops a session entry on unregister — no daemon leak', () => {
+      registerSessionModel('sess-X', 'model-X');
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL'
+        ],
+      ).toBe('model-X');
+      unregisterSessionModel('sess-X');
+      delete process.env['QWEN_CODE_MODEL'];
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL'
+        ],
+      ).toBeUndefined();
+    });
+
+    it('falls back to the global slot for the single-session CLI', () => {
+      process.env['QWEN_CODE_MODEL'] = 'model-only';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe('model-only');
     });
   });
 

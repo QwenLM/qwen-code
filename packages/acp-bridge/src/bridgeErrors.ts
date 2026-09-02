@@ -211,6 +211,22 @@ export class PromptQueueFullError extends Error {
 }
 
 /**
+ * Rejected by `sendPrompt` when an accepted prompt exceeds its wallclock
+ * deadline (`BridgeClientRequestContext.deadlineMs`). The bridge publishes a
+ * `turn_error{code:'prompt_deadline_exceeded'}` terminal, releases the FIFO,
+ * and best-effort cancels the agent — the agent may still be executing.
+ * Exported so tests and routes can match on the class identity.
+ */
+export class PromptDeadlineExceededError extends Error {
+  readonly deadlineMs: number;
+  constructor(deadlineMs: number) {
+    super(`prompt exceeded the ${deadlineMs}ms deadline`);
+    this.name = 'PromptDeadlineExceededError';
+    this.deadlineMs = deadlineMs;
+  }
+}
+
+/**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
  * canonicalize to the bridge's bound workspace. Every bridge instance is bound
  * to exactly one runtime; a multi-workspace daemon selects a bridge before

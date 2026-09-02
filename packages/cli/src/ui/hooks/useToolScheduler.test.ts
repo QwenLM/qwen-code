@@ -72,7 +72,7 @@ const mockConfig = {
   getUseModelRouter: () => false,
   getGeminiClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
-  getChatRecordingService: () => undefined,
+  getChatRecordingService: vi.fn(() => undefined),
   getMessageBus: vi.fn().mockReturnValue(undefined),
   getDisableAllHooks: vi.fn().mockReturnValue(true),
   getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -108,6 +108,7 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     mockToolRegistry.getTool.mockClear();
     mockToolRegistry.ensureTool.mockClear();
     (mockConfig.getBaseLlmClient as Mock).mockReset();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
@@ -278,6 +279,7 @@ describe('useReactToolScheduler', () => {
     (mockTool.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
 
     mockOnUserConfirmForToolConfirmation = vi.fn();
     (
@@ -414,6 +416,10 @@ describe('useReactToolScheduler', () => {
 
   it('fails closed when the full-turn tool runtime cannot be resolved', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const recordToolResult = vi.fn();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue({
+      recordToolResult,
+    });
     (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
       resolveForModel: vi.fn().mockRejectedValue(new Error('missing route')),
     });
@@ -436,6 +442,7 @@ describe('useReactToolScheduler', () => {
     });
 
     expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
     expect(onComplete).toHaveBeenCalledWith([
       expect.objectContaining({
         status: 'error',

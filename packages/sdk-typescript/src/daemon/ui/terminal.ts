@@ -24,7 +24,7 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'tool.update':
       return terminalLine(
         `tool ${event.status}`,
-        `${event.title}${event.details ? ` ${event.details}` : ''}`,
+        `${event.title ?? event.toolName ?? event.toolKind ?? 'Tool'}${event.details ? ` ${event.details}` : ''}`,
         '38;5;75',
       );
     case 'shell.output':

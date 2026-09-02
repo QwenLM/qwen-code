@@ -8,6 +8,7 @@ import { copyToClipboard } from '../utils/commandUtils.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { findInlineMathExpressions } from '../utils/inline-math.js';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -40,12 +41,6 @@ interface SelectedInlineLatexExpression {
   expression: InlineLatexExpression;
   label: string;
 }
-
-const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_REGEX = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)([^$\n]{1,${INLINE_MATH_MAX_CHARS}})\$(?![\w$])`,
-  'g',
-);
 
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
@@ -139,14 +134,11 @@ function parseInlineLatexExpressions(
       continue;
     }
 
-    for (const match of line.matchAll(INLINE_MATH_REGEX)) {
-      const content = match[1];
-      if (content) {
-        expressions.push({
-          content,
-          index: expressions.length + 1,
-        });
-      }
+    for (const content of findInlineMathExpressions(line)) {
+      expressions.push({
+        content,
+        index: expressions.length + 1,
+      });
     }
   }
 
@@ -293,11 +285,15 @@ function selectCodeBlock(
 
   let lang: string | null = null;
   let requestedIndex: number | null = null;
-  const selectorTokens =
-    firstToken === 'code' ? tokens.slice(1) : tokens.map((token) => token);
-  if (firstToken !== 'code') {
-    lang = firstToken;
-  }
+  // Only the leading `code` keyword is consumed here. Every other token is
+  // classified by the loop below, which already assigns `lang` for anything
+  // that is not a number. Seeding `lang` from the first token beforehand was
+  // redundant for `/copy ts` and actively wrong once a message index has been
+  // stripped off the front: `/copy 1 2` leaves "2" as the whole argument, so
+  // this set lang to "2" while the loop set requestedIndex to 2, the filter
+  // looked for blocks written in a language called "2", found none, and
+  // reported that no code block matched.
+  const selectorTokens = firstToken === 'code' ? tokens.slice(1) : tokens;
 
   for (const token of selectorTokens) {
     if (/^\d+$/.test(token)) {

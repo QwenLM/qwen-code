@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { SessionNotFoundError } from './acp-session-bridge.js';
 import {
   createWorkspaceSessionOwnerIndex,
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   createSingleWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -77,6 +78,96 @@ describe('createSingleWorkspaceRegistry', () => {
     expect(registry.resolveWorkspaceCwd('/work/primary')).toBe(runtime);
     expect(registry.resolveWorkspaceCwd('/work/primary/')).toBeUndefined();
   });
+
+  it('closes the old generation and atomically activates a replacement', () => {
+    const runtime = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+    });
+    const replacement = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      trusted: false,
+    });
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const entry = registry.primaryEntry;
+    const oldGeneration = entry.current!;
+
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    expect(oldGeneration.guard.closed).toBe(true);
+    expect(() => oldGeneration.guard.assertOpen()).toThrow(/no longer active/);
+    expect(registry.list()).toEqual([]);
+
+    const next = registry.activateReplacement(entry, replacement, 'policy-2');
+    expect(next.generationId).toBe(oldGeneration.generationId + 1);
+    expect(registry.primary).toBe(replacement);
+    expect(registry.list()).toEqual([replacement]);
+    expect(entry.appliedRevision).toBe('policy-2');
+  });
+
+  it('preserves updated workspace metadata across a replacement', () => {
+    const runtime = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      displayName: 'Original',
+      registrationIds: ['registration-1'],
+    });
+    const replacement = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      trusted: false,
+    });
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const entry = registry.primaryEntry;
+
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    registry.activateReplacement(entry, replacement, 'policy-2');
+
+    expect(replacement.displayName).toBe('Original');
+    expect(replacement.registrationIds).toEqual(['registration-1']);
+
+    runtime.displayName = 'Renamed';
+    runtime.registrationIds = ['registration-2'];
+    registry.syncRuntimeMetadata(runtime);
+
+    expect(entry.displayName).toBe('Renamed');
+    expect(entry.registrationIds).toEqual(['registration-2']);
+    expect(replacement.displayName).toBe('Renamed');
+    expect(replacement.registrationIds).toEqual(['registration-2']);
+  });
+
+  it('keeps a failed replacement as a queryable blocked entry', () => {
+    const runtime = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+    });
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const entry = registry.primaryEntry;
+
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    registry.blockReplacement(entry, 'runtime_build_failed');
+
+    expect(registry.list()).toEqual([]);
+    expect(registry.listManaged()).toEqual([runtime]);
+    expect(registry.listEntries()).toEqual([entry]);
+    expect(registry.getEntryByWorkspaceId('ws-primary')).toBe(entry);
+    expect(entry.state).toBe('blocked');
+    expect(entry.applyError).toBe('runtime_build_failed');
+    expect(() => registry.primary).toThrow(/unavailable/);
+
+    const replacement = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      trusted: false,
+    });
+    expect(registry.beginReplacement(entry, 'policy-3')).toBe(true);
+    const recovered = registry.activateReplacement(
+      entry,
+      replacement,
+      'policy-3',
+    );
+    expect(recovered.generationId).toBe(2);
+  });
 });
 
 describe('createWorkspaceRegistry', () => {
@@ -89,7 +180,9 @@ describe('createWorkspaceRegistry', () => {
       workspaceId: 'ws-secondary',
     });
 
-    const registry = createWorkspaceRegistry([primary, secondary]);
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      scanUnindexedOwners: false,
+    });
 
     expect(registry.primary).toBe(primary);
     expect(registry.list()).toEqual([primary, secondary]);
@@ -134,7 +227,7 @@ describe('createWorkspaceRegistry', () => {
     ).toThrow(/Duplicate workspace runtime id/);
   });
 
-  it('resolves live session owners without falling back to primary', () => {
+  it('does not scan bridges when the authoritative owner index is empty', () => {
     const primary = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',
       primary: true,
@@ -152,15 +245,56 @@ describe('createWorkspaceRegistry', () => {
       }),
     });
 
-    const registry = createWorkspaceRegistry([primary, secondary]);
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      scanUnindexedOwners: false,
+    });
 
     expect(registry.resolveLiveSessionOwner('sess-secondary')).toEqual({
-      kind: 'found',
-      runtime: secondary,
+      kind: 'not_found',
     });
     expect(registry.resolveLiveSessionOwner('missing')).toEqual({
       kind: 'not_found',
     });
+  });
+
+  it('scans unindexed injected bridges when compatibility mode is enabled', () => {
+    const primarySummary = vi.fn(() => {
+      throw new SessionNotFoundError('missing');
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      primary: false,
+      bridge: bridgeWithSummary((sessionId: string) => ({
+        sessionId,
+        workspaceCwd: '/work/secondary',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    const registry = createWorkspaceRegistry(
+      [
+        makeRuntime('/work/primary', {
+          workspaceId: 'ws-primary',
+          primary: true,
+          bridge: bridgeWithSummary(primarySummary),
+        }),
+        secondary,
+      ],
+      { sessionOwnerIndex, scanUnindexedOwners: true },
+    );
+
+    expect(registry.resolveLiveSessionOwner('legacy-session')).toEqual({
+      kind: 'found',
+      runtime: secondary,
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds('legacy-session')).toEqual([
+      secondary.workspaceCwd,
+    ]);
+
+    expect(registry.resolveLiveSessionOwner('legacy-session')).toEqual({
+      kind: 'found',
+      runtime: secondary,
+    });
+    expect(primarySummary).toHaveBeenCalledTimes(1);
   });
 
   it('uses the session owner index before scanning runtime bridges', () => {
@@ -185,6 +319,7 @@ describe('createWorkspaceRegistry', () => {
 
     const registry = createWorkspaceRegistry([primary, secondary], {
       sessionOwnerIndex,
+      scanUnindexedOwners: false,
     });
 
     expect(registry.resolveLiveSessionOwner('sess-secondary')).toEqual({
@@ -195,7 +330,7 @@ describe('createWorkspaceRegistry', () => {
     expect(secondarySummary).toHaveBeenCalledWith('sess-secondary');
   });
 
-  it('drops stale indexed owners and caches the fallback scan result', () => {
+  it('drops stale indexed owners without scanning unrelated runtimes', () => {
     const primarySummary = vi.fn((sessionId: string) => ({
       sessionId,
       workspaceCwd: '/work/primary',
@@ -217,24 +352,48 @@ describe('createWorkspaceRegistry', () => {
 
     const registry = createWorkspaceRegistry([primary, secondary], {
       sessionOwnerIndex,
+      scanUnindexedOwners: false,
     });
 
     expect(registry.resolveLiveSessionOwner('stale')).toEqual({
-      kind: 'found',
-      runtime: primary,
+      kind: 'not_found',
     });
-    expect(primarySummary).toHaveBeenCalledTimes(1);
-    expect(secondarySummary).toHaveBeenCalledTimes(2);
+    expect(primarySummary).not.toHaveBeenCalled();
+    expect(secondarySummary).toHaveBeenCalledTimes(1);
 
     expect(registry.resolveLiveSessionOwner('stale')).toEqual({
-      kind: 'found',
-      runtime: primary,
+      kind: 'not_found',
     });
-    expect(primarySummary).toHaveBeenCalledTimes(2);
-    expect(secondarySummary).toHaveBeenCalledTimes(2);
+    expect(primarySummary).not.toHaveBeenCalled();
+    expect(secondarySummary).toHaveBeenCalledTimes(1);
   });
 
-  it('fails closed when live session owner resolution is ambiguous', () => {
+  it('scans live owners after dropping a stale indexed owner', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary((sessionId: string) => ({
+        sessionId,
+        workspaceCwd: '/work/primary',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register('stale', '/work/removed');
+    const registry = createWorkspaceRegistry([primary], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: true,
+    });
+
+    expect(registry.resolveLiveSessionOwner('stale')).toEqual({
+      kind: 'found',
+      runtime: primary,
+    });
+    expect(sessionOwnerIndex.getWorkspaceCwds('stale')).toEqual([
+      primary.workspaceCwd,
+    ]);
+  });
+
+  it('does not infer ambiguous ownership by scanning bridges', () => {
     const first = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',
       primary: true,
@@ -251,15 +410,16 @@ describe('createWorkspaceRegistry', () => {
       })),
     });
 
-    const registry = createWorkspaceRegistry([first, second]);
+    const registry = createWorkspaceRegistry([first, second], {
+      scanUnindexedOwners: false,
+    });
 
     expect(registry.resolveLiveSessionOwner('sess-ambiguous')).toEqual({
-      kind: 'ambiguous',
-      runtimes: [first, second],
+      kind: 'not_found',
     });
   });
 
-  it('propagates unexpected live session lookup errors', () => {
+  it('does not consult bridge summaries for an unindexed session', () => {
     const lookupError = new Error('bridge unavailable');
     const primary = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',
@@ -269,12 +429,16 @@ describe('createWorkspaceRegistry', () => {
       }),
     });
 
-    const registry = createWorkspaceRegistry([primary]);
+    const registry = createWorkspaceRegistry([primary], {
+      scanUnindexedOwners: false,
+    });
 
-    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(registry.resolveLiveSessionOwner('sess')).toEqual({
+      kind: 'not_found',
+    });
   });
 
-  it('does not cache partial scan results when live owner scan fails', () => {
+  it('leaves the index unchanged when an unindexed session is queried', () => {
     const lookupError = new Error('bridge unavailable');
     const primarySummary = vi.fn((sessionId: string) => ({
       sessionId,
@@ -295,14 +459,19 @@ describe('createWorkspaceRegistry', () => {
     const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
     const registry = createWorkspaceRegistry([primary, secondary], {
       sessionOwnerIndex,
+      scanUnindexedOwners: false,
     });
 
-    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(registry.resolveLiveSessionOwner('sess')).toEqual({
+      kind: 'not_found',
+    });
     expect(sessionOwnerIndex.getWorkspaceCwds('sess')).toEqual([]);
 
-    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
-    expect(primarySummary).toHaveBeenCalledTimes(2);
-    expect(secondarySummary).toHaveBeenCalledTimes(2);
+    expect(registry.resolveLiveSessionOwner('sess')).toEqual({
+      kind: 'not_found',
+    });
+    expect(primarySummary).not.toHaveBeenCalled();
+    expect(secondarySummary).not.toHaveBeenCalled();
   });
 
   it('hides draining runtimes, rolls back, and releases cwd ownership on completion', () => {
@@ -310,14 +479,17 @@ describe('createWorkspaceRegistry', () => {
       workspaceId: 'ws-primary',
       primary: true,
     });
+    const generationGuard = createWorkspaceGenerationGuard();
     const secondary = makeRuntime('/work/secondary', {
       workspaceId: 'ws-secondary',
       removable: true,
+      generationGuard,
     });
     const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
     sessionOwnerIndex.register('session-secondary', secondary.workspaceCwd);
     const registry = createWorkspaceRegistry([primary, secondary], {
       sessionOwnerIndex,
+      scanUnindexedOwners: false,
     });
 
     expect(registry.beginDrain(primary)).toBe(false);
@@ -334,6 +506,8 @@ describe('createWorkspaceRegistry', () => {
     expect(registry.beginDrain(secondary)).toBe(true);
     registry.completeDrain(secondary);
     expect(registry.listManaged()).toEqual([primary]);
+    expect(generationGuard.closed).toBe(true);
+    expect(() => generationGuard.assertOpen()).toThrow(/no longer active/);
     expect(sessionOwnerIndex.getWorkspaceCwds('session-secondary')).toEqual([]);
 
     const replacement = makeRuntime('/work/secondary', {
@@ -342,6 +516,30 @@ describe('createWorkspaceRegistry', () => {
     });
     registry.add(replacement);
     expect(registry.getByWorkspaceCwd('/work/secondary')).toBe(replacement);
+  });
+
+  it('closes the generation when removal commits and cannot reactivate it', () => {
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+    });
+    const generationGuard = createWorkspaceGenerationGuard();
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      removable: true,
+      generationGuard,
+    });
+    const registry = createWorkspaceRegistry([primary, secondary]);
+
+    expect(registry.beginDrain(secondary)).toBe(true);
+    registry.commitDrain(secondary);
+
+    expect(generationGuard.closed).toBe(true);
+    expect(() => generationGuard.assertOpen()).toThrow(
+      'Workspace runtime generation is no longer active.',
+    );
+    registry.cancelDrain(secondary);
+    expect(registry.getByWorkspaceCwd(secondary.workspaceCwd)).toBeUndefined();
   });
 
   it('excludes draining owners from indexed and fallback session resolution', () => {
@@ -364,6 +562,7 @@ describe('createWorkspaceRegistry', () => {
     sessionOwnerIndex.register('indexed', secondary.workspaceCwd);
     const registry = createWorkspaceRegistry([primary, secondary], {
       sessionOwnerIndex,
+      scanUnindexedOwners: false,
     });
 
     expect(registry.beginDrain(secondary)).toBe(true);
@@ -383,14 +582,11 @@ describe('createWorkspaceRegistry', () => {
       runtime: secondary,
     });
     expect(registry.resolveLiveSessionOwner('fallback')).toEqual({
-      kind: 'found',
-      runtime: secondary,
+      kind: 'not_found',
     });
     expect(sessionOwnerIndex.getWorkspaceCwds('indexed')).toEqual([
       secondary.workspaceCwd,
     ]);
-    expect(sessionOwnerIndex.getWorkspaceCwds('fallback')).toEqual([
-      secondary.workspaceCwd,
-    ]);
+    expect(sessionOwnerIndex.getWorkspaceCwds('fallback')).toEqual([]);
   });
 });

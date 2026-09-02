@@ -7,6 +7,8 @@
 import type {
   Config,
   CronJob,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
@@ -30,8 +32,13 @@ import {
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
   LOOP_SENTINEL_DYNAMIC,
+  TeamEventType,
+  ToolConfirmationOutcome,
+  ToolNames,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
   skipHeadlessLoopSentinel,
@@ -332,6 +339,8 @@ describe('runNonInteractive', () => {
       // --worktree flag, so return null to short-circuit injection
       // and let the resume-restore branch run.
       consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {
@@ -498,6 +507,220 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
+    setupMetricsMock();
+    // A resumed session with a one-shot recovered-agents notice pending.
+    vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({} as never);
+    vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
+      'Restored 2 background agents from the previous session.',
+    );
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Continue the work',
+      'prompt-resume-notice',
+    );
+
+    expect(mockConfig.consumePendingRecoveredAgentsNotice).toHaveBeenCalled();
+    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    // The notice is prepended as a system-reminder ahead of the user prompt.
+    expect(request).toEqual([
+      {
+        text: expect.stringContaining(
+          'Restored 2 background agents from the previous session.',
+        ),
+      },
+      { text: 'Continue the work' },
+    ]);
+    expect((request as Array<{ text: string }>)[0].text).toContain(
+      SYSTEM_REMINDER_OPEN,
+    );
+  });
+
+  it('does not consume the recovered-agents notice on an interrupted-turn continuation', async () => {
+    setupMetricsMock();
+    // A resumed session with a one-shot recovered-agents notice pending, but
+    // this run is an interrupted-turn continuation. The `!continueInterrupted`
+    // guard must leave the notice for the user's next ordinary prompt.
+    vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({} as never);
+    vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
+      'Restored 2 background agents from the previous session.',
+    );
+    mockGeminiClient.getChat = vi.fn(() => ({
+      getDebugResponses: mockGetDebugResponses,
+      getHistory: vi.fn().mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]),
+    }));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-notice', {
+      continueInterrupted: true,
+    });
+
+    // The notice is not consumed, and the continuation send carries only the
+    // synthesized functionResponse — no recovered-agents system-reminder.
+    expect(
+      mockConfig.consumePendingRecoveredAgentsNotice,
+    ).not.toHaveBeenCalled();
+    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(request).toEqual([
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'shell',
+          response: { error: expect.stringContaining('not recorded') },
+        },
+      },
+    ]);
+  });
+
+  it('does not let headless YOLO bypass explicit teammate approval', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: "python -c 'print(1)'" },
+            confirmationDetails: {
+              type: 'info',
+              title: 'Permission rule requires confirmation',
+              prompt: 'Allow this operation?',
+              hideAlwaysAllow: true,
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-exact-teammate',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'requires an explicit interactive approval surface',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('exact-invocation'),
+    );
+  });
+
+  it('describes the active mode when explicit teammate approval cannot be shown', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: "python -c 'print(1)'" },
+            confirmationDetails: {
+              type: 'info',
+              title: 'Permission rule requires confirmation',
+              prompt: 'Allow this operation?',
+              hideAlwaysAllow: true,
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-exact-teammate-default',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `current approval mode (${ApprovalMode.DEFAULT})`,
+      ),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Use --input-format stream-json --output-format stream-json',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('cannot be bypassed by YOLO mode'),
+    );
   });
 
   describe('continueInterrupted', () => {
@@ -1100,6 +1323,286 @@ describe('runNonInteractive', () => {
     ).toHaveBeenCalled();
   });
 
+  it('uses a tool-selected full-turn model for the next request', async () => {
+    setupMetricsMock();
+    const model = 'qwen3-vl-plus\0';
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-image') {
+          expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
+          return {
+            responseParts: [{ text: 'Tool response with image' }],
+            modelOverride: model,
+          };
+        }
+        return {
+          responseParts: [{ text: 'Skill response' }],
+          modelOverride: undefined,
+        };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'skill-after-image',
+              name: 'skill_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Image understood' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use the screenshot tool',
+      'prompt-tool-image',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'Tool response with image' }, { text: 'Skill response' }],
+      expect.any(AbortSignal),
+      'prompt-tool-image',
+      { type: SendMessageType.ToolResult, modelOverride: model },
+    );
+  });
+
+  it('rejects a conflicting tool-selected full-turn model within a batch', async () => {
+    setupMetricsMock();
+    const first = 'qwen3-vl-plus\0';
+    const second = 'qwen3-vl-max\0';
+    const accepted: Record<string, boolean> = {};
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-image-a') {
+          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+          return {
+            responseParts: [{ text: 'first image' }],
+            modelOverride: first,
+          };
+        }
+        if (request.callId === 'tool-image-b') {
+          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
+          return {
+            responseParts: [{ text: 'second image' }],
+            modelOverride: second,
+          };
+        }
+        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image-a',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image-b',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Image understood' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use the screenshot tool',
+      'prompt-tool-image',
+    );
+
+    expect(accepted['a']).toBe(true);
+    expect(accepted['b']).toBe(false);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'first image' }, { text: 'second image' }],
+      expect.any(AbortSignal),
+      'prompt-tool-image',
+      { type: SendMessageType.ToolResult, modelOverride: first },
+    );
+  });
+
+  it('rejects a conflicting tool-selected full-turn model in a drain item', async () => {
+    setupMetricsMock();
+    const first = 'qwen3-vl-plus\0';
+    const second = 'qwen3-vl-max\0';
+    const accepted: Record<string, boolean> = {};
+
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; toolUseId?: string; status: string },
+        ) => void)
+      | null = null;
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-main') {
+          notificationCallback?.('Agent done', 'Agent completed', {
+            agentId: 'bg-1',
+            status: 'completed',
+          });
+          return { responseParts: [{ text: 'main tool done' }] };
+        }
+        if (request.callId === 'drain-tool-a') {
+          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+          return {
+            responseParts: [{ text: 'drain image a' }],
+            modelOverride: first,
+          };
+        }
+        if (request.callId === 'drain-tool-b') {
+          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
+          return {
+            responseParts: [{ text: 'drain image b' }],
+            modelOverride: second,
+          };
+        }
+        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
+      },
+    );
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-main',
+              name: 'some_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Main done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'drain-tool-a',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'drain-tool-b',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Drain done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Do something',
+      'prompt-drain',
+    );
+
+    expect(accepted['a']).toBe(true);
+    expect(accepted['b']).toBe(false);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      4,
+      [{ text: 'drain image a' }, { text: 'drain image b' }],
+      expect.any(AbortSignal),
+      'prompt-drain/automatic/3',
+      { type: SendMessageType.ToolResult, modelOverride: first },
+    );
+  });
+
   describe('parallel tool execution', () => {
     const finishTurn: ServerGeminiStreamEvent[] = [
       { type: GeminiEventType.Content, value: 'done' },
@@ -1125,6 +1628,94 @@ describe('runNonInteractive', () => {
         },
       }));
     }
+
+    it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          ({
+            kind:
+              name === ToolNames.READ_FILE
+                ? Kind.Read
+                : name === ToolNames.WRITE_FILE
+                  ? Kind.Edit
+                  : Kind.Other,
+          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+      );
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'entered plan mode' },
+              },
+            },
+          ],
+          resultDisplay: 'entered plan mode',
+        }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            ...toolCallEvents(
+              ['write-before-entry'],
+              ToolNames.WRITE_FILE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['enter-plan'],
+              ToolNames.ENTER_PLAN_MODE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['read-after-entry-1', 'read-after-entry-2'],
+              ToolNames.READ_FILE,
+              'p-plan-boundary',
+            ),
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'enter plan mode',
+        'p-plan-boundary',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'enter-plan',
+        name: ToolNames.ENTER_PLAN_MODE,
+      });
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
+        'write-before-entry',
+        'enter-plan',
+        'read-after-entry-1',
+        'read-after-entry-2',
+      ]);
+      expect(nextTurnParts[0].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[1].functionResponse?.response).toEqual({
+        output: 'entered plan mode',
+      });
+      expect(nextTurnParts[2].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[3].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+    });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();
@@ -1227,6 +1818,66 @@ describe('runNonInteractive', () => {
         .map((part) => part.functionResponse?.id)
         .filter((id): id is string => id === 'a' || id === 'b' || id === 'c');
       expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('hard-caps the aggregate headless tool response before the next model turn', async () => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      (
+        mockConfig as Config & {
+          getToolOutputBatchBudget: ReturnType<typeof vi.fn>;
+        }
+      ).getToolOutputBatchBudget = vi.fn().mockReturnValue(10_000);
+      const prefix = 'Tool output was too large and has been truncated';
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, req: { callId: string }) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: req.callId,
+                name: 'read',
+                response: { output: `${prefix}${req.callId.repeat(7000)}` },
+              },
+            },
+          ],
+          persistedOutputFiles: [],
+        }),
+      );
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(toolCallEvents(['a', 'b'], 'read', 'p-cap')),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-cap');
+
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      const total = nextTurnParts.reduce((sum, part) => {
+        const output = part.functionResponse?.response?.['output'];
+        return sum + (typeof output === 'string' ? output.length : 0);
+      }, 0);
+      expect(total).toBeLessThanOrEqual(10_000);
+      expect(recordToolResult).toHaveBeenCalledTimes(2);
+      expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+        nextTurnParts,
+      );
     });
 
     it('runs side-effecting (unsafe) tool calls sequentially', async () => {
@@ -1675,6 +2326,12 @@ describe('runNonInteractive', () => {
     expect(exitCode).toBe(1);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    const drainPromptIds = mockGeminiClient.sendMessageStream.mock.calls
+      .slice(1)
+      .map((call) => call[2]);
+    expect(new Set(drainPromptIds)).toEqual(
+      new Set(['prompt-id-drain-dup-loop/automatic/2']),
+    );
 
     const duplicateParts = mockGeminiClient.sendMessageStream.mock
       .calls[2][0] as Part[];
@@ -1741,6 +2398,20 @@ describe('runNonInteractive', () => {
 
   it('should execute only the first duplicate provider tool-call id in the same batch', async () => {
     setupMetricsMock();
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+          finalize: ReturnType<typeof vi.fn>;
+          flush: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getChatRecordingService = () => ({
+      recordToolResult,
+      finalize: vi.fn(),
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
     vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
     const firstToolCall: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -1764,9 +2435,34 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-same-batch-dup',
       },
     };
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: [{ text: 'Tool response' }],
-    });
+    mockCoreExecuteToolCall.mockImplementation(
+      async (
+        _config: unknown,
+        request: ToolCallRequestInfo,
+        _signal: AbortSignal,
+        options: {
+          onAllToolCallsComplete?: (
+            calls: Array<{
+              request: ToolCallRequestInfo;
+              response: ToolCallResponseInfo;
+              status: 'success';
+            }>,
+          ) => Promise<void>;
+        },
+      ) => {
+        const response: ToolCallResponseInfo = {
+          callId: request.callId,
+          responseParts: [{ text: 'Tool response' }],
+          resultDisplay: 'Tool response',
+          error: undefined,
+          errorType: undefined,
+        };
+        await options.onAllToolCallsComplete?.([
+          { request, response, status: 'success' },
+        ]);
+        return response;
+      },
+    );
 
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
@@ -1802,6 +2498,11 @@ describe('runNonInteractive', () => {
     expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-1"',
     );
+    expect(recordToolResult).toHaveBeenCalledTimes(2);
+    expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual([
+      'success',
+      'error',
+    ]);
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -2008,6 +2709,9 @@ describe('runNonInteractive', () => {
       baseUrl: 'https://vision.example/v1',
       agentCapable: true,
     });
+    const selector = 'vision-agent\0https://vision.example/v1\0';
+    let acceptedSameSelector = false;
+    let rejectedDifferentSelector = false;
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
       value: {
@@ -2018,10 +2722,20 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-vision-route',
       },
     };
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: [{ text: 'tool response' }],
-      modelOverride: 'other-model',
-    });
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        acceptedSameSelector =
+          options.onToolResultFullTurnModel?.(selector) ?? false;
+        rejectedDifferentSelector =
+          options.onToolResultFullTurnModel?.(
+            'different-model\0https://vision.example/v1\0',
+          ) === false;
+        return {
+          responseParts: [{ text: 'tool response' }],
+          modelOverride: 'other-model',
+        };
+      },
+    );
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
@@ -2038,10 +2752,11 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
     );
 
-    const selector = 'vision-agent\0https://vision.example/v1\0';
     expect(resolveForModel).toHaveBeenCalledWith(selector.slice(0, -1), {
       failClosed: true,
     });
+    expect(acceptedSameSelector).toBe(true);
+    expect(rejectedDifferentSelector).toBe(true);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       headlessImageParts,
@@ -2112,7 +2827,7 @@ describe('runNonInteractive', () => {
       2,
       [{ text: 'task result' }],
       expect.any(AbortSignal),
-      'prompt-drain-isolation',
+      'prompt-drain-isolation/automatic/2',
       expect.objectContaining({
         type: SendMessageType.Notification,
         modelOverride: undefined,
@@ -2122,7 +2837,7 @@ describe('runNonInteractive', () => {
       3,
       [{ text: 'drain tool response' }],
       expect.any(AbortSignal),
-      'prompt-drain-isolation',
+      'prompt-drain-isolation/automatic/2',
       { type: SendMessageType.ToolResult, modelOverride: undefined },
     );
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
@@ -2205,6 +2920,83 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('emits a stream-json system message for headless vision bridge notices', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'vision_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'vision_bridge',
+      data: { notice: expect.stringContaining('Converted 1 image(s)') },
+    });
+  });
+
+  it('emits a notice when a non-agent vision bridge fails', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-failed',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-failed',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Vision bridge failed; proceeding without the image(s).\n',
+    );
+  });
+
   it('strips headless images when a non-agent vision bridge is skipped', async () => {
     setupMetricsMock();
     await mockHeadlessImageInput();
@@ -2214,6 +3006,8 @@ describe('runNonInteractive', () => {
       status: 'skipped',
       convertedCount: 0,
       omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
     });
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
@@ -2231,6 +3025,12 @@ describe('runNonInteractive', () => {
       expect.any(AbortSignal),
       'prompt-vision-bridge-skipped',
       { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Vision bridge cancelled.'),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('were sent to vision-bridge'),
     );
   });
 
@@ -2949,6 +3749,68 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('emits the effective fork context mode in headless task events', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation(
+      (callback) => {
+        callback?.({
+          agentId: 'fork-tool-fork-1',
+          toolUseId: 'tool-fork-1',
+          description: 'Inherit parent context',
+          subagentType: 'fork',
+        });
+      },
+    );
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Fork launched.' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 2 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Launch a context-inheriting fork',
+      'prompt-headless-fork',
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(envelopes).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'task_started',
+        data: expect.objectContaining({
+          task_id: 'fork-tool-fork-1',
+          tool_use_id: 'tool-fork-1',
+          subagent_type: 'fork',
+        }),
+      }),
+    );
+  });
+
   it('flushes terminal monitor notifications before the final headless result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,
@@ -3057,7 +3919,7 @@ describe('runNonInteractive', () => {
       2,
       [{ text: notificationXml }],
       expect.any(AbortSignal),
-      'prompt-monitor',
+      'prompt-monitor/automatic/2',
       {
         type: SendMessageType.Notification,
         modelOverride: undefined,
@@ -3093,6 +3955,111 @@ describe('runNonInteractive', () => {
       type: 'result',
       is_error: false,
     });
+  });
+
+  it('keeps notifications from different Todo work chains in separate batches', async () => {
+    setupMetricsMock();
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_2</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>also ready</result>\n' +
+      '</task-notification>';
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-1',
+      });
+      cb('Monitor "build" event #1: ready', secondNotificationXml, {
+        monitorId: 'mon_2',
+        toolUseId: 'tool_mon_2',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-2',
+      });
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Started.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'First notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Second notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-work-chains',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: firstNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/2',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-1',
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: secondNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/3',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-2',
+      }),
+    );
   });
 
   it.skip('should emit a single user envelope when userEnvelope is provided', async () => {
@@ -3150,6 +4117,95 @@ describe('runNonInteractive', () => {
 
     const userEnvelopes = envelopes.filter((env) => env.type === 'user');
     expect(userEnvelopes).toHaveLength(0);
+  });
+
+  it('drops a queued running monitor event after cancellation', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    let monitorStatus = 'running';
+    mockMonitorRegistry.get.mockImplementation(() => ({
+      status: monitorStatus,
+    }));
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) return;
+      cb('Monitor "logs" event #1: ready', notificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+      monitorStatus = 'cancelled';
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Monitor stopped.' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 2 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Start then stop a monitor',
+      'prompt-monitor-cancel',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(
+      envelopes.some(
+        (env) =>
+          env.type === 'user' &&
+          Array.isArray(env.message?.content) &&
+          env.message.content.some(
+            (block: unknown) =>
+              typeof block === 'object' &&
+              block !== null &&
+              'text' in block &&
+              block.text === 'Monitor "logs" event #1: ready',
+          ),
+      ),
+    ).toBe(false);
+    expect(
+      envelopes.some(
+        (env) =>
+          env.type === 'system' &&
+          env.subtype === 'task_notification' &&
+          env.data?.task_id === 'mon_1',
+      ),
+    ).toBe(false);
   });
 
   it('does not let late monitor output keep one-shot runs alive', async () => {

@@ -190,7 +190,7 @@ describe('<ToolGroupMessage />', () => {
       const frame = lastFrame() ?? '';
       // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
       expect(frame).toContain('Searched pattern');
-      expect(frame).toContain('read 2 files');
+      expect(frame).toContain('read a.ts, b.ts');
       expect(frame).not.toContain('MockTool');
     });
 
@@ -338,7 +338,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Read 2 files');
+      expect(frame).toContain('Read a.ts, b.ts');
       expect(frame).toContain('Recalled 1 memory');
     });
 
@@ -1072,7 +1072,8 @@ describe('<ToolGroupMessage />', () => {
       const call = vi
         .mocked(ToolMessage)
         .mock.calls.find((c) => c[0].callId === 'shell-result');
-      expect(call?.[0].availableTerminalHeight).toBe(9);
+      // 2 reads inline (no hint row) → summary is 1 row shorter than before.
+      expect(call?.[0].availableTerminalHeight).toBe(10);
     });
   });
 

@@ -8,8 +8,8 @@ This document proposes an application-level text selection and copy system for V
 
 The feature is delivered in **two PRs** with a deliberately conservative first release:
 
-- **PR 1 (this branch, #6937)** — the design followed by the Ink frame-buffer foundation and a **visible-region visual selection** MVP: drag-select within the currently visible viewport, word/line selection, and copy-on-select. Copy returns the **visual cells** as shown on screen; it does not yet rejoin soft-wrapped lines or exclude gutters. Selection clears on scroll/resize/streaming.
-- **PR 2 (follow-up)** — completion: cross-screen selection (off-screen accumulation, edge auto-scroll, reverse drag) and **semantic copy fidelity** (soft-wrap rejoin, gutter/decoration exclusion), which require renderer-level semantic metadata rather than a raw grid.
+- **PR 1 (#6937, merged)** — the Ink frame-buffer foundation and a **visible-region visual selection** MVP: drag-select within the currently visible viewport, word/line selection, and copy-on-select. Copy returns the **visual cells** as shown on screen; it does not yet rejoin soft-wrapped lines or exclude gutters. Selection clears on scroll/resize/streaming.
+- **PR 2 (follow-up)** — **semantic copy fidelity**: soft-wrap rejoin and gutter/decoration exclusion, which require renderer-level semantic metadata rather than a raw grid. Cross-screen selection remains outside this two-PR sequence.
 
 This split follows the "Simplicity First" principle: PR 1 solves the core problem (mouse select-and-copy of what's on screen) with a small, well-scoped Ink patch and no per-renderer text serialization; the deeper renderer semantic extension is isolated in PR 2 so it can be reviewed against its own cost.
 
@@ -25,10 +25,11 @@ The design was revised after an implementation-feasibility audit against the Ink
 - Copy delivers the visual cells as displayed, across local (pbcopy/xclip/xsel/clip), remote (OSC 52), and multiplexer (tmux/screen passthrough) environments, reusing existing clipboard infrastructure. Wide characters (CJK/emoji) and their spacer cells are handled; per-line trailing padding is trimmed.
 - Selection clears deterministically on any non-selection scroll, resize, or streaming/layout change.
 
-### PR 2 — completion (follow-up)
+### PR 2 — semantic copy fidelity (follow-up)
 
-- Cross-screen selection: dragging past a viewport edge auto-scrolls and accumulates off-screen rows so a long selection copies in full; reverse drag works.
-- Semantic copy fidelity: soft-wrapped logical lines are rejoined (true hard newlines preserved); gutter/decoration cells (line-number gutters, scrollbar column, and confirmed decorations) are excluded, per per-renderer copy rules for diff/table/markdown/tool output.
+- Soft-wrapped logical lines are rejoined while true hard newlines are preserved.
+- The VP scrollbar and code/diff line-number gutters are excluded.
+- Diff markers, Markdown markers, table borders, and tool-output prefixes remain copyable content.
 
 ## Non-goals
 
@@ -36,6 +37,7 @@ The design was revised after an implementation-feasibility audit against the Ink
 - Reading text from the system clipboard (paste). Text paste continues to flow through terminal bracketed-paste; only image paste reads the clipboard today, and that path is untouched.
 - Selection inside the input composer beyond what already exists; the composer already maps clicks to cursor offsets.
 - Rich-copy (HTML/ANSI). We copy plain text.
+- Cross-screen selection, edge auto-scroll, and off-screen row accumulation.
 
 ## Background: why native selection breaks in VP mode
 
@@ -71,7 +73,7 @@ The audit confirmed the direction but corrected a category error in the earlier 
 
 - **Soft vs hard wrap is unrecoverable from the grid.** `render-node-to-output.ts` calls `wrapText()` and only then passes newline-joined strings to `Output.write()`; `Output.get()` sees `text.split('\n')` and cannot tell a soft wrap from a hard newline. A hard break that exactly fills the wrap width is byte-identical in the grid to a soft wrap. "Line width + absence of intervening content" does not disambiguate it.
 - **Selectability has no data source in the grid.** Gutters, the scrollbar column, and decorations cannot be reliably identified by column region and style across markdown/diff/table/tool output.
-- **The grid is one frame, not the virtual document.** `VirtualizedList` mounts only the visible range; off-screen items have no cells. Cross-screen selection therefore needs off-screen snapshotting and a content/layout-version lifecycle, not a bigger grid.
+- **The grid is one frame, not the virtual document.** `VirtualizedList` mounts only the visible range; off-screen items have no cells. Cross-screen selection would require off-screen snapshotting and a content/layout-version lifecycle, so it remains separate from semantic copy fidelity.
 
 Therefore:
 
@@ -153,25 +155,76 @@ viewport and is active whenever `ui.useTerminalBuffer` is enabled.
 
 ## Follow-up: semantic copy fidelity (PR 2)
 
-To rejoin soft wraps and exclude decorations without per-renderer serialization, the frame is extended with semantics produced where they still exist — at wrap time — and propagated through compositing:
+To rejoin soft wraps and exclude decorations without per-renderer serialization, semantics are produced wherever wrapping still has source context and propagated through compositing. A break is a boundary between visual rows, not a property of an arbitrary character cell:
 
 ```ts
-type SelectableCell = {
-  value: string;
-  width: 1 | 2;
-  sourceId?: string;
-  logicalOffset?: number;
+type SemanticFrameCell = FrameCell & {
   selectable: boolean;
-  breakAfter: 'none' | 'soft' | 'hard';
+  flowId: number | null;
+};
+
+type RowBoundary = {
+  kind: 'soft' | 'hard';
+  flowId: number;
+  selectable: boolean;
+  joiner: string;
+};
+
+type SemanticFrame = {
+  cells: ReadonlyArray<ReadonlyArray<SemanticFrameCell>>;
+  // boundaries[y][x] describes the transition from row y to row y + 1
+  boundaries: ReadonlyArray<ReadonlyArray<RowBoundary | null>>;
 };
 ```
 
-- `breakAfter` is produced when `wrapText()` splits a line (soft) vs. when a source newline is present (hard); it cannot be inferred in `Output.get()`.
-- `selectable` is set by the app/renderer for gutters, the scrollbar column, and confirmed decorations — not guessed from style.
-- The compositor still determines final cell coverage, so visual coordinates stay uniform across renderers.
-- Selection extraction then rejoins soft-continuation runs while preserving true hard newlines, and skips `selectable: false` cells.
+- A `flowId` identifies one logical text flow within a frame. Direct `Text` node identity and opaque flow keys supplied by pre-Ink producers are mapped through one per-render allocator, so the numeric IDs cannot collide. A producer gives every visual fragment of its logical row the same key. IDs only need to survive one published frame because PR 1 already invalidates selection when content changes.
+- `boundaries[y][x]` is a compositor-aligned boundary grid. A writer paints a boundary over its horizontal layout interval, independently of whether that row emitted a character. A zero-width empty flow claims one slot at its clamped layout X coordinate. This represents empty and whitespace-only hard lines without inventing an owner cell.
+- Ink emits `soft` when its own width wrapping continues a flow and `hard` for an explicit source newline. A visual row assembled from sibling `Text` nodes has no implicit boundary claim.
+- `joiner` is the exact plain-text source separator omitted at that boundary. A character-level wrap uses `''`; a word wrap that removes one space, several spaces, or a tab stores that exact substring. A separator still represented by selectable source cells is not duplicated in `joiner`. Hard boundaries normalize CRLF to `joiner: '\n'`.
+- `selectable` defaults to `true`. A `selectable={false}` `Text` subtree marks both its cells and boundary claims false; the renderer never guesses from glyph, column, or style.
+- Clipping trims boundary intervals using the same clip rectangle as cells. Every later overlapping write paints either its boundary or an explicit `null` over its covered columns, so stale claims cannot survive underneath the final composition. A clipped character cannot erase a still-visible row boundary because the boundary is stored independently.
 
-Per-renderer copy rules must be decided as product rules, not by auto-excluding anything decoration-like: scrollbar excluded; diff line-number gutter excludable; diff `+/-` likely kept (users may want the full patch); markdown list/quote markers usually kept (content); table borders and tool-output prefix/status glyphs decided case by case. PR 2 also carries the cross-screen work (off-screen row snapshot/cache, edge auto-scroll, reverse drag) and the content/layout-version invalidation rules that let a selection survive scrolling.
+Selection extraction remains conservative. It skips non-selectable cells and boundary claims. For each selected visual-row transition it finds the selectable flows represented by selected source cells on both sides, then considers the non-null boundary claims for those flows; null slots outside a flow's painted interval are irrelevant. It replaces the visual newline with `joiner` only when there is one common flow and all of its claims agree on `soft` and the same joiner. A `hard` claim emits `\n`; no common flow, a missing claim for a common flow, multiple common flows, or conflicting kind/joiner claims retain one visual newline. The joiner is emitted only when the selection includes source content on both sides, so starting or ending on a continuation row does not pull in an unselected separator. Consecutive empty hard rows occupy distinct grid transitions and therefore preserve every newline.
+
+Source whitespace remains selectable content, including whitespace-only hard rows. One Ink-specific carrier case is reconstructed instead: `wrap-ansi` can expand an omitted separator such as a tab into a whitespace-only soft visual row, so that carrier row is non-selectable and the exact source separator lives in the preceding soft boundary's `joiner`. The extractor no longer calls `trimEnd()` on semantic rows; it drops only cells explicitly marked non-selectable by the renderer. Ink layout padding and `MaxSizedBox` continuation-gutter padding are also non-selectable, while table padding remains selectable under the table product rule below. This prevents fidelity metadata from preserving terminal layout spaces, copying an expanded tab instead of its source byte, or discarding real trailing spaces.
+
+### Pre-Ink wrap producers
+
+Some application renderers destroy hard/soft information before `render-node-to-output`, so S0 includes them explicitly:
+
+| Producer                            | Contract                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MaxSizedBox`                       | Its internal line model becomes `{segments, flowKey, breakAfter, joiner}`. Splitting an input `\n` or moving between input row `Box` elements emits `hard` with `joiner: '\n'`; character wrapping emits `soft` with `joiner: ''`; a whitespace token discarded or relocated by word wrapping becomes the exact soft joiner. All fragments of that input row keep one flow key. Synthesized continuation-gutter padding is non-selectable. |
+| `CodeColorizer` and `DiffRenderer`  | Their source-line `Box` boundaries remain hard through `MaxSizedBox`; width continuations are soft. Code/diff line-number segments opt out, while content and diff markers remain in the row's selectable flow.                                                                                                                                                                                                                            |
+| `ToolMessage.sliceTextForMaxHeight` | It returns semantic visual-line descriptors instead of a newline-joined string, preserving whether each retained transition came from source `\n` or width slicing and preserving any omitted separator as `joiner`. `MaxSizedBox` consumes those descriptors without reclassifying them.                                                                                                                                                  |
+| `AnsiOutput`                        | Each input `AnsiLine` is a real tool-output row and stays hard. ANSI token boundaries remain cells in that row, and `MaxSizedBox` truncation does not create a soft claim.                                                                                                                                                                                                                                                                 |
+| `TableRenderer`                     | Table copy intentionally preserves the displayed plain-text table. Its pre-rendered newline-joined rows are treated as hard visual boundaries, including cell wrapping; it does not claim soft continuations in this PR.                                                                                                                                                                                                                   |
+| Ink `Text` wrapping                 | The patched wrap helper retains the ANSI-stripped source line while wrapping and maps each wrapped segment forward from the prior source offset. It records exact omitted whitespace in `joiner`, leaves joiner empty when whitespace remains in source cells, marks whitespace-only separator carrier rows non-selectable, and leaves hard whitespace-only source rows selectable.                                                        |
+
+Any new pre-Ink wrapper must either return the same semantic line descriptors or explicitly preserve its generated rows as hard visual boundaries. Inferring semantics later from rendered width remains forbidden.
+
+The remaining width helpers are not hidden producers for this contract. `CompactToolGroupDisplay` and `ToolConfirmationMessage` use `wrapAnsi` only to estimate height; Ink still performs their visible wrapping. The collapsed streaming Thought preview produced by `tailVisualLines` is deliberately visual-only because it is a lossy tail window and streaming already invalidates selection; its generated rows remain hard. `sliceTextByVisualHeight` currently has no production caller.
+
+The copy rules are deliberately narrow:
+
+| Surface                             | Rule    | Reason                                                                                                |
+| ----------------------------------- | ------- | ----------------------------------------------------------------------------------------------------- |
+| VP scrollbar                        | Exclude | Navigation chrome, never conversation content.                                                        |
+| Ink and continuation layout padding | Exclude | Renderer-inserted spacing is not source text; source whitespace remains selectable.                   |
+| Code and diff line-number gutters   | Exclude | Positional display aids; copied code and patches should not gain synthetic line numbers.              |
+| Diff `+` / `-` markers              | Keep    | They are required to copy a usable patch.                                                             |
+| Markdown list and quote markers     | Keep    | They carry Markdown meaning.                                                                          |
+| Table borders, padding, and rows    | Keep    | This PR preserves the displayed plain-text table; structured cell export would be a separate feature. |
+| Tool prefixes and status glyphs     | Keep    | They identify the displayed output; no existing category has a confirmed non-content rule.            |
+
+No other renderer may opt out cells in this PR without adding a product rule and a copy snapshot here. This prevents style-based heuristics from silently dropping user content.
+
+### PR 2 milestones
+
+- **S0 — semantic line contract.** Add the independent boundary grid with exact joiners and preserve it through direct Ink wrapping, `MaxSizedBox`, `Output.write`, clipping, overlap, and the published frame. Prove exact-width and empty hard newlines, whitespace-only rows, single/multiple-space and tab joiners, ANSI, CJK/emoji, clipped boundaries, and sibling conflicts.
+- **S1 — Semantic extraction.** Replace unambiguous soft visual breaks with their joiner, retain hard/ambiguous newlines, preserve source whitespace, skip non-selectable layout cells, and keep PR 1 highlight behavior unchanged.
+- **S2 — Confirmed exclusions and producer coverage.** Mark the VP scrollbar, synthesized continuation padding, and code/diff line-number gutters `selectable={false}`. Add direct `MaxSizedBox` code/diff/tool/ANSI fixtures plus Before/After fixtures for table and Markdown output.
+- **S3 — E2E and compatibility.** Verify real terminal/tmux clipboard payloads and run the existing VP selection regression set.
 
 ## Edge cases and risks
 
@@ -187,10 +240,13 @@ Per-renderer copy rules must be decided as product rules, not by auto-excluding 
 | Performance               | Large history + per-drag repaint                     | Highlight is one immutable transform; repaint bounded by Ink `maxFps` (~30)     |
 | Non-VP mode               | Enabling ownership would hijack native selection     | Strictly VP-gated                                                               |
 | Streaming under selection | Content shifts beneath a selection                   | PR 1: clear on scroll/resize/streaming (visible-region only)                    |
+| Pre-Ink wrapping          | App renderers erase source break semantics           | Semantic line descriptors in `MaxSizedBox`; table rows explicitly stay visual   |
+| Boundary ambiguity        | Empty, clipped, or sibling rows have no owner cell   | Independent boundary grid; only unambiguous single-flow soft boundaries rejoin  |
+| Separator loss            | Wrapping drops or relocates spaces and tabs          | Exact soft-boundary joiner; source whitespace distinguished from layout padding |
 
 ## Milestones
 
-PR 1 (this branch) — each milestone a separate, reviewable commit; no semantic-fidelity work mixed in:
+PR 1 (#6937, merged) — each milestone was a separate, reviewable commit with no semantic-fidelity work mixed in:
 
 - **M0 — Ink frame-buffer foundation (go/no-go).** The `FrameController` (getFrame/setSelection/subscribe), the pre-serialization immutable highlight transform, and throttled invalidation, with a minimal real consumer. This is the feasibility gate.
 - **M1 — Selection state machine + coordinate mapping (visible region).** press/drag/release → visual-cell range → `getSelectedText` → copy. No highlight yet.
@@ -198,7 +254,7 @@ PR 1 (this branch) — each milestone a separate, reviewable commit; no semantic
 - **M3 — Copy interaction.** Copy-on-select through the existing clipboard utility.
 - **M4 — Word/visual-line selection + settings + invalidation + docs.**
 
-PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as described above.
+PR 2 (follow-up) — semantic copy fidelity, as described above.
 
 ## Merge gate (PR 1)
 
@@ -213,11 +269,23 @@ PR 2 (follow-up) — cross-screen selection and semantic copy fidelity, as descr
 - Repaint frequency respects Ink's default `maxFps` (~30, ~33 ms); the throttle is Ink's, not an app-side 16 ms timer.
 - Real terminal/tmux E2E covers drag-select, highlight, and clipboard payload.
 
+## Merge gate (PR 2)
+
+- Soft wraps and explicit newlines—including exact-width, empty, and whitespace-only lines—remain distinguishable.
+- ANSI, CJK/emoji, and multiple sibling `Text` nodes on one visual row do not leak flow, break, or selectability metadata.
+- Clipping and overlap publish final visible cell metadata and independently composited boundary slots; clipping a cell never drops a still-visible boundary.
+- Conflicting sibling flows conservatively retain a visual newline; only an unambiguous single-flow soft boundary is rejoined.
+- Direct Ink and `MaxSizedBox` fixtures preserve one space, multiple spaces, and tabs across word wrapping, emit no duplicate when whitespace remains in cells, and add no joiner outside the selected endpoints.
+- `MaxSizedBox` directly proves hard/soft boundaries and non-selectable continuation padding, and code, diff, tool, and ANSI consumers each have an integration fixture.
+- Every `selectable={false}` site matches a product rule above and has a copy snapshot.
+- Diff, table, Markdown, and tool output have Before/After extraction fixtures.
+- Existing PR 1 highlighting, invalidation, copy, and repaint-frequency tests remain green.
+
 ## Testing strategy
 
-- **Unit** — coordinate mapping (wide chars, scroll offset, frame anchor); `selection-text.ts` visual extraction; mouse arbitration.
-- **Snapshot** — `getSelectedText` (visual) over markdown, a diff, a table, and tool output, asserting extracted text matches the _visible_ text.
-- **Patch guard** — asserts the exposed frame's shape/dimensions so an Ink upgrade breaks loudly.
+- **Unit** — PR 1 coordinate/mouse coverage plus semantic extraction over exact-width, empty, whitespace-only, joiner, endpoint, clipped, overlapping, and conflicting-flow boundaries.
+- **Producer fixtures** — direct `MaxSizedBox` wrapping plus code, diff, tool, ANSI, Markdown, and table Before/After copy snapshots.
+- **Patch guard** — asserts the exposed cell and boundary grids, direct Ink hard/soft wrapping, and compositing behavior so an Ink upgrade breaks loudly.
 - **E2E** — interactive tmux harness: drag-select across wrapped visual lines and multiple items, confirm clipboard/OSC 52 payload. Follows the `.qwen/e2e-tests/` workflow.
 
 ## Rollout
@@ -226,5 +294,5 @@ The feature is VP-only, and VP mode is itself opt-in (`ui.useTerminalBuffer` def
 
 ## Open questions
 
-- Is deepening the Ink patch to a frame controller acceptable to maintainers for PR 1, and the semantic-frame extension for PR 2? PR 2 is a renderer semantic change and should be evaluated at that risk level.
-- For PR 2's `selectable`/copy rules: confirm the per-renderer product decisions (diff `+/-`, table borders, tool-output glyphs) before implementation.
+- Is the semantic-frame extension acceptable to maintainers? PR 2 changes both the Ink patch and the application-level pre-wrap contract and should be evaluated at that risk level.
+- Should cross-screen selection be pursued after semantic fidelity proves stable? It needs a separate virtual-document design and is not part of PR 2.

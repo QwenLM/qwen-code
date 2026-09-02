@@ -38,8 +38,6 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
     inputAnnotations?: unknown;
-    qwenDiscreteMessage?: boolean;
-    backgroundTask?: unknown;
   };
 };
 
@@ -54,9 +52,66 @@ interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
 }
 
+interface BackgroundAgentTaskUpdate {
+  status: string;
+  endTime: number;
+}
+
+function collectBackgroundAgentTaskUpdates(
+  blocks: readonly DaemonTranscriptBlock[],
+): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
+  const updates = new Map<string, BackgroundAgentTaskUpdate>();
+  for (const block of blocks) {
+    if (block.kind !== 'assistant') continue;
+    const meta = getRecord(block.meta);
+    if (
+      meta?.['source'] !== 'background_notification' ||
+      meta['qwenDiscreteMessage'] !== true
+    ) {
+      continue;
+    }
+    const task = getRecord(meta['backgroundTask']);
+    const toolUseId = getString(task, 'toolUseId');
+    const status = getString(task, 'status');
+    if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
+    updates.set(toolUseId, {
+      status,
+      endTime: block.serverTimestamp ?? block.clientReceivedAt,
+    });
+  }
+  return updates;
+}
+
+function applyBackgroundAgentTaskUpdate(
+  tool: DaemonMessageToolCall,
+  update: BackgroundAgentTaskUpdate | undefined,
+): void {
+  if (!update) return;
+  switch (update.status) {
+    case 'completed':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      break;
+    case 'failed':
+      tool.status = 'failed';
+      tool.endTime = update.endTime;
+      break;
+    case 'cancelled':
+    case 'canceled':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      tool.rawOutput = {
+        ...(getRecord(tool.rawOutput) ?? {}),
+        status: 'cancelled',
+      };
+      break;
+  }
+}
+
 function isIgnoredWebShellStatus(text: string): boolean {
   return (
     text.startsWith('language_changed (unrecognized daemon event):') ||
+    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
     text.startsWith('Model switched: ')
   );
 }
@@ -115,24 +170,18 @@ function getMidTurnInjectedText(data: unknown): string | null {
   return text || null;
 }
 
-function isBackgroundNotificationAssistantBlock(
+function isBackgroundNotificationBlock(
   block: DaemonTextTranscriptBlock,
 ): boolean {
   const extended = block as ExtendedDaemonTextTranscriptBlock;
-  const meta = extended.meta;
-  return (
-    meta?.['source'] === 'background_notification' &&
-    meta['qwenDiscreteMessage'] === true &&
-    meta['backgroundTask'] !== undefined
-  );
+  return extended.meta?.['source'] === 'background_notification';
 }
 
-function normalizeAssistantTextBlock(
+function getBackgroundNotificationData(
   block: DaemonTextTranscriptBlock,
-): DaemonTextTranscriptBlock | null {
-  if (isBackgroundNotificationAssistantBlock(block)) return null;
-  if (!block.text && !block.usage) return null;
-  return block;
+): Record<string, unknown> | undefined {
+  const extended = block as ExtendedDaemonTextTranscriptBlock;
+  return getRecord(extended.meta?.['backgroundTask']) ?? undefined;
 }
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
@@ -202,6 +251,7 @@ export function transcriptBlocksToDaemonMessages(
   // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
+  const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -218,10 +268,25 @@ export function transcriptBlocksToDaemonMessages(
 
     switch (block.kind) {
       case 'user': {
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
         currentAssistantIdx = null;
         currentThinkingIdx = null;
         needsNewContentMessage = false;
-        const textBlock = block as DaemonTextTranscriptBlock;
         const meta = getRecord(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
@@ -249,10 +314,23 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'assistant': {
-        const textBlock = normalizeAssistantTextBlock(
-          block as DaemonTextTranscriptBlock,
-        );
-        if (!textBlock) break;
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
@@ -393,6 +471,10 @@ export function transcriptBlocksToDaemonMessages(
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
+        applyBackgroundAgentTaskUpdate(
+          toolCall,
+          backgroundAgentTaskUpdates.get(toolCall.callId),
+        );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
           toolCall.title = permissionInfo.title;
@@ -499,6 +581,7 @@ export function transcriptBlocksToDaemonMessages(
         const existingPermission = toolsByCallId.get(permissionToolCall.callId);
         if (existingPermission) {
           const previousStatus = existingPermission.status;
+          const previousEndTime = existingPermission.endTime;
           permissionToolCall.toolName = existingPermission.toolName;
           if (permBlock.resolved) {
             if (isApprovedPermissionResolution(permBlock.resolved)) {
@@ -512,11 +595,13 @@ export function transcriptBlocksToDaemonMessages(
           }
           mergeToolCall(existingPermission, permissionToolCall);
           if (
-            permBlock.resolved &&
-            isSubAgentPermission &&
-            isApprovedPermissionResolution(permBlock.resolved)
+            isTerminalToolStatus(previousStatus) ||
+            (permBlock.resolved &&
+              isSubAgentPermission &&
+              isApprovedPermissionResolution(permBlock.resolved))
           ) {
             existingPermission.status = previousStatus;
+            existingPermission.endTime = previousEndTime;
           }
           break;
         }
@@ -739,6 +824,10 @@ function mergeToolCall(
   target.locations = source.locations ?? target.locations;
 }
 
+function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
+  return status === 'completed' || status === 'failed';
+}
+
 function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'agent' || name === 'task') return true;
@@ -924,6 +1013,7 @@ function isApprovalToken(token: string): boolean {
     token === 'confirmed' ||
     token === 'proceed' ||
     token === 'proceed_once' ||
+    token === 'proceed_once_and_switch_to_default' ||
     token === 'proceed_always_project' ||
     token === 'proceed_always_user' ||
     token === 'allow_once' ||

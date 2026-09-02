@@ -10,16 +10,26 @@
 // says otherwise.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
+const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 vi.mock('./lib/gh.js', () => ({
   ghWithInput: ghMock,
-  gh: vi.fn(() => ''),
+  gh: ghViewMock,
   setGhHost: vi.fn(),
 }));
 
@@ -75,6 +85,7 @@ function args(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
   ghMock.mockClear();
+  ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -250,6 +261,105 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   /** What was actually sent to GitHub. */
   const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
 
+  /**
+   * A plan whose Step 4 verification is provably delivered — recorded prompt,
+   * brief, and a transcript that ran it verbatim and opened the brief.
+   *
+   * The tests below post Criticals, and a Critical nobody verified no longer
+   * blocks: composeReview softens the Request changes and says so. These
+   * tests are about OTHER properties of a blocking submission (count
+   * derivation, body escaping, unanchorable carriage), so they carry the
+   * verification that keeps the Request changes standing.
+   */
+  function verifiedPlan(): string {
+    const diffPath = join(dir, 'verified-diff.txt');
+    writeFileSync(diffPath, 'diff');
+    const plan = join(dir, 'verified-plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 10,
+        diffLines: 10,
+        files: [],
+        chunks: [{ id: 1, startLine: 1, endLine: 1 }],
+      }),
+    );
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(plan, 'verify');
+    writeFileSync(brief, 'The verify brief.');
+    const launch =
+      `You are review agent \`verify\`.\n` + `read_file(file_path="${brief}")`;
+    writeFileSync(join(d, 'verify.txt'), launch);
+    // Transcripts newer than the plan, as in a real run.
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    const sub = join(dir, 'subagents', 'SUBV');
+    mkdirSync(sub, { recursive: true });
+    const base = {
+      agentId: 'v1',
+      agentName: 'general-purpose',
+      sessionId: 'SUBV',
+    };
+    writeFileSync(
+      join(sub, 'agent-v1.jsonl'),
+      [
+        {
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        },
+        {
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { name: 'read_file', args: { file_path: brief } },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        },
+      ]
+        .map((x) => JSON.stringify(x))
+        .join('\n') + '\n',
+    );
+    return plan;
+  }
+
+  /** Run with the transcript env the stripped-`env` compose path reads. */
+  function withVerifyEnv(fn: () => void): void {
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'SUBV';
+    try {
+      fn();
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  }
+
   it("refuses a payload that carries a verdict — that is not the caller's to write", () => {
     // The failure this replaces. Dogfooded, a run read the coverage check's
     // refusal, decided "the agents clearly did their job", skipped
@@ -286,16 +396,18 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied
-    // anyway is refused.
+    // anyway is refused. Verification is on record, so the Request changes the
+    // count earns actually stands.
     const review = file('c1.json', {
       ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
       comments: [
         { path: 'a.ts', line: 12, body: '**[Critical]** boom' },
         { path: 'b.ts', line: 3, body: '**[Suggestion]** tidy' },
       ],
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(posted().event).toBe('REQUEST_CHANGES');
   });
 
@@ -342,6 +454,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       state: {
         ...REVIEW.state,
+        planPath: verifiedPlan(),
         bodyCriticals: [
           'the splitter uses `/\\n/` where the input is CRLF, so every line ' +
             'keeps a trailing `\\r`',
@@ -349,7 +462,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       },
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(posted().event).toBe('REQUEST_CHANGES');
     expect(posted().body).toContain('`/\\n/`');
     // Real newlines, not the two characters.
@@ -424,12 +537,13 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ...REVIEW,
       state: {
         ...REVIEW.state,
+        planPath: verifiedPlan(),
         bodyCriticals: ['the inline cache is stale after a rebase'],
       },
       comments: [],
     });
 
-    runSubmit(authorized({ review }));
+    withVerifyEnv(() => runSubmit(authorized({ review })));
     expect(ghMock).toHaveBeenCalledOnce();
     const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
     expect(sent.event).toBe('REQUEST_CHANGES');
@@ -592,5 +706,93 @@ describe('what the reviewer caught in this change', () => {
     );
     expect(out.event).toBe('COMMENT');
     expect(out.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('strips a caller-supplied prBodyFetcher — a state JSON cannot suppress the Chinese fold', () => {
+    // submit is the only boundary that posts, and its strip is the one with no
+    // test. Deleting `prBodyFetcher: _droppedFetcher` from the destructure
+    // leaves every other test green. Without the strip, `null` is invoked as
+    // a function, throws, and the fail-safe catch drops the fold — the exact
+    // regression this PR closes, through the door that publishes.
+    ghViewMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const planPath = file('plan.json', {
+      chunks: [],
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: '6771',
+    });
+    runSubmit(
+      authorized({
+        review: file('fetcher-strip.json', {
+          commit_id: 'abc123',
+          comments: [],
+          state: { modelId: 'm', planPath, prBodyFetcher: null },
+        }),
+      }),
+    );
+    const body = (
+      JSON.parse(ghMock.mock.calls[0][0] as string) as { body: string }
+    ).body;
+    expect(body).toContain('中文说明');
+  });
+});
+
+// The submit receipt is the WRITE half of cleanup's bypass-audit contract:
+// cleanup reads the review ids it records to tell a sanctioned review from a
+// bypass. Every other test here leaves ghMock returning '' (so JSON.parse of
+// the response throws and the receipt block hits its catch), which means the
+// happy path where a receipt is actually written was never exercised. These
+// run the command from inside the fixture dir so the relative .qwen/tmp
+// receipt lands there.
+describe('submit receipt (producer half of the audit contract)', () => {
+  const receiptPath = () =>
+    join(dir, '.qwen', 'tmp', 'qwen-review-pr-6771-submit-receipt.json');
+
+  const authorizedPost = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+
+  let savedCwd: string;
+  beforeEach(() => {
+    savedCwd = process.cwd();
+    process.chdir(dir);
+  });
+  afterEach(() => process.chdir(savedCwd));
+
+  it('writes the posted review id, event and a timestamp', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([42]);
+    expect(receipt.event).toBe('COMMENT');
+    expect(typeof receipt.postedAt).toBe('string');
+  });
+
+  it('accumulates ids across two submits in the same window (drift restart)', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 43 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([42, 43]);
+  });
+
+  it('migrates a legacy single-id receipt on the next submit', () => {
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewId: 7, event: 'COMMENT', postedAt: 'x' }),
+    );
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 8 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([7, 8]);
+  });
+
+  it('writes atomically, leaving no .tmp sibling behind', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(readFileSync(receiptPath(), 'utf8')).toContain('"reviewIds"');
+    const tmpDir = join(dir, '.qwen', 'tmp');
+    const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
   });
 });

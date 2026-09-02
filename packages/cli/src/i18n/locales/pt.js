@@ -70,6 +70,7 @@ export default {
   'Type your message or @path/to/file':
     'Digite sua mensagem ou @caminho/do/arquivo',
   '? for shortcuts': '? para atalhos',
+  'Pasting…': 'Colando…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Pressione 'i' para modo INSERÇÃO e 'Esc' para modo NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -804,8 +805,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with original user prompt text.':
-    'A entrada para o comando é JSON com o texto original do prompt do usuário.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1475,6 +1476,11 @@ export default {
   reviewed: 'revisado',
   'Code Changes:': 'Alterações de Código:',
   Performance: 'Desempenho',
+  'Generation Metrics': 'Métricas de geração',
+  'Latest Request': 'Última solicitação',
+  'Generation Time': 'Tempo de geração',
+  'Average TTFT': 'TTFT médio',
+  'Session TPS': 'TPS da sessão',
   'Wall Time:': 'Tempo Total:',
   'Agent Active:': 'Agente Ativo:',
   'API Time:': 'Tempo de API:',
@@ -2133,8 +2139,14 @@ export default {
     'Uma nova versão do Qwen Code está disponível! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} está atualizado!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Falha ao verificar atualizações. Verifique sua rede ou configuração do registro.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Falha ao verificar atualizações ({{reason}}). Verifique sua rede ou configuração do registro.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Verificação de atualização ignorada ({{reason}}) — execute /update para tentar novamente.',
+  'registry did not respond within {{seconds}}s':
+    'o registro não respondeu em {{seconds}}s',
+  'registry unreachable': 'registro inacessível',
+  'registry error': 'erro no registro',
   'Unable to check for updates: {{reason}}':
     'Não foi possível verificar atualizações: {{reason}}',
   'Update successful! The new version will be used on your next run.':

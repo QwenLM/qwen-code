@@ -34,6 +34,8 @@ export interface StreamingTextDeltaState {
    * visible duplication).
    */
   emittedLength: number;
+  /** Integer token-estimate units accumulated from normalized emitted text. */
+  emittedTokenUnits?: number;
   cumulativeMode: boolean;
 }
 

@@ -22,7 +22,7 @@ ACP sends no mode update when permission is pending or when confirmation, hooks,
 
 ## Failure behavior
 
-- Calls outside Plan mode are denied before a confirmation is constructed.
+- Calls outside Plan mode fail safely with actionable state guidance at whichever boundary observes the mode change. `execute()` returns a guidance error when the session is outside Plan mode and there is no approval snapshot. `getConfirmationDetails()` throws the same guidance when called outside Plan mode (e.g. via a PM `ask` rule or a Plan-to-non-Plan switch between permission evaluation and confirmation construction). The default permission is `allow` — this is a state issue, not a security issue.
 - Invalid confirmation outcomes, cancellation, aborts, stale revisions, and transition failures leave Plan mode active.
 - Two exits approved against the same revision cannot both succeed.
 - If an ACP host cannot present `switch_mode`, Plan mode remains active and the error directs the user to the host mode selector or `/plan exit`.

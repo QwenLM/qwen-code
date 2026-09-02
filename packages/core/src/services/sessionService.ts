@@ -5,6 +5,7 @@
  */
 
 import { Storage } from '../config/storage.js';
+import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -45,6 +46,11 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+  type SessionWriterProcessKind,
+} from './session-writer-lease.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -192,6 +198,7 @@ export interface UnarchiveSessionsOptions {
 
 export interface SessionServiceOptions {
   onWarning?: (message: string) => void;
+  runtimeBaseDir?: string;
 }
 
 /**
@@ -323,7 +330,7 @@ export class SessionService {
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
-    this.storage = new Storage(cwd);
+    this.storage = new Storage(cwd, options.runtimeBaseDir);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;
@@ -335,6 +342,25 @@ export class SessionService {
    * scheduled-tasks file without re-plumbing the workspace path. */
   getProjectRoot(): string {
     return this.projectRoot;
+  }
+
+  async acquireSessionWriterLease(
+    sessionId: string,
+    options: {
+      processKind: SessionWriterProcessKind;
+      qwenVersion?: string | null;
+      reclaimPolicy: 'local' | 'never';
+    },
+  ): Promise<SessionWriterLease> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      throw new SessionWriterUnavailableError();
+    }
+    return SessionWriterLease.acquire({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      transcriptPath: this.getSessionFilePath(sessionId, 'active'),
+      ...options,
+    });
   }
 
   private warn(message: string): void {
@@ -381,6 +407,24 @@ export class SessionService {
       return true;
     }
 
+    // Worktree sessions record cwd as the worktree path
+    // (<repoRoot>/.qwen/worktrees/<slug>), which has a different project
+    // hash. Infer the repo root from the path and check its hash. This
+    // is durable — it doesn't depend on the sidecar file, which is
+    // transient and cleared when the worktree is removed. Pure string
+    // ops, so check before the file-read runtime status below.
+    // Use lastIndexOf to handle nested worktrees: for
+    // /repo/.qwen/worktrees/parent/.qwen/worktrees/child, the innermost
+    // marker gives repoRoot = /repo/.qwen/worktrees/parent (the workspace).
+    const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+    const markerIdx = recordCwd.lastIndexOf(worktreesMarker);
+    if (markerIdx > 0) {
+      const repoRoot = recordCwd.substring(0, markerIdx);
+      if (getProjectHash(repoRoot) === this.projectHash) {
+        return true;
+      }
+    }
+
     const status = await readRuntimeStatus(
       this.storage.getRuntimeStatusPath(sessionId),
     );
@@ -397,6 +441,13 @@ export class SessionService {
    */
   getWorktreeSessionPath(sessionId: string): string {
     return this.getWorktreeSessionPathForState(sessionId, 'active');
+  }
+
+  getWorktreeSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getWorktreeSessionPathForState(sessionId, state);
   }
 
   private async readProjectSessionHead(
@@ -1306,6 +1357,22 @@ export class SessionService {
     return removed;
   }
 
+  /**
+   * Usage salvage wrapper enforcing the "never blocks deletion" contract at
+   * the call site: persistUsageBeforeTranscriptDeletion catches its own
+   * errors, but this second layer keeps the guarantee structural rather
+   * than an implementation detail of another module.
+   */
+  private async salvageUsageBestEffort(transcriptPath: string): Promise<void> {
+    try {
+      await persistUsageBeforeTranscriptDeletion(transcriptPath);
+    } catch (error) {
+      this.warn(
+        `usage salvage failed for ${transcriptPath}: ${error}; deleting anyway`,
+      );
+    }
+  }
+
   private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
@@ -1315,9 +1382,19 @@ export class SessionService {
       const activePath = this.getSessionFilePath(sessionId, 'active');
       const active = await this.readProjectSessionHead(sessionId, activePath);
       if (active) {
+        // #7384: the usage-history rebuild reads transcripts, so salvage
+        // the session's usage summary before the file is gone. Never
+        // blocks deletion (the salvage swallows its own errors).
+        await this.salvageUsageBestEffort(activePath);
         this.removeFileIfExists(activePath);
         const archivedPath = this.getSessionFilePath(sessionId, 'archived');
         if (fs.existsSync(archivedPath)) {
+          // When both copies co-exist (e.g. an interrupted archive), the
+          // active transcript may hold no telemetry while the archived one
+          // carries the session's history — salvage it too. The dedup
+          // guard inside the salvage makes this a no-op whenever the
+          // active copy already produced a record.
+          await this.salvageUsageBestEffort(archivedPath);
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
@@ -1332,6 +1409,7 @@ export class SessionService {
       if (!archived) {
         return false;
       }
+      await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
       this.removeFileHistoryBackups(sessionId);
@@ -1612,6 +1690,9 @@ export class SessionService {
   async forkSession(
     sourceSessionId: string,
     newSessionId: string,
+    options: {
+      source?: { sourceType: string; sourceId?: string };
+    } = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
       throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
@@ -1655,7 +1736,8 @@ export class SessionService {
         !(
           record.type === 'system' &&
           (record.subtype === 'parent_session' ||
-            record.subtype === 'session_source')
+            record.subtype === 'session_source' ||
+            (options.source && record.subtype === 'custom_title'))
         ),
     );
     if (sourceRecords.length === 0) {
@@ -1665,32 +1747,53 @@ export class SessionService {
     // Rebuild the parentUuid chain in active-history order so the fork is a
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
-    let prevUuid: string | null = null;
+    const sourceRecord: ChatRecord | undefined = options.source
+      ? {
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: newSessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'session_source',
+          cwd: this.projectRoot,
+          version: records[0].version,
+          systemPayload: {
+            sourceType: options.source.sourceType,
+            ...(options.source.sourceId !== undefined
+              ? { sourceId: options.source.sourceId }
+              : {}),
+          },
+        }
+      : undefined;
+    let prevUuid: string | null = sourceRecord?.uuid ?? null;
     const remappedArtifactIds = new Map<string, string>();
-    const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const isArtifactRecord = isSessionArtifactRecord(record);
-      const systemPayload = remapSystemPayloadForFork(
-        record,
-        sourceSessionId,
-        newSessionId,
-        remappedArtifactIds,
-      );
-      const next: ChatRecord = {
-        ...record,
-        sessionId: newSessionId,
-        cwd: this.projectRoot,
-        systemPayload,
-        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
-        forkedFrom: {
-          sessionId: sourceSessionId,
-          messageUuid: record.uuid,
-        },
-      };
-      if (!isArtifactRecord) {
-        prevUuid = record.uuid;
-      }
-      return next;
-    });
+    const forked: ChatRecord[] = [
+      ...(sourceRecord ? [sourceRecord] : []),
+      ...sourceRecords.map((record) => {
+        const isArtifactRecord = isSessionArtifactRecord(record);
+        const systemPayload = remapSystemPayloadForFork(
+          record,
+          sourceSessionId,
+          newSessionId,
+          remappedArtifactIds,
+        );
+        const next: ChatRecord = {
+          ...record,
+          sessionId: newSessionId,
+          cwd: this.projectRoot,
+          systemPayload,
+          parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
+          forkedFrom: {
+            sessionId: sourceSessionId,
+            messageUuid: record.uuid,
+          },
+        };
+        if (!isArtifactRecord) {
+          prevUuid = record.uuid;
+        }
+        return next;
+      }),
+    ];
 
     // File-history snapshots are side-channel system records used by /rewind.
     // They may not sit on the active message leaf copied above, and copied

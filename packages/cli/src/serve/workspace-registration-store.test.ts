@@ -11,7 +11,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WorkspaceRegistrationStore,
   WorkspaceRegistrationStoreError,
+  WorkspaceDisplayNameValidationError,
   getWorkspaceRegistrationStorePath,
+  normalizeWorkspaceDisplayName,
   workspaceRegistrationId,
   workspaceRegistrationScopeHash,
 } from './workspace-registration-store.js';
@@ -63,6 +65,126 @@ describe('WorkspaceRegistrationStore', () => {
     const id = workspaceRegistrationId('/work/secondary');
     await expect(store.removeById(id)).resolves.toBe(true);
     await expect(store.read()).resolves.toMatchObject({ workspaces: [] });
+  });
+
+  it('reads legacy snapshots without display names', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: ['/work/secondary'],
+      }),
+    );
+
+    await expect(store.read()).resolves.toEqual({
+      schemaVersion: 1,
+      primaryWorkspace: '/work/primary',
+      workspaces: ['/work/secondary'],
+    });
+  });
+
+  it('stores a display name when adding a registration', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const id = workspaceRegistrationId('/work/secondary');
+
+    await expect(store.add('/work/secondary', 'Secondary')).resolves.toBe(true);
+    await expect(store.read()).resolves.toMatchObject({
+      workspaces: ['/work/secondary'],
+      displayNames: { [id]: 'Secondary' },
+    });
+
+    await expect(store.add('/work/secondary', 'Renamed')).resolves.toBe(false);
+    await expect(store.add('/work/secondary')).resolves.toBe(false);
+    await expect(store.add('/work/secondary', '')).resolves.toBe(false);
+    await expect(store.read()).resolves.toMatchObject({
+      displayNames: { [id]: 'Secondary' },
+    });
+  });
+
+  it('removes display names with their registrations', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const firstId = workspaceRegistrationId('/work/secondary-a');
+    const secondId = workspaceRegistrationId('/work/secondary-b');
+    await store.add('/work/secondary-a', 'First');
+    await store.add('/work/secondary-b', 'Second');
+
+    await expect(store.removeById(firstId)).resolves.toBe(true);
+    await expect(store.read()).resolves.toMatchObject({
+      workspaces: ['/work/secondary-b'],
+      displayNames: { [secondId]: 'Second' },
+    });
+    await expect(store.removeById(secondId)).resolves.toBe(true);
+    await expect(store.read()).resolves.toEqual({
+      schemaVersion: 1,
+      primaryWorkspace: '/work/primary',
+      workspaces: [],
+    });
+  });
+
+  it('sets and clears display names for every matching registration id', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const firstId = workspaceRegistrationId('/work/secondary-a');
+    const secondId = workspaceRegistrationId('/work/secondary-b');
+    const otherId = workspaceRegistrationId('/work/other');
+    await store.add('/work/secondary-a', 'First');
+    await store.add('/work/secondary-b', 'Second');
+    await store.add('/work/other', 'Other');
+
+    await expect(
+      store.setDisplayNameByIds([firstId, secondId, 'missing'], 'Shared'),
+    ).resolves.toBe(2);
+    await expect(store.read()).resolves.toMatchObject({
+      displayNames: {
+        [firstId]: 'Shared',
+        [secondId]: 'Shared',
+        [otherId]: 'Other',
+      },
+    });
+
+    await expect(store.setDisplayNameByIds([firstId, secondId])).resolves.toBe(
+      2,
+    );
+    await expect(store.read()).resolves.toMatchObject({
+      displayNames: { [otherId]: 'Other' },
+    });
+    await expect(store.setDisplayNameByIds([otherId])).resolves.toBe(1);
+    await expect(store.read()).resolves.not.toHaveProperty('displayNames');
+    await expect(
+      store.setDisplayNameByIds(['missing'], 'Ignored'),
+    ).resolves.toBe(0);
+    await expect(store.read()).resolves.not.toHaveProperty('displayNames');
+  });
+
+  it('normalizes empty display names and rejects invalid values', () => {
+    expect(normalizeWorkspaceDisplayName('')).toBeUndefined();
+    expect(normalizeWorkspaceDisplayName('   ')).toBeUndefined();
+    expect(normalizeWorkspaceDisplayName('  Workspace  ')).toBe('Workspace');
+    expect(normalizeWorkspaceDisplayName('\tWorkspace\n')).toBe('Workspace');
+    expect(normalizeWorkspaceDisplayName('\t\r\n')).toBeUndefined();
+    expect(normalizeWorkspaceDisplayName('x'.repeat(256))).toBe(
+      'x'.repeat(256),
+    );
+    expect(normalizeWorkspaceDisplayName(`${'x'.repeat(256)} `)).toBe(
+      'x'.repeat(256),
+    );
+    for (const invalid of [
+      'x'.repeat(257),
+      'line\nbreak',
+      'nul\0byte',
+      `delete${String.fromCharCode(0x7f)}`,
+      42,
+    ]) {
+      expect(() => normalizeWorkspaceDisplayName(invalid)).toThrow(
+        WorkspaceDisplayNameValidationError,
+      );
+    }
   });
 
   it('returns false when removing a missing workspace id', async () => {
@@ -189,6 +311,53 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).rejects.toThrow(/duplicate paths/);
   });
 
+  it.each([
+    ['a non-object map', [], /displayNames must be an object/],
+    [
+      'an unknown registration id',
+      { missing: 'Name' },
+      /unknown registration id/,
+    ],
+    [
+      'an empty stored name',
+      { [workspaceRegistrationId('/work/secondary')]: '' },
+      /must not be empty/,
+    ],
+    [
+      'a non-string stored name',
+      { [workspaceRegistrationId('/work/secondary')]: 42 },
+      /must be a string/,
+    ],
+    [
+      'an oversized stored name',
+      { [workspaceRegistrationId('/work/secondary')]: 'x'.repeat(257) },
+      /exceeds 256 characters/,
+    ],
+    [
+      'a stored name with control characters',
+      { [workspaceRegistrationId('/work/secondary')]: 'line\nbreak' },
+      /control characters/,
+    ],
+  ])(
+    'rejects displayNames with %s',
+    async (_description, displayNames, error) => {
+      const home = await tempHome();
+      const store = new WorkspaceRegistrationStore('/work/primary', home);
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+          displayNames,
+        }),
+      );
+
+      await expect(store.read()).rejects.toThrow(error);
+    },
+  );
+
   it('rejects additions after reaching the secondary workspace limit', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
@@ -265,6 +434,10 @@ describe('WorkspaceRegistrationStore', () => {
           schemaVersion: 1,
           primaryWorkspace: '/work/primary',
           workspaces: ['/work/secondary'],
+          displayNames: {
+            [storeModule.workspaceRegistrationId('/work/secondary')]:
+              'Secondary',
+          },
         }),
       );
 
@@ -278,6 +451,9 @@ describe('WorkspaceRegistrationStore', () => {
       expect(
         JSON.parse(await fs.readFile(store.filePath, 'utf8')),
       ).toMatchObject({ workspaces: [] });
+      expect(
+        JSON.parse(await fs.readFile(store.filePath, 'utf8')),
+      ).not.toHaveProperty('displayNames');
     } finally {
       vi.doUnmock('proper-lockfile');
       vi.resetModules();

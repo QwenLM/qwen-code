@@ -81,6 +81,19 @@ describe('BuiltinAgentRegistry', () => {
       expect(exploreAgent?.tools).toBeDefined();
       expect(exploreAgent?.tools).not.toContain('ask_user_question');
     });
+
+    it('reports a missing status-line input to the parent without asking the user', () => {
+      const statuslineAgent =
+        BuiltinAgentRegistry.getBuiltinAgent('statusline-setup');
+
+      expect(statuslineAgent?.tools).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(statuslineAgent?.systemPrompt).toContain(
+        'report that blocker to the parent agent',
+      );
+      expect(statuslineAgent?.systemPrompt).toContain(
+        'stop without modifying settings',
+      );
+    });
   });
 
   describe('getBuiltinAgent', () => {

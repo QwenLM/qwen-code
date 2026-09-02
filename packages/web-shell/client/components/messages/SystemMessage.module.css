@@ -31,6 +31,37 @@
   min-width: 0;
 }
 
+.notificationContent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.notificationIcon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin-top: calc((1.6em - 14px) / 2);
+}
+
+.notificationIcon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.notificationIcon[data-tone='success'] {
+  color: var(--success-color);
+}
+
+.notificationIcon[data-tone='error'] {
+  color: var(--error-color);
+}
+
+.notificationText {
+  min-width: 0;
+}
+
 .message pre {
   display: inline;
   margin: 0;

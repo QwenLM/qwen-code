@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
@@ -13,6 +14,49 @@ import { createDebugLogger } from './debugLogger.js';
 const debugLogger = createDebugLogger('GIT');
 const GIT_STATUS_TIMEOUT_MS = 5000;
 const DETACHED_HEAD_LABEL = '(detached HEAD)';
+
+// Bound the read: these files are one short line, never megabytes.
+const MAX_GIT_METADATA_BYTES = 4096;
+
+/**
+ * Read the first line of a git metadata file with O_NOFOLLOW (refuse symlinks
+ * atomically) and a bounded prefix (never load a pathologically large file).
+ * Returns null on any failure.
+ *
+ * Lives here rather than beside either caller because both `gitDirect.ts` (HEAD,
+ * commondir) and `gitDiff.ts` (commondir) need it, and `gitDirect.ts` already
+ * imports `gitDiff.ts` — exporting it from there would close an import cycle.
+ * This module imports nothing but node builtins, so it can be shared freely.
+ */
+export async function readFirstLineNoFollow(
+  filePath: string,
+): Promise<string | null> {
+  let fh: fsPromises.FileHandle;
+  try {
+    // O_NOFOLLOW refuses a symlink (ELOOP). O_NONBLOCK never blocks on a FIFO —
+    // a crafted `.git/HEAD` or commondir named pipe would otherwise hang here
+    // and pin a libuv thread-pool slot. Both are no-ops on a regular file.
+    fh = await fsPromises.open(
+      filePath,
+      (fs.constants?.O_RDONLY ?? 0) |
+        (fs.constants?.O_NOFOLLOW ?? 0) |
+        (fs.constants?.O_NONBLOCK ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(MAX_GIT_METADATA_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, MAX_GIT_METADATA_BYTES, 0);
+    return buf.toString('utf-8', 0, bytesRead).split('\n', 1)[0] ?? '';
+  } catch {
+    return null;
+  } finally {
+    // Per the codebase convention a close error must not escape — the docstring
+    // promises null on any failure.
+    await fh.close().catch(() => {});
+  }
+}
 
 /**
  * Checks if a directory is within a git repository

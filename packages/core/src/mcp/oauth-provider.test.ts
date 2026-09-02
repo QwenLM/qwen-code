@@ -236,6 +236,10 @@ describe('MCPOAuthProvider', () => {
       expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
         expect.stringContaining('authorize'),
       );
+      expect(mockHttpServer.listen).toHaveBeenCalledWith(
+        { port: 7777, host: '127.0.0.1' },
+        expect.any(Function),
+      );
       const tokenStorage = new MCPOAuthTokenStorage();
       expect(tokenStorage.saveToken).toHaveBeenCalledWith(
         'test-server',
@@ -677,7 +681,7 @@ describe('MCPOAuthProvider', () => {
         callback?.();
         setTimeout(() => {
           const mockReq = {
-            url: '/oauth/callback?error=access_denied&error_description=User%20denied%20access',
+            url: '/oauth/callback?error=access_denied&error_description=User%20denied%20access&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
           };
           const mockRes = {
             writeHead: vi.fn(),
@@ -696,7 +700,7 @@ describe('MCPOAuthProvider', () => {
       ).rejects.toThrow('OAuth error: access_denied');
     });
 
-    it('should handle state mismatch in callback', async () => {
+    it('should ignore a callback with an invalid state and accept the valid callback', async () => {
       let callbackHandler: unknown;
       vi.mocked(http.createServer).mockImplementation((handler) => {
         callbackHandler = handler;
@@ -706,24 +710,36 @@ describe('MCPOAuthProvider', () => {
       mockHttpServer.listen.mockImplementation((port, callback) => {
         callback?.();
         setTimeout(() => {
-          const mockReq = {
-            url: '/oauth/callback?code=auth_code_123&state=wrong_state',
-          };
-          const mockRes = {
-            writeHead: vi.fn(),
-            end: vi.fn(),
-          };
           (callbackHandler as (req: unknown, res: unknown) => void)(
-            mockReq,
-            mockRes,
+            { url: '/oauth/callback?code=auth_code_123&state=wrong_state' },
+            { writeHead: vi.fn(), end: vi.fn() },
+          );
+          (callbackHandler as (req: unknown, res: unknown) => void)(
+            {
+              url: '/oauth/callback?code=auth_code_123&state=bW9ja19zdGF0ZV8xNl9ieXRlcw',
+            },
+            { writeHead: vi.fn(), end: vi.fn() },
           );
         }, 10);
       });
 
       const authProvider = new MCPOAuthProvider();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          contentType: 'application/json',
+          text: JSON.stringify(mockTokenResponse),
+          json: mockTokenResponse,
+        }),
+      );
       await expect(
         authProvider.authenticate('test-server', mockConfig),
-      ).rejects.toThrow('State mismatch - possible CSRF attack');
+      ).resolves.toMatchObject({
+        accessToken: mockToken.accessToken,
+        refreshToken: mockToken.refreshToken,
+        tokenType: mockToken.tokenType,
+        scope: mockToken.scope,
+      });
     });
 
     it('should handle token exchange failure', async () => {

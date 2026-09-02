@@ -237,9 +237,18 @@ const countHeadContentLines = (
 ): number => {
   const headFromFence = content.slice(fenceStartIndex, splitPoint);
   const newlineCount = (headFromFence.match(/\n/g) || []).length;
-  // The opening fence line owns the first newline; the rest are content lines.
-  // A head not ending in a newline has one trailing partial content line.
-  return headFromFence.endsWith('\n') ? newlineCount - 1 : newlineCount;
+  // The opening fence line owns the first newline; every newline after it ends
+  // one completed content line.
+  //
+  // A head that stops mid-line was previously counted as if that line were
+  // finished, which advanced the tail's gutter one line too far: the tail's
+  // first row is the *remainder* of that same source line, not the next one.
+  // Splitting ````js\naaa\nbbb\nccc\n```` at 12
+  // put `bb` at the end of the head and `b` at the start of the tail, then
+  // labelled the tail start-line 3 -- so every line number after a mid-line
+  // split was off by one. A completed line and a partial one both leave the
+  // same number of newlines behind, so neither needs a special case.
+  return Math.max(newlineCount - 1, 0);
 };
 
 /**

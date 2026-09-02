@@ -18,6 +18,7 @@ import {
 } from '../utils/mouse.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
@@ -151,7 +152,7 @@ export function useMouseEvents(
   // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
   // no matter how many click/hover subscribers are added later.
   const settings = useContext(SettingsContext);
-  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? false;
+  const isVpMode = useVirtualViewport(settings?.merged.ui?.useTerminalBuffer);
   const vpGateOpen = isVpMode || bypassVpGate;
 
   const handlerRef = useRef(handler);
@@ -166,6 +167,12 @@ export function useMouseEvents(
   const enabled =
     isActive && isRawModeSupported && vpGateOpen && Boolean(stdout.isTTY);
 
+  // Synchronous guard: the subscription effect cleanup runs after paint, so a
+  // mouse event dispatched between re-render and cleanup would still reach the
+  // handler. The ref keeps the callback in lockstep with the computed flag.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
   useEffect(() => {
     if (!enabled) return;
 
@@ -177,6 +184,7 @@ export function useMouseEvents(
   }, [enabled, stdout, tracking]);
 
   const mouseCallback = useCallback((event: MouseEvent) => {
+    if (!enabledRef.current) return;
     handlerRef.current(event);
   }, []);
 

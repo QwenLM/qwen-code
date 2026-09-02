@@ -17,6 +17,7 @@ import type {
   DaemonUiSessionActions,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   DaemonSessionProvider,
   useDaemonActions,
@@ -52,6 +53,7 @@ interface MockSession {
   state?: Record<string, unknown>;
   hasActivePrompt?: boolean;
   historyHasMore?: boolean;
+  historyAnchorRecordId?: string;
   client?: MockClient;
   lastEventId?: number;
   setLastEventId: (lastEventId: number | undefined) => void;
@@ -414,6 +416,28 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('does not rerender streaming state consumers for equivalent transcript updates', async () => {
+    let store: DaemonTranscriptStore | undefined;
+    let renderCount = 0;
+
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      useDaemonStreamingState();
+      renderCount += 1;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    const initialRenderCount = renderCount;
+
+    act(() => {
+      store?.appendLocalUserMessage('first');
+      store?.appendLocalUserMessage('second');
+    });
+
+    expect(renderCount).toBe(initialRenderCount);
+  });
+
   it('keeps capabilities handshake failures out of the transcript', async () => {
     sdkMocks.capabilities.mockRejectedValue(
       Object.assign(new Error('GET /capabilities: HTTP 400'), { status: 400 }),
@@ -549,6 +573,10 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('preheats ACP and refreshes deferred skills when ACP is not running', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
     sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
@@ -611,6 +639,10 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears deferred skills when ACP refresh returns an empty list', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
     sdkMocks.workspaceAcpStatus.mockResolvedValue({ channelLive: false });
     sdkMocks.workspaceSkills
       .mockResolvedValueOnce({
@@ -652,6 +684,148 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection?.skills).toEqual([]);
     expect(connection?.commands).toEqual([]);
+  });
+
+  it('skips ACP workspace routes when the daemon lacks their capabilities', async () => {
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('skips primary ACP workspace routes for a secondary workspace', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+      workspaceCwd: '/secondary-workspace',
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('preheats without probing status when only preheat is advertised', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).not.toHaveBeenCalled();
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+  });
+
+  it('does not preheat when the advertised ACP status is live', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(sdkMocks.workspaceAcpStatus).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceAcpPreheat).not.toHaveBeenCalled();
+  });
+
+  it('still preheats when the advertised ACP status request fails', async () => {
+    const statusError = new Error('status unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat', 'workspace_acp_status'],
+    });
+    sdkMocks.workspaceAcpStatus.mockRejectedValue(statusError);
+
+    function Harness() {
+      useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] workspaceAcpStatus failed in deferred connect:',
+      statusError,
+    );
+    expect(sdkMocks.workspaceAcpPreheat).toHaveBeenCalledWith(5000);
+  });
+
+  it('keeps the deferred connection usable when preheat fails', async () => {
+    const preheatError = new Error('preheat unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['workspace_acp_preheat'],
+    });
+    sdkMocks.workspaceAcpPreheat.mockRejectedValue(preheatError);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/mock-workspace',
+    });
+    expect(connection).not.toHaveProperty('sessionId');
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] ACP preheat for workspace skills failed:',
+      preheatError,
+    );
   });
 
   it('warns when deferred workspace providers fail', async () => {
@@ -3529,7 +3703,11 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('renders bounded replay truncation from the loaded snapshot without resync', async () => {
+  it('uses bounded replay truncation to enable history pagination without rendering it', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
     const session = createMockSession({
       replaySnapshot: {
         compactedReplay: [
@@ -3552,6 +3730,276 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: 'retained replay' },
+                _meta: { 'qwen.session.recordId': 'record-retained' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'assistant',
+        text: 'retained replay',
+      }),
+    ]);
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-retained',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('uses history_truncated marker recordId as pagination anchor when session_updates lack one', async () => {
+    // Regression coverage: a live-journal truncation during a single long
+    // in-flight turn can leave the retained window with no
+    // `session_update` carrying a `qwen.session.recordId`. The daemon's
+    // compaction engine now stamps the last-seen recordId on the
+    // `history_truncated` marker itself; the client must fall back to
+    // that anchor so `loadMore()` keeps working instead of rendering the
+    // banner with no recovery path.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 7602,
+              retainedEvents: 10000,
+              maxBytes: 8 * 1024 * 1024,
+              maxEvents: 10000,
+              fullTranscriptAvailable: true,
+              recordId: 'record-anchor',
+            },
+          },
+          {
+            id: 9001,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk 1' },
+              },
+            },
+          },
+          {
+            id: 9002,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk 2' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // Banner is NOT rendered: marker's recordId unlocked historyHasMore.
+    expect(history?.hasMore).toBe(true);
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'status',
+          text: expect.stringContaining('History truncated'),
+        }),
+      ]),
+    );
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-anchor',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('prefers session_update recordId over marker recordId for pagination anchor', async () => {
+    // Critical regression: when the retained window has session_updates
+    // carrying an earlier recordId than the marker's stamped anchor, the
+    // client must use the session_update's recordId — otherwise
+    // `beforeRecordId` re-fetches records already displayed.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 100,
+              retainedEvents: 3,
+              maxBytes: 8 * 1024 * 1024,
+              maxEvents: 10000,
+              fullTranscriptAvailable: true,
+              recordId: 'record-recent',
+            },
+          },
+          {
+            id: 9001,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'earlier turn' },
+                _meta: { 'qwen.session.recordId': 'record-earlier' },
+              },
+            },
+          },
+          {
+            id: 9002,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    // Uses the session_update's earlier recordId, NOT the marker's.
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-earlier',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('renders bounded replay truncation when no pagination anchor is available', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 1,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
               },
             },
           },
@@ -3561,35 +4009,119 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
-    let awaitingResync = false;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
-      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      history = useDaemonTranscriptHistory();
       return null;
     }
 
     await renderWithProvider(<Harness />, {
       autoConnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
     });
     await act(async () => {
       await flushPromises();
     });
 
-    expect(awaitingResync).toBe(false);
+    expect(history?.hasMore).toBe(false);
     expect(blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'status',
           text: expect.stringContaining('History truncated'),
         }),
+      ]),
+    );
+  });
+
+  it('uses daemon historyAnchorRecordId when neither marker nor session_updates carry a recordId', async () => {
+    // Regression for the live-session case: an in-flight turn caps the
+    // journal before any turn boundary fires, so the retained window has
+    // no recordId-bearing session_update AND the marker ships without
+    // one (recordId is only stamped during transcript replay, never on
+    // the live stream). The daemon backfills `historyAnchorRecordId`
+    // from the persisted transcript; the client must use it as the
+    // pagination anchor so loadMore keeps working.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      historyAnchorRecordId: 'record-daemon-anchor',
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 1259,
+              retainedEvents: 10000,
+              maxBytes: 8 * 1024 * 1024,
+              maxEvents: 10000,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 9001,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // Banner is NOT rendered: daemon anchor unlocked historyHasMore.
+    expect(history?.hasMore).toBe(true);
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
-          kind: 'assistant',
-          text: 'retained replay',
+          kind: 'status',
+          text: expect.stringContaining('History truncated'),
         }),
       ]),
+    );
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-daemon-anchor',
+        limit: 25,
+        clientId: session.clientId,
+      },
     );
   });
 
@@ -6098,6 +6630,53 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     expect(blocks).toEqual([]);
+  });
+
+  it('keeps the current transcript when a same-session reload is aborted', async () => {
+    const replacement = createDeferred<MockSession>();
+    const currentSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('current transcript'),
+    });
+    sdkMocks.sessions.push(currentSession);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => replacement.promise,
+    );
+    const controller = new AbortController();
+    const reload = requireActions(actions).reloadSession(controller.signal);
+    await act(async () => {
+      await flushPromises();
+    });
+
+    controller.abort();
+    const refreshedSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('replacement transcript'),
+    });
+    replacement.resolve(refreshedSession);
+    await act(async () => {
+      await expect(reload).rejects.toMatchObject({ name: 'AbortError' });
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'current transcript' },
+    ]);
+    expect(currentSession.detach).not.toHaveBeenCalled();
+    expect(refreshedSession.detach).toHaveBeenCalledOnce();
   });
 
   it('clears transcript immediately for default session switches', async () => {
@@ -8757,6 +9336,80 @@ describe('DaemonSessionProvider', () => {
     expect(history?.hasMore).toBe(false);
   });
 
+  it('drops fetched transcript events whose records are already displayed', async () => {
+    // The pagination anchor can sit inside the retained window (e.g. the
+    // daemon's transcript backfill for a live-journal overflow returns the
+    // latest recordId), so a fetched page may include records the client
+    // already shows. prepend must dedup by sourceRecordId or those records
+    // render twice.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-dedup',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(3, 'displayed prompt', 'record-2')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    // The page overlaps the retained window: 'record-2' is already
+    // displayed; only 'record-1' is genuinely older.
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [
+        replayEvent(1, 'older prompt', 'record-1'),
+        replayEvent(2, 'displayed prompt', 'record-2'),
+      ],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    // 'record-2' is NOT duplicated; only the genuinely older 'record-1'
+    // is prepended.
+    expect(
+      blocks.map((block) => ('text' in block ? block.text : undefined)),
+    ).toEqual(['older prompt', 'displayed prompt']);
+  });
+
   it('keeps transient transcript page failures retryable', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -8818,13 +9471,85 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      1,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
     expect(
       blocks.map((block) => ('text' in block ? block.text : undefined)),
     ).toEqual(['older prompt', 'recent prompt']);
     expect(history?.hasMore).toBe(false);
   });
 
-  it('skips malformed older-page events and advances the cursor', async () => {
+  it('latches a non-retryable transcript page failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (id: number, text: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': `record-${id}` },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-forbidden-history-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(2, 'recent prompt')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockRejectedValue(
+      new DaemonHttpError(403, undefined, 'Forbidden'),
+    );
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await expect(history?.loadMore()).rejects.toThrow('Forbidden');
+      await flushPromises();
+    });
+
+    expect(history?.paginationError).toBe(true);
+    expect(history?.hasMore).toBe(false);
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips malformed older-page events and advances by record boundary', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -8905,7 +9630,7 @@ describe('DaemonSessionProvider', () => {
       2,
       session.sessionId,
       {
-        cursor: 'next-page',
+        beforeRecordId: 'record-2',
         limit: 25,
         clientId: session.clientId,
       },
@@ -8920,6 +9645,78 @@ describe('DaemonSessionProvider', () => {
         message: 'Skipped malformed history event',
         debugMessage: 'malformed history event',
       }),
+    );
+  });
+
+  it('falls back to the server cursor when a page has no record boundary', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId?: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-cursor-fallback',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(3, 'recent prompt', 'recent-record')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(2, 'older prompt')],
+        nextCursor: 'next-page',
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(1, 'oldest prompt')],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        cursor: 'next-page',
+        limit: 25,
+        clientId: session.clientId,
+      },
     );
   });
 
@@ -8987,11 +9784,8 @@ describe('DaemonSessionProvider', () => {
       blocks.map((block) => ('text' in block ? block.text : undefined)),
     ).toEqual(['recent prompt']);
     expect(history?.hasMore).toBe(false);
-    expect(notices.at(-1)).toMatchObject({
-      code: 'daemon.transcript_history.failed',
-      message: 'Failed to load earlier session history',
-      debugMessage: 'Replay conversion failed for this page',
-    });
+    expect(history?.paginationError).toBe(true);
+    expect(notices.at(-1)).toBeUndefined();
   });
 
   it('keeps an oversized initial replay intact and stops older pagination', async () => {
@@ -9189,6 +9983,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
     historyHasMore: opts.historyHasMore ?? false,
+    historyAnchorRecordId: opts.historyAnchorRecordId,
     lastEventId: opts.lastEventId,
     setLastEventId:
       opts.setLastEventId ??

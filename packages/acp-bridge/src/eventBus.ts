@@ -19,14 +19,29 @@
  *     Aborting the supplied AbortSignal closes the iterator promptly.
  */
 
+import { randomUUID } from 'node:crypto';
+
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
   liveJournal: BridgeEvent[];
   lastEventId: number;
+  /**
+   * Present (and `true`) once the compaction engine threw during
+   * `ingest`/`seedReplayEvents` for this bus. The snapshot may be
+   * silently missing events from that point on; consumers should
+   * prefer a full transcript reload over trusting it.
+   */
+  degraded?: true;
 }
 
 export interface CompactionEngine {
-  ingest(event: BridgeEvent): void;
+  /**
+   * `byteLength` is the serialized size the bus already computed for the
+   * event (publish's eager sizing gate) so implementations that track
+   * byte budgets don't have to re-stringify. Optional — seeding paths
+   * and older callers may omit it and implementations self-compute.
+   */
+  ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
   snapshot(): SessionReplaySnapshot;
   close(): void;
@@ -73,6 +88,13 @@ export interface SubscribeOptions {
    * are replayed before live events flow.
    */
   lastEventId?: number;
+  /**
+   * Bus epoch token the consumer's `lastEventId` was minted under. When
+   * provided and it doesn't match this bus's `epoch`, the cursor belongs
+   * to a dead epoch (daemon restart rebuilt the bus) and a full resync is
+   * forced regardless of the numeric heuristic below.
+   */
+  epoch?: string;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**
@@ -84,10 +106,32 @@ export interface SubscribeOptions {
 
 export interface EventBusOptions {
   maxQueuedBytes?: number;
+  /**
+   * Total serialized-byte budget for the `Last-Event-ID` replay burst a
+   * single `subscribe()` may force-push (DAEMON-011). Replay frames bypass
+   * the per-subscriber live caps by design (dropping them would break the
+   * resume contract), so without this bound a reconnect against a large
+   * ring materializes the whole backlog into the queue at once — up to
+   * `maxSubscribers` times under concurrent reconnects. When the budget
+   * runs out mid-replay the remaining frames are dropped and the consumer
+   * gets a `state_resync_required` (`reason: 'replay_budget_exceeded'`)
+   * telling it to recover via `loadSession`. NOT named `maxReplayBytes`:
+   * that name is taken by the compaction engine's compacted-window budget
+   * and both appear in the same `createSessionEventBus` construction.
+   */
+  replayBudgetBytes?: number;
+  /**
+   * Invoked once, on the FIRST compaction failure (`ingest` /
+   * `seedReplayEvents` throw). The bus itself doesn't know its session,
+   * so the creator injects context-aware diagnostics here. Subsequent
+   * failures only keep the degraded flag set, silently.
+   */
+  onCompactionError?: (err: unknown) => void;
 }
 
 const DEFAULT_MAX_QUEUED = 256;
 export const DEFAULT_MAX_QUEUED_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
 /**
  * Default replay-ring depth per session. Sized for a 5-second
  * reconnect window over a chatty turn — a single long-running prompt
@@ -138,18 +182,32 @@ function normalizeMaxQueuedBytes(value: number | undefined): number {
   return value;
 }
 
-export function serializedBridgeEventByteLength(event: BridgeEvent): number {
+function normalizeReplayBudgetBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REPLAY_BUDGET_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('replayBudgetBytes must be a positive safe integer');
+  }
+  return value;
+}
+
+export function serializedBridgeEventByteLength(
+  event: BridgeEvent,
+): number | undefined {
   try {
     const serialized = JSON.stringify(event);
-    if (serialized === undefined) return 0;
+    // `undefined` (a bare non-JSON value) and throws (BigInt, circular
+    // references) both mean the event cannot survive the SSE wire —
+    // report that to the caller instead of pretending it weighs 0 bytes
+    // (which let unserializable events bypass every byte cap and then
+    // fail at send time — DAEMON-011).
+    if (serialized === undefined) return undefined;
     return Buffer.byteLength(serialized, 'utf8');
   } catch {
-    logEventSizingFailed(event.type);
-    return 0;
+    return undefined;
   }
 }
 
-function logEventSizingFailed(type: string): void {
+export function logEventSizingFailed(type: string): void {
   try {
     process.stderr.write(
       `qwen serve: EventBus event sizing failed ${JSON.stringify({ type })}\n`,
@@ -250,9 +308,18 @@ export class SubscriberLimitExceededError extends Error {
 // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export class EventBus {
   private nextId = 1;
+  /**
+   * Identity token for this bus instance. Regenerated on every construction
+   * (daemon restart / bus rebuild), never persisted — a cursor minted under
+   * a different epoch is provably stale no matter its numeric value.
+   */
+  readonly epoch: string = randomUUID();
+  private compactionDegraded = false;
+  private readonly onCompactionError?: (err: unknown) => void;
   private readonly ring: BridgeEvent[] = [];
   private readonly subs = new Set<InternalSub>();
   private readonly maxQueuedBytes: number;
+  private readonly replayBudgetBytes: number;
   private closed = false;
 
   constructor(
@@ -262,10 +329,27 @@ export class EventBus {
     opts: EventBusOptions = {},
   ) {
     this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
+    this.replayBudgetBytes = normalizeReplayBudgetBytes(opts.replayBudgetBytes);
+    this.onCompactionError = opts.onCompactionError;
   }
 
   snapshotReplay(): SessionReplaySnapshot | undefined {
-    return this.compactionEngine?.snapshot();
+    const snapshot = this.compactionEngine?.snapshot();
+    if (snapshot && this.compactionDegraded) {
+      return { ...snapshot, degraded: true };
+    }
+    return snapshot;
+  }
+
+  private markCompactionDegraded(err: unknown): void {
+    if (this.compactionDegraded) return;
+    this.compactionDegraded = true;
+    try {
+      this.onCompactionError?.(err);
+    } catch {
+      // Diagnostics callback must not break publish()'s never-throws
+      // contract.
+    }
   }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
@@ -300,9 +384,11 @@ export class EventBus {
     }
     try {
       this.compactionEngine?.seedReplayEvents(events);
-    } catch {
+    } catch (err) {
       // CompactionEngine is best-effort; mirror publish()'s never-throws
-      // contract for bulk replay seeding.
+      // contract for bulk replay seeding. Mark the snapshot degraded so
+      // consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
     }
 
     // Seeded replay frames intentionally do not enter the reconnect ring. A
@@ -342,7 +428,11 @@ export class EventBus {
     if (this.closed) return undefined;
     const existingMeta = input._meta;
     const event: BridgeEvent = {
-      id: this.nextId++,
+      // Read WITHOUT incrementing: a rejected event must not burn an id —
+      // other subscribers would see a sequence gap (3 → 5) that resume
+      // logic misreads as ring eviction. `nextId` advances only after the
+      // event has passed the serializability gate below.
+      id: this.nextId,
       v: EVENT_SCHEMA_VERSION,
       ...input,
       _meta: {
@@ -350,12 +440,28 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    // Eager sizing doubles as the serializability gate (DAEMON-011): an
+    // event JSON.stringify cannot represent would bypass every byte cap
+    // at weight 0 and then fail at SSE send time anyway. Reject it here —
+    // no ring entry, no compaction ingest, no fanout — so "in the ring"
+    // implies "serializable" for the replay and journal byte accounting.
+    // The SSE route stringifies every delivered frame regardless, so this
+    // only moves that cost earlier (once per publish, memoized for all
+    // subscribers).
+    const eventBytes = serializedBridgeEventByteLength(event);
+    if (eventBytes === undefined) {
+      logEventSizingFailed(event.type);
+      return undefined;
+    }
+    this.nextId += 1;
     this.ring.push(event);
     try {
-      this.compactionEngine?.ingest(event);
-    } catch {
+      this.compactionEngine?.ingest(event, eventBytes);
+    } catch (err) {
       // CompactionEngine is best-effort; a throw must not break the
-      // publish() never-throws contract (never-throws).
+      // publish() never-throws contract (never-throws). Mark the snapshot
+      // degraded so consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
     }
     // Eviction-by-shift is O(n) once the ring is full. At the current
     // default `ringSize=8000` (the target) the per-publish shift work
@@ -365,11 +471,7 @@ export class EventBus {
     // profiling actually flags it, or the operator bumps
     // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
-    let eventBytes: number | undefined;
-    const getEventBytes = () => {
-      eventBytes ??= serializedBridgeEventByteLength(event);
-      return eventBytes;
-    };
+    const getEventBytes = () => eventBytes;
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
     // Set we're iterating.
@@ -585,13 +687,22 @@ export class EventBus {
       // a bare `replay_complete{replayedCount:0}` — a false "you're caught
       // up" while its accumulated reducer state is stale data from the dead
       // epoch. Emit `state_resync_required` (reason `epoch_reset`) first.
-      const epochReset = opts.lastEventId >= this.nextId;
+      //
+      // The numeric heuristic alone is defeated once the new epoch's event
+      // count catches up with the stale cursor. When the consumer also
+      // presents the epoch token it minted the cursor under, a mismatch
+      // forces the same resync deterministically (DAEMON-001); `detail`
+      // lets operators tell the two triggers apart.
+      const epochMismatch =
+        opts.epoch !== undefined && opts.epoch !== this.epoch;
+      const epochReset = epochMismatch || opts.lastEventId >= this.nextId;
       if (epochReset) {
         queue.forcePush({
           v: EVENT_SCHEMA_VERSION,
           type: 'state_resync_required',
           data: {
             reason: 'epoch_reset',
+            ...(epochMismatch ? { detail: 'epoch_mismatch' } : {}),
             lastDeliveredId: opts.lastEventId,
             // Ring is typically empty right after a restart; fall back to
             // `nextId` (the first id this epoch will assign) so the field
@@ -638,10 +749,14 @@ export class EventBus {
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the
       // `Last-Event-ID` resume contract (the consumer would think they
-      // caught up). If the gap really is enormous, the queue will be
-      // primed with a long backlog the consumer drains at its own pace.
+      // caught up). The bypass is still bounded: `replayBudgetBytes` caps
+      // the total serialized bytes one replay burst may materialize
+      // (DAEMON-011) — past it the remaining frames are dropped and the
+      // consumer is told to recover via loadSession (resync frame below).
       let replayedCount = 0;
       let lastReplayedId: number | undefined;
+      let replayBytes = 0;
+      let budgetExceededAtId: number | undefined;
       for (const e of this.ring) {
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
@@ -649,10 +764,39 @@ export class EventBus {
         // BridgeEvent.id is optional for synthetic terminal frames.
         // Guard explicitly to keep narrow typing without runtime cost.
         if (e.id !== undefined && e.id > replayFrom) {
+          if (budgetExceededAtId !== undefined) continue;
+          // Ring events passed publish's serializability gate, so sizing
+          // cannot fail here; `?? 0` keeps the accounting total-ordered
+          // if it ever does. Sized lazily per frame — replay is a
+          // low-frequency path.
+          replayBytes += serializedBridgeEventByteLength(e) ?? 0;
+          if (replayBytes > this.replayBudgetBytes && replayedCount > 0) {
+            budgetExceededAtId = e.id;
+            continue;
+          }
           queue.forcePush(e);
           replayedCount += 1;
           lastReplayedId = e.id;
         }
+      }
+      // Budget exhausted mid-replay: the frames already pushed are the
+      // contiguous prefix from `replayFrom + 1`, so the consumer applied
+      // them safely — but everything past `budgetExceededAtId` was
+      // dropped. Tell the consumer its accumulated state is no longer
+      // trustworthy (recover via loadSession), exactly like the
+      // ring-eviction path. `replayedCount > 0` above guarantees at least
+      // one frame always fits so a single event larger than the budget
+      // still resumes (parity with the live byte cap's first-item rule).
+      if (budgetExceededAtId !== undefined) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'replay_budget_exceeded',
+            lastDeliveredId: lastReplayedId ?? opts.lastEventId,
+            earliestAvailableId: budgetExceededAtId,
+          },
+        });
       }
       // Emit a `replay_complete` sentinel so consumers can deterministically
       // drop catch-up indicators. Fires both when replay actually
@@ -748,7 +892,19 @@ export class EventBus {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const sub of this.subs) sub.queue.close();
+    for (const sub of this.subs) {
+      sub.queue.close();
+      // Dispose, not just close: `dispose()` also detaches the
+      // AbortSignal listener that `subscribe()` registered. Without it a
+      // subscriber that never started iterating kept its abort listener
+      // (and the queue + sub closures it captures) alive for as long as
+      // the caller's signal, long after the bus was gone — the same
+      // retention bug the eviction path fixed (see publish()) showing up
+      // on the close() path (DAEMON-010). Dispose is idempotent, and
+      // mutating `this.subs` mid-iteration is safe for Sets when only
+      // deleting the current element.
+      sub.dispose();
+    }
     this.subs.clear();
     this.compactionEngine?.close();
   }

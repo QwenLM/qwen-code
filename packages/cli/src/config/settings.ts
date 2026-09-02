@@ -33,7 +33,7 @@ import {
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { setNestedPropertySafe } from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
-import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
+import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
   V1_TO_V2_MIGRATION_MAP,
@@ -358,6 +358,19 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
+  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
+  // the merge; warn so the user knows their workspace setting has no effect.
+  const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
+      undefined
+  ) {
+    warningSet.add(
+      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
+
   return [...warningSet];
 }
 
@@ -385,6 +398,22 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+/**
+ * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
+ * so it must never be honored from Workspace scope — otherwise a malicious
+ * repository could self-grant the bypass and point hooks at link-local or
+ * private infrastructure. Strip it from workspace settings before merging.
+ * Returns a shallow copy — never mutates input.
+ */
+function stripWorkspacePrivateNetworkHooks(settings: Settings): Settings {
+  if (settings.security?.allowPrivateNetworkHooks === undefined) {
+    return settings;
+  }
+  const { allowPrivateNetworkHooks: _stripped, ...restSecurity } =
+    settings.security;
+  return { ...settings, security: restSecurity };
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -393,7 +422,10 @@ function mergeSettings(
   isTrusted: boolean,
 ): Settings {
   const safeWorkspace = isTrusted
-    ? tagMcpServerScope(workspace, 'workspace')
+    ? tagMcpServerScope(
+        stripWorkspacePrivateNetworkHooks(workspace),
+        'workspace',
+      )
     : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
@@ -481,11 +513,17 @@ export class LoadedSettings {
     }
   }
 
-  setValue(scope: SettingScope, key: string, value: unknown): void {
+  setValue(
+    scope: SettingScope,
+    key: string,
+    value: unknown,
+    assertCanCommit?: () => void,
+  ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
       value = stripRuntimeSnapshotPrefix(value);
     }
+    assertCanCommit?.();
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
@@ -501,6 +539,7 @@ export class LoadedSettings {
       value: unknown;
     }>,
     onScopeCommitted?: (scope: SettingScope) => void,
+    assertCanCommit?: () => void,
   ): void {
     const scopes = new Set<SettingScope>();
     for (const write of writes) {
@@ -518,6 +557,7 @@ export class LoadedSettings {
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
       try {
+        assertCanCommit?.();
         saveSettings(this.forScope(scope), undefined, undefined, {
           throwOnWriteFailure: true,
         });
@@ -661,6 +701,8 @@ export const CORRUPTED_SUFFIX = '.corrupted';
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
+  skipWorkspaceSettings?: boolean;
+  workspaceTrusted?: boolean;
 }
 
 export function loadSettings(
@@ -916,7 +958,8 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  const workspaceSettingsActive =
+    !opts.skipWorkspaceSettings && realWorkspaceDir !== realHomeDir;
   if (workspaceSettingsActive) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
@@ -973,11 +1016,13 @@ export function loadSettings(
     userSettings,
   );
   const isTrusted =
+    opts.workspaceTrusted ??
     isWorkspaceTrusted(
       initialTrustCheckSettings as Settings,
       undefined,
       realWorkspaceDir,
-    ).isTrusted ?? true;
+    ).isTrusted ??
+    true;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

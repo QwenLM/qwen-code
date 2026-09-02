@@ -5,7 +5,12 @@
  */
 
 import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
-import { CircleDotIcon, LayersIcon, TriangleAlertIcon } from 'lucide-react';
+import {
+  CircleDotIcon,
+  GitForkIcon,
+  LayersIcon,
+  TriangleAlertIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import styles from './ChatEditor.module.css';
 import {
@@ -77,6 +82,42 @@ function badgeTone(s: DerivedStatus): BadgeTone | null {
   return null;
 }
 
+type TranslateFn = ReturnType<typeof useI18n>['t'];
+
+function statusPhrases(s: DerivedStatus, t: TranslateFn): string[] {
+  const phrases: string[] = [];
+  if (s.operation) phrases.push(t(`git.operation.${s.operation}`));
+  if (s.detached) phrases.push(t('git.detached'));
+  if (s.conflicted > 0)
+    phrases.push(t('git.conflicted', { count: s.conflicted }));
+  if (s.staged > 0) phrases.push(t('git.staged', { count: s.staged }));
+  if (s.unstaged > 0) phrases.push(t('git.unstaged', { count: s.unstaged }));
+  if (s.untracked > 0) phrases.push(t('git.untracked', { count: s.untracked }));
+  if (s.ahead > 0) phrases.push(t('git.ahead', { count: s.ahead }));
+  if (s.behind > 0) phrases.push(t('git.behind', { count: s.behind }));
+  if (s.stashCount > 0) phrases.push(t('git.stash', { count: s.stashCount }));
+  return phrases;
+}
+
+/**
+ * Composed accessible label for a git branch chip, e.g.
+ * "Current branch: main — 3 staged, 2 ahead". Shared by the indicator and any
+ * wrapper button so the accessible name never drifts from the tooltip phrases.
+ */
+export function gitBranchAriaLabel(
+  branch: string,
+  status: DaemonWorkspaceGitStatus | undefined,
+  t: TranslateFn,
+): string {
+  const phrases = statusPhrases(deriveStatus(status), t);
+  if (phrases.length > 0) {
+    return `${t('git.currentBranch', { branch })} — ${phrases.join(', ')}`;
+  }
+  return status?.computedAt !== undefined
+    ? `${t('git.currentBranch', { branch })} — ${t('git.clean')}`
+    : t('git.currentBranch', { branch });
+}
+
 /**
  * The chip's inner content (icon + branch + status indicators), shared by the
  * interactive {@link GitBranchIndicator} and the toolbar's hidden measurement
@@ -87,10 +128,12 @@ export function GitBranchChipContent({
   branch,
   status,
   compact,
+  worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact: boolean;
+  worktree?: boolean;
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
@@ -99,7 +142,13 @@ export function GitBranchChipContent({
     <>
       <span className={styles.gitBranchIconWrap}>
         <span className={styles.gitBranchIcon}>
-          {s.detached ? <CircleDotIcon /> : <GitBranchIcon />}
+          {worktree ? (
+            <GitForkIcon size={14} strokeWidth={1.5} />
+          ) : s.detached ? (
+            <CircleDotIcon />
+          ) : (
+            <GitBranchIcon />
+          )}
         </span>
         {compact && tone && (
           <span
@@ -147,35 +196,21 @@ export function GitBranchIndicator({
   status,
   compact = false,
   onOpenDiff,
+  worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
   onOpenDiff?: () => void;
+  worktree?: boolean;
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
 
   // Localized state phrases drive both the accessible label and the tooltip,
   // so the two never drift apart.
-  const phrases: string[] = [];
-  if (s.operation) phrases.push(t(`git.operation.${s.operation}`));
-  if (s.detached) phrases.push(t('git.detached'));
-  if (s.conflicted > 0)
-    phrases.push(t('git.conflicted', { count: s.conflicted }));
-  if (s.staged > 0) phrases.push(t('git.staged', { count: s.staged }));
-  if (s.unstaged > 0) phrases.push(t('git.unstaged', { count: s.unstaged }));
-  if (s.untracked > 0) phrases.push(t('git.untracked', { count: s.untracked }));
-  if (s.ahead > 0) phrases.push(t('git.ahead', { count: s.ahead }));
-  if (s.behind > 0) phrases.push(t('git.behind', { count: s.behind }));
-  if (s.stashCount > 0) phrases.push(t('git.stash', { count: s.stashCount }));
-
-  const ariaLabel =
-    phrases.length > 0
-      ? `${t('git.currentBranch', { branch })} — ${phrases.join(', ')}`
-      : status?.computedAt !== undefined
-        ? `${t('git.currentBranch', { branch })} — ${t('git.clean')}`
-        : t('git.currentBranch', { branch });
+  const phrases = statusPhrases(s, t);
+  const ariaLabel = gitBranchAriaLabel(branch, status, t);
 
   const chipClassName = `${styles.gitBranchChip} ${
     compact ? styles.gitBranchChipCompact : ''
@@ -187,10 +222,16 @@ export function GitBranchIndicator({
     'data-dirty': s.dirty ? 'true' : undefined,
     'data-operation': s.operation ?? undefined,
     'data-clickable': onOpenDiff ? 'true' : undefined,
+    'data-worktree': worktree ? 'true' : undefined,
   } as const;
 
   const chipInner = (
-    <GitBranchChipContent branch={branch} status={status} compact={compact} />
+    <GitBranchChipContent
+      branch={branch}
+      status={status}
+      compact={compact}
+      worktree={worktree}
+    />
   );
 
   return (

@@ -11,6 +11,18 @@ import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { getSelectedText } from '../selection/selection-text.js';
+
+function copiedFrame(stdout: NodeJS.WriteStream): string {
+  const frame = getScreenBuffer(stdout)!.frame!;
+  return getSelectedText(frame, {
+    sx: 0,
+    sy: 0,
+    ex: frame.width - 1,
+    ey: frame.height - 1,
+  });
+}
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -375,10 +387,13 @@ describe('<MarkdownDisplay />', () => {
 * item B
 + item C
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '- item A\n* item B\n+ item C',
+      );
     });
 
     it('renders nested unordered lists', () => {
@@ -425,10 +440,13 @@ Test
 | Cell 1   | Cell 2   |
 | Cell 3   | Cell 4   |
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '│ Cell 1   │  Cell 2  │',
+      );
     });
 
     it('handles a table at the end of the input', () => {
@@ -1079,7 +1097,7 @@ Another paragraph.
       );
       const output = lastFrame();
       expect(output).toContain('✓ Done');
-      expect(output).toContain('○ Todo');
+      expect(output).toContain('○\uFE0E Todo');
     });
 
     it('keeps pipes inside markdown table code spans in the same cell', () => {
@@ -1114,6 +1132,25 @@ Another paragraph.
       expect(output).toContain('α');
       expect(output).toContain('alpha');
       expect(output).not.toContain('$\\alpha$');
+    });
+
+    it('renders escaped dollars in table prose and keeps code spans verbatim', () => {
+      const text = `
+| Formula | Literal | Code | Mixed |
+|---------|---------|------|-------|
+| $x$ | \\$xy$ | \`\`a \`$zz$\` b\`\` | $x + \\$5$ |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = stripAnsi(lastFrame() ?? '');
+
+      expect(output).toContain('│ x');
+      expect(output).toContain('$xy$');
+      expect(output).not.toContain('\\$xy$');
+      expect(output).toContain('a `$zz$` b');
+      expect(output).toContain('x + $5');
+      expect(output).not.toContain('$x$');
     });
 
     it('keeps pipes inside markdown table math spans in the same cell', () => {

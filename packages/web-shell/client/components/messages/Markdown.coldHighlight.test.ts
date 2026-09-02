@@ -45,7 +45,7 @@ beforeEach(() => {
 });
 
 describe('CodeBlock cold-highlight path', () => {
-  it("drops the previous block's highlight and shows plain text while a cold language loads", async () => {
+  it("drops the previous block's highlight without loading a grammar while streaming", async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -62,10 +62,8 @@ describe('CodeBlock cold-highlight path', () => {
     });
     expect(container.textContent).toContain('const aaa = 1;');
 
-    // Regenerate the same slot into Python, whose grammar is held pending. The
-    // sync path returns null, so the effect enters the cold path. The stale
-    // `const aaa` highlight MUST be cleared and the new code shown as plain text
-    // until the (never-resolving) load completes — not the previous content.
+    // Regenerate the same slot into Python. Streaming deliberately stays on the
+    // plain-text path and does not load or tokenize the grammar.
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -77,10 +75,7 @@ describe('CodeBlock cold-highlight path', () => {
 
     expect(container.textContent).not.toContain('aaa');
     expect(container.textContent).toContain('xyzzy = 123456');
-    // Pin that we actually exercised the *cold* path (async load), not a warm
-    // sync highlight — otherwise a mock-setup drift (python highlighting
-    // synchronously) would make the assertions above pass for the wrong reason.
-    expect(mocks.getCodeHighlighter).toHaveBeenCalledWith('python');
+    expect(mocks.getCodeHighlighter).not.toHaveBeenCalledWith('python');
 
     await act(async () => {
       root.unmount();
@@ -103,7 +98,7 @@ describe('CodeBlock cold-highlight path', () => {
       root.render(
         createElement(Markdown, {
           content: '```python\nxyzzy = 123456\n```',
-          isStreaming: true,
+          isStreaming: false,
         }),
       );
     });

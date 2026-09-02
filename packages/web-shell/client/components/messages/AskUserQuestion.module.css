@@ -186,6 +186,11 @@
   background: var(--accent);
 }
 
+.option:disabled,
+.customTrigger:disabled {
+  cursor: not-allowed;
+}
+
 .option:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: -2px;
@@ -359,9 +364,17 @@
 }
 
 .submitButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: var(--primary);
   color: var(--primary-foreground);
   border-color: transparent;
+}
+
+.submitSpinner {
+  width: 14px;
+  height: 14px;
 }
 
 .ignoreButton {
@@ -379,4 +392,9 @@
 
 .ignoreButton:hover {
   color: var(--foreground);
+}
+
+.ignoreButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }

@@ -13,7 +13,11 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
-import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  InputModalities,
+  MemoryProjectScope,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -60,7 +64,7 @@ export interface ServeOptions {
    * this, new `POST /session` requests that would spawn fresh sessions
    * return 503. Attaching to an existing session (same workspace under
    * `sessionScope: 'single'`) still works — so an idle daemon doesn't
-   * block reconnects from existing users. Defaults to 20: comfortably
+   * block reconnects from existing users. Defaults to 32: comfortably
    * above single-user usage, well below the design's N≈50 cliff where
    * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
    * `0` or `Infinity` to disable.
@@ -110,6 +114,18 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
+   * to 10 000. Must be a positive safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. Threaded into
+   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
+   * safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Absolute workspace path this daemon binds as its primary workspace.
    * The CLI parser accepts repeated `--workspace` values to register isolated
    * runtimes, but this public option remains the primary workspace string so
@@ -123,6 +139,14 @@ export interface ServeOptions {
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Project-memory partitioning for every runtime owned by this daemon.
+   * `workspace` keys memory by the exact registered workspace; `git-root`
+   * preserves the legacy behavior that shares memory among workspaces
+   * resolved to the same Git root. When omitted,
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment.
+   */
+  memoryProjectScope?: MemoryProjectScope;
   /**
    * When true, refuses to boot without a bearer
    * token — even on loopback. Loopback's no-token developer default
@@ -222,6 +246,12 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -316,6 +346,7 @@ export interface CapabilitiesEnvelope {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     removable?: boolean;

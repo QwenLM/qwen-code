@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import sharp from 'sharp';
 import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -131,6 +132,21 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('uses display paths for canonical reads', async () => {
+      const { absolutePath } = await createTestFile('target.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [absolutePath],
+        displayPaths: new Map([[absolutePath, 'alias.txt']]),
+      });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Content from alias.txt');
+      expect(content).not.toContain(`Content from ${absolutePath}`);
+      expect(result.files[0]!.filePath).toBe('alias.txt');
+    });
+
     it('should read multiple files', async () => {
       await createTestFile('file1.txt');
       await createTestFile('file2.txt');
@@ -168,6 +184,28 @@ describe('readManyFiles', () => {
       expect(result.files).toHaveLength(0);
     });
 
+    it('drops a validated read when the identity map has no matching path key', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [
+            path.join(tempRootDir, 'other.txt'),
+            { dev: approvedStats.dev, ino: approvedStats.ino },
+          ],
+        ]),
+      });
+
+      expect(contentToString(result.contentParts)).not.toContain(
+        'Content of approved.txt',
+      );
+      expect(result.files).toHaveLength(0);
+    });
+
     it('reads a validated file from its approved handle during an ABA path swap', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
@@ -179,14 +217,14 @@ describe('readManyFiles', () => {
       const outsidePath = path.join(outsideDir, 'secret.txt');
       await fs.writeFile(outsidePath, 'outside secret');
       const fileSystemService = new StandardFileSystemService();
-      const readTextFile =
-        fileSystemService.readTextFile.bind(fileSystemService);
-      vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
+      const readTextFileFromHandle =
+        fileSystemService.readTextFileFromHandle.bind(fileSystemService);
+      vi.spyOn(fileSystemService, 'readTextFileFromHandle').mockImplementation(
         async (options) => {
           await fs.rename(absolutePath, backupPath);
           await fs.symlink(outsidePath, absolutePath);
           try {
-            return await readTextFile(options);
+            return await readTextFileFromHandle(options);
           } finally {
             await fs.unlink(absolutePath);
             await fs.rename(backupPath, absolutePath);
@@ -196,7 +234,7 @@ describe('readManyFiles', () => {
       const mockConfig = {
         ...createMockConfig(tempRootDir),
         getFileSystemService: () => fileSystemService,
-      } as Config;
+      } as unknown as Config;
 
       try {
         const result = await readManyFiles(mockConfig, {
@@ -211,6 +249,212 @@ describe('readManyFiles', () => {
         expect(content).not.toContain('outside secret');
       } finally {
         await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads validated large text through a bounded handle without snapshotting', async () => {
+      const relativePath = 'large-approved.log';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const line = `${'x'.repeat(20)}\n`;
+      await fs.writeFile(
+        absolutePath,
+        line.repeat(Math.ceil((11 * 1024 * 1024) / line.length)),
+        'utf-8',
+      );
+      const approvedStats = await fs.stat(absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFileSpy = vi.spyOn(fileSystemService, 'readTextFile');
+      const readTextFileFromHandleSpy = vi.spyOn(
+        fileSystemService,
+        'readTextFileFromHandle',
+      );
+      const mkdtempSpy = vi.spyOn(fs, 'mkdtemp');
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+        const content = contentToString(result.contentParts);
+
+        expect(content).toContain('Showing lines 1-');
+        expect(content).toContain('... [truncated]');
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.error).toBeUndefined();
+        expect(readTextFileFromHandleSpy).toHaveBeenCalled();
+        expect(readTextFileSpy).not.toHaveBeenCalled();
+        expect(mkdtempSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen-validated-read-'),
+        );
+      } finally {
+        readTextFileSpy.mockRestore();
+        readTextFileFromHandleSpy.mockRestore();
+        mkdtempSpy.mockRestore();
+      }
+    });
+
+    it('reads validated text through a handle when truncation is disabled', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFileFromHandleSpy = vi.spyOn(
+        fileSystemService,
+        'readTextFileFromHandle',
+      );
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+      });
+
+      expect(contentToString(result.contentParts)).toContain(
+        'Content of approved.txt',
+      );
+      expect(readTextFileFromHandleSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxOutputBytes: Number.MAX_SAFE_INTEGER,
+          maxScanBytes: approvedStats.size,
+        }),
+      );
+    });
+
+    it('keeps sibling files when one validated text file fails to open', async () => {
+      const good = await createTestFile('good.txt');
+      const bad = await createTestFile('bad.txt');
+      const goodStats = await fs.stat(good.absolutePath);
+      const badStats = await fs.stat(bad.absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const originalOpen = fs.open.bind(fs);
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          if (String(args[0]) === bad.absolutePath) {
+            const err: NodeJS.ErrnoException = new Error(
+              'EACCES: permission denied',
+            );
+            err.code = 'EACCES';
+            throw err;
+          }
+          return originalOpen(...args);
+        });
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [good.relativePath, bad.relativePath],
+          validatedPathIdentities: new Map([
+            [good.absolutePath, { dev: goodStats.dev, ino: goodStats.ino }],
+            [bad.absolutePath, { dev: badStats.dev, ino: badStats.ino }],
+          ]),
+        });
+        const text = contentToString(result.contentParts);
+
+        expect(text).toContain('Content of good.txt');
+        expect(text).toContain('Error reading');
+        expect(text).toContain('EACCES');
+        expect(result.files).toHaveLength(2);
+        expect(result.files[0]!.error).toBeUndefined();
+        expect(result.files[1]!.error).toContain('EACCES');
+        expect(result.error).toBeUndefined();
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+
+    it('keeps validated text reads on custom file systems on the original path', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const stats = await fs.stat(absolutePath);
+      const readTextFile = vi.fn(async () => ({
+        content: 'unsaved buffer',
+        _meta: {
+          originalLineCount: 1,
+          originalLineCountExact: true,
+        },
+      }));
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => ({
+          readTextFile,
+          writeTextFile: vi.fn(),
+          findFiles: vi.fn(),
+        }),
+      } as unknown as Config;
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
+
+      expect(readTextFile).toHaveBeenCalledWith(
+        expect.objectContaining({ path: absolutePath }),
+      );
+      expect(contentToString(result.contentParts)).toContain('unsaved buffer');
+    });
+
+    it('does not cache a validated custom-fs read dropped after identity drift', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const backupPath = `${absolutePath}.approved`;
+      const stats = await fs.stat(absolutePath);
+      const cache = new FileReadCache();
+      const readTextFile = vi.fn(async () => {
+        await fs.rename(absolutePath, backupPath);
+        await fs.writeFile(absolutePath, 'replacement secret');
+        return {
+          content: 'unsaved buffer',
+          _meta: {
+            originalLineCount: 1,
+            originalLineCountExact: true,
+          },
+        };
+      });
+      const mockConfig = {
+        ...createMockConfigWithCache(tempRootDir, cache),
+        getFileSystemService: () => ({
+          readTextFile,
+          writeTextFile: vi.fn(),
+          findFiles: vi.fn(),
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: stats.dev, ino: stats.ino }],
+          ]),
+        });
+
+        const content = contentToString(result.contentParts);
+        expect(content).not.toContain('unsaved buffer');
+        expect(content).not.toContain('replacement secret');
+        expect(result.files).toHaveLength(0);
+        expect(cache.size()).toBe(0);
+        const decision = await checkPriorRead(cache, absolutePath, 'editing');
+        expect(decision.ok).toBe(false);
+      } finally {
+        await fs.unlink(absolutePath).catch(() => {});
+        await fs.rename(backupPath, absolutePath).catch(() => {});
       }
     });
 
@@ -259,11 +503,19 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.filePath).toBe(absolutePath);
     });
 
-    it('preserves unsupported images when the bridge handoff flag is set', async () => {
+    it('renders canonical images through the overview pipeline even when the bridge handoff flag is set', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
-      const imageBytes = Buffer.from('fake png data');
-      await fs.writeFile(absolutePath, imageBytes);
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(absolutePath);
       const mockConfig = createMockConfig(tempRootDir);
 
       const result = await readManyFiles(mockConfig, {
@@ -276,13 +528,165 @@ describe('readManyFiles', () => {
       expect(
         (imagePart as { inlineData: { mimeType: string; data: string } })
           .inlineData,
-      ).toEqual({
-        mimeType: 'image/png',
-        data: imageBytes.toString('base64'),
+      ).toMatchObject({
+        mimeType: 'image/jpeg',
+        data: expect.any(String),
         displayName: 'screenshot.png',
       });
+      const parts = result.contentParts as Part[];
+      const imageIndex = parts.indexOf(imagePart!);
+      expect(parts[imageIndex - 2]?.text).toBe(
+        `\nContent from ${absolutePath}:\n`,
+      );
+      expect(parts[imageIndex - 1]?.text).toContain(
+        'Image overview: 20x10; oriented source: 20x10',
+      );
       expect(result.files).toHaveLength(1);
-      expect(result.files[0]!.content).toEqual(imagePart);
+      expect(result.files[0]!.content).toEqual([
+        parts[imageIndex - 1],
+        imagePart,
+      ]);
+    });
+
+    it('reads a validated image from its approved snapshot during a path swap', async () => {
+      const relativePath = 'approved.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(absolutePath);
+      const approvedStats = await fs.stat(absolutePath);
+      const backupPath = `${absolutePath}.approved`;
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'read-many-files-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.png');
+      await fs.writeFile(outsidePath, Buffer.from('outside secret'));
+      const readFile = fs.readFile.bind(fs);
+      let swappedAfterSnapshotRead = false;
+      const readFileSpy = vi
+        .spyOn(fs, 'readFile')
+        .mockImplementation(async (file, options) => {
+          const result = await readFile(file, options);
+          // The first snapshot read proves the descriptor is already bound to
+          // the approved inode before the visible path is swapped.
+          if (String(file).includes('qwen-validated-read-')) {
+            swappedAfterSnapshotRead = true;
+            await fs.rename(absolutePath, backupPath);
+            await fs.symlink(outsidePath, absolutePath);
+          }
+          return result;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          preserveUnsupportedImageForBridge: true,
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+        const imagePart = findInlineDataPart(result.contentParts);
+
+        expect(imagePart).toBeDefined();
+        expect(swappedAfterSnapshotRead).toBe(true);
+        expect(contentToString(result.contentParts)).not.toContain(
+          'outside secret',
+        );
+      } finally {
+        readFileSpy.mockRestore();
+        await fs.rm(absolutePath, { force: true });
+        await fs.rename(backupPath, absolutePath).catch(() => undefined);
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops a validated directory when its identity changes after reading', async () => {
+      const relativePath = 'approved-dir';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.mkdir(absolutePath);
+      await fs.writeFile(path.join(absolutePath, 'visible.txt'), 'visible');
+      const approvedStats = await fs.stat(absolutePath);
+      const originalStat = fs.stat.bind(fs);
+      let validatedStats = 0;
+      const statSpy = vi.spyOn(fs, 'stat').mockImplementation(async (file) => {
+        const stats = await originalStat(file);
+        if (file === absolutePath && ++validatedStats === 2) {
+          return { ...stats, ino: stats.ino + 1 } as nodeFs.Stats;
+        }
+        return stats;
+      });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+
+        expect(contentToString(result.contentParts)).not.toContain(
+          'visible.txt',
+        );
+        expect(result.files).toHaveLength(0);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('drops a validated snapshot when the source grows during copying', async () => {
+      const relativePath = 'approved.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.alloc(8, 0x01));
+      const approvedStats = await fs.stat(absolutePath);
+      const originalOpen = fs.open.bind(fs);
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await originalOpen(...args);
+          if (args[0] === absolutePath) {
+            const originalRead = handle.read.bind(handle);
+            let appended = false;
+            vi.spyOn(handle, 'read').mockImplementation((async (
+              buffer: NodeJS.ArrayBufferView,
+              offset?: number | null,
+              length?: number | null,
+              position?: number | null,
+            ) => {
+              if (!appended && position === approvedStats.size) {
+                appended = true;
+                await fs.appendFile(absolutePath, Buffer.from([0x02]));
+              }
+              return originalRead(buffer, offset, length, position);
+            }) as typeof handle.read);
+          }
+          return handle;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+
+        expect(result.files).toHaveLength(0);
+        expect(contentToString(result.contentParts)).not.toContain(
+          'approved.bin',
+        );
+      } finally {
+        openSpy.mockRestore();
+      }
     });
 
     it('skips unsupported images when the bridge handoff flag is absent', async () => {
@@ -578,6 +982,53 @@ describe('readManyFiles', () => {
       // Downstream callers (e.g. atCommandProcessor) inspect this field to
       // render the read as failed rather than successful.
       expect(result.files[0]!.error).toMatch(/exceeds the 10MB limit/i);
+      expect(result.files[0]!.error).not.toContain('qwen-validated-read-');
+    });
+
+    it('uses display paths for validated binary-file messages', async () => {
+      const relativePath = 'blob.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.from([0x00, 0x01]));
+      const stats = await fs.stat(absolutePath);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+        displayPaths: new Map([[absolutePath, 'alias.bin']]),
+      });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain(
+        'Cannot display content of binary file: alias.bin',
+      );
+      expect(content).not.toContain('qwen-validated-read-');
+    });
+
+    it('surfaces a size error for a validated file too large to snapshot', async () => {
+      const relativePath = 'huge-image.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const handle = await fs.open(absolutePath, 'w');
+      await handle.truncate(101 * 1024 * 1024 + 1);
+      await handle.close();
+      const stats = await fs.stat(absolutePath);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
+
+      const content = contentToString(result.contentParts);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toMatch(/exceeds/i);
+      expect(content).not.toContain(
+        'No files matching the criteria were found',
+      );
     });
   });
 
@@ -603,6 +1054,28 @@ describe('readManyFiles', () => {
       // a redundant read_file.
       const after = await checkPriorRead(cache, absolutePath, 'editing');
       expect(after.ok).toBe(true);
+    });
+
+    it('records a validated text read by canonical path for prior-read enforcement', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('validated.ts');
+      const approvedStats = await fs.stat(absolutePath);
+      const cache = new FileReadCache();
+      const fileSystemService = new StandardFileSystemService();
+      const mockConfig = {
+        ...createMockConfigWithCache(tempRootDir, cache),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+        ]),
+      });
+
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(true);
     });
 
     it('records the read as fresh and cacheable in the FileReadCache', async () => {

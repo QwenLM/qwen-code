@@ -5,8 +5,8 @@ import {
   getChannelMemoryRevision,
   listChannelMemoryEntries,
   nextFireTime,
-  parseCron,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
@@ -18,11 +18,7 @@ import {
   ChannelLoopStore,
   SessionRouter,
 } from '@qwen-code/channel-base';
-import type {
-  ChannelBase,
-  ChannelBaseOptions,
-  ChannelLoopController,
-} from '@qwen-code/channel-base';
+import type { ChannelBase, ChannelBaseOptions } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
 import {
@@ -36,6 +32,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -43,6 +40,10 @@ import {
   sessionsPath,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 export { resolveProxy } from './proxy.js';
@@ -62,7 +63,10 @@ function isFileExistsError(err: unknown): boolean {
 function channelMemoryOptions(
   getBridge: () => AcpBridge,
   cwd: string,
-): Pick<ChannelBaseOptions, 'channelMemory' | 'memoryIntentClassifier'> {
+): Pick<
+  ChannelBaseOptions,
+  'channelMemory' | 'memoryIntentClassifier' | 'channelMemoryRecallObserver'
+> {
   return {
     channelMemory: {
       readChannelMemory,
@@ -77,31 +81,8 @@ function channelMemoryOptions(
       getBridge,
       cwd,
     ),
+    channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
   };
-}
-
-function createLoopController(store: ChannelLoopStore): ChannelLoopController {
-  return {
-    create: (input) => store.create(input),
-    createForTarget: (input, maxEnabledLoops) =>
-      store.createForTarget(input, maxEnabledLoops),
-    listForTarget: (channelName, target) =>
-      store.listForTarget(channelName, target),
-    disable: (id) => store.disable(id),
-    validateCron: (cron) => {
-      parseCron(cron);
-      nextFireTime(cron, new Date());
-    },
-    nextFireTime: (job) =>
-      nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
-  };
-}
-
-function isChannelCronEnabled(settings: {
-  merged: { experimental?: { cron?: boolean } };
-}): boolean {
-  if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
-  return settings.merged.experimental?.cron !== false;
 }
 
 function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
@@ -213,7 +194,7 @@ async function startSingle(
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
   const loopController = loopStore
-    ? createLoopController(loopStore)
+    ? createChannelLoopController(loopStore)
     : undefined;
   const channels: Map<string, ChannelBase> = new Map();
 
@@ -232,6 +213,7 @@ async function startSingle(
       })
     : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -286,6 +268,7 @@ async function startSingle(
         channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
         registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -371,7 +354,7 @@ async function startAll(
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
   const loopController = loopStore
-    ? createLoopController(loopStore)
+    ? createChannelLoopController(loopStore)
     : undefined;
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
@@ -395,6 +378,7 @@ async function startAll(
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -494,6 +478,7 @@ async function startAll(
           process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
         registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -555,7 +540,7 @@ export const startCommand: CommandModule<object, { name?: string }> = {
     }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );

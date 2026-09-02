@@ -14,6 +14,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -28,6 +29,8 @@ interface RegisterWorkspaceLifecycleRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export function registerWorkspaceLifecycleRoutes(
@@ -46,6 +49,17 @@ export function registerWorkspaceLifecycleRoutes(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    try {
+      assertGenerationOpen?.();
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/init' });
+      return;
+    }
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     const body = safeBody(req);
     const force = body['force'];
     if (force !== undefined && typeof force !== 'boolean') {
@@ -58,6 +72,7 @@ export function registerWorkspaceLifecycleRoutes(
     const clientId = parseAndValidateClientId(req, res);
     if (clientId === null) return;
     try {
+      assertGenerationOpen?.();
       const ctx = buildWorkspaceCtx('POST /workspace/init', clientId);
       const result = await workspace.initWorkspace(ctx, {
         force: force === true,
@@ -69,6 +84,11 @@ export function registerWorkspaceLifecycleRoutes(
   });
 
   app.post('/workspace/reload', mutate({ strict: true }), async (req, res) => {
+    void (req.app.locals as { requestTrustReconcile?: () => Promise<void> })
+      .requestTrustReconcile?.()
+      .catch(() => {
+        // The policy monitor reports reconciliation failures separately.
+      });
     const clientId = parseAndValidateClientId(req, res);
     if (clientId === null) return;
     try {
@@ -136,6 +156,11 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
     '/workspaces/:workspace/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      void (req.app.locals as { requestTrustReconcile?: () => Promise<void> })
+        .requestTrustReconcile?.()
+        .catch(() => {
+          // The policy monitor reports reconciliation failures separately.
+        });
       const runtime = resolveWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,

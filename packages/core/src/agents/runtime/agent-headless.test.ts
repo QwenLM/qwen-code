@@ -43,6 +43,7 @@ import {
 import {
   AgentEventEmitter,
   AgentEventType,
+  type AgentRoundTextEvent,
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
@@ -55,6 +56,8 @@ import type {
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
+import { ToolNames } from '../../tools/tool-names.js';
+import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -132,6 +135,7 @@ vi.mock('../../subagents/subagent-manager.js', () => {
     .fn()
     .mockReturnValue(() => {});
   SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  SubagentManagerMock.prototype.getAvailableModelGrades = () => new Map();
   return { SubagentManager: SubagentManagerMock };
 });
 
@@ -543,6 +547,233 @@ describe('subagent.ts', () => {
         ]);
       });
 
+      it('should reuse chat and tools for sequential follow-up turns', async () => {
+        const { config, toolRegistry } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const externalMessages: string[] = [];
+        scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+          externalMessages.push(event.text);
+        });
+
+        const initialContext = new ContextState();
+        initialContext.set('task_prompt', 'Initial task');
+        await scope.execute(initialContext);
+
+        scope.getCore().recordToolCallStats('stale_tool', true, 25);
+        scope.getCore().stats.recordTokens(100, 50);
+
+        const followUpContext = new ContextState();
+        followUpContext.set('task_prompt', 'Follow-up task');
+        await scope.execute(followUpContext);
+
+        expect(GeminiChat).toHaveBeenCalledTimes(1);
+        expect(toolRegistry.warmAll).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
+          { text: 'Initial task' },
+        ]);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '[Message from parent agent]: Follow-up task' },
+        ]);
+        expect(mockSendMessageStream.mock.calls[0][2]).not.toBe(
+          mockSendMessageStream.mock.calls[1][2],
+        );
+        expect(mockSendMessageStream.mock.calls[0][2]).toMatch(/#0$/);
+        expect(mockSendMessageStream.mock.calls[1][2]).toMatch(/#1$/);
+        expect(externalMessages).toEqual(['Follow-up task']);
+        expect(scope.getExecutionSummary()).toMatchObject({
+          rounds: 1,
+          totalToolCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          toolUsage: [],
+        });
+        expect(scope.getStatistics()).toMatchObject({
+          rounds: 1,
+          totalToolCalls: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          toolUsage: [],
+        });
+      });
+
+      it('should continue with atomically claimed finishing inputs', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const externalEvents: Array<{
+          kind: string | undefined;
+          text: string;
+        }> = [];
+        scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+          externalEvents.push({ kind: event.kind, text: event.text });
+        });
+
+        const initialContext = new ContextState();
+        initialContext.set('task_prompt', 'Initial task');
+        await scope.execute(initialContext);
+        await scope.executeExternalInputs(
+          ['late correction', { kind: 'notification', text: 'monitor fired' }],
+          undefined,
+          { resetStats: false },
+        );
+
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '[Message from parent agent]: late correction' },
+          { text: 'monitor fired' },
+        ]);
+        expect(externalEvents).toEqual([
+          { kind: 'message', text: 'late correction' },
+          { kind: 'notification', text: 'monitor fired' },
+        ]);
+        expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
+      });
+
+      it('should preserve statistics for continuation work in the same logical turn', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        await scope.execute(new ContextState());
+        scope.getCore().recordToolCallStats('first_attempt_tool', true, 25);
+        scope.getCore().stats.recordTokens(100, 50);
+        scope.getCore().executionStats.inputTokens = 100;
+        scope.getCore().executionStats.outputTokens = 50;
+        scope.getCore().executionStats.totalTokens = 150;
+        const logicalTurnStart = Date.now() - 10_000;
+        scope.getCore().executionStats.startTimeMs = logicalTurnStart;
+        scope.getCore().stats.start(logicalTurnStart);
+
+        const continuationContext = new ContextState();
+        continuationContext.set('task_prompt', 'Address the stop-hook reason');
+        await scope.execute(continuationContext, undefined, {
+          resetStats: false,
+        });
+
+        expect(scope.getExecutionSummary()).toMatchObject({
+          rounds: 2,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+        });
+        expect(scope.getCore().executionStats.startTimeMs).toBe(
+          logicalTurnStart,
+        );
+        expect(
+          scope.getCore().executionStats.totalDurationMs,
+        ).toBeGreaterThanOrEqual(10_000);
+        expect(scope.getStatistics()).toMatchObject({
+          rounds: 2,
+          totalDurationMs: expect.any(Number),
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+        });
+      });
+
+      it('should reject concurrent execute calls', async () => {
+        const { config } = await createMockConfig();
+        let releaseResponse: (() => void) | undefined;
+        const responseGate = new Promise<void>((resolve) => {
+          releaseResponse = resolve;
+        });
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            await responseGate;
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Done.' }],
+                    },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const firstExecution = scope.execute(new ContextState());
+        await vi.waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'AgentHeadless does not support concurrent execute() calls.',
+        );
+
+        releaseResponse?.();
+        await firstExecution;
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should clear the prior result before a failing follow-up turn', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream
+          .mockImplementationOnce(createMockStream(['stop']))
+          .mockRejectedValueOnce(new Error('follow-up failed'));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        await scope.execute(new ContextState());
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+
+        const followUpContext = new ContextState();
+        followUpContext.set('task_prompt', 'Follow-up task');
+        await expect(scope.execute(followUpContext)).rejects.toThrow(
+          'follow-up failed',
+        );
+
+        expect(scope.getFinalText()).toBe('');
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+      });
+
       it('should append userMemory to the system prompt when available', async () => {
         const { config } = await createMockConfig();
         const userMemoryContent =
@@ -586,6 +817,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is empty', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -615,6 +847,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is whitespace-only', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -638,6 +871,43 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
         expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should append the auto-memory section to the system prompt when available', async () => {
+        const { config } = await createMockConfig();
+        const autoMemoryContent = '# auto memory\nMEMORY_INDEX_MARKER';
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue(
+          autoMemoryContent,
+        );
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).toContain('You are a test agent.');
+        // The volatile auto-memory section must be present as the trailing
+        // block, separated by the `---` suffix separator.
+        expect(sysPrompt).toContain('MEMORY_INDEX_MARKER');
+        expect(sysPrompt).toContain('---');
+        expect(sysPrompt.trimEnd().endsWith(autoMemoryContent)).toBe(true);
       });
 
       it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
@@ -1124,7 +1394,547 @@ describe('subagent.ts', () => {
           'file1.txt\nfile2.ts',
         );
 
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('keeps declarations unchanged while enforcing the execution allowlist', async () => {
+        const readFileToolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const editFileToolDef: FunctionDeclaration = {
+          name: ToolNames.EDIT,
+          description: 'Edits a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const { config } = await createMockConfig();
+
+        const readFileInvocation = {
+          params: { path: 'README.md' },
+          getDescription: vi.fn().mockReturnValue('Read README.md'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        };
+        const editFileInvocation = {
+          params: { path: 'README.md' },
+          getDescription: vi.fn().mockReturnValue('Edit README.md'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          execute: vi.fn(),
+        };
+        const readFileTool = {
+          name: ToolNames.READ_FILE,
+          displayName: 'Read File',
+          description: 'Reads a file',
+          kind: 'READ' as const,
+          schema: readFileToolDef,
+          build: vi.fn().mockReturnValue(readFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const editFileTool = {
+          name: ToolNames.EDIT,
+          displayName: 'Edit File',
+          description: 'Edits a file',
+          kind: 'EDIT' as const,
+          schema: editFileToolDef,
+          build: vi.fn().mockReturnValue(editFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(config.getToolRegistry().getTool).mockImplementation(
+          (name: string) =>
+            name === ToolNames.READ_FILE
+              ? readFileTool
+              : name === ToolNames.EDIT
+                ? editFileTool
+                : undefined,
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+              {
+                id: 'call_edit',
+                name: ToolNames.EDIT,
+                args: { path: 'README.md', old_string: 'a', new_string: 'b' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const approvalEvents: unknown[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+        eventEmitter.on(
+          AgentEventType.TOOL_WAITING_APPROVAL,
+          (event: unknown) => {
+            approvalEvents.push(event);
+          },
+        );
+
+        const executionAllowedTools: string[] = [ToolNames.READ_FILE];
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [readFileToolDef, editFileToolDef],
+            executionAllowedTools,
+          },
+          eventEmitter,
+        );
+        executionAllowedTools.push(ToolNames.EDIT);
+        await scope.execute(new ContextState());
+
+        const sentDeclarations =
+          mockSendMessageStream.mock.calls[0][1].config.tools[0]
+            .functionDeclarations;
+        expect(sentDeclarations).toStrictEqual([
+          readFileToolDef,
+          editFileToolDef,
+        ]);
+        expect(JSON.stringify(sentDeclarations)).toBe(
+          JSON.stringify([readFileToolDef, editFileToolDef]),
+        );
+        expect(readFileTool.build).toHaveBeenCalled();
+        expect(readFileInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(editFileTool.build).not.toHaveBeenCalled();
+        expect(editFileInvocation.execute).not.toHaveBeenCalled();
+        expect(approvalEvents).toHaveLength(0);
+
+        const secondRoundParts = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          secondRoundParts.map((part) => part.functionResponse?.id),
+        ).toEqual(['call_read', 'call_edit']);
+        const deniedResponse = secondRoundParts.find(
+          (part) => part.functionResponse?.id === 'call_edit',
+        )?.functionResponse;
+        expect(deniedResponse?.name).toBe(ToolNames.EDIT);
+        expect(deniedResponse?.response?.['error']).toContain(
+          'execution allowlist',
+        );
+        expect(deniedResponse?.response?.['error']).not.toContain('fork_tools');
+        expect(deniedResponse?.response?.['error']).not.toContain('not found');
+        expect(toolCallEvents.map((event) => event.callId).sort()).toEqual([
+          'call_edit',
+          'call_read',
+        ]);
+        expect(
+          toolResultEvents
+            .map((event) => ({
+              callId: event.callId,
+              success: event.success,
+            }))
+            .sort((left, right) => left.callId.localeCompare(right.callId)),
+        ).toEqual([
+          { callId: 'call_edit', success: false },
+          { callId: 'call_read', success: true },
+        ]);
+      });
+
+      it('treats an empty execution allowlist as deny-all', async () => {
+        const toolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const tool = {
+          name: ToolNames.READ_FILE,
+          schema: toolDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn().mockReturnValue(tool),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [toolDef], executionAllowedTools: [] },
+        );
+        await scope.execute(new ContextState());
+
+        expect(tool.build).not.toHaveBeenCalled();
+        const response = (
+          mockSendMessageStream.mock.calls[1][1].message as Part[]
+        )[0]?.functionResponse;
+        expect(response?.id).toBe('call_read');
+        expect(response?.response?.['error']).toContain('No tools are allowed');
+      });
+
+      it('caps and decouples the execution allowlist denial message', async () => {
+        const toolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const tool = {
+          name: ToolNames.READ_FILE,
+          schema: toolDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn().mockReturnValue(tool),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+        const executionAllowedTools = Array.from(
+          { length: 12 },
+          (_, index) => `tool_${index}_${'x'.repeat(50)}`,
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [toolDef], executionAllowedTools },
+        );
+        await scope.execute(new ContextState());
+
+        const error = (
+          mockSendMessageStream.mock.calls[1][1].message as Part[]
+        )[0]?.functionResponse?.response?.['error'];
+        expect(error).toContain('execution allowlist');
+        expect(error).toContain('(+4 more)');
+        expect(error).not.toContain('fork_tools');
+        expect(String(error).length).toBeLessThan(400);
+        expect(tool.build).not.toHaveBeenCalled();
+      });
+
+      it('matches an exact MCP server allowlist entry without crossing server boundaries', async () => {
+        const githubName = normalizeToolNameForProvider('mcp__github__search');
+        const enterpriseName = normalizeToolNameForProvider(
+          'mcp__github-enterprise__search',
+        );
+        const githubDef: FunctionDeclaration = {
+          name: githubName,
+          description: 'Search GitHub',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const enterpriseDef: FunctionDeclaration = {
+          name: enterpriseName,
+          description: 'Search GitHub Enterprise',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const githubInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Search GitHub'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'github result',
+            returnDisplay: 'github result',
+          }),
+        };
+        const githubTool = {
+          name: githubName,
+          serverName: 'github',
+          serverToolName: 'search',
+          schema: githubDef,
+          build: vi.fn().mockReturnValue(githubInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const enterpriseTool = {
+          name: enterpriseName,
+          serverName: 'github-enterprise',
+          serverToolName: 'search',
+          schema: enterpriseDef,
+          build: vi.fn(),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === githubName
+              ? githubTool
+              : name === enterpriseName
+                ? enterpriseTool
+                : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_github', name: githubName, args: {} },
+              { id: 'call_enterprise', name: enterpriseName, args: {} },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [githubDef, enterpriseDef],
+            executionAllowedTools: ['mcp__github'],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(githubInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(enterpriseTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find(
+            (part) => part.functionResponse?.id === 'call_enterprise',
+          )?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
+      });
+
+      it('lets mcp__* match MCP tools without matching built-in tools', async () => {
+        const mcpName = normalizeToolNameForProvider('mcp__github__search');
+        const mcpDef: FunctionDeclaration = {
+          name: mcpName,
+          description: 'Search GitHub',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const builtinDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const mcpInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Search GitHub'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'github result',
+            returnDisplay: 'github result',
+          }),
+        };
+        const mcpTool = {
+          name: mcpName,
+          serverName: 'github',
+          serverToolName: 'search',
+          schema: mcpDef,
+          build: vi.fn().mockReturnValue(mcpInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const builtinTool = {
+          name: ToolNames.READ_FILE,
+          schema: builtinDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === mcpName
+              ? mcpTool
+              : name === ToolNames.READ_FILE
+                ? builtinTool
+                : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_mcp', name: mcpName, args: {} },
+              {
+                id: 'call_builtin',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [mcpDef, builtinDef],
+            executionAllowedTools: ['mcp__*'],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(mcpInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(builtinTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find((part) => part.functionResponse?.id === 'call_builtin')
+            ?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
+      });
+
+      it('matches long MCP wildcard patterns by raw server identity and boundary', async () => {
+        const serverSuffix = 'a'.repeat(80);
+        const allowedServer = `repo.${serverSuffix}`;
+        const deniedServer = `repo/${serverSuffix}`;
+        const boundaryDeniedServer = `${allowedServer}__evil`;
+        const allowedName = normalizeToolNameForProvider(
+          `mcp__${allowedServer}__read`,
+        );
+        const deniedName = normalizeToolNameForProvider(
+          `mcp__${deniedServer}__read`,
+        );
+        const boundaryDeniedName = normalizeToolNameForProvider(
+          `mcp__${boundaryDeniedServer}__read`,
+        );
+        const allowedDef: FunctionDeclaration = {
+          name: allowedName,
+          description: 'Reads from repo.bad',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const deniedDef: FunctionDeclaration = {
+          name: deniedName,
+          description: 'Reads from repo/bad',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const boundaryDeniedDef: FunctionDeclaration = {
+          name: boundaryDeniedName,
+          description: 'Reads from a server with a shared raw prefix',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const allowedInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Read from repo.bad'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'repo result',
+            returnDisplay: 'repo result',
+          }),
+        };
+        const allowedTool = {
+          name: allowedName,
+          serverName: allowedServer,
+          serverToolName: 'read',
+          schema: allowedDef,
+          build: vi.fn().mockReturnValue(allowedInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const deniedTool = {
+          name: deniedName,
+          serverName: deniedServer,
+          serverToolName: 'read',
+          schema: deniedDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const boundaryDeniedTool = {
+          name: boundaryDeniedName,
+          serverName: boundaryDeniedServer,
+          serverToolName: 'read',
+          schema: boundaryDeniedDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === allowedName
+              ? allowedTool
+              : name === deniedName
+                ? deniedTool
+                : name === boundaryDeniedName
+                  ? boundaryDeniedTool
+                  : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_repo', name: allowedName, args: {} },
+              { id: 'call_repo2', name: deniedName, args: {} },
+              {
+                id: 'call_boundary',
+                name: boundaryDeniedName,
+                args: {},
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [allowedDef, deniedDef, boundaryDeniedDef],
+            executionAllowedTools: [`mcp__${allowedServer}__*`],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(allowedName).not.toBe(deniedName);
+        expect(allowedInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(deniedTool.build).not.toHaveBeenCalled();
+        expect(boundaryDeniedTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find((part) => part.functionResponse?.id === 'call_repo2')
+            ?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
+        expect(
+          responses.find(
+            (part) => part.functionResponse?.id === 'call_boundary',
+          )?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
       });
 
       it('should ignore duplicate provider tool-call ids across rounds', async () => {
@@ -1861,6 +2671,59 @@ describe('subagent.ts', () => {
         expect(events[0]!.thought).toBe(true);
         expect(events[1]!.text).toBe('Here is the answer.');
         expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should emit usage for a tool-call-only model round', async () => {
+        const { config } = await createMockConfig();
+        const usageMetadata = {
+          promptTokenCount: 100,
+          candidatesTokenCount: 10,
+          cachedContentTokenCount: 5,
+          totalTokenCount: 110,
+        };
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'missing_tool',
+                    args: {},
+                  },
+                ],
+                usageMetadata,
+              },
+            };
+          })(),
+        );
+
+        const eventEmitter = new AgentEventEmitter();
+        const events: AgentRoundTextEvent[] = [];
+        eventEmitter.on(AgentEventType.ROUND_TEXT, (event) => {
+          events.push(event);
+        });
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 1 },
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(events).toEqual([
+          expect.objectContaining({
+            round: 1,
+            text: '',
+            thoughtText: '',
+            usageMetadata,
+          }),
+        ]);
       });
 
       it('should exclude thought text from finalText', async () => {

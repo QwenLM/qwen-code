@@ -28,6 +28,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   clientId?: string;
   /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
   restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
+  historyPageSize?: number;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -92,6 +94,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
+    historyPageSize,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -112,6 +115,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
           restartSseOnPrompt={restartSseOnPrompt}
+          historyPageSize={historyPageSize}
           webShellProps={webShellProps}
         />
       </DaemonWorkspaceProvider>
@@ -126,17 +130,25 @@ export type {
   WebShellApi,
   WebShellComposerPlaceholders,
   WebShellComposerPlaceholderState,
+  WebShellSlashCommand,
+  WebShellSlashCommandHandler,
   WebShellProps,
   WebShellSidebarOptions,
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type { WebShellShadowDom, WebShellShadowDomOptions } from './shadowDom';
 export type { ToastTone } from './components/ToastHost';
 export type {
   WebShellSidebarBranding,
   WebShellSidebarFooterItem,
   WebShellSidebarFooterOptions,
   WebShellSidebarLockedWorkspace,
+  WebShellSidebarPrimaryNavOptions,
+  WebShellSidebarPrimaryNavItem,
+  WebShellSidebarSessionActionsOptions,
+  WebShellSidebarSessionActionItem,
+  WebShellSidebarSessionInlineActionItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
@@ -160,6 +172,7 @@ export type {
   UserMessageContentRenderInfo,
   UserMessageContentParser,
   ComposerHeaderRenderer,
+  ComposerFooterRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellAtItemRenderInfo,
@@ -180,6 +193,14 @@ export type {
   WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
+  WebShellChatHeaderItem,
+  WebShellChatHeaderOptions,
+  WebShellRightPanelItem,
+  WebShellRightPanelOptions,
+  WebShellEnvironmentPanelItem,
+  WebShellEnvironmentPanelOptions,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
@@ -188,6 +209,7 @@ export type {
   WebShellAtProvider,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
+  WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
@@ -202,14 +224,19 @@ export type {
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
+  PaneHeaderActionsInfo,
+  PaneHeaderActionsRenderer,
+} from './components/ChatPane';
+export type {
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,
+  createMarkdownChartRegistry,
   createEchartsFullDataRenderer,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';
 export type {
   DatasetCell,
   EchartsFullDataBlockProps,
@@ -221,4 +248,4 @@ export type {
   EchartsInstance,
   EchartsRuntime,
   EchartsRuntimeLoader,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';

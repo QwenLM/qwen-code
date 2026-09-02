@@ -463,7 +463,9 @@ export async function parseChannelConfig(
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
-      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
+      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+      plugin?.defaultSessionScope ||
+      'user',
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

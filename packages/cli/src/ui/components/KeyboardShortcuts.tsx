@@ -20,7 +20,9 @@ const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
 const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
-  return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
+  // macOS terminals (iTerm2, Terminal.app) intercept Cmd+V for text paste, so
+  // advertise Ctrl+V and Option+V, which reach the CLI as image-paste keys.
+  return process.platform === 'darwin' ? 'ctrl+v / option+v' : 'ctrl+v';
 };
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';

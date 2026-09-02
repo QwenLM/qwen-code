@@ -26,6 +26,7 @@ import {
   formatTokenCount,
   getAgentType,
   getAgentDescription,
+  localizeAgentTypeName,
   localizeToolDisplayName,
 } from '../toolFormatting';
 import chromeStyles from './ToolChrome.module.css';
@@ -302,7 +303,9 @@ export function SubAgentPanel({
       {!hideHeader && (
         <div className={styles.header} onClick={() => setExpanded(!expanded)}>
           <StatusIcon status={displayStatus} />
-          <span className={chromeStyles.lineName}>{agentType}:</span>
+          <span className={chromeStyles.lineName}>
+            {localizeAgentTypeName(agentType, t)}:
+          </span>
           {description && (
             <span className={styles.desc}>{truncateText(description, 50)}</span>
           )}

@@ -114,7 +114,7 @@ $BinaryName = "qwen-cua-driver.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-$Script:CuaDriverRsBakedVersion = "0.7.2"
+$Script:CuaDriverRsBakedVersion = "0.7.3"
 # ~~~ END_BAKED_VERSION ~~~
 
 # ---------- Path resolution ------------------------------------------------

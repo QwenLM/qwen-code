@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-weixin",
-  "version": "0.19.12",
+  "version": "0.21.2",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -23,10 +23,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "file:../base"
+    "@qwen-code/channel-base": "0.21.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

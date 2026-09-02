@@ -17,9 +17,12 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
+const MAX_ACTIVE_TODO_CONTEXT_CHARS = 800;
 
 export interface TodoWriteParams {
   todos: TodoItem[];
@@ -250,6 +253,27 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, sessionId);
+      const unfinishedTodos = finalTodos.filter(
+        (todo) => todo.status !== 'completed',
+      );
+      const promptId = promptIdContext.getStore();
+      if (promptId) {
+        const serializedTodos = escapeSystemReminderTags(
+          unfinishedTodos
+            .map((todo) => `- [${todo.status}] ${todo.content}`)
+            .join('\n'),
+        );
+        const todoContext = serializedTodos.slice(
+          0,
+          MAX_ACTIVE_TODO_CONTEXT_CHARS,
+        );
+        this.config.setActiveTodoReminder(
+          promptId,
+          unfinishedTodos.length > 0
+            ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
+            : undefined,
+        );
+      }
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted

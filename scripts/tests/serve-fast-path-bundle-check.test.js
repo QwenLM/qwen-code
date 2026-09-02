@@ -12,8 +12,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   checkAcpImportBoundary,
+  checkEntryBootstrapIntact,
+  checkSdkImplProtocolBoundary,
   checkServeFastPathBundle,
   findAcpImportBoundaryOffenders,
+  findSdkImplProtocolOffenders,
   findServeFastPathBundleOffenders,
   formatServeFastPathBundleOffenders,
   normalizeMetafilePath,
@@ -26,6 +29,8 @@ const checkScriptPath = fileURLToPath(
 function makeMetafile(outputs) {
   return {
     outputs: {
+      // A healthy bundle compiles the entry module into the entry output.
+      'dist/cli.js': output({ inputs: ['packages/cli/src/cli.ts'] }),
       'dist/chunks/fast-path.js': output({
         inputs: ['packages/cli/src/serve/fast-path.ts'],
       }),
@@ -37,6 +42,9 @@ function makeMetafile(outputs) {
       }),
       'dist/chunks/acp-agent.js': output({
         inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+      }),
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
       }),
       ...outputs,
     },
@@ -464,6 +472,123 @@ describe('ACP import boundary check', () => {
     expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
   });
 
+  it('reports a statically imported Google GenAI SDK', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        bytes: 1_196_331,
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'Google GenAI SDK',
+        matchedInput: 'node_modules/@google/genai/dist/node/index.mjs',
+      }),
+    ]);
+  });
+
+  it('allows the Google GenAI SDK behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports first-use dependency packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'iconv-lite encoding tables' }),
+        expect.objectContaining({ label: 'xterm headless runtime' }),
+        expect.objectContaining({ label: 'simple-git runtime' }),
+      ]),
+    );
+  });
+
+  it('allows first-use dependency packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports legacy JSONC parser packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: [
+          'node_modules/comment-json/src/index.js',
+          'node_modules/esprima/dist/esprima.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'comment-json parser' }),
+        expect.objectContaining({ label: 'esprima parser' }),
+      ]),
+    );
+  });
+
+  it('rejects the jsonc-parser UMD build from the ACP bundle', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: ['node_modules/jsonc-parser/lib/umd/main.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'jsonc-parser UMD build',
+        matchedInput: 'node_modules/jsonc-parser/lib/umd/main.js',
+      }),
+    ]);
+  });
+
   it('reads a metafile path and returns ACP boundary offenders', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
     try {
@@ -488,6 +613,223 @@ describe('ACP import boundary check', () => {
           }),
         ],
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('telemetry sdk-impl protocol boundary check', () => {
+  it('reports gRPC cluster packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [staticImport('dist/chunks/grpc-chain.js')],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: [
+          'node_modules/@grpc/grpc-js/build/src/index.js',
+          'node_modules/protobufjs/index.js',
+          'node_modules/@opentelemetry/exporter-trace-otlp-grpc/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'gRPC runtime' }),
+        expect.objectContaining({ label: 'protobufjs runtime' }),
+        expect.objectContaining({ label: 'OTLP gRPC trace exporter' }),
+      ]),
+    );
+  });
+
+  it('reports the shared OTLP serialization layer reached statically', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: [
+          'packages/core/src/telemetry/sdk-impl.ts',
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'OTLP transformer',
+        matchedInput:
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+      }),
+    ]);
+  });
+
+  it('allows protocol chains behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [
+          dynamicImport('dist/chunks/grpc-chain.js'),
+          dynamicImport('dist/chunks/http-chain.js'),
+        ],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: ['node_modules/@grpc/grpc-js/build/src/index.js'],
+      }),
+      'dist/chunks/http-chain.js': output({
+        inputs: [
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([]);
+  });
+
+  it('throws when the sdk-impl chunk is missing', () => {
+    const metafile = {
+      outputs: {
+        'dist/chunks/unrelated.js': output({
+          inputs: ['packages/cli/src/unrelated.ts'],
+        }),
+      },
+    };
+
+    expect(() => findSdkImplProtocolOffenders(metafile)).toThrow(
+      /Could not find bundled output for telemetry sdk-impl/,
+    );
+  });
+
+  it('reads a metafile path and returns sdk-impl boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkSdkImplProtocolBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'gRPC runtime',
+            matchedInput: 'node_modules/@grpc/grpc-js/build/src/index.js',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for sdk-impl offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(
+        /Telemetry sdk-impl static closure includes OTLP protocol chain modules/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('bundled entry bootstrap check', () => {
+  it('accepts an entry output that still contains the entry module', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(tempDir, makeMetafile({}));
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an entry hoisted into a shared chunk by code splitting', () => {
+    // What a static `import ... from './cli.js'` inside a lazily-loaded module
+    // does to the bundle: dist/cli.js keeps no inputs of its own and becomes a
+    // re-export stub, so cli.ts's main-module bootstrap guard never fires.
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the entry output is absent from the metafile', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafile = makeMetafile({});
+      delete metafile.outputs['dist/cli.js'];
+      const metafilePath = writeMetafile(tempDir, metafile);
+
+      expect(() => checkEntryBootstrapIntact({ metafilePath })).toThrow(
+        /Missing dist\/cli\.js in the esbuild metafile/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for a hoisted entry', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/no longer contains packages\/cli\/src\/cli\.ts/);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

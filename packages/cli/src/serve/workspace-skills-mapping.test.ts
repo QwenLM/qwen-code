@@ -59,21 +59,27 @@ describe('mapSkillConfigToStatus', () => {
   it('marks a settings-disabled skill as disabled', () => {
     const status = mapSkillConfigToStatus(
       makeSkill({ name: 'internal' }),
-      new Set(['internal']),
+      new Map([['internal', { reason: 'hard', lockedScope: 'user' }]]),
     );
 
     expect(status.status).toBe('disabled');
     expect(status.modelInvocable).toBe(true);
     expect(status.name).toBe('internal');
+    expect(status.disabledReason).toBe('hard');
+    expect(status.lockedScope).toBe('user');
   });
 
   it('marks a forced-disabled skill as disabled', () => {
-    const status = mapSkillConfigToStatus(makeSkill(), new Set(), {
-      disabled: true,
-    });
+    const status = mapSkillConfigToStatus(
+      makeSkill(),
+      new Map([['review', { reason: 'hard', lockedScope: 'user' }]]),
+      { disabled: true },
+    );
 
     expect(status.status).toBe('disabled');
     expect(status.modelInvocable).toBe(true);
+    expect(status.disabledReason).toBe('inactive_extension');
+    expect(status).not.toHaveProperty('lockedScope');
   });
 
   it('surfaces optional model and extensionName only when present', () => {

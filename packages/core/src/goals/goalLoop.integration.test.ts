@@ -70,6 +70,7 @@ function makeConfigWithRealHookSystem(): {
   // it pulls from Config during construction.
   const config = {
     getAllowedHttpHookUrls: () => [],
+    getAllowPrivateNetworkHooks: () => false,
     getSessionId: () => SESSION,
     isTrustedFolder: () => true,
     getDisableAllHooks: () => false,

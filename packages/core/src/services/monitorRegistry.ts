@@ -18,6 +18,7 @@
 import * as path from 'node:path';
 import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
@@ -118,6 +119,7 @@ export interface MonitorNotificationMeta {
   eventCount: number;
   toolUseId?: string;
   ownerAgentId?: string;
+  todoWorkChainId?: string;
 }
 
 export type MonitorNotificationCallback = (
@@ -184,6 +186,7 @@ export class MonitorRegistry {
     entry.kind = 'monitor';
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);
     this.resetIdleTimer(entry);
@@ -524,6 +527,7 @@ export class MonitorRegistry {
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
       ownerAgentId: entry.ownerAgentId,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
@@ -577,6 +581,7 @@ export class MonitorRegistry {
       eventCount: entry.eventCount,
       toolUseId: entry.toolUseId,
       ownerAgentId: entry.ownerAgentId,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     this.dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);

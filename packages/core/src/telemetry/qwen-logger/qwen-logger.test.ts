@@ -26,6 +26,8 @@ import {
   HookCallEvent,
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
+  RipgrepRuntimeRecoveryEvent,
+  type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -360,6 +362,38 @@ describe('QwenLogger', () => {
   });
 
   describe('event handlers', () => {
+    it('logs ripgrep runtime recovery without search details', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new RipgrepRuntimeRecoveryEvent({
+        selection_mode: 'builtin',
+        retry_triggered: true,
+        retry_succeeded: true,
+        failure_kind: 'eagain',
+      });
+
+      logger.logRipgrepRuntimeRecoveryEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'misc',
+          name: 'ripgrep_runtime_recovery',
+          properties: {
+            platform: process.platform,
+            arch: process.arch,
+            selection_mode: 'builtin',
+            retry_triggered: true,
+            retry_succeeded: true,
+            failure_kind: 'eagain',
+          },
+        }),
+      );
+      expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).not.toMatch(
+        /pattern|path|stdout|stderr|needle/,
+      );
+    });
+
     it('logs protocol tag sanitization without model content', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
@@ -597,6 +631,49 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+
+    it('should not include submitted prompts in hook telemetry', () => {
+      const configWithLogPrompts = makeFakeConfig({
+        getTelemetryLogPromptsEnabled: () => true,
+      });
+      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'UserPromptSubmit',
+        'command',
+        'external-context.sh',
+        {
+          prompt: 'model-bound prompt',
+          submitted_prompt: 'sensitive submitted prompt',
+        },
+        150,
+        true,
+        { echoed: 'sensitive hook output' },
+        0,
+        'sensitive hook stdout',
+        'sensitive hook stderr',
+      );
+
+      logger.logHookCallEvent(event);
+
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('hook_input');
+      expect(rumEvent.properties).not.toHaveProperty('hook_output');
+      expect(rumEvent.properties).not.toHaveProperty('prompt');
+      expect(rumEvent.properties).not.toHaveProperty('submitted_prompt');
+      expect(rumEvent.properties).not.toHaveProperty('stdout');
+      expect(rumEvent.properties).not.toHaveProperty('stderr');
+      const serializedEvent = JSON.stringify(rumEvent);
+      for (const sensitiveValue of [
+        'sensitive submitted prompt',
+        'sensitive hook output',
+        'sensitive hook stdout',
+        'sensitive hook stderr',
+      ]) {
+        expect(serializedEvent).not.toContain(sensitiveValue);
+      }
     });
 
     it('should log a failed hook call event with error when telemetry log prompts enabled', () => {
@@ -909,6 +986,47 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('logToolCallEvent', () => {
+    it('records terminal status and tool type without MCP server metadata', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T12:00:00.000Z',
+        function_name: 'remote_tool',
+        function_args: { secret: 'not-forwarded' },
+        duration_ms: 42,
+        status: 'error',
+        success: false,
+        error: 'failed',
+        error_type: 'unknown',
+        prompt_id: 'prompt-tool',
+        tool_type: 'mcp',
+        mcp_server_name: 'private-server',
+      } as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'tool_call#remote_tool',
+          properties: expect.objectContaining({
+            tool_name: 'remote_tool',
+            status: 'error',
+            tool_type: 'mcp',
+            success: 0,
+            duration_ms: 42,
+            error_type: 'unknown',
+            error_message: 'failed',
+          }),
+        }),
+      );
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
+      expect(rumEvent.properties).not.toHaveProperty('function_args');
     });
   });
 });

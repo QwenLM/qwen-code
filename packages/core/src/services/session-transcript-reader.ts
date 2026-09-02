@@ -12,6 +12,8 @@ import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
+import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
+import type { GoalSnapshotV2 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   aggregateTranscriptRecordFragments,
@@ -85,6 +87,8 @@ export interface SessionTranscriptReadPageOptions {
   cursor?: string;
   /** Start a newest-to-oldest snapshot immediately before this active record. */
   beforeRecordId?: string;
+  /** Start at the persisted tail and page newest-to-oldest. */
+  direction?: 'backward';
   limit?: number;
   maxBytes?: number;
 }
@@ -118,6 +122,7 @@ interface UuidIndexEntry {
   parentUuid: string | null;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
+  inherited: boolean;
   segments: RecordSegment[];
 }
 
@@ -127,6 +132,7 @@ interface TranscriptIndex {
   snapshotSize: number;
   leafUuid: string;
   activeUuids: string[];
+  goalStatePositions: number[];
   gaps: HistoryGap[];
   startTime: string;
   lastUpdated: string;
@@ -515,24 +521,38 @@ function selectBackwardPageUuids(
       break;
     }
   }
-  if (!alignedToReplayBoundary) {
+  let expandedSelection = false;
+  if (alignedToReplayBoundary && selectedStart > 0) {
+    let previousTurnStart = selectedStart - 1;
+    while (
+      previousTurnStart >= 0 &&
+      !isReplayTurnStart(index, index.activeUuids[previousTurnStart]!)
+    ) {
+      previousTurnStart--;
+    }
+    if (previousTurnStart < 0) {
+      selectedStart = 0;
+      expandedSelection = true;
+    }
+  } else if (!alignedToReplayBoundary) {
     while (
       selectedStart > 0 &&
       !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
     ) {
       selectedStart--;
     }
-    if (maxBytes !== undefined) {
-      const alignedBytes = index.activeUuids
-        .slice(selectedStart, position)
-        .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
-      if (alignedBytes > maxBytes) {
-        throw new SessionTranscriptPageTooLargeError(
-          sessionId,
-          alignedBytes,
-          maxBytes,
-        );
-      }
+    expandedSelection = true;
+  }
+  if (expandedSelection && maxBytes !== undefined) {
+    const alignedBytes = index.activeUuids
+      .slice(selectedStart, position)
+      .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
+    if (alignedBytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(
+        sessionId,
+        alignedBytes,
+        maxBytes,
+      );
     }
   }
 
@@ -585,6 +605,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
   for (const uuid of index.activeUuids) {
     total += estimateStringBytes(uuid);
   }
+  total += index.goalStatePositions.length * 8;
   for (const gap of index.gaps) {
     total +=
       INDEX_ENTRY_BASE_BYTES +
@@ -770,6 +791,27 @@ async function readAggregatedRecords(
   }
 }
 
+async function readGoalStateBeforePosition(
+  index: TranscriptIndex,
+  position: number,
+): Promise<GoalSnapshotV2 | undefined> {
+  let low = 0;
+  let high = index.goalStatePositions.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (index.goalStatePositions[middle]! < position) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  const goalStatePosition = index.goalStatePositions[low - 1];
+  if (goalStatePosition === undefined) return undefined;
+  const uuid = index.activeUuids[goalStatePosition]!;
+  const [record] = await readAggregatedRecords(index, [uuid]);
+  return parseGoalStateRecordPayloadV2(record?.systemPayload)?.snapshot;
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -796,6 +838,7 @@ async function buildIndex(params: {
   let sequence = 0;
   let leafUuid: string | undefined;
   let startTime: string | undefined;
+  let sideTaskSourceUuid: string | undefined;
 
   await forEachLineInSnapshot(
     filePath,
@@ -808,6 +851,14 @@ async function buildIndex(params: {
         const record = validateTranscriptRecord(value).record;
         if (!record || !isTranscriptConversationRecord(record)) {
           continue;
+        }
+        if (
+          record.type === 'system' &&
+          record.subtype === 'session_source' &&
+          isObjectRecord(record.systemPayload) &&
+          record.systemPayload['sourceType'] === 'side_task'
+        ) {
+          sideTaskSourceUuid = record.uuid;
         }
         if (record.timestamp) startTime ??= record.timestamp;
         leafUuid = record.uuid;
@@ -828,6 +879,7 @@ async function buildIndex(params: {
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
+            inherited: record.forkedFrom !== undefined,
             segments: [segment],
           });
         }
@@ -855,7 +907,23 @@ async function buildIndex(params: {
         }
       : undefined;
   });
-  const activeUuids = [...chain.uuids];
+  const sourceBoundary = sideTaskSourceUuid
+    ? chain.uuids.indexOf(sideTaskSourceUuid)
+    : -1;
+  const activeUuids =
+    sourceBoundary >= 0
+      ? chain.uuids
+          .slice(sourceBoundary)
+          .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
+      : [...chain.uuids];
+  const goalStatePositions: number[] = [];
+  for (let position = 0; position < activeUuids.length; position++) {
+    const uuid = activeUuids[position]!;
+    const entry = byUuid.get(uuid);
+    if (entry?.type === 'system' && entry.subtype === 'goal_state') {
+      goalStatePositions.push(position);
+    }
+  }
   const gaps: HistoryGap[] = [...chain.gaps];
   if (chain.cycleUuid) {
     debugLogger.debug(
@@ -874,6 +942,7 @@ async function buildIndex(params: {
     snapshotSize,
     leafUuid,
     activeUuids,
+    goalStatePositions,
     gaps,
     startTime,
     lastUpdated,
@@ -976,7 +1045,10 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
-    if (cursor && options.beforeRecordId !== undefined) {
+    if (
+      cursor &&
+      (options.beforeRecordId !== undefined || options.direction !== undefined)
+    ) {
       throw new InvalidSessionTranscriptCursorError();
     }
     if (cursor && cursor.sessionId !== sessionId) {
@@ -1020,8 +1092,11 @@ export class SessionTranscriptReader {
 
     const direction =
       cursor?.direction ??
+      options.direction ??
       (options.beforeRecordId !== undefined ? 'backward' : 'forward');
-    let position = cursor?.position ?? 0;
+    let position =
+      cursor?.position ??
+      (direction === 'backward' ? index.activeUuids.length : 0);
     if (!cursor && options.beforeRecordId !== undefined) {
       if (options.beforeRecordId.length === 0) {
         throw new InvalidSessionTranscriptCursorError();
@@ -1048,6 +1123,10 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
+    const backwardGoalState =
+      direction === 'backward'
+        ? await readGoalStateBeforePosition(index, nextPosition)
+        : undefined;
     const hasMore =
       direction === 'backward'
         ? nextPosition > 0
@@ -1082,7 +1161,11 @@ export class SessionTranscriptReader {
       hasMore,
       ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
-      ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
+      ...(backwardGoalState
+        ? { replay: { goalState: backwardGoalState } }
+        : cursor?.replay !== undefined
+          ? { replay: cursor.replay }
+          : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
     };

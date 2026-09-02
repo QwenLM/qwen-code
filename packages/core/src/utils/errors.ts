@@ -160,7 +160,13 @@ export function getErrorMessage(error: unknown): string {
         `${error.message} (cause: ${detail})`,
       );
     }
-    return error.message;
+    // Capped like every other branch. Returning `error.message` raw made the
+    // limit depend on details of the error that have nothing to do with how
+    // long it is: the same string was capped as `{ message }` or once a
+    // distinct `cause` was attached, and uncapped only for a bare `Error`.
+    // That is the shape a provider SDK throws when it packs a whole response
+    // body into the message, and the result flows straight into `llmContent`.
+    return truncateStringifiedErrorMessage(error.message);
   }
   if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
     const { message, cause } = error as {

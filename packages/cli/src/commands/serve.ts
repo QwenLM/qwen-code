@@ -14,13 +14,19 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
-import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import {
+  DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  DEFAULT_MAX_JOURNAL_BYTES,
+  DEFAULT_MAX_JOURNAL_EVENTS,
+} from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
   shouldLaunchBrowser,
+  type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -102,7 +108,10 @@ interface ServeArgs {
   'max-connections': number;
   'event-ring-size': number;
   'compacted-replay-max-bytes': number;
+  'max-journal-events': number;
+  'max-journal-bytes': number;
   workspace?: string | string[];
+  'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -120,6 +129,7 @@ interface ServeArgs {
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
+  'initialize-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
@@ -163,7 +173,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 20,
+        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
@@ -190,6 +200,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('memory-project-scope', {
+        type: 'string',
+        choices: MEMORY_PROJECT_SCOPES,
+        description:
+          'Choose how project memory is partitioned. ' +
+          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {
         type: 'number',
@@ -276,6 +294,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'history in load snapshots at higher heap cost. Must be a positive ' +
           'safe integer no larger than 256 MiB.',
       })
+      .option('max-journal-events', {
+        type: 'number',
+        default: DEFAULT_MAX_JOURNAL_EVENTS,
+        description:
+          'Per-session cap on raw events retained in the in-flight live ' +
+          'journal (current unfinished turn). When exceeded, the oldest ' +
+          'entries are dropped. Must be a positive safe integer.',
+      })
+      .option('max-journal-bytes', {
+        type: 'number',
+        default: DEFAULT_MAX_JOURNAL_BYTES,
+        description:
+          'Per-session byte cap on the in-flight live journal. When ' +
+          'exceeded, the oldest entries are dropped (at least one is ' +
+          'always kept). Must be a positive safe integer.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
@@ -334,6 +368,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
           '0 or unset = immediate kill (default).',
+      })
+      .option('initialize-timeout-ms', {
+        type: 'number',
+        description:
+          'ACP child request timeout, including the initialize handshake (ms). ' +
+          'Default: 10000 (10 s).',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
@@ -565,7 +605,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
+        maxJournalEvents: argv['max-journal-events'],
+        maxJournalBytes: argv['max-journal-bytes'],
         workspace: argv.workspace,
+        ...(argv['memory-project-scope'] !== undefined
+          ? { memoryProjectScope: argv['memory-project-scope'] }
+          : {}),
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
@@ -587,6 +632,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['channel-idle-timeout-ms'] !== undefined
           ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
+          : {}),
+        ...(argv['initialize-timeout-ms'] !== undefined
+          ? { initializeTimeoutMs: argv['initialize-timeout-ms'] }
           : {}),
         ...(argv['session-reap-interval-ms'] !== undefined
           ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }

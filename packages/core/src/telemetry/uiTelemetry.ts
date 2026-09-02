@@ -18,6 +18,7 @@ import type {
   ToolCallEvent,
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -58,6 +59,21 @@ export interface SkillMetrics {
   byName: Record<string, SkillCallStats>;
 }
 
+export interface GenerationTimingSample {
+  model: string;
+  ttftMs: number;
+  generationDurationMs: number;
+  outputTokens: number;
+}
+
+export interface GenerationMetrics {
+  timedRequests: number;
+  totalTtftMs: number;
+  totalGenerationDurationMs: number;
+  totalThroughputOutputTokens: number;
+  last?: GenerationTimingSample;
+}
+
 /**
  * Per-model counters without the nested source breakdown. Used both as the
  * aggregate `ModelMetrics` shape (via extension) and as the value type of the
@@ -90,6 +106,7 @@ export interface ModelMetrics extends ModelMetricsCore {
 
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
+  generation?: GenerationMetrics;
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -140,6 +157,13 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   totalSuccess: 0,
   totalFail: 0,
   byName: {},
+});
+
+const createInitialGenerationMetrics = (): GenerationMetrics => ({
+  timedRequests: 0,
+  totalTtftMs: 0,
+  totalGenerationDurationMs: 0,
+  totalThroughputOutputTokens: 0,
 });
 
 const createInitialMetrics = (): SessionMetrics => ({
@@ -311,6 +335,33 @@ export class UiTelemetryService extends EventEmitter {
       bucket.tokens.cached += event.cached_content_token_count;
       bucket.tokens.thoughts += event.thoughts_token_count;
     }
+
+    if (
+      event.ttft_ms === undefined ||
+      !Number.isFinite(event.ttft_ms) ||
+      event.ttft_ms < 0 ||
+      isInternalPromptId(event.prompt_id)
+    ) {
+      return;
+    }
+
+    const generation =
+      metrics.generation ??
+      (metrics.generation = createInitialGenerationMetrics());
+    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+
+    generation.timedRequests++;
+    generation.totalTtftMs += event.ttft_ms;
+    if (generationDurationMs > 0) {
+      generation.totalGenerationDurationMs += generationDurationMs;
+      generation.totalThroughputOutputTokens += event.output_token_count;
+    }
+    generation.last = {
+      model: event.model,
+      ttftMs: event.ttft_ms,
+      generationDurationMs,
+      outputTokens: event.output_token_count,
+    };
   }
 
   #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {

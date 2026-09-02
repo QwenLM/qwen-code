@@ -1,4 +1,10 @@
 import { memo } from 'react';
+import {
+  CircleCheckIcon,
+  CircleMinusIcon,
+  CircleXIcon,
+  InfoIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import {
   ContextUsageMessage,
@@ -114,20 +120,70 @@ export const SystemMessage = memo(function SystemMessage({
   const preserveWhitespace =
     variant === 'info' && source === 'model_switch_summary';
   const isRecap = variant === 'info' && source === 'recap';
+  const isTaskNotification =
+    variant === 'info' && source === 'background_notification';
+  const taskStatus =
+    isTaskNotification &&
+    typeof data === 'object' &&
+    data !== null &&
+    'status' in data &&
+    typeof data.status === 'string'
+      ? data.status
+      : undefined;
+  const taskNotificationLabel =
+    taskStatus === 'completed'
+      ? t('system.taskCompleted')
+      : taskStatus === 'failed'
+        ? t('system.taskFailed')
+        : taskStatus === 'cancelled'
+          ? t('system.taskCancelled')
+          : t('system.taskNotification');
+  const taskNotificationTone =
+    taskStatus === 'completed'
+      ? 'success'
+      : taskStatus === 'failed'
+        ? 'error'
+        : 'neutral';
+  const TaskNotificationIcon =
+    taskStatus === 'completed'
+      ? CircleCheckIcon
+      : taskStatus === 'failed'
+        ? CircleXIcon
+        : taskStatus === 'cancelled'
+          ? CircleMinusIcon
+          : InfoIcon;
+  const renderedContent = preserveWhitespace ? (
+    <pre>{content}</pre>
+  ) : variant === 'info' ? (
+    <Markdown content={content} />
+  ) : (
+    <pre>{content}</pre>
+  );
 
   return (
     <div
       className={`${styles.message} ${styles[variant]} ${
         preserveWhitespace ? styles.modelSwitch : ''
-      } ${isRecap ? styles.recap : ''}`}
+      } ${isRecap ? styles.recap : ''} ${
+        isTaskNotification ? styles.noMarker : ''
+      }`}
     >
       <div className={styles.content}>
-        {preserveWhitespace ? (
-          <pre>{content}</pre>
-        ) : variant === 'info' ? (
-          <Markdown content={content} />
+        {isTaskNotification ? (
+          <div className={styles.notificationContent}>
+            <span
+              className={styles.notificationIcon}
+              data-tone={taskNotificationTone}
+              role="img"
+              aria-label={taskNotificationLabel}
+              title={taskNotificationLabel}
+            >
+              <TaskNotificationIcon aria-hidden="true" />
+            </span>
+            <div className={styles.notificationText}>{renderedContent}</div>
+          </div>
         ) : (
-          <pre>{content}</pre>
+          renderedContent
         )}
         {showRetryHint && onRetryClick && (
           <div className={styles.retryHint}>

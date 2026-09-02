@@ -16,6 +16,7 @@ import {
   MAX_SCREENSHOTS,
   sanitizeName,
   selectImages,
+  selectRenderShapingFiles,
 } from './web-shell-visuals-publish.mjs';
 
 const PNG = '89504e470d0a1a0a';
@@ -159,4 +160,182 @@ test('buildComment lists a lone composite as one wide image (no light/dark table
   assert.doesNotMatch(body, /<table>/); // composites are a flat list now
   // A lone light shot no longer needs a dark-pair placeholder cell.
   assert.doesNotMatch(body, /<td>/);
+});
+
+// --- Empty-preview triage (coverage gap vs. genuinely no visual effect) ---
+
+test('selectRenderShapingFiles keeps rendered .tsx/.css/.svg and drops logic/test/other-package edits', () => {
+  const { files, total } = selectRenderShapingFiles([
+    'packages/web-shell/client/components/WelcomeScreen.tsx',
+    'packages/web-shell/client/components/worktree.module.css',
+    'packages/webui/src/ui/button.tsx',
+    'packages/web-shell/client/assets/icons/plan.svg',
+    // Dropped: not a rendered extension...
+    'packages/web-shell/client/hooks/useWorktree.ts',
+    'packages/web-shell/client/types.d.ts',
+    // ...not the rendered surface...
+    'packages/core/src/utils/gitDiff.ts',
+    'packages/web-shell/server/routes.tsx',
+    'docs/web-shell.md',
+    // ...or test/scenario code, which DRIVES the preview rather than being it.
+    'packages/web-shell/client/e2e/visuals/screenshots.spec.ts',
+    'packages/web-shell/client/components/Sidebar.test.tsx',
+    'packages/web-shell/client/components/__tests__/Chip.tsx',
+    // Blank lines from a trailing newline in the paths file.
+    '',
+    '   ',
+  ]);
+  assert.deepEqual(files, [
+    'packages/web-shell/client/assets/icons/plan.svg',
+    'packages/web-shell/client/components/WelcomeScreen.tsx',
+    'packages/web-shell/client/components/worktree.module.css',
+    'packages/webui/src/ui/button.tsx',
+  ]);
+  assert.equal(total, 4);
+});
+
+test('selectRenderShapingFiles caps the listed paths but reports the true total', () => {
+  const many = Array.from(
+    { length: 12 },
+    (_, i) => `packages/web-shell/client/c/F${String(i).padStart(2, '0')}.tsx`,
+  );
+  const { files, total } = selectRenderShapingFiles(many, { maxListed: 3 });
+  assert.equal(total, 12);
+  assert.equal(files.length, 3);
+  assert.equal(files[0], 'packages/web-shell/client/c/F00.tsx');
+});
+
+test('selectRenderShapingFiles tolerates a missing/undefined list', () => {
+  assert.deepEqual(selectRenderShapingFiles(undefined), {
+    files: [],
+    total: 0,
+  });
+  assert.deepEqual(selectRenderShapingFiles([]), { files: [], total: 0 });
+});
+
+test('buildComment flags a possible COVERAGE GAP when UI changed but no view did', () => {
+  const body = buildComment([], {
+    shortSha: 'abc1234',
+    changedPaths: [
+      'packages/web-shell/client/components/WelcomeScreen.tsx',
+      'packages/web-shell/client/hooks/useWorktree.ts', // logic — not listed
+    ],
+  });
+  // The bare green check would read as "nothing broke"; it must not appear.
+  assert.doesNotMatch(body, /✅/);
+  assert.match(body, /1 render-shaping file:/); // singular
+  assert.match(
+    body,
+    /`packages\/web-shell\/client\/components\/WelcomeScreen\.tsx`/,
+  );
+  assert.doesNotMatch(body, /useWorktree\.ts/);
+  assert.match(body, /no scenario renders this UI/);
+  assert.match(body, /screenshots\.spec\.ts/); // tells you where to fix it
+});
+
+test('buildComment keeps the green check when only non-rendering files changed', () => {
+  const body = buildComment([], {
+    shortSha: 'abc1234',
+    changedPaths: [
+      'packages/web-shell/client/hooks/useWorktree.ts',
+      'packages/core/src/index.ts',
+    ],
+  });
+  // A logic-only PR with no visual delta is EXPECTED — prompting here would
+  // train everyone to ignore the prompt when it matters.
+  assert.match(body, /✅ _No screenshot changes against the PR base\._/);
+  assert.doesNotMatch(body, /coverage gap/);
+});
+
+test('buildComment does not triage when screenshots DID change', () => {
+  const body = buildComment(['home-dark.png'], {
+    rawBase: 'r',
+    changedPaths: ['packages/web-shell/client/components/WelcomeScreen.tsx'],
+  });
+  assert.match(body, /<img /);
+  assert.doesNotMatch(body, /coverage gap/);
+  assert.doesNotMatch(body, /render-shaping/);
+});
+
+test('buildComment summarises the overflow instead of listing every path', () => {
+  const body = buildComment([], {
+    changedPaths: Array.from(
+      { length: 10 },
+      (_, i) =>
+        `packages/web-shell/client/c/F${String(i).padStart(2, '0')}.tsx`,
+    ),
+  });
+  assert.match(body, /10 render-shaping files:/); // plural
+  assert.match(body, /_…and 2 more\._/); // 10 - MAX_LISTED_PATHS(8)
+  assert.equal(body.split('\n').filter((l) => /^- `/.test(l)).length, 8);
+});
+
+test('buildComment neutralises a path that tries to break out of its code span', () => {
+  const body = buildComment([], {
+    changedPaths: [
+      'packages/web-shell/client/`<img src=x onerror=alert(1)>`.tsx',
+    ],
+  });
+  assert.doesNotMatch(body, /<img /); // the injected tag never becomes HTML
+  assert.match(body, /&lt;img src=x/); // escaped, inside the code span
+  // Exactly one path bullet, and it opens and closes its own span.
+  const bullets = body.split('\n').filter((l) => /^- `/.test(l));
+  assert.equal(bullets.length, 1);
+  assert.equal((bullets[0].match(/`/g) ?? []).length, 2);
+});
+
+// --- Render-incomplete honesty (a failed scenario must not read as "no change") ---
+
+test('buildComment: empty preview + renderIncomplete says RENDER FAILED, not no-change or coverage-gap', () => {
+  const body = buildComment([], {
+    shortSha: 'abc1234',
+    runUrl: 'https://run.example/9',
+    renderIncomplete: true,
+    // Even with render-shaping files changed, a failed render must NOT show the
+    // coverage-gap prompt — that would imply the render actually ran.
+    changedPaths: ['packages/web-shell/client/components/WelcomeScreen.tsx'],
+  });
+  assert.match(body, /failed to render/i);
+  assert.doesNotMatch(body, /✅/); // never the clean check
+  assert.doesNotMatch(body, /No screenshot changes against the PR base/);
+  assert.doesNotMatch(body, /coverage gap/); // coverage-gap prompt suppressed
+  assert.doesNotMatch(body, /render-shaping/);
+  assert.match(body, /https:\/\/run\.example\/9/); // links the run
+});
+
+test('buildComment: composites present + renderIncomplete warns the preview is PARTIAL', () => {
+  const body = buildComment(['home-dark.png'], {
+    rawBase: 'r',
+    runUrl: 'https://run.example/9',
+    renderIncomplete: true,
+  });
+  assert.match(body, /<img src="r\/home-dark\.png"/); // the shots that rendered still show
+  assert.match(body, /failed to render/i); // ...prefixed by the partial-preview warning
+  assert.match(body, /may be missing views/i);
+});
+
+test('buildComment: renderIncomplete false keeps the existing no-change / coverage-gap behavior', () => {
+  // Complete render, no shots, no render-shaping files → the plain green check.
+  const clean = buildComment([], {
+    shortSha: 'abc1234',
+    renderIncomplete: false,
+    changedPaths: ['packages/core/src/index.ts'],
+  });
+  assert.match(clean, /✅ _No screenshot changes against the PR base\._/);
+  assert.doesNotMatch(clean, /failed to render/i);
+
+  // Complete render, no shots, render-shaping files → the coverage-gap prompt.
+  const gap = buildComment([], {
+    shortSha: 'abc1234',
+    renderIncomplete: false,
+    changedPaths: ['packages/web-shell/client/components/WelcomeScreen.tsx'],
+  });
+  assert.match(gap, /no scenario renders this UI/);
+  assert.doesNotMatch(gap, /failed to render/i);
+});
+
+test('buildComment: render-failure note omits the run link when runUrl is absent', () => {
+  const body = buildComment([], { renderIncomplete: true });
+  assert.match(body, /failed to render/i);
+  assert.doesNotMatch(body, /\[workflow run\]/); // no dangling empty link
 });

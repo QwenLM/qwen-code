@@ -791,7 +791,7 @@ describe('real-world shape', () => {
     const plan = buildDiffPlan(diff, 400);
     expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
     expect(plan.chunks.length).toBeGreaterThanOrEqual(4);
-    // No chunk is anywhere near the 30 000-char shell cap that motivated this.
+    // No chunk approaches the historical Shell preview that motivated this.
     for (const c of plan.chunks) expect(c.lines).toBeLessThanOrEqual(400 + 42);
   });
 });

@@ -9,7 +9,10 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * 'interactive' mode only). These are merged with ACP-provided commands,
  * with ACP taking precedence on duplicates.
  */
-export function getLocalCommands(t: Translate): CommandInfo[] {
+export function getLocalCommands(
+  t: Translate,
+  options: { sideTaskAvailable?: boolean } = {},
+): CommandInfo[] {
   const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
     {
@@ -28,7 +31,9 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'btw',
       description: t('local.btw'),
-      argumentHint: '<your question>',
+      argumentHint: options.sideTaskAvailable
+        ? '[side] <your question>'
+        : '<your question>',
     },
     {
       name: 'copy',
@@ -90,6 +95,8 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '[<name>]',
     },
     { name: 'diff', description: t('local.diff') },
+    { name: 'log', description: t('local.log') },
+    { name: 'prs', description: t('local.prs') },
     {
       name: 'fork',
       description: t('local.fork'),

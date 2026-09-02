@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { Storage } from '@qwen-code/qwen-code-core';
 import type {
@@ -185,11 +186,18 @@ export function buildPromptBlocks(
       type: 'resource_link',
       name: image.name,
       mimeType: image.mimeType,
-      uri: `file://${image.path}`,
+      uri: pathToFileURL(toFileUrlPath(image.path)).href,
     });
   }
 
   return blocks;
+}
+
+function toFileUrlPath(imagePath: string): string {
+  if (process.platform !== 'win32' && /^[a-zA-Z]:[\\/]/.test(imagePath)) {
+    return `/${imagePath.replace(/\\/g, '/')}`;
+  }
+  return imagePath;
 }
 
 // ---------- Image path resolution ----------

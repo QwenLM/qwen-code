@@ -42,7 +42,7 @@ LLM-based automatic chat compression remains on the primary-model path. A full-t
 
 Phase 1 covers the interactive TUI, ACP, and non-interactive CLI.
 
-Textual `@` paths are resolved to their canonical target before MIME detection, workspace checks, ignore filtering, and file reads. Both the user-supplied alias and canonical target must pass ignore filtering, so a symlink cannot disguise an ignored file or a non-image target.
+Textual `@` paths are resolved to their canonical target before MIME detection, workspace checks, ignore filtering, and file reads. Both the user-supplied alias and canonical target must pass ignore filtering, so a symlink cannot disguise an ignored file or a non-image target. Hardlinks are not resolved by `realpath` and are not covered by this check.
 
 ## Durable visual context
 

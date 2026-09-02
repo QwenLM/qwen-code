@@ -89,6 +89,9 @@ function createCompletion(
     handleAutocomplete: vi.fn(),
     completionMode: CompletionMode.IDLE,
     midInputGhostText: null,
+    activeCategory: 'all',
+    availableCategories: ['all'],
+    switchCategory: vi.fn(),
     ...overrides,
   };
 }

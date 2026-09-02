@@ -13,6 +13,7 @@ function createConfig(opts: {
   currentSessionId: string;
   removeSessions?: (ids: string[]) => Promise<RemoveSessionsResult>;
   removeSession?: (id: string) => Promise<boolean>;
+  fireSessionDeleteEvent?: (id: string) => Promise<unknown>;
 }) {
   const sessionService = {
     removeSession: opts.removeSession ?? vi.fn().mockResolvedValue(true),
@@ -20,12 +21,21 @@ function createConfig(opts: {
       opts.removeSessions ??
       vi.fn().mockResolvedValue({ removed: [], notFound: [], errors: [] }),
   };
+  const hookSystem = {
+    fireSessionDeleteEvent:
+      opts.fireSessionDeleteEvent ?? vi.fn().mockResolvedValue(undefined),
+  };
+  const debugLogger = { warn: vi.fn() };
   return {
     config: {
       getSessionId: () => opts.currentSessionId,
       getSessionService: () => sessionService,
+      getHookSystem: () => hookSystem,
+      getDebugLogger: () => debugLogger,
     } as unknown as Config,
     sessionService,
+    hookSystem,
+    debugLogger,
   };
 }
 
@@ -515,6 +525,160 @@ describe('useDeleteCommand', () => {
       ];
       expect(item.type).toBe('error');
       expect(item.text).toContain('raw failure');
+    });
+
+    it('fires once for each successfully deleted session', async () => {
+      const { config, hookSystem } = createConfig({
+        currentSessionId: 'current',
+        removeSessions: vi.fn().mockResolvedValue({
+          removed: ['a', 'b'],
+          notFound: ['missing'],
+          errors: [],
+        }),
+      });
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn() }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'b', 'missing']);
+        await flushAsync();
+      });
+
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenCalledTimes(2);
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenNthCalledWith(1, 'a');
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenNthCalledWith(2, 'b');
+    });
+
+    it('reports batch deletion success when SessionDelete hooks reject', async () => {
+      const { config, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        removeSessions: vi.fn().mockResolvedValue({
+          removed: ['a', 'b'],
+          notFound: [],
+          errors: [],
+        }),
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(new Error('failed')),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'b']);
+        await flushAsync();
+      });
+
+      expect(debugLogger.warn).toHaveBeenCalledTimes(2);
+      expect(debugLogger.warn).toHaveBeenNthCalledWith(
+        1,
+        'SessionDelete hook failed for a: failed',
+      );
+      expect(debugLogger.warn).toHaveBeenNthCalledWith(
+        2,
+        'SessionDelete hook failed for b: failed',
+      );
+      const [item] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(item).toEqual({ type: 'info', text: 'Deleted 2 session(s).' });
+    });
+  });
+
+  describe('handleDelete', () => {
+    it('fires after a successful deletion', async () => {
+      const { config, hookSystem } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(true),
+      });
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn() }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenCalledWith(
+        'deleted-id',
+      );
+    });
+
+    it('does not fire when the session was not removed', async () => {
+      const { config, hookSystem } = createConfig({
+        currentSessionId: 'current',
+        removeSession: vi.fn().mockResolvedValue(false),
+      });
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn() }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('missing-id');
+        await flushAsync();
+      });
+
+      expect(hookSystem.fireSessionDeleteEvent).not.toHaveBeenCalled();
+    });
+
+    it('reports deletion success when the SessionDelete hook rejects', async () => {
+      const { config, hookSystem, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(new Error('failed')),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenCalledWith(
+        'deleted-id',
+      );
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionDelete hook failed for deleted-id: failed',
+      );
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('reports deletion success when the SessionDelete hook rejects with undefined', async () => {
+      const { config, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(undefined),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionDelete hook failed for deleted-id: undefined',
+      );
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
     });
   });
 });

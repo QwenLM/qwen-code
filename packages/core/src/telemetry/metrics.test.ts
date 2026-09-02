@@ -67,6 +67,7 @@ vi.mock('@opentelemetry/api');
 
 describe('Telemetry Metrics', () => {
   let initializeMetricsModule: typeof import('./metrics.js').initializeMetrics;
+  let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
@@ -80,6 +81,8 @@ describe('Telemetry Metrics', () => {
   let recordPerformanceScoreModule: typeof import('./metrics.js').recordPerformanceScore;
   let recordPerformanceRegressionModule: typeof import('./metrics.js').recordPerformanceRegression;
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
+  let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
+  let recordMemoryRecallDeliveryMetricsModule: typeof import('./metrics.js').recordMemoryRecallDeliveryMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -91,6 +94,7 @@ describe('Telemetry Metrics', () => {
 
     const metricsJsModule = await import('./metrics.js');
     initializeMetricsModule = metricsJsModule.initializeMetrics;
+    recordToolCallMetricsModule = metricsJsModule.recordToolCallMetrics;
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
@@ -107,6 +111,10 @@ describe('Telemetry Metrics', () => {
     recordPerformanceRegressionModule =
       metricsJsModule.recordPerformanceRegression;
     recordBaselineComparisonModule = metricsJsModule.recordBaselineComparison;
+    recordChannelMemoryRecallMetricsModule =
+      metricsJsModule.recordChannelMemoryRecallMetrics;
+    recordMemoryRecallDeliveryMetricsModule =
+      metricsJsModule.recordMemoryRecallDeliveryMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -119,6 +127,48 @@ describe('Telemetry Metrics', () => {
     (otelApiModule.metrics.getMeter as Mock).mockReturnValue(mockMeterInstance);
     mockCreateCounterFn.mockReturnValue(mockCounterInstance);
     mockCreateHistogramFn.mockReturnValue(mockHistogramInstance);
+  });
+
+  describe('recordToolCallMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records an explicit terminal status only on the counter', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 25, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(25, {
+        function_name: 'read_file',
+      });
+    });
+
+    it('derives status from success for legacy callers', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 10, {
+        function_name: 'legacy_tool',
+        success: false,
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'legacy_tool',
+        success: false,
+        status: 'error',
+      });
+    });
   });
 
   describe('recordChatCompressionMetrics', () => {
@@ -842,6 +892,29 @@ describe('Telemetry Metrics', () => {
   });
 
   describe('metric attribute cardinality controls', () => {
+    it('records memory recall delivery with low-cardinality attributes', () => {
+      const config = makeFakeConfig({ sessionId: 'cardinality-test' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordMemoryRecallDeliveryMetricsModule(config, 42, {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+      });
+
+      const expectedAttrs = {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, expectedAttrs);
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, expectedAttrs);
+    });
+
     it('omits session.id from metric attributes by default', () => {
       const config = makeFakeConfig({ sessionId: 'cardinality-test' });
       initializeMetricsModule(config);
@@ -871,6 +944,66 @@ describe('Telemetry Metrics', () => {
 
       const attrs = mockCounterAddFn.mock.calls[0]?.[1] ?? {};
       expect(attrs['session.id']).toBe('cardinality-test');
+    });
+  });
+
+  describe('recordChannelMemoryRecallMetrics', () => {
+    it('does not record before metrics are initialized', () => {
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12,
+        cache: 'hit',
+        result: 'selected',
+        selectedCount: 2,
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('records only bounded recall outcome attributes', () => {
+      initializeMetricsModule(makeFakeConfig({ sessionId: 'secret-session' }));
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12.5,
+        cache: 'miss',
+        result: 'revision_unstable',
+        selectedCount: 1,
+      });
+
+      const attributes = {
+        cache: 'miss',
+        result: 'revision_unstable',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, attributes);
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(
+        1,
+        12.5,
+        attributes,
+      );
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 1, attributes);
+      expect(Object.keys(mockCounterAddFn.mock.calls[0]![1]!).sort()).toEqual([
+        'cache',
+        'result',
+      ]);
+    });
+
+    it('initializes dedicated channel memory recall instruments', () => {
+      initializeMetricsModule(makeFakeConfig({}));
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.count',
+        expect.any(Object),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.duration',
+        expect.objectContaining({ unit: 'ms' }),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.selected_count',
+        expect.any(Object),
+      );
     });
   });
 });

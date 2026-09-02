@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.12",
+  "version": "0.21.2",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -14,7 +14,10 @@
     "packages/channels/wecom",
     "packages/channels/feishu",
     "packages/channels/qqbot",
+    "packages/channels/github",
+    "packages/channels/gitlab",
     "packages/channels/plugin-example",
+    "integrations/external-context",
     "!packages/desktop"
   ],
   "repository": {
@@ -22,7 +25,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.12"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.2"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -47,7 +50,7 @@
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests ./fake-openai-server.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests ./fake-openai-server.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/daemon-invocation-context.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
@@ -63,7 +66,7 @@
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
     "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
-    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
+    "audit:runtime:critical": "node scripts/audit-runtime-critical.js",
     "format": "prettier --experimental-cli --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
@@ -146,6 +149,7 @@
     "prettier": "^3.5.3",
     "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",
+    "sharp": "^0.34.5",
     "strip-ansi": "^7.1.2",
     "tsx": "^4.20.3",
     "typescript-eslint": "^8.30.1",

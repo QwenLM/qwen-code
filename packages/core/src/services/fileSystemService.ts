@@ -6,15 +6,18 @@
 
 import os from 'node:os';
 import type { Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
 import {
-  iconvEncode,
-  iconvEncodingExists,
-  isUtf8CompatibleEncoding,
-} from '../utils/iconvHelper.js';
+  readTextCursorWindowFromHandle,
+  readTextRangeFromHandle,
+  type ReadTextCursorWindowResult,
+} from '../utils/read-text-range.js';
+import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
+import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
 import type {
   ReadTextFileRequest,
@@ -33,6 +36,8 @@ export type ReadTextFileResponse = {
     originalLineCountExact?: boolean;
     lineEnding?: LineEnding;
     truncatedByBytes?: boolean;
+    /** Byte offset to resume from; absent once the read reached EOF. */
+    nextByteOffset?: number;
   };
 };
 
@@ -49,6 +54,50 @@ export type CoreReadTextFileRequest = Omit<
   signal?: AbortSignal;
   stats?: Stats;
 };
+
+/**
+ * Handle-bound range read used by filesystem security boundaries. The caller
+ * opens the descriptor, keeps it open for the duration, and closes it; this
+ * request never transfers ownership.
+ *
+ * Declared standalone rather than derived from {@link CoreReadTextFileRequest}:
+ * a handle-bound read shares only `line` and `signal` with a path-bound one, so
+ * an `Omit` chain would strip more than it kept and would keep re-admitting
+ * fields that this path has no use for. `fileSize` is the one value retained
+ * from the descriptor's opening stat because it bounds reads against appends.
+ *
+ * Both byte bounds are required rather than optional: what makes a large-file
+ * read safe at a boundary is that the *returned* bytes and the *scanned* bytes
+ * are each capped. A finite `limit` is not one of those bounds — `limit: 20` at
+ * `line: 900_000_000` still walks the whole file — so it stays optional and
+ * `maxScanBytes` is what actually keeps the read affordable.
+ */
+export interface CoreReadTextFileHandleRequest {
+  fileHandle: FileHandle;
+  /** File size captured from the opened descriptor before reading. */
+  fileSize: number;
+  /** 0-based start line, matching {@link CoreReadTextFileRequest}. */
+  line?: number | null;
+  limit?: number;
+  maxOutputBytes: number;
+  maxScanBytes: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Byte-cursor read used by filesystem security boundaries to page text without
+ * re-scanning from byte 0. Same borrowed-descriptor contract as
+ * {@link CoreReadTextFileHandleRequest}.
+ */
+export interface CoreReadTextCursorRequest {
+  fileHandle: FileHandle;
+  startOffset: number;
+  fileSize: number;
+  limit?: number;
+  maxOutputBytes: number;
+  maxSnapBytes: number;
+  signal?: AbortSignal;
+}
 
 /**
  * Supported file encodings for new files.
@@ -68,6 +117,10 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
  */
 export interface FileSystemService {
   readTextFile(params: CoreReadTextFileRequest): Promise<ReadTextFileResponse>;
+
+  readTextFileFromHandle?(
+    params: CoreReadTextFileHandleRequest,
+  ): Promise<ReadTextFileResponse>;
 
   writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
@@ -182,7 +235,7 @@ export function detectLineEnding(content: string): LineEnding {
   return content.includes('\r\n') ? 'crlf' : 'lf';
 }
 
-interface PreparedTextFileContent {
+export interface PreparedTextFileContent {
   data: string | Buffer;
   encoding?: BufferEncoding;
 }
@@ -212,11 +265,12 @@ function getBOMBytesForEncoding(encoding: string): Buffer | null {
   }
 }
 
-function prepareTextFileContent(
+export function prepareTextFileContent(
   filePath: string,
   content: string,
   meta?: ReadTextFileResponse['_meta'] | null,
-): PreparedTextFileContent {
+  iconvLite?: IconvLite,
+): PreparedTextFileContent | undefined {
   const lineEnding = meta?.['lineEnding'] as string | undefined;
   const shouldUseCrlf = needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
   const normalizedContent = shouldUseCrlf
@@ -226,17 +280,20 @@ function prepareTextFileContent(
   const encoding = meta?.['encoding'] as string | undefined;
 
   // Check if a non-UTF-8 encoding is specified and supported by iconv-lite
-  const isNonUtf8Encoding =
+  if (encoding && !isUtf8CompatibleEncoding(encoding) && !iconvLite) {
+    return undefined;
+  }
+
+  if (
     encoding &&
     !isUtf8CompatibleEncoding(encoding) &&
-    iconvEncodingExists(encoding);
-
-  if (isNonUtf8Encoding) {
+    iconvLite?.encodingExists(encoding)
+  ) {
     // Non-UTF-8 encoding (e.g. GBK, Big5, Shift_JIS, UTF-16LE, UTF-32BE…)
     // Use iconv-lite to encode the content. When the file originally had a BOM
     // (bom: true), prepend the correct BOM bytes for this encoding so the
     // byte-order mark is preserved on write-back.
-    const encoded = iconvEncode(normalizedContent, encoding);
+    const encoded = iconvLite.encode(normalizedContent, encoding);
     if (bom) {
       const bomBytes = getBOMBytesForEncoding(encoding);
       return {
@@ -261,14 +318,35 @@ function prepareTextFileContent(
   return { data: normalizedContent, encoding: 'utf-8' };
 }
 
-export function encodeTextFileContent(
+export async function prepareTextFileContentAsync(
   filePath: string,
   content: string,
   meta?: ReadTextFileResponse['_meta'] | null,
-): Buffer {
-  const prepared = prepareTextFileContent(filePath, content, meta);
-  if (Buffer.isBuffer(prepared.data)) return prepared.data;
-  return Buffer.from(prepared.data, prepared.encoding ?? 'utf-8');
+): Promise<PreparedTextFileContent> {
+  let prepared = prepareTextFileContent(filePath, content, meta);
+  if (!prepared) {
+    prepared = prepareTextFileContent(
+      filePath,
+      content,
+      meta,
+      await loadIconvLite(),
+    );
+  }
+  if (!prepared) {
+    throw new Error('iconv-lite did not prepare non-UTF-8 text content');
+  }
+  return prepared;
+}
+
+export async function encodeTextFileContentAsync(
+  filePath: string,
+  content: string,
+  meta?: ReadTextFileResponse['_meta'] | null,
+): Promise<Buffer> {
+  const prepared = await prepareTextFileContentAsync(filePath, content, meta);
+  return Buffer.isBuffer(prepared.data)
+    ? prepared.data
+    : Buffer.from(prepared.data, prepared.encoding ?? 'utf-8');
 }
 
 /**
@@ -278,37 +356,103 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    const { path, limit, line, maxOutputBytes, signal, stats } = params;
-    const readResult = await readFileWithLineAndLimit({
-      path,
-      limit: limit ?? Number.POSITIVE_INFINITY,
-      ...(line !== undefined && line !== null ? { line } : {}),
-      ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
-      ...(signal !== undefined ? { signal } : {}),
-      ...(stats !== undefined ? { stats } : {}),
+    return readTextFileStandard(params);
+  }
+
+  async readTextFileFromHandle(
+    params: CoreReadTextFileHandleRequest,
+  ): Promise<ReadTextFileResponse> {
+    if (!Number.isSafeInteger(params.fileSize) || params.fileSize < 0) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer fileSize, got ${params.fileSize}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxOutputBytes)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxScanBytes)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite maxScanBytes, got ${params.maxScanBytes}`,
+      );
+    }
+    if (
+      params.limit !== undefined &&
+      params.limit !== Number.POSITIVE_INFINITY &&
+      !isPositiveSafeInteger(params.limit)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
+      );
+    }
+    if (
+      params.line !== undefined &&
+      params.line !== null &&
+      (!Number.isSafeInteger(params.line) || params.line < 0)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer line, got ${params.line}`,
+      );
+    }
+    const range = await readTextRangeFromHandle(params.fileHandle, {
+      offset: params.line ?? 0,
+      limit: params.limit ?? Number.POSITIVE_INFINITY,
+      fileSize: params.fileSize,
+      maxOutputBytes: params.maxOutputBytes,
+      maxScanBytes: params.maxScanBytes,
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
-    const detectedLineEnding =
-      readResult.lineEnding ?? detectLineEnding(readResult.content);
-    return {
-      content: readResult.content,
-      _meta: {
-        bom: readResult.bom,
-        encoding: readResult.encoding,
-        originalLineCount: readResult.originalLineCount,
-        originalLineCountExact: readResult.originalLineCountExact,
-        lineEnding: detectedLineEnding,
-        ...(readResult.truncatedByBytes !== undefined
-          ? { truncatedByBytes: readResult.truncatedByBytes }
-          : {}),
-      },
-    };
+    return toReadTextFileResponse(range);
+  }
+
+  async readTextCursorFromHandle(
+    params: CoreReadTextCursorRequest,
+  ): Promise<ReadTextCursorWindowResult> {
+    if (!isPositiveSafeInteger(params.maxOutputBytes)) {
+      throw new RangeError(
+        `cursor reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxSnapBytes)) {
+      throw new RangeError(
+        `cursor reads require a positive finite maxSnapBytes, got ${params.maxSnapBytes}`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(params.startOffset) ||
+      params.startOffset < 0 ||
+      !Number.isSafeInteger(params.fileSize) ||
+      params.fileSize < 0
+    ) {
+      throw new RangeError(
+        `cursor reads require non-negative integer startOffset and fileSize, got ${params.startOffset}/${params.fileSize}`,
+      );
+    }
+    if (params.limit !== undefined && !isPositiveSafeInteger(params.limit)) {
+      throw new RangeError(
+        `cursor reads require a positive integer limit, got ${params.limit}`,
+      );
+    }
+    return readTextCursorWindowFromHandle(params.fileHandle, {
+      startOffset: params.startOffset,
+      fileSize: params.fileSize,
+      maxOutputBytes: params.maxOutputBytes,
+      maxSnapBytes: params.maxSnapBytes,
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    });
   }
 
   async writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
-    const prepared = prepareTextFileContent(filePath, params.content, _meta);
+    const prepared = await prepareTextFileContentAsync(
+      filePath,
+      params.content,
+      _meta,
+    );
     if (Buffer.isBuffer(prepared.data)) {
       await atomicWriteFile(filePath, prepared.data);
     } else {
@@ -328,4 +472,54 @@ export class StandardFileSystemService implements FileSystemService {
       });
     });
   }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+async function readTextFileStandard(
+  params: CoreReadTextFileRequest,
+): Promise<ReadTextFileResponse> {
+  const { path, limit, line, maxOutputBytes, signal, stats } = params;
+  const readResult = await readFileWithLineAndLimit({
+    path,
+    limit: limit ?? Number.POSITIVE_INFINITY,
+    ...(line !== undefined && line !== null ? { line } : {}),
+    ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
+    ...(signal !== undefined ? { signal } : {}),
+    ...(stats !== undefined ? { stats } : {}),
+  });
+  return toReadTextFileResponse(readResult);
+}
+
+/** Shared metadata shaping so both read paths report identically. */
+function toReadTextFileResponse(readResult: {
+  content: string;
+  bom?: boolean;
+  encoding?: string;
+  originalLineCount: number;
+  originalLineCountExact?: boolean;
+  lineEnding?: LineEnding;
+  truncatedByBytes?: boolean;
+  nextByteOffset?: number;
+}): ReadTextFileResponse {
+  const detectedLineEnding =
+    readResult.lineEnding ?? detectLineEnding(readResult.content);
+  return {
+    content: readResult.content,
+    _meta: {
+      bom: readResult.bom,
+      encoding: readResult.encoding,
+      originalLineCount: readResult.originalLineCount,
+      originalLineCountExact: readResult.originalLineCountExact,
+      lineEnding: detectedLineEnding,
+      ...(readResult.truncatedByBytes !== undefined
+        ? { truncatedByBytes: readResult.truncatedByBytes }
+        : {}),
+      ...(readResult.nextByteOffset !== undefined
+        ? { nextByteOffset: readResult.nextByteOffset }
+        : {}),
+    },
+  };
 }

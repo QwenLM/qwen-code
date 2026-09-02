@@ -9,6 +9,7 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
+import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
@@ -27,11 +28,15 @@ vi.mock('./MessageItem', async () => {
       showAssistantActions,
       isLocateFlashing,
       assistantTurnFooterInfo,
+      sendFailed,
+      onRetrySend,
     }: {
       message: Message;
       showAssistantActions?: boolean;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+      sendFailed?: boolean;
+      onRetrySend?: () => void;
     }) => {
       const { renderAssistantTurnFooter } = useWebShellCustomization();
       const assistantTurnFooter = assistantTurnFooterInfo
@@ -43,7 +48,19 @@ vi.mock('./MessageItem', async () => {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
+          'data-send-failed': sendFailed ? 'true' : undefined,
         },
+        sendFailed
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `retry-${message.id}`,
+                onClick: onRetrySend,
+                type: 'button',
+              },
+              'retry',
+            )
+          : null,
         message.role === 'thinking'
           ? React.createElement('button', {
               'aria-expanded': 'false',
@@ -181,6 +198,13 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
+const backgroundNotificationMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'background task completed',
+  variant: 'info',
+  source: 'background_notification',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -202,10 +226,30 @@ function mount(
     hasOlderHistory?: boolean;
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
+    historyPaginationError?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
+    transcriptBlockCount?: number;
+    transcriptActivity?: {
+      getSnapshot(): {
+        lastEventId?: number;
+        blocks?: { readonly length: number };
+      };
+      subscribe(listener: () => void): () => void;
+    };
+    onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
+    hideFirstUserMessage?: boolean;
+    firstTurnMetrics?: {
+      durationMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedTokens?: number;
+    };
+    includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
+    failedPromptMessageId?: string;
+    onRetryFailedPrompt?: () => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -225,9 +269,20 @@ function mount(
             hasOlderHistory={opts.hasOlderHistory}
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
+            historyPaginationError={opts.historyPaginationError}
             onLoadOlderHistory={opts.onLoadOlderHistory}
+            transcriptBlockCount={opts.transcriptBlockCount}
+            transcriptActivity={opts.transcriptActivity}
+            onReloadTranscript={opts.onReloadTranscript}
             isResponding={opts.isResponding}
+            hideFirstUserMessage={opts.hideFirstUserMessage}
+            firstTurnMetrics={opts.firstTurnMetrics}
+            includeSubagentToolUsageInMetrics={
+              opts.includeSubagentToolUsageInMetrics
+            }
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+            failedPromptMessageId={opts.failedPromptMessageId}
+            onRetryFailedPrompt={opts.onRetryFailedPrompt}
           />
         </WebShellCustomizationProvider>
       </I18nProvider>,
@@ -272,9 +327,7 @@ const assistantActions = (c: HTMLElement, id: string) =>
     .querySelector(`[data-testid="msg-${id}"]`)
     ?.getAttribute('data-assistant-actions');
 const isCollapsed = (c: HTMLElement, id: string) =>
-  c
-    .querySelector(`[data-testid="msg-${id}"]`)
-    ?.closest('[data-collapsed="true"]') !== null;
+  c.querySelector(`[data-testid="msg-${id}"]`) === null;
 const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
@@ -312,13 +365,172 @@ const simpleTurns = (count: number): Message[] =>
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
 
+describe('MessageList — failed prompt retry', () => {
+  it('marks only the matching user message and forwards retry', () => {
+    const onRetry = vi.fn();
+    const container = mount([userMsg('u1'), userMsg('u2')], undefined, {
+      failedPromptMessageId: 'u1',
+      onRetryFailedPrompt: onRetry,
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-send-failed'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-send-failed'),
+    ).toBeNull();
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry-u1"]')
+        ?.click(),
+    );
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('MessageList — turn collapse (DOM)', () => {
+  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    let lastEventId = 10;
+    let notifyActivity = () => undefined;
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      transcriptActivity: {
+        getSnapshot: () => ({ lastEventId }),
+        subscribe: (listener) => {
+          notifyActivity = listener;
+          return () => undefined;
+        },
+      },
+      onReloadTranscript,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+      lastEventId++;
+      notifyActivity();
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    lastEventId++;
+    notifyActivity();
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    let resolveReload = () => undefined;
+    let reloadSignal: AbortSignal | undefined;
+    const onReloadTranscript = vi.fn((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    const container = mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(reloadSignal?.aborted).toBe(false);
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 400;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(reloadSignal?.aborted).toBe(true);
+
+    await act(async () => resolveReload());
+  });
+
+  it('hides only the first user message and overrides first-turn metrics', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), content: 'first prompt' },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), content: 'second prompt' },
+        toolMsg('g2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      {
+        hideFirstUserMessage: true,
+        firstTurnMetrics: {
+          durationMs: 9_000,
+          inputTokens: 1_200,
+          outputTokens: 45,
+          cachedTokens: 800,
+        },
+      },
+    );
+
+    expect(has(c, 'u1')).toBe(false);
+    expect(has(c, 'u2')).toBe(true);
+    expect(c.textContent).toContain('9s');
+    expect(c.textContent).toContain('↑1.2k (800 cached, 67%) ↓45');
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);
     expect(has(c, 'a1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('collapses a background notification before the final assistant content', () => {
+    const c = mount([
+      userMsg('u1'),
+      backgroundNotificationMsg('bg1'),
+      asstMsg('a1'),
+    ]);
+
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'a1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('keeps a background notification when it is the final content', () => {
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg1'),
+    ]);
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'a1')).toBe(true);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -345,6 +557,28 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).toContain('1 thought');
     expect(text).not.toContain('1 step');
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
+  });
+
+  it('does not add tool summary usage when full transcript usage includes it', () => {
+    const agent = agentMsg('nested');
+    agent.tools[0]!.rawOutput = {
+      executionSummary: { inputTokens: 100, outputTokens: 20 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        {
+          ...asstMsg('a1'),
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      ],
+      undefined,
+      { includeSubagentToolUsageInMetrics: false },
+    );
+
+    expect(c.textContent).toContain('↑100 ↓20');
+    expect(c.textContent).not.toContain('↑200 ↓40');
   });
 
   it('renders step-less metrics without a toggle', () => {
@@ -1386,6 +1620,37 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('button')).toBeNull();
   });
 
+  it('suppresses the loading status during automatic pagination', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(c.querySelector('[role="status"]')).toBeNull();
+
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+  });
+
   it('shows when the history display limit is reached', () => {
     const c = mount([userMsg('u1')], undefined, {
       historyCapacityReached: true,
@@ -1394,6 +1659,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[role="status"]')?.textContent).toBe(
       'History display limit reached. Earlier messages remain saved.',
     );
+  });
+
+  it('shows a persistent error when history pagination fails', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+    });
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Earlier history could not be loaded.',
+    );
+  });
+
+  it('does not auto-load older history when a pagination error is present', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // historyPaginationError is true, hasOlderHistory is true
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // It should NOT call loadMore because paginationError blocks it
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
@@ -1601,7 +1910,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(assistantActions(c, 'mid')).toBe('false');
+    expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 

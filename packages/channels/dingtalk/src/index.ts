@@ -8,6 +8,24 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  management: {
+    fields: [
+      {
+        key: 'clientId',
+        label: 'Client ID',
+        kind: 'string',
+        required: true,
+        envResolvable: true,
+      },
+      {
+        key: 'clientSecret',
+        label: 'Client Secret',
+        kind: 'secret',
+        required: true,
+        envResolvable: true,
+      },
+    ],
+  },
   createChannel: (name, config, bridge, options) =>
     new DingtalkChannel(name, config, bridge, options),
 };

@@ -62,3 +62,4 @@ export {
   type WriteTextAtomicOptions,
   type WriteTextAtomicOutcome,
 } from './workspace-file-system.js';
+export { MAX_TEXT_CURSOR_CHARS } from './text-cursor.js';

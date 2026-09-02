@@ -46,6 +46,7 @@ const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
+  CheckRepoActions: { IS_REPO_ROOT: 'is-repo-root' },
   simpleGit: vi.fn((path: string) => {
     mockGit.path.mockReturnValue(path);
     return mockGit;
@@ -1055,6 +1056,150 @@ describe('extension tests', () => {
 
       expect(snapshot.extensions[extension.id]).toBeUndefined();
       expect(fs.existsSync(destination)).toBe(false);
+    });
+  });
+
+  describe('refreshCacheIfSourcesChanged', () => {
+    // Extension sources have no watcher, so read-only consumers rely on this to
+    // stay eventually consistent with mutations made outside the process
+    // (`qwen extensions install` in a terminal) without scanning on every read.
+    // See docs/design/workspace-skills-read-model.md.
+    it('does not refresh while the sources are unchanged', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+      const refreshSpy = vi.spyOn(manager, 'refreshCache');
+      for (let i = 0; i < 20; i++) {
+        expect(await manager.refreshCacheIfSourcesChanged()).toBe(false);
+      }
+
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+    });
+
+    it('refreshes once a new extension appears on disk', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-b' });
+
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(
+        manager
+          .getLoadedExtensions()
+          .map((e) => e.name)
+          .sort(),
+      ).toEqual(['ext-a', 'ext-b']);
+      // The refresh commits a new baseline, so the next call is a no-op again.
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(false);
+    });
+
+    it('refreshes after an extension is removed', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      fs.rmSync(path.join(userExtensionsDir, 'ext-a'), {
+        recursive: true,
+        force: true,
+      });
+
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(0);
+    });
+
+    it('refreshes after an in-place manifest edit', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions()[0]?.version).toBe('1.0.0');
+
+      // Rewriting the manifest changes neither the extensions dir nor the
+      // extension dir mtime on every platform, which is why the fingerprint
+      // covers each manifest itself. The new version is a different length so
+      // the size differs too — otherwise this would depend on the filesystem's
+      // mtime granularity.
+      fs.writeFileSync(
+        path.join(userExtensionsDir, 'ext-a', EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'ext-a', version: '10.0.0', mcpServers: {} }),
+      );
+
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()[0]?.version).toBe('10.0.0');
+    });
+
+    it('shares one refresh between concurrent callers', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-b' });
+      const refreshSpy = vi.spyOn(manager, 'refreshCache');
+
+      const results = await Promise.all([
+        manager.refreshCacheIfSourcesChanged(),
+        manager.refreshCacheIfSourcesChanged(),
+        manager.refreshCacheIfSourcesChanged(),
+      ]);
+
+      expect(results).toEqual([true, true, true]);
+      expect(refreshSpy).toHaveBeenCalledOnce();
+    });
+
+    it('does not mask a change that lands while a refresh is running', async () => {
+      // The committed baseline is captured before the load, so a write that
+      // races the refresh leaves the fingerprint stale and is still seen next
+      // time. Stamping after the load would swallow it until something else
+      // moved on disk.
+      createExtension({ extensionsDir: userExtensionsDir, name: 'ext-a' });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+      const realLoad = manager['loadExtensionsFromExtensionsDir'].bind(manager);
+      let raced = false;
+      vi.spyOn(
+        manager as unknown as {
+          loadExtensionsFromExtensionsDir: (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+        },
+        'loadExtensionsFromExtensionsDir',
+      ).mockImplementation(async (...args: unknown[]) => {
+        const loaded = await (
+          realLoad as (...a: unknown[]) => Promise<unknown>
+        )(...args);
+        if (!raced) {
+          raced = true;
+          // Lands after this refresh has already read the directory.
+          createExtension({ extensionsDir: userExtensionsDir, name: 'ext-b' });
+        }
+        return loaded;
+      });
+
+      // Triggered by the enablement file moving, so the first refresh does not
+      // observe ext-b.
+      fs.writeFileSync(
+        path.join(userExtensionsDir, 'extension-enablement.json'),
+        JSON.stringify({ touched: true }),
+      );
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+      vi.restoreAllMocks();
+
+      // The racing install is still visible to the next check.
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(
+        manager
+          .getLoadedExtensions()
+          .map((e) => e.name)
+          .sort(),
+      ).toEqual(['ext-a', 'ext-b']);
     });
   });
 
@@ -2778,6 +2923,41 @@ describe('extension tests', () => {
         const id = getExtensionId(config, metadata);
         expect(id).toBe(
           hashValue('https://gitlab.company.com/team/extension-repo'),
+        );
+      });
+
+      it('gives plugins from the same repository distinct ids (#7568)', () => {
+        const metadataFor = (pluginName: string) => ({
+          type: 'git' as const,
+          source: 'https://github.com/dotnet/skills',
+          pluginName,
+        });
+        const dotnetId = getExtensionId(
+          { name: 'dotnet', version: '1.0.0' },
+          metadataFor('dotnet'),
+        );
+        const dotnetTestId = getExtensionId(
+          { name: 'dotnet-test', version: '1.0.0' },
+          metadataFor('dotnet-test'),
+        );
+
+        expect(dotnetId).toBe(
+          hashValue('https://github.com/dotnet/skills:dotnet'),
+        );
+        expect(dotnetTestId).toBe(
+          hashValue('https://github.com/dotnet/skills:dotnet-test'),
+        );
+        expect(dotnetId).not.toBe(dotnetTestId);
+      });
+
+      it('keeps the repo-only id when no plugin name is recorded', () => {
+        const config: ExtensionConfig = { name: 'solo-ext', version: '1.0.0' };
+        const metadata = {
+          type: 'git' as const,
+          source: 'https://github.com/owner/solo',
+        };
+        expect(getExtensionId(config, metadata)).toBe(
+          hashValue('https://github.com/owner/solo'),
         );
       });
     });

@@ -4,14 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
-
-// ParallelAgentsGroup renders SubAgentPanel, which pulls in ToolGroup;
-// ToolGroup imports App only for CompactModeContext — loading the real
-// App module would drag the whole application graph into this unit test.
-vi.mock('../../../App', async () => {
-  const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
-});
+import { SubagentDetailsProvider } from '../../../subagentDetailsContext';
 
 const { computeAgentsTimeline, ParallelAgentsGroup } = await import(
   './ParallelAgentsGroup'
@@ -152,6 +145,45 @@ describe('computeAgentsTimeline', () => {
 });
 
 describe('ParallelAgentsGroup timeline rendering', () => {
+  it('keeps nested agents inspectable without a details provider', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'nested', subContent: 'nested agent output' }),
+    ]);
+    const row = container.querySelector('[class*="row"]') as HTMLButtonElement;
+
+    expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('false');
+    act(() => row.click());
+    expect(container.textContent).toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('opens nested agents through the details provider when available', () => {
+    const onOpen = vi.fn();
+    const nested = agent({ callId: 'nested' });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ParallelAgentsGroup agents={[nested]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+    act(() =>
+      (container.querySelector('[aria-expanded]') as HTMLElement).click(),
+    );
+    const row = container.querySelector('[class*="row"]') as HTMLElement;
+    expect(row.hasAttribute('aria-expanded')).toBe(false);
+    act(() => row.click());
+
+    expect(onOpen).toHaveBeenCalledWith(nested);
+  });
+
   it('renders one bar per agent and a ruler when the span is comparable', () => {
     const container = renderExpandedGroup([
       agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),

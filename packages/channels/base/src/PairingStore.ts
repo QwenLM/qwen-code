@@ -81,8 +81,8 @@ export class PairingStore {
    * grandfather the same baseline, and an older qwen version running
    * concurrently still reads the global files.
    *
-   * Revocation therefore means REMOVING ENTRIES from the scoped allowlist
-   * (and from the legacy global file, while it exists) — not deleting files.
+   * Revocation therefore means removing entries from this store's allowlist,
+   * not deleting files or mutating the legacy global baseline.
    */
   private migrateLegacyState(channelsRoot: string, channelName: string): void {
     try {
@@ -214,6 +214,16 @@ export class PairingStore {
 
   getAllowlist(): string[] {
     return this.readAllowlist();
+  }
+
+  revoke(senderId: string): boolean {
+    const list = this.readAllowlist();
+    const next = list.filter((id) => id !== senderId);
+    if (next.length === list.length) {
+      return false;
+    }
+    this.writeAllowlist(next);
+    return true;
   }
 
   private ensureDir(): void {

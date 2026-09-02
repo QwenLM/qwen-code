@@ -4,14 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionManager } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { resolveLanguageSetting } from '../../i18n/index.js';
 import { createExtensionsController } from './workspace-extensions-controller.js';
 
+vi.mock('../../i18n/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../i18n/index.js')>();
+  return {
+    ...actual,
+    resolveLanguageSetting: vi.fn().mockReturnValue('en'),
+  };
+});
+
 describe('createExtensionsController', () => {
+  beforeEach(() => {
+    vi.mocked(resolveLanguageSetting).mockReturnValue('en');
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -136,6 +152,50 @@ describe('createExtensionsController', () => {
     await Promise.all([firstOperationFinished, secondOperationFinished]);
   });
 
+  it('does not commit after the captured runtime generation closes', async () => {
+    let generationOpen = true;
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      captureGenerationAssertion: () => () => {
+        if (!generationOpen) throw new Error('generation closed');
+      },
+    });
+    const manager = {
+      refreshCache: vi.fn(async () => undefined),
+    } as unknown as ExtensionManager;
+    const responseBody = vi.fn();
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      location: vi.fn().mockReturnThis(),
+      set: vi.fn().mockReturnThis(),
+      json: responseBody,
+    } as unknown as Response;
+    const commit = vi.fn(async () => ({ generation: 1 }));
+
+    controller.runQueuedExtensionMutation(
+      'install',
+      { name: 'demo' },
+      response,
+      async (_extensionManager, _signal, context) => {
+        await context!.commit(commit);
+        return { status: 'installed', name: 'demo' };
+      },
+      { manager, skipRefresh: true },
+    );
+    generationOpen = false;
+    const operationId = responseBody.mock.calls[0]?.[0].operationId as string;
+
+    await vi.waitFor(() =>
+      expect(controller.getOperation(operationId)).toMatchObject({
+        status: 'failed',
+        error: 'generation closed',
+      }),
+    );
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it('starts the status cache lifetime after a slow refresh completes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -157,6 +217,65 @@ describe('createExtensionsController', () => {
     await controller.buildLocalExtensionsStatus();
 
     expect(refreshCache).toHaveBeenCalledOnce();
+  });
+
+  it('normalizes the current language when resolving extension metadata', async () => {
+    vi.mocked(resolveLanguageSetting).mockImplementation((language) =>
+      language === 'zh_TW' ? 'zh_TW' : 'en',
+    );
+    const extensionDir = await mkdtemp(
+      join(tmpdir(), 'qwen-localized-extension-'),
+    );
+
+    try {
+      await mkdir(join(extensionDir, '.qwen'));
+      await writeFile(
+        join(extensionDir, '.qwen', 'settings.json'),
+        JSON.stringify({ general: { language: 'zh_TW' } }),
+      );
+      await writeFile(
+        join(extensionDir, 'qwen-extension.json'),
+        JSON.stringify({
+          name: 'localized-extension',
+          displayName: { en: 'English name', 'zh-TW': '繁體名稱' },
+        }),
+      );
+      const controller = createExtensionsController({
+        boundWorkspace: extensionDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+
+      const config = controller
+        .createExtensionManager(extensionDir, true)
+        .loadExtensionConfig({ extensionDir });
+
+      expect(config.displayName).toBe('繁體名稱');
+      expect(resolveLanguageSetting).toHaveBeenCalledWith('zh_TW');
+    } finally {
+      await rm(extensionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('invalidates the status cache when the current language changes', async () => {
+    const refreshCache = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockResolvedValue(undefined);
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+    });
+
+    await controller.buildLocalExtensionsStatus();
+    await controller.buildLocalExtensionsStatus();
+    vi.mocked(resolveLanguageSetting).mockReturnValue('zh');
+    await controller.buildLocalExtensionsStatus();
+
+    expect(refreshCache).toHaveBeenCalledTimes(2);
   });
 
   it('reports an accepted operation as running while its cache refreshes', async () => {

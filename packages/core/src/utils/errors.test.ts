@@ -253,3 +253,43 @@ describe('isNodeError', () => {
     expect(isNodeError(null)).toBe(false);
   });
 });
+
+describe('getErrorMessage length cap', () => {
+  // `MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH` is 1000 and is not exported; the
+  // truncated form is the first 997 characters plus an ellipsis.
+  const CAP = 1000;
+  const big = 'x'.repeat(5000);
+
+  it('caps a bare Error whose message carries a response body', () => {
+    const message = getErrorMessage(new Error(big));
+
+    expect(message).toHaveLength(CAP);
+    expect(message.endsWith('...')).toBe(true);
+  });
+
+  // The cap used to depend on things unrelated to length: the same string was
+  // capped in every other shape and uncapped only for a bare Error. Each of
+  // these is the same message reached by a different branch.
+  it.each([
+    ['bare Error', () => new Error(big)],
+    ['Error with a distinct cause', () => new Error(big, { cause: 'boom' })],
+    ['object with a message', () => ({ message: big })],
+    [
+      'object with a message and cause',
+      () => ({ message: big, cause: 'boom' }),
+    ],
+    ['object serialised as JSON', () => ({ blob: big })],
+  ])('caps %s at the same length', (_label, makeError) => {
+    expect(getErrorMessage(makeError()).length).toBeLessThanOrEqual(CAP);
+  });
+
+  // Guards against over-correcting: a message inside the limit must come back
+  // whole, with no ellipsis. Passes both before and after the change.
+  it.each([
+    ['short', 'boom'],
+    ['exactly at the cap', 'y'.repeat(CAP)],
+    ['one under the cap', 'y'.repeat(CAP - 1)],
+  ])('returns a %s message unchanged', (_label, message) => {
+    expect(getErrorMessage(new Error(message))).toBe(message);
+  });
+});

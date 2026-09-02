@@ -56,8 +56,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
 const { I18nProvider } = await import('../../i18n');
+const { WebShellPortalRootContext } = await import('../../portalRoot');
 
 let container: HTMLDivElement | null = null;
+let portalRoot: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 async function mount(
@@ -84,18 +86,24 @@ async function mount(
     servers: [],
   });
   container = document.createElement('div');
+  portalRoot = document.createElement('div');
+  portalRoot.setAttribute('data-web-shell-portal-root', '');
+  portalRoot.setAttribute('data-web-shell-shadcn', '');
   document.body.appendChild(container);
+  document.body.appendChild(portalRoot);
   root = createRoot(container);
   await act(async () => {
     root!.render(
-      <I18nProvider language="en">
-        <ScheduledTasksDialog
-          onRunPrompt={opts.onRunPrompt ?? vi.fn()}
-          onCreateViaChat={vi.fn()}
-          onOpenSession={opts.onOpenSession}
-          onError={opts.onError ?? vi.fn()}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={opts.onRunPrompt ?? vi.fn()}
+            onCreateViaChat={vi.fn()}
+            onOpenSession={opts.onOpenSession}
+            onError={opts.onError ?? vi.fn()}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
   await flush();
@@ -160,8 +168,10 @@ function dispatchClipboardEvent(
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  portalRoot?.remove();
   root = null;
   container = null;
+  portalRoot = null;
   vi.clearAllMocks();
 });
 
@@ -260,6 +270,55 @@ describe('ScheduledTasksDialog editing', () => {
     );
   });
 
+  it('removes a prompt reference tag and its adjacent spacer', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+    expect(removeButtons[0]?.getAttribute('aria-label')).toBe(
+      'Remove clickhouse',
+    );
+
+    click(removeButtons[1]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse @mcp:repo-tools',
+      }),
+      undefined,
+    );
+  });
+
+  it('removes spacing before a trailing prompt reference tag', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+
+    click(removeButtons[2]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse /review',
+      }),
+      undefined,
+    );
+  });
+
   it('copies and cuts prompt references as serialized tokens', async () => {
     const promptText = '@ext:clickhouse /review @mcp:repo-tools';
     await mount([baseTask({ prompt: promptText })]);
@@ -326,7 +385,7 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
+          displayName: '\u001b[31mAlibaba Cloud\u001b[0m\u202e\u0007',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -374,8 +433,12 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButtonContaining('repo-tools'));
     await flush();
 
-    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
-      'alibabacloud-compute-suite',
+    const extensionTag = document.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('Alibaba Cloud');
+    expect(extensionTag?.dataset.promptTagSerialized).toBe(
+      '@ext:alibabacloud-compute-suite',
     );
 
     click(findButton('Create'));
@@ -465,6 +528,29 @@ describe('ScheduledTasksDialog editing', () => {
     expect(findButtonContaining('alibabacloud-compute-suite')).toBeUndefined();
   });
 
+  it('renders the reference picker inside the Web Shell portal root', async () => {
+    await mount([]);
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Skills'));
+    await flush();
+
+    const picker = document.querySelector('[role="listbox"]');
+    expect(picker).not.toBeNull();
+    expect(portalRoot?.contains(picker)).toBe(true);
+  });
+
   it('drops plain text only into the prompt editor', async () => {
     await mount([]);
     click(findButton('New scheduled task'));
@@ -542,7 +628,6 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -565,6 +650,11 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
     click(findButtonContaining('alibabacloud-compute-suite'));
     await flush();
+
+    const extensionTag = prompt.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('alibabacloud-compute-suite');
 
     click(findButton('Create'));
     await flush();
@@ -880,8 +970,20 @@ describe('ScheduledTasksDialog next-run countdown', () => {
 
 describe('ScheduledTasksDialog multi-workspace', () => {
   const WORKSPACES = [
-    { id: 'id-main', cwd: '/repo/main', primary: true, trusted: true },
-    { id: 'id-other', cwd: '/repo/other', primary: false, trusted: true },
+    {
+      id: 'id-main',
+      cwd: '/repo/main',
+      displayName: 'Main Workspace',
+      primary: true,
+      trusted: true,
+    },
+    {
+      id: 'id-other',
+      cwd: '/repo/other',
+      displayName: 'Payments API',
+      primary: false,
+      trusted: true,
+    },
     { id: 'id-locked', cwd: '/repo/locked', primary: false, trusted: false },
   ];
 
@@ -947,13 +1049,13 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
     expect(actions.listScheduledTasks).not.toHaveBeenCalledWith('id-locked');
 
-    // Each card carries a workspace badge (title = cwd), labeled by basename.
+    // Each card carries a workspace badge (title = cwd), labeled for display.
     const primaryBadge = document.querySelector('[title="/repo/main"]');
     const secondaryBadge = document.querySelector('[title="/repo/other"]');
-    expect(primaryBadge?.textContent).toContain('main');
+    expect(primaryBadge?.textContent).toContain('Main Workspace');
     // The primary is no longer singled out with a "(primary)" tag.
     expect(primaryBadge?.textContent).not.toContain('(primary)');
-    expect(secondaryBadge?.textContent).toContain('other');
+    expect(secondaryBadge?.textContent).toContain('Payments API');
   });
 
   it('creates a task in the workspace chosen in the picker', async () => {
@@ -964,14 +1066,14 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
-    // Options show the workspace basename only — no "(primary)" tag on the
-    // primary entry (the label this PR removed). Guards the visible dropdown
+    // Options show each workspace label with no "(primary)" tag on the primary
+    // entry (the label this PR removed). Guards the visible dropdown
     // text, which the count/value assertions above do not cover.
     expect(
       Array.from(wsSelect!.querySelectorAll('option')).map(
         (o) => o.textContent,
       ),
-    ).toEqual(['main', 'other']);
+    ).toEqual(['Main Workspace', 'Payments API']);
 
     // Choose the secondary workspace.
     act(() => {

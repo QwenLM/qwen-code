@@ -4,7 +4,6 @@ import {
   ArrowLeftIcon,
   DatabaseIcon,
   EllipsisVerticalIcon,
-  InfoIcon,
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
@@ -26,6 +25,10 @@ import { extractErrorDetail } from '../../utils/errorDetail';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
+import {
+  ManagementNotice,
+  type ManagementNoticeTone,
+} from '../ui/management-notice';
 import { Badge } from '../ui/badge';
 import {
   Breadcrumb,
@@ -78,6 +81,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from '../ui/toggle-group';
 import { Textarea } from '../ui/textarea';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
 
 type McpStatus = Awaited<ReturnType<DaemonWorkspaceActions['loadMcpStatus']>>;
@@ -406,8 +415,17 @@ export function McpManagerPage({
     serverName?: string;
     text: string;
     error?: boolean;
+    success?: boolean;
+    progress?: boolean;
     authUrl?: string;
   } | null>(null);
+  const noticeTone: ManagementNoticeTone = notice?.error
+    ? 'error'
+    : notice?.success
+      ? 'success'
+      : notice?.progress
+        ? 'progress'
+        : 'info';
   const [loadErrorsByServer, setLoadErrorsByServer] = useState<
     Record<string, { tools?: string; resources?: string }>
   >({});
@@ -661,6 +679,7 @@ export function McpManagerPage({
           ? t(editing ? 'mcp.edit.done' : 'mcp.add.done', { name })
           : t('mcp.runtime.notUpdated'),
         error: !runtimeUpdated,
+        success: runtimeUpdated,
       });
       setAddDialogOpen(false);
       setEditingServer(null);
@@ -738,6 +757,7 @@ export function McpManagerPage({
       setNotice({
         serverName: serverToRemove.name,
         text: t('mcp.action.running', { action: t('mcp.action.remove') }),
+        progress: true,
       });
       const runtimeUpdated = await startDiscovery('reload', false, true).catch(
         () => false,
@@ -838,6 +858,7 @@ export function McpManagerPage({
           action.id === 'authenticate'
             ? oauthMessage(server.name, t)
             : t('mcp.action.running', { action: action.label }),
+        progress: true,
       });
       try {
         let detail = '';
@@ -880,6 +901,7 @@ export function McpManagerPage({
             setNotice({
               serverName: server.name,
               text: oauthMessage(server.name, t, detail),
+              progress: true,
               ...(authUrl ? { authUrl } : {}),
             });
           }
@@ -966,6 +988,7 @@ export function McpManagerPage({
             : action.id === 'authenticate' && detail
               ? oauthMessage(server.name, t, detail)
               : detail || t('mcp.action.done', { action: action.label }),
+          success: true,
           ...(!pendingAuthentication && authUrl ? { authUrl } : {}),
         });
       } catch (error) {
@@ -1280,7 +1303,7 @@ export function McpManagerPage({
                 <WrenchIcon />
               </div>
               <div className="min-w-0">
-                <h1 className="break-words text-2xl font-semibold">
+                <h1 className="break-words text-xl font-semibold">
                   {selectedTool.name}
                 </h1>
                 <p className="text-sm text-muted-foreground">
@@ -1310,7 +1333,7 @@ export function McpManagerPage({
               <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted">
                 <DatabaseIcon />
               </div>
-              <h1 className="min-w-0 break-words text-2xl font-semibold">
+              <h1 className="min-w-0 break-words text-xl font-semibold">
                 {selectedResource.title ||
                   selectedResource.name ||
                   selectedResource.uri}
@@ -1344,7 +1367,7 @@ export function McpManagerPage({
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="break-words text-2xl font-semibold">
+                  <h1 className="break-words text-xl font-semibold">
                     {selectedServer.name}
                   </h1>
                   <Badge
@@ -1398,22 +1421,25 @@ export function McpManagerPage({
             </div>
 
             {notice?.serverName === selectedServer.name ? (
-              <Alert variant={notice.error ? 'destructive' : 'default'}>
-                {notice.error ? <AlertCircleIcon /> : <InfoIcon />}
-                <AlertDescription className="whitespace-pre-wrap break-words">
-                  <p>{notice.text}</p>
-                  {notice.authUrl && isHttpUrl(notice.authUrl) ? (
-                    <a
-                      className="mt-2 inline-block underline underline-offset-3"
-                      href={notice.authUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {t('mcp.oauth.open')}
-                    </a>
-                  ) : null}
-                </AlertDescription>
-              </Alert>
+              <ManagementNotice
+                tone={noticeTone}
+                noticeKey={notice.text}
+                closeLabel={t('common.close')}
+                onDismiss={() => setNotice(null)}
+                className="whitespace-pre-wrap break-words"
+              >
+                <p>{notice.text}</p>
+                {notice.authUrl && isHttpUrl(notice.authUrl) ? (
+                  <a
+                    className="mt-2 inline-block underline underline-offset-3"
+                    href={notice.authUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('mcp.oauth.open')}
+                  </a>
+                ) : null}
+              </ManagementNotice>
             ) : null}
 
             <Tabs
@@ -1596,7 +1622,7 @@ export function McpManagerPage({
       <div className="flex w-full flex-col gap-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-balance">
+            <h1 className="text-xl font-semibold text-balance">
               {t('mcp.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
@@ -1635,25 +1661,43 @@ export function McpManagerPage({
         </div>
 
         {initializing && connectingCount === 0 ? (
-          <Alert>
-            <RefreshCwIcon className="animate-spin" />
-            <AlertTitle>{t('mcp.discovery.initializing')}</AlertTitle>
-            <AlertDescription>{t('mcp.startingNote')}</AlertDescription>
-          </Alert>
+          <ManagementNotice
+            tone="progress"
+            noticeKey="mcp-initializing"
+            closeLabel={t('common.close')}
+            onDismiss={() => undefined}
+          >
+            <span className="grid gap-1">
+              <span className="font-medium">
+                {t('mcp.discovery.initializing')}
+              </span>
+              <span>{t('mcp.startingNote')}</span>
+            </span>
+          </ManagementNotice>
         ) : connectingCount > 0 ? (
-          <Alert>
-            <RefreshCwIcon />
-            <AlertTitle>
-              {t('mcp.starting', { count: connectingCount })}
-            </AlertTitle>
-            <AlertDescription>{t('mcp.startingNote')}</AlertDescription>
-          </Alert>
+          <ManagementNotice
+            tone="progress"
+            noticeKey={`mcp-connecting-${connectingCount}`}
+            closeLabel={t('common.close')}
+            onDismiss={() => undefined}
+          >
+            <span className="grid gap-1">
+              <span className="font-medium">
+                {t('mcp.starting', { count: connectingCount })}
+              </span>
+              <span>{t('mcp.startingNote')}</span>
+            </span>
+          </ManagementNotice>
         ) : null}
         {notice && !notice.serverName ? (
-          <Alert variant={notice.error ? 'destructive' : 'default'}>
-            <AlertCircleIcon />
-            <AlertDescription>{notice.text}</AlertDescription>
-          </Alert>
+          <ManagementNotice
+            tone={noticeTone}
+            noticeKey={notice.text}
+            closeLabel={t('common.close')}
+            onDismiss={() => setNotice(null)}
+          >
+            {notice.text}
+          </ManagementNotice>
         ) : null}
         {(status.errors ?? []).map((error, index) => (
           <Alert key={`${error.kind}-${index}`} variant="destructive">
@@ -1740,8 +1784,19 @@ export function McpManagerPage({
                           {statusLabel(server, t)}
                         </Badge>
                       </div>
-                      <CardDescription className="mt-1 truncate text-xs">
-                        {server.description?.trim() || '-'}
+                      <CardDescription className="mt-1 min-w-0 text-xs">
+                        <TooltipProvider delayDuration={300}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="block truncate">
+                                {server.description?.trim() || '-'}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {server.description?.trim() || '-'}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       </CardDescription>
                     </div>
                   </div>

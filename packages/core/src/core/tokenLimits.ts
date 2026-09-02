@@ -120,6 +120,22 @@ export function normalize(model: string): string {
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
+
+  // A colon can sit on either side of the model name. `authType:model` and
+  // `family:model` put it on the left, and the split below keeps the right
+  // half. But OpenRouter variant suffixes and Ollama / LM Studio tags put it
+  // on the RIGHT — `qwen3-coder:free`, `gemini-2.5-pro:online`,
+  // `qwen2.5-coder:32b` — and there the right half is a tag, not a model, so
+  // keeping it discards the model name entirely and every such id silently
+  // falls through to the default limit. Those tags are a closed enough set to
+  // recognise, so they are removed first and the split below then sees a bare
+  // model name. `modelId.ts` documents the same collision from the other side
+  // ("Model IDs can legitimately contain colons").
+  s = s.replace(
+    /:(?:free|beta|extended|thinking|online|nitro|floor|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
+    '',
+  );
+
   s = s.split(':').pop() ?? s;
 
   // collapse whitespace to single hyphen

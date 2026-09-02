@@ -49,6 +49,7 @@ Commands for adjusting interface appearance and work environment.
 | → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                                                                 |
 | `/history`           | Control history display preferences and visibility                                                                                                                                | `/history collapse-on-resume`, `/history expand-on-resume`, `/history expand-now` |
 | `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                                                           |
+| `/log`               | Open a commit history viewer for the workspace (Web Shell only)                                                                                                                   | `/log`                                                                            |
 | `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                                                          |
 | `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                                                            |
 | `/voice`             | Toggle voice dictation input                                                                                                                                                      | `/voice`, `/voice hold`, `/voice tap`, `/voice off`, `/voice status`              |
@@ -309,6 +310,59 @@ In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-tex
   +12  -2  src/utils/parser.test.ts
    +3  -2  README.md
 ```
+
+**Web Shell:** In the Web Shell UI (`qwen serve`), `/diff` opens a graphical diff dialog. A tab bar at the top lets you switch between the **Changes** view and the **History** view (`/log`).
+
+#### History Viewer (`/log`) — Web Shell only
+
+The `/log` command opens a commit history browser for the current workspace. It is available only in the Web Shell UI; the CLI/TUI does not have this command.
+
+**How it works:**
+
+`/log` opens a dialog listing commits in reverse chronological order (newest first). Each row shows:
+
+- Short SHA (monospace, with a copy button for the full SHA)
+- Commit subject (single line)
+- Author name and relative time (e.g. "2h ago")
+- Branch/tag ref labels, when present
+- A merge icon (⎇) for merge commits
+
+Click a commit row to expand its details on demand:
+
+- Full commit message body
+- File change statistics (files changed, lines added/removed, per-file breakdown)
+
+Use **Load more** at the bottom to fetch the next page of commits (50 per page).
+
+**Example:**
+
+```
+┌─ History ──────────────────────────── 50 commits ─ ✕ ┐
+│                                                       │
+│  a1b2c3d  feat(cli): add --json flag        2h ago   │
+│           wenshao                                    │
+│                                                       │
+│  e4f5g6h  fix(core): handle null config     5h ago   │
+│           dev · main  v1.2.0                         │
+│                                                       │
+│ ▼ 789abcd  refactor: simplify parser        1d ago   │
+│   ┌─────────────────────────────────────────────┐    │
+│   │  Broke the monolithic parse() into smaller  │    │
+│   │  functions for readability.                 │    │
+│   │                                             │    │
+│   │  3 files · +45 −12                          │    │
+│   │   +30 −8   src/parser.ts                    │    │
+│   │   +10 −2   src/utils.ts                     │    │
+│   │   +5  −2   test/parser.test.ts              │    │
+│   └─────────────────────────────────────────────┘    │
+│                                                       │
+│              [ Load more ]                            │
+└───────────────────────────────────────────────────────┘
+```
+
+> [!note]
+>
+> `/log` requires a git repository workspace. If the workspace is not a git repository or has no commits, the dialog shows a placeholder message.
 
 ### 1.9 Information, Settings, and Help
 

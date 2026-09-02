@@ -37,9 +37,29 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { isPreapprovedUrl } from './web-fetch-preapproved.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
+import { parsePositiveIntegerEnv } from '../utils/env.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 // Full-transfer budget: headers AND body must complete within this window.
 const FETCH_TIMEOUT_MS = 60_000;
+// Backstop for the post-fetch summarization side query. Deliberately above
+// the 240s stream idle watchdog so the watchdog's more specific error fires
+// first on a hung stream; this only catches pathological slow-drip streams.
+// Expiry does NOT fail the tool — executeDirectFetch falls back to returning
+// the raw fetched content.
+const SIDE_QUERY_TIMEOUT_MS = 300_000;
+// Deployment/test knob (same convention as QWEN_STREAM_IDLE_TIMEOUT_MS):
+// override the processing backstop without code changes. Malformed or
+// non-positive values fall back to the default. Values above the max timer
+// delay (2^31-1 ms) are rejected rather than clamped — Node truncates larger
+// delays to 1ms, which would disable processing instead of extending it.
+export function sideQueryTimeoutMs(): number {
+  const value = parsePositiveIntegerEnv(
+    process.env['QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS'],
+    SIDE_QUERY_TIMEOUT_MS,
+  );
+  return value > 2_147_483_647 ? SIDE_QUERY_TIMEOUT_MS : value;
+}
 // Truncation applies to converted/decoded text, never to raw HTML — cutting
 // markup before conversion silently destroys content deep in large pages.
 const MAX_CONTENT_CHARS = 100_000;
@@ -342,6 +362,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       },
     };
 
+    const networkStart = Date.now();
     let result;
     let usedHttpFallback = false;
     try {
@@ -364,6 +385,8 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       }
     }
 
+    const networkMs = Date.now() - networkStart;
+
     if (result.kind === 'cross-host-redirect') {
       // Never cached; the caller converts it into a redirect ToolResult.
       return result;
@@ -376,6 +399,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       );
     }
 
+    const extractStart = Date.now();
     const contentType = response.contentType;
     const sniff = sniffFileKind(
       response.body,
@@ -482,6 +506,10 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       content = truncateText(response.body.toString('utf-8'));
     }
 
+    this.debugLogger.debug(
+      `[WebFetchTool] network_ms=${networkMs} extract_ms=${Date.now() - extractStart}`,
+    );
+
     const entry: CacheEntry = {
       fetchedAt: Date.now(),
       status: response.status,
@@ -507,11 +535,18 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
   }
 
   private async executeDirectFetch(signal: AbortSignal): Promise<ToolResult> {
+    const startMs = Date.now();
+    const elapsedSuffix = () =>
+      ` in ${((Date.now() - startMs) / 1000).toFixed(1)}s`;
     try {
       const entry = await this.fetchAndProcess(signal);
       // CacheEntry has no 'kind' discriminant — this narrows to the redirect.
       if ('kind' in entry) {
-        return this.buildRedirectResult(entry);
+        const redirect = this.buildRedirectResult(entry);
+        return {
+          ...redirect,
+          returnDisplay: `${redirect.returnDisplay}${elapsedSuffix()}`,
+        };
       }
 
       const header = this.buildMetadataHeader(entry);
@@ -526,7 +561,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (entry.persistedPath && !entry.content) {
         return {
           llmContent: `${header}\n\n[No text could be extracted from this binary content.]${binaryNote}`,
-          returnDisplay: displaySummary,
+          returnDisplay: `${displaySummary}${elapsedSuffix()}`,
           resultFilePaths: [entry.persistedPath],
         };
       }
@@ -548,7 +583,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,
-          returnDisplay: displaySummary,
+          returnDisplay: `${displaySummary}${elapsedSuffix()}`,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -566,21 +601,58 @@ Please use the following content to answer the user's request.
 ${entry.content}
 ---`;
 
-      const result = await runSideQuery(this.config, {
-        purpose: 'web-fetch',
-        // Pin to the main model — fast model loses too much fidelity on
-        // long, rich source material.
-        model: this.config.getModel(),
-        // Best-effort: the outer catch already converts processing failures
-        // into a tool error; retrying 7× just delays that fallback.
-        maxAttempts: 1,
-        contents: [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        systemInstruction:
-          'Extract and summarize the requested information from the provided web content. ' +
-          'Be concise and accurate. Respond only with the requested information.',
-        abortSignal: signal,
-      });
-      let resultText = (result.text || '').trim();
+      const sideQueryStart = Date.now();
+      let resultText: string;
+      try {
+        // Runs on the fast model (runSideQuery's default) like claw-code's
+        // Haiku summarizer.
+        const result = await runSideQuery(this.config, {
+          purpose: 'web-fetch',
+          // Best-effort: a failure falls back to raw content below; retrying
+          // 7× just delays that fallback.
+          maxAttempts: 1,
+          contents: [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
+          systemInstruction:
+            'Extract and summarize the requested information from the provided web content. ' +
+            'Be concise and accurate. Respond only with the requested information.',
+          // Stream so the provider SDK's whole-request timeout only bounds
+          // connect + first chunk: an exhaustive extraction can legitimately
+          // generate for >120s, and a non-streaming call dies at that SDK
+          // deadline and is then re-fired by SDK-internal retries (which
+          // maxAttempts does not govern).
+          stream: true,
+          abortSignal: AbortSignal.any([
+            signal,
+            AbortSignal.timeout(sideQueryTimeoutMs()),
+          ]),
+        });
+        // The stream can deliver its final chunk after the user aborts — a
+        // cancelled turn must not surface that late success as a result.
+        signal.throwIfAborted();
+        resultText = (result.text || '').trim();
+        this.debugLogger.debug(
+          `[WebFetchTool] side_query_ms=${Date.now() - sideQueryStart}`,
+        );
+      } catch (error) {
+        // A cancelled turn must not fabricate a result.
+        if (signal.aborted) {
+          throw error;
+        }
+        this.debugLogger.error(
+          `[WebFetchTool] side_query_ms=${Date.now() - sideQueryStart} (failed); returning raw content`,
+          error,
+        );
+        // The fetch succeeded; only post-fetch processing failed. Return the
+        // normalized raw content instead of discarding the transfer (and, for
+        // binaries, orphaning the persisted file).
+        return {
+          llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
+          returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
+          ...(entry.persistedPath
+            ? { resultFilePaths: [entry.persistedPath] }
+            : {}),
+        };
+      }
       if (!resultText) {
         resultText =
           '[The processing model returned no content. The fetch itself succeeded — see the metadata above.]';
@@ -588,18 +660,19 @@ ${entry.content}
 
       return {
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
-        returnDisplay: displaySummary,
+        returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
       };
     } catch (e) {
-      const error = e as Error;
-      const errorMessage = `Error during fetch for ${this.params.url}: ${error.message}`;
-      this.debugLogger.error(`[WebFetchTool] ${errorMessage}`, error);
+      // e may be a non-Error abort reason (throwIfAborted rethrows whatever
+      // the aborting caller passed — e.g. a plain string, or null).
+      const errorMessage = `Error during fetch for ${this.params.url}: ${getErrorMessage(e)}`;
+      this.debugLogger.error(`[WebFetchTool] ${errorMessage}`, e);
       return {
         llmContent: `Error: ${errorMessage}`,
-        returnDisplay: `Error: ${errorMessage}`,
+        returnDisplay: `Error: ${errorMessage}${elapsedSuffix()}`,
         error: {
           message: errorMessage,
           type: ToolErrorType.WEB_FETCH_FALLBACK_FAILED,

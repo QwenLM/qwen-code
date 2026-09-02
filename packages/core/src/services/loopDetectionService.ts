@@ -532,11 +532,23 @@ export class LoopDetectionService {
     // reset tracking to avoid analyzing content that spans across different element boundaries.
     const numFences = (content.match(/```/g) ?? []).length;
     const hasTable = /(^|\n)\s*(\|.*\||[|+-]{3,})/.test(content);
+    // The `-` is placed first in both classes below so it is a literal member
+    // rather than a range endpoint. Written mid-class it silently became one:
+    // `[*-+]` was the range U+002A-U+002B, i.e. exactly {*, +}, so `- item`
+    // -- the most common bullet in markdown -- was not recognised as a list
+    // item and never reset tracking, letting a long bulleted list accumulate
+    // until it tripped the repetition check and halted a healthy response.
     const hasListItem =
-      /(^|\n)\s*[*-+]\s/.test(content) || /(^|\n)\s*\d+\.\s/.test(content);
+      /(^|\n)\s*[-*+]\s/.test(content) || /(^|\n)\s*\d+\.\s/.test(content);
     const hasHeading = /(^|\n)#+\s/.test(content);
     const hasBlockquote = /(^|\n)>\s/.test(content);
-    const isDivider = /^[+-_=*\u2500-\u257F]+$/.test(content);
+    // `[+-_=*]` was the range U+002B-U+005F, which covers every digit and
+    // every uppercase letter, so `SELECT`, `12345`, `ABC` and `>>>` all read
+    // as horizontal rules. A divider both resets tracking and returns early
+    // below, so such content was excluded from the history entirely and a
+    // model chanting one of those tokens could never be detected. Only the
+    // \u2500-\u257F box-drawing span is meant to be a range.
+    const isDivider = /^[-+_=*\u2500-\u257F]+$/.test(content);
 
     if (
       numFences ||
@@ -746,6 +758,7 @@ export class LoopDetectionService {
     'read_file',
     'read_many_files',
     'list_directory',
+    'zoom_image',
   ]);
 
   // Prefix fallback for MCP-provided tools that follow the same naming

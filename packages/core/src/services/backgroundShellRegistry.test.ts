@@ -5,21 +5,28 @@
  */
 
 import {
+  chmodSync,
   constants as fsConstants,
+  lstatSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
   MAX_RETAINED_TERMINAL_SHELLS,
+  statusFilePathFor,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 let tmpDirs: string[] = [];
 
@@ -61,6 +68,15 @@ function makeEntry(
 
 describe('BackgroundShellRegistry', () => {
   describe('register / get / getAll', () => {
+    it('captures the Todo work-chain owner at registration', () => {
+      const reg = new BackgroundShellRegistry();
+      const entry = todoWorkChainContext.run('work-chain-1', () =>
+        reg.register(makeEntry()),
+      );
+
+      expect(entry.todoWorkChainId).toBe('work-chain-1');
+    });
+
     it('round-trips a registered entry by id', () => {
       const reg = new BackgroundShellRegistry();
       const e = makeEntry({ shellId: 'a' });
@@ -419,11 +435,12 @@ describe('BackgroundShellRegistry', () => {
       // error and the entry would never reach a terminal status.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
+      const dir = makeTempDir();
       reg.setNotificationCallback(callback);
       reg.register(
         makeEntry({
           shellId: 'a',
-          outputPath: join(tmpdir(), 'qwen-shell-no-such-file-xyz.log'),
+          outputPath: join(dir, 'no-such-file.log'),
         }),
       );
 
@@ -748,5 +765,149 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       expect(() => reg.cancel('missing', 0)).not.toThrow();
     });
+  });
+
+  describe('status sidecar file', () => {
+    function makeDirEntry(
+      overrides: Partial<ShellTaskRegistration> = {},
+    ): ShellTaskRegistration & { statusPath: string } {
+      const dir = makeTempDir();
+      const shellId = (overrides.shellId as string) ?? 's1';
+      const entry = makeEntry({
+        outputPath: join(dir, `shell-${shellId}.output`),
+        ...overrides,
+      });
+      return {
+        ...entry,
+        statusPath: join(dir, `shell-${shellId}.status`),
+      };
+    }
+
+    function readStatus(statusPath: string): Record<string, unknown> {
+      return JSON.parse(readFileSync(statusPath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+    }
+
+    it('writes a running sidecar on register, with pid and ISO times', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeDirEntry({ shellId: 'a', pid: 4242, startTime: 1000 });
+      reg.register(e);
+      const status = readStatus(e.statusPath);
+      expect(status['id']).toBe('a');
+      expect(status['status']).toBe('running');
+      expect(status['pid']).toBe(4242);
+      expect(status['command']).toBe('sleep 60');
+      expect(status['cwd']).toBe('/tmp');
+      expect(status['startTime']).toBe(new Date(1000).toISOString());
+      expect(typeof status['updatedAt']).toBe('string');
+      expect(status['exitCode']).toBeUndefined();
+    });
+
+    it('writes completed with exitCode and endTime on complete', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeDirEntry({ shellId: 'a' });
+      reg.register(e);
+      reg.complete('a', 0, 2000);
+      const status = readStatus(e.statusPath);
+      expect(status['status']).toBe('completed');
+      expect(status['exitCode']).toBe(0);
+      expect(status['endTime']).toBe(new Date(2000).toISOString());
+    });
+
+    it('writes failed with the error message on fail', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeDirEntry({ shellId: 'a' });
+      reg.register(e);
+      reg.fail('a', 'exited with code 3', 2000);
+      const status = readStatus(e.statusPath);
+      expect(status['status']).toBe('failed');
+      expect(status['error']).toBe('exited with code 3');
+    });
+
+    it('writes cancelled on cancel', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeDirEntry({ shellId: 'a' });
+      reg.register(e);
+      reg.cancel('a', 2000);
+      expect(readStatus(e.statusPath)['status']).toBe('cancelled');
+    });
+
+    it('writes cancelled for every running entry on abortAll', () => {
+      const reg = new BackgroundShellRegistry();
+      const a = makeDirEntry({ shellId: 'a' });
+      const b = makeDirEntry({ shellId: 'b' });
+      const done = makeDirEntry({ shellId: 'c' });
+      reg.register(a);
+      reg.register(b);
+      reg.register(done);
+      reg.complete('c', 0, 1500);
+      reg.abortAll();
+      expect(readStatus(a.statusPath)['status']).toBe('cancelled');
+      expect(readStatus(b.statusPath)['status']).toBe('cancelled');
+      expect(readStatus(done.statusPath)['status']).toBe('completed');
+    });
+
+    it('leaves no temp-file residue next to the sidecar', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeDirEntry({ shellId: 'a' });
+      reg.register(e);
+      reg.complete('a', 0, 2000);
+      const residue = readdirSync(dirname(e.statusPath)).filter(
+        (name) => !/^shell-a\.(output|status)$/.test(name),
+      );
+      expect(residue).toEqual([]);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'forces 0o600 even when a looser sidecar pre-exists (forceMode)',
+      () => {
+        const reg = new BackgroundShellRegistry();
+        const e = makeDirEntry({ shellId: 'a' });
+        writeFileSync(e.statusPath, '{}');
+        chmodSync(e.statusPath, 0o644); // legacy bad perms
+        reg.register(e);
+        expect(statSync(e.statusPath).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'replaces a pre-placed symlink instead of writing through it (noFollow)',
+      () => {
+        const reg = new BackgroundShellRegistry();
+        const e = makeDirEntry({ shellId: 'a' });
+        const secretPath = join(dirname(e.statusPath), 'secret.txt');
+        writeFileSync(secretPath, 'secret credentials');
+        symlinkSync(secretPath, e.statusPath);
+        reg.register(e);
+        // The symlink target is untouched; the sidecar replaced the link.
+        expect(readFileSync(secretPath, 'utf8')).toBe('secret credentials');
+        expect(lstatSync(e.statusPath).isSymbolicLink()).toBe(false);
+        expect(readStatus(e.statusPath)['status']).toBe('running');
+      },
+    );
+
+    it('swallows sidecar write failures without throwing', () => {
+      const reg = new BackgroundShellRegistry();
+      const e = makeEntry({
+        shellId: 'a',
+        outputPath: join(makeTempDir(), 'no-such-dir', 'shell-a.output'),
+      });
+      expect(() => reg.register(e)).not.toThrow();
+      expect(() => reg.complete('a', 0, 2000)).not.toThrow();
+    });
+  });
+});
+
+describe('statusFilePathFor', () => {
+  it('derives the sidecar path from the output path', () => {
+    expect(statusFilePathFor('/a/b/shell-x.output')).toBe(
+      '/a/b/shell-x.status',
+    );
+  });
+
+  it('appends .status when the path has no .output suffix', () => {
+    expect(statusFilePathFor('/a/b/custom.log')).toBe('/a/b/custom.log.status');
   });
 });

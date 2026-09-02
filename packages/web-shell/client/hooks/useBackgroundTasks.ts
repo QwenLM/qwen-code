@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
+import { isSessionDisconnectedError } from '../utils/sessionErrors';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
@@ -13,6 +14,7 @@ function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
 }
 
 export function useBackgroundTasks(
+  sessionId: string | undefined,
   taskActivityKey: string,
   connected: boolean,
   refreshTrigger = 0,
@@ -22,41 +24,42 @@ export function useBackgroundTasks(
   const [pollingActive, setPollingActive] = useState(false);
   const [tasksPanelActive, setTasksPanelActive] = useState(false);
   const emptyPollsRef = useRef(0);
-  const tasksRefreshInFlightRef = useRef(false);
+  const tasksRefreshInFlightRef = useRef<{
+    sessionId: string;
+    request: object;
+  } | null>(null);
 
   useEffect(() => {
-    if (!connected) {
-      setTasks([]);
-      setPollingActive(false);
-      emptyPollsRef.current = 0;
-      return;
-    }
-  }, [connected]);
+    setTasks([]);
+    setPollingActive(false);
+    emptyPollsRef.current = 0;
+  }, [connected, sessionId]);
 
   useEffect(() => {
-    if (!connected || !taskActivityKey) return;
+    if (!connected || !sessionId || !taskActivityKey) return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, taskActivityKey]);
+  }, [connected, sessionId, taskActivityKey]);
 
   useEffect(() => {
-    if (!connected || refreshTrigger === 0) return;
+    if (!connected || !sessionId || refreshTrigger === 0) return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, refreshTrigger]);
+  }, [connected, refreshTrigger, sessionId]);
 
   useEffect(() => {
     if (tasksPanelActive) return;
-    if (!connected || !pollingActive) return;
+    if (!connected || !sessionId || !pollingActive) return;
 
     let disposed = false;
     const refresh = () => {
-      if (tasksRefreshInFlightRef.current) return;
-      tasksRefreshInFlightRef.current = true;
+      if (tasksRefreshInFlightRef.current?.sessionId === sessionId) return;
+      const request = {};
+      tasksRefreshInFlightRef.current = { sessionId, request };
       actions
         .getTasks()
         .then((snapshot) => {
-          if (disposed) return;
+          if (disposed || snapshot.sessionId !== sessionId) return;
           setTasks(snapshot.tasks);
           if (snapshot.tasks.length === 0) {
             emptyPollsRef.current += 1;
@@ -72,10 +75,16 @@ export function useBackgroundTasks(
         })
         .catch((error: unknown) => {
           if (disposed) return;
+          if (isSessionDisconnectedError(error)) {
+            setPollingActive(false);
+            return;
+          }
           console.warn('[web-shell] failed to refresh tasks:', error);
         })
         .finally(() => {
-          tasksRefreshInFlightRef.current = false;
+          if (tasksRefreshInFlightRef.current?.request === request) {
+            tasksRefreshInFlightRef.current = null;
+          }
         });
     };
 
@@ -85,7 +94,7 @@ export function useBackgroundTasks(
       disposed = true;
       clearInterval(id);
     };
-  }, [actions, connected, pollingActive, tasksPanelActive]);
+  }, [actions, connected, pollingActive, sessionId, tasksPanelActive]);
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;

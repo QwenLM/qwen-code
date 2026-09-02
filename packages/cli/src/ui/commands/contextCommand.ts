@@ -169,6 +169,13 @@ export async function collectContextData(
 
   const memoryContent = config.getUserMemory();
   const memoryFiles = parseMemoryFiles(memoryContent);
+  const autoMemoryPrompt = config.getAutoMemoryPrompt();
+  if (autoMemoryPrompt) {
+    memoryFiles.push({
+      path: t('auto memory'),
+      tokens: estimateTokens(autoMemoryPrompt),
+    });
+  }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);

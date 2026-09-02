@@ -3,7 +3,6 @@ import {
   AlertCircleIcon,
   ArrowLeftIcon,
   EllipsisVerticalIcon,
-  InfoIcon,
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -23,6 +22,7 @@ import {
   type SkillStatusFilter,
 } from './skills-manager-logic';
 import { Alert, AlertDescription } from '../ui/alert';
+import { ManagementNotice } from '../ui/management-notice';
 import { Badge } from '../ui/badge';
 import {
   Breadcrumb,
@@ -388,7 +388,7 @@ export function SkillsManagerPage({
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="break-words text-2xl font-semibold text-balance">
+                <h1 className="break-words text-xl font-semibold text-balance">
                   {selectedSkill.name}
                 </h1>
                 <Badge variant="outline">
@@ -471,10 +471,14 @@ export function SkillsManagerPage({
           </div>
 
           {notice?.skillName === selectedSkill.name ? (
-            <Alert variant={notice.error ? 'destructive' : 'default'}>
-              {notice.error ? <AlertCircleIcon /> : <InfoIcon />}
-              <AlertDescription>{notice.text}</AlertDescription>
-            </Alert>
+            <ManagementNotice
+              tone={notice.error ? 'error' : 'success'}
+              noticeKey={notice.text}
+              closeLabel={t('common.close')}
+              onDismiss={() => setNotice(null)}
+            >
+              {notice.text}
+            </ManagementNotice>
           ) : null}
 
           {message || selectedSkill.error ? (
@@ -570,7 +574,7 @@ export function SkillsManagerPage({
       <div className="flex w-full flex-col gap-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-balance">
+            <h1 className="text-xl font-semibold text-balance">
               {t('skills.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
@@ -582,12 +586,6 @@ export function SkillsManagerPage({
             </p>
           </div>
           <div className="flex gap-2">
-            {canManageSkills ? (
-              <Button onClick={() => setInstallOpen(true)}>
-                <PlusIcon data-icon="inline-start" />
-                {t('skills.install.action')}
-              </Button>
-            ) : null}
             <Button
               variant="outline"
               disabled={loading}
@@ -600,6 +598,12 @@ export function SkillsManagerPage({
               )}
               {t('common.refresh')}
             </Button>
+            {canManageSkills ? (
+              <Button onClick={() => setInstallOpen(true)}>
+                <PlusIcon data-icon="inline-start" />
+                {t('skills.install.action')}
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -611,10 +615,14 @@ export function SkillsManagerPage({
         ) : null}
 
         {listNotice ? (
-          <Alert>
-            <InfoIcon />
-            <AlertDescription>{listNotice}</AlertDescription>
-          </Alert>
+          <ManagementNotice
+            tone="success"
+            noticeKey={listNotice}
+            closeLabel={t('common.close')}
+            onDismiss={() => setListNotice(null)}
+          >
+            {listNotice}
+          </ManagementNotice>
         ) : null}
 
         <div className="relative">

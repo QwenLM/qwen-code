@@ -32,6 +32,11 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
+import {
+  computeWorkspaceSkillListUpdates,
+  resolveSkillSettings,
+  skillSettingStrings,
+} from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
 import { levelLabel } from '../../utils/skill-level-label.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
@@ -153,9 +158,8 @@ export function SkillsManagerDialog({
   // settings snapshot at open time — using `useMemo` keyed on `settings`
   // would re-derive on every parent re-render and could thrash the
   // `selectedKeys` derivation below.
-  const initialWorkspaceDisabled = useMemo(
-    () =>
-      new Set(normalizeNames(namesFromScope(settings, SettingScope.Workspace))),
+  const initialResolved = useMemo(
+    () => resolveSkillSettings(settings),
     [settings],
   );
   const higher = useMemo(() => buildHigherDisabled(settings), [settings]);
@@ -198,16 +202,25 @@ export function SkillsManagerDialog({
     [allSkills, higher.set],
   );
 
-  // Initial selection: every unlocked skill that the workspace has NOT
-  // disabled. Checked = enabled.
+  const initialSelectedKeys = useMemo(
+    () =>
+      new Set(
+        unlockedSkills
+          .filter(
+            (skill) => !initialResolved.disabledNames.has(lower(skill.name)),
+          )
+          .map((skill) => skill.name),
+      ),
+    [initialResolved, unlockedSkills],
+  );
+
+  // Initial selection: every effectively enabled, unlocked skill.
+  // Checked = enabled.
   const [selectedKeys, setSelectedKeys] = useState<string[] | null>(null);
   useEffect(() => {
     if (selectedKeys !== null || unlockedSkills.length === 0) return;
-    const initial = unlockedSkills
-      .filter((s) => !initialWorkspaceDisabled.has(lower(s.name)))
-      .map((s) => s.name);
-    setSelectedKeys(initial);
-  }, [unlockedSkills, initialWorkspaceDisabled, selectedKeys]);
+    setSelectedKeys([...initialSelectedKeys]);
+  }, [unlockedSkills, initialSelectedKeys, selectedKeys]);
 
   const filteredUnlocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -292,60 +305,48 @@ export function SkillsManagerDialog({
     }
 
     const selected = new Set(selectedKeys ?? []);
-    // workspace disabled = unlocked skills NOT in the selection.
-    // Locked names are intentionally excluded so we don't write redundant
-    // entries the higher scope is already enforcing.
-    const previousWorkspace = namesFromScope(settings, SettingScope.Workspace);
-    // Only string entries can be re-emitted with their original casing.
-    // A stray non-string survived the namesFromScope `Array.isArray` guard
-    // but would crash `lower()` (`.trim is not a function`).
-    const previousStrings = previousWorkspace.filter(
-      (n): n is string => typeof n === 'string',
-    );
-    const previousMap = new Map(previousStrings.map((n) => [lower(n), n]));
-    const nextDisabled: string[] = [];
-    // Preserve workspace entries that don't correspond to any currently-
-    // loaded skill (e.g. from a different git branch, uninstalled
-    // extension, deleted .qwen/skills/ directory). Without this, opening
-    // /skills and pressing Esc would silently drop orphaned entries and
-    // the user's prior disable setting would vanish if the skill later
-    // reappears (branch switch, extension reinstall).
-    //
-    // Use `allSkills` (not `unlockedSkills`) as the "known" set so that
-    // skills disabled at a higher scope (locked) are NOT treated as
-    // orphans and re-emitted — that would violate invariant #2 (locked
-    // names never appear in the workspace write).
-    const allKnownLower = new Set(allSkills.map((s) => lower(s.name)));
-    for (const prev of previousStrings) {
-      if (!allKnownLower.has(lower(prev))) {
-        nextDisabled.push(prev);
-      }
-    }
-    for (const s of unlockedSkills) {
-      if (selected.has(s.name)) continue;
-      const existing = previousMap.get(lower(s.name));
-      nextDisabled.push(existing ?? s.name);
-    }
-
-    // Skip the disk write + refresh roundtrip when the on-disk state
-    // already matches what we'd write. Comparing normalized lists keeps
-    // whitespace/case-only edits in the JSON file from being treated as
-    // changes. `previousWorkspace` includes only workspace-scope entries
-    // (matching what we're about to write) — locked entries from higher
-    // scopes are not in this list, so they don't affect the comparison.
-    const prevNormalized = normalizeNames(previousWorkspace).sort();
-    const nextNormalized = normalizeNames(nextDisabled).sort();
-    const unchanged =
-      prevNormalized.length === nextNormalized.length &&
-      prevNormalized.every((n, i) => n === nextNormalized[i]);
-    if (unchanged) return 'ok';
+    const workspaceDisabled = namesFromScope(
+      settings,
+      SettingScope.Workspace,
+    ).filter((name): name is string => typeof name === 'string');
+    const lockedNames = new Set(lockedSkills.map((skill) => lower(skill.name)));
+    const { disabled, enabled, disabledChanged, enabledChanged } =
+      computeWorkspaceSkillListUpdates(
+        workspaceDisabled,
+        lockedNames,
+        skillSettingStrings(settings, SettingScope.Workspace, 'enabled'),
+        unlockedSkills.map((skill) => ({
+          name: skill.name,
+          wasEnabled: initialSelectedKeys.has(skill.name),
+          isEnabled: selected.has(skill.name),
+          defaultDisabled:
+            initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
+            !initialResolved.enabledNames.has(lower(skill.name)),
+        })),
+      );
+    if (!disabledChanged && !enabledChanged) return 'ok';
 
     try {
-      settings.setValue(
-        SettingScope.Workspace,
-        'skills.disabled',
-        nextDisabled.length > 0 ? nextDisabled : undefined,
-      );
+      settings.setValues([
+        ...(disabledChanged
+          ? [
+              {
+                scope: SettingScope.Workspace,
+                key: 'skills.disabled',
+                value: disabled.length > 0 ? disabled : undefined,
+              },
+            ]
+          : []),
+        ...(enabledChanged
+          ? [
+              {
+                scope: SettingScope.Workspace,
+                key: 'skills.enabled',
+                value: enabled.length > 0 ? enabled : undefined,
+              },
+            ]
+          : []),
+      ]);
     } catch (e) {
       addItem(
         {
@@ -394,7 +395,9 @@ export function SkillsManagerDialog({
     return 'ok';
   }, [
     addItem,
-    allSkills,
+    initialResolved,
+    initialSelectedKeys,
+    lockedSkills,
     reloadCommands,
     selectedKeys,
     settings,

@@ -23,6 +23,15 @@ import type {
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
   DaemonChannelControlTransition,
+  DaemonChannelDelivery,
+  DaemonChannelNotifyRequest,
+  DaemonChannelNotifyResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
+  DaemonChannelDeliveryErrorCode,
+  DaemonChannelDeliveryResultData,
+  DaemonChannelDeliveryResultEvent,
   DaemonChannelSelection,
   DaemonChannelSetResult,
   DaemonChannelStartupAttemptFailure,
@@ -94,6 +103,7 @@ import type {
   DaemonWorkspaceTrustSource,
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceUpdate,
   DaemonWorkspaceMemoryDreamOptions,
   DaemonWorkspaceMemoryDreamResult,
   DaemonWorkspaceMemoryDreamTask,
@@ -210,6 +220,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecordingDegradedData>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
     expectTypeOf<DaemonChannelSelection>().not.toBeNever();
+    expectTypeOf<DaemonChannelDelivery>().not.toBeNever();
+    expectTypeOf<DaemonChannelNotifyRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelNotifyResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingApprovalsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryErrorCode>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryResultData>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryResultEvent>().not.toBeNever();
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
@@ -234,6 +253,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonWorkspaceTrustSource>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustState>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceUpdate>().toEqualTypeOf<{
+      displayName: string | null;
+    }>();
     expectTypeOf<DaemonVoiceAudioInput>().not.toBeNever();
     expectTypeOf<DaemonVoiceMode>().not.toBeNever();
     expectTypeOf<DaemonVoiceModelDescriptor>().not.toBeNever();

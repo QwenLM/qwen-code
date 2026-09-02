@@ -7,6 +7,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
+import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
@@ -40,7 +41,7 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
-          <Text color={theme.text.secondary}>○</Text>
+          <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
         </Box>
         <Box flexGrow={1} flexDirection="column">
           <Text color={theme.text.secondary}>
@@ -69,7 +70,7 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
         // ◎ matches the footer GoalPill's icon — same visual identity for
         // "goal is on / armed" between the history card and the live pill.
         return {
-          prefix: '◎',
+          prefix: ICON.BULLSEYE,
           prefixColor: theme.text.accent,
           title: 'Goal set',
         };
@@ -81,7 +82,7 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
         };
       case 'cleared':
         return {
-          prefix: '○',
+          prefix: ICON.CIRCLE_EMPTY,
           prefixColor: theme.text.secondary,
           title: 'Goal cleared',
         };

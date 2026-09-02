@@ -1047,6 +1047,73 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(getCall?.headers['last-event-id']).toBeUndefined();
   });
 
+  it('sends X-Qwen-Event-Epoch alongside the resume cursor (DAEMON-001)', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    for await (const _e of t.subscribeEvents('sess-1', {
+      lastEventId: 42,
+      epoch: 'epoch-abc',
+    })) {
+      // drain (empty stream)
+    }
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall?.headers['last-event-id']).toBe('42');
+    expect(getCall?.headers['x-qwen-event-epoch']).toBe('epoch-abc');
+  });
+
+  it('does NOT send the epoch header without a resume cursor (meaningless alone)', async () => {
+    const { fetch, calls } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    for await (const _e of t.subscribeEvents('sess-1', {
+      epoch: 'epoch-abc',
+    })) {
+      // drain (empty stream)
+    }
+
+    const getCall = calls.find(
+      (c) => c.method === 'GET' && c.url.endsWith('/acp'),
+    );
+    expect(getCall?.headers['x-qwen-event-epoch']).toBeUndefined();
+  });
+
+  it('reports the response X-Qwen-Event-Epoch header via onEpoch', async () => {
+    const { fetch } = initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) => {
+        if (req.method === 'GET' && req.headers['acp-session-id']) {
+          const res = sseResponse([]);
+          res.headers.set('x-qwen-event-epoch', 'epoch-from-server');
+          return res;
+        }
+        return jsonResponse(200, {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { ok: true },
+        });
+      },
+    });
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const onEpoch = vi.fn();
+    for await (const _e of t.subscribeEvents('sess-1', { onEpoch })) {
+      // drain (empty stream)
+    }
+    expect(onEpoch).toHaveBeenCalledTimes(1);
+    expect(onEpoch).toHaveBeenCalledWith('epoch-from-server');
+  });
+
+  it('does not invoke onEpoch when the response carries no epoch header', async () => {
+    const { fetch } = sessionStreamFetch([]);
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+    const onEpoch = vi.fn();
+    for await (const _e of t.subscribeEvents('sess-1', { onEpoch })) {
+      // drain (empty stream)
+    }
+    expect(onEpoch).not.toHaveBeenCalled();
+  });
+
   it('does not raise an unhandled rejection when the signal is already aborted at entry', async () => {
     // The mock fetch ignores the signal, so the read loop is reached with
     // `signal.aborted === true`: the loop never enters and `Promise.race`

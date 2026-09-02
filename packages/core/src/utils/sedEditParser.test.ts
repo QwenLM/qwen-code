@@ -73,9 +73,30 @@ describe('sedEditParser', () => {
       flags: 'g',
       extendedRegex: true,
     });
+    expect(parseSedEditCommand("sed -Eri 's/foo|bar/baz/g' src/a.ts")).toEqual({
+      filePath: 'src/a.ts',
+      pattern: 'foo|bar',
+      replacement: 'baz',
+      flags: 'g',
+      extendedRegex: true,
+    });
     expect(
       parseSedEditCommand("sed -iE 's/foo|bar/baz/g' src/a.ts"),
     ).toBeNull();
+  });
+
+  // Everything after -i is the backup suffix, so -Eir is `-E` plus in-place
+  // with an `r` suffix: real sed writes src/a.tsr next to the edit. The
+  // simulation makes no backup, so these have to fall through to real sed --
+  // the same reason `-i.bak` is rejected below.
+  it('rejects combined flags where in-place is not last', () => {
+    expect(
+      parseSedEditCommand("sed -Eir 's/foo|bar/baz/g' src/a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -riE 's/foo|bar/baz/g' src/a.ts"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -iri 's/foo/bar/' src/a.ts")).toBeNull();
   });
 
   it('parses expression flag forms', () => {
@@ -342,5 +363,42 @@ describe('sedEditParser', () => {
         extendedRegex: true,
       }),
     ).toThrow(/sed pattern simulation failed/);
+  });
+
+  // In POSIX BRE/ERE a `]` right after `[` or `[^` is a literal member of the
+  // bracket expression. JavaScript reads `[]` as an empty class and `[^]` as
+  // "any character", so simulating these rewrites the file differently from
+  // the command the user ran. Returning null hands the command back to the
+  // real sed. Behaviour of the real sed below was measured, not assumed.
+  it('declines a bracket expression whose first member is a literal ]', () => {
+    // On `a]b`, sed writes `XXb`; the simulation matched nothing at all.
+    expect(parseSedEditCommand("sed -i 's/[]a]/X/g' f.txt")).toBeNull();
+    // On `a]b`, sed writes `X]X`; the simulation wrote `Xb`, losing a byte,
+    // because JS reads `[^]` as "any character" and leaves `]` a literal.
+    expect(parseSedEditCommand("sed -i 's/[^]]/X/g' f.txt")).toBeNull();
+  });
+
+  it('declines the same bracket expressions under -E', () => {
+    // The -E path hands the pattern to RegExp untouched, so it diverges the
+    // same way and has to be declined separately.
+    expect(parseSedEditCommand("sed -E -i 's/[]a]/X/g' f.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/[^]]/X/g' f.txt")).toBeNull();
+  });
+
+  it('still simulates ordinary bracket expressions', () => {
+    // The guard against over-correcting: declining every pattern would also
+    // satisfy the two tests above. A `]` that is not the first member, and an
+    // escaped `[`, both still translate exactly and must keep their fast path.
+    const plain = parseSedEditCommand("sed -i 's/[abc]/X/g' f.txt");
+    expect(plain).not.toBeNull();
+    expect(applySedSubstitution('a]b', plain!)).toBe('X]X');
+
+    const negated = parseSedEditCommand("sed -i 's/[^abc]/X/g' f.txt");
+    expect(negated).not.toBeNull();
+    expect(applySedSubstitution('a]b', negated!)).toBe('aXb');
+
+    const escaped = parseSedEditCommand("sed -i 's/a\\[b/X/g' f.txt");
+    expect(escaped).not.toBeNull();
+    expect(applySedSubstitution('a[b]c', escaped!)).toBe('X]c');
   });
 });

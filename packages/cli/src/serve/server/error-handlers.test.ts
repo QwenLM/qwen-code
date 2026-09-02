@@ -7,6 +7,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import { installFinalErrorHandler } from './error-handlers.js';
 
 describe('installFinalErrorHandler', () => {
@@ -34,6 +35,23 @@ describe('installFinalErrorHandler', () => {
     expect(res.body).toEqual({
       error: 'Malformed URL encoding',
       code: 'invalid_request',
+    });
+  });
+
+  it('returns a retryable 503 when a workspace generation closes', async () => {
+    const app = express();
+    app.get('/error', () => {
+      throw new WorkspaceGenerationClosedError();
+    });
+    installFinalErrorHandler(app);
+
+    const res = await request(app).get('/error');
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body).toEqual({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
     });
   });
 });

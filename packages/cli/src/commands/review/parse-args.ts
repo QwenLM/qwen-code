@@ -55,7 +55,11 @@ export interface ParsedReviewArgs {
   warnings: string[];
 }
 
-const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
+export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
+  'low',
+  'medium',
+  'high',
+]);
 
 // The verdict's owner/repo/number are interpolated into `gh` commands by the
 // caller, so they must be established trustworthily, not merely extracted:

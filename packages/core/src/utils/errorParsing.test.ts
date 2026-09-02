@@ -153,6 +153,21 @@ describe('parseAndFormatApiError', () => {
     expect(parseAndFormatApiError(error)).toBe(message);
   });
 
+  it('should surface a friendly quota-exhaustion message verbatim (string)', () => {
+    const message =
+      'Quota exhausted: Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after the reset time, or switch to another API key / auth method.';
+    // Must NOT be re-wrapped in "[API Error: …]" and must NOT pick up the
+    // misleading "please wait and try again later" transient-throttle suffix.
+    expect(parseAndFormatApiError(message)).toBe(message);
+  });
+
+  it('should surface a friendly quota-exhaustion StructuredError.message verbatim', () => {
+    const message =
+      'Quota exhausted: Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after the reset time, or switch to another API key / auth method.';
+    const error: StructuredError = { message, status: 429 };
+    expect(parseAndFormatApiError(error, AuthType.USE_OPENAI)).toBe(message);
+  });
+
   // Idempotency — added after a customer report where a 4xx in non-interactive
   // mode produced "[API Error: [API Error: ...]]". The non-interactive runner
   // formats once, prints, then throws an Error whose .message is the formatted

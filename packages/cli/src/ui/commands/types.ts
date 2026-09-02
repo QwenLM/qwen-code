@@ -189,6 +189,7 @@ export interface OpenDialogActionReturn {
     | 'fast-model'
     | 'voice-model'
     | 'vision-model'
+    | 'image-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'
@@ -364,6 +365,13 @@ export interface SlashCommand {
    * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
    */
   supportedModes?: ExecutionMode[];
+
+  /**
+   * Whether the interactive UI may execute this command immediately while a
+   * model response is streaming. Commands opt in only when they do not submit
+   * a model turn or mutate conversation state owned by the active turn.
+   */
+  canRunDuringStreaming?: boolean;
 
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**

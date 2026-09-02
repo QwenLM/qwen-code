@@ -34,6 +34,7 @@ interface Harness {
 async function makeHarness(opts?: {
   trusted?: boolean;
   token?: string;
+  generationGuard?: { assertOpen(): void };
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -49,6 +50,7 @@ async function makeHarness(opts?: {
     boundWorkspaces: [workspace],
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
+    ...(opts?.generationGuard ? { generationGuard: opts.generationGuard } : {}),
   });
   const app = createServeApp(
     { ...baseOpts, workspace, token: opts?.token },
@@ -109,6 +111,30 @@ describe('POST /file/write', () => {
     expect(await fsp.readFile(path.join(h.workspace, 'a.txt'), 'utf-8')).toBe(
       'hello\n',
     );
+  });
+
+  it('maps a generation closed at the write boundary to retryable unavailable', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      token: 'secret',
+      generationGuard: {
+        assertOpen() {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        },
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/file/write')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'a.txt', content: 'hello', mode: 'create' });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('does not overwrite existing files in create mode', async () => {

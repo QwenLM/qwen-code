@@ -41,9 +41,9 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     args?.run_in_background === undefined &&
     args?.working_dir === undefined &&
     args?.name === undefined &&
-    // Core keeps fork fallbacks in the foreground (`!isForkRequested` in
-    // AgentTool.execute), so an omitted-flag `subagent_type: "fork"` call must
-    // not be classified as background here.
+    // Args alone cannot distinguish an interactive detached fork from a
+    // headless registry-backed fork. Keep the omitted-flag shape out of this
+    // heuristic and trust rawOutput.status for the effective runtime mode.
     (typeof args?.subagent_type !== 'string' ||
       args.subagent_type.toLowerCase() !== 'fork');
   const explicitlyBackground =

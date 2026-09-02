@@ -476,6 +476,14 @@
   white-space: nowrap;
 }
 
+.sessionBadgeIcon {
+  display: inline;
+  vertical-align: -1px;
+  margin-right: 3px;
+  color: var(--color-accent-fg, #8b5cf6);
+  flex-shrink: 0;
+}
+
 .projectName {
   flex: 0 1 auto;
 }
@@ -689,10 +697,16 @@
 }
 
 .tooltipTitle {
+  display: -webkit-box;
+  overflow: hidden;
   color: var(--popover-foreground);
   font-size: 13px;
   font-weight: 500;
   line-height: 20px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .tooltipTags {
@@ -725,10 +739,59 @@
   color: var(--agent-blue-500);
 }
 
-.tooltipMeta {
+.sessionDetailsContent {
+  width: min(16rem, var(--radix-dropdown-menu-content-available-width, 16rem));
+  max-width: var(--radix-dropdown-menu-content-available-width, 16rem);
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow: hidden auto;
+}
+
+.sessionDetailsIdRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionDetailsId {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 400;
+  line-height: 18px;
+}
+
+.sessionDetailsCopyButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.sessionDetailsCopyButton:hover,
+.sessionDetailsCopyButton:focus-visible {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+
+.sessionDetailsCopyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sessionDetailsCopied {
+  color: var(--muted-foreground);
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -1260,14 +1323,20 @@
   color: var(--foreground);
 }
 
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .dangerButton {
   border: 1px solid var(--error-color);
   background: transparent;
   color: var(--error-color);
 }
 
-.dangerButton:hover,
-.dangerButton:focus-visible {
+.dangerButton:hover:not(:disabled),
+.dangerButton:focus-visible:not(:disabled) {
   background: var(--error-bg);
 }
 

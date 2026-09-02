@@ -42,6 +42,20 @@ export class AgentStatistics {
   private apiTotalTokens = 0;
   private toolUsage = new Map<string, ToolUsageStats>();
 
+  reset(): void {
+    this.startTimeMs = 0;
+    this.rounds = 0;
+    this.totalToolCalls = 0;
+    this.successfulToolCalls = 0;
+    this.failedToolCalls = 0;
+    this.inputTokens = 0;
+    this.outputTokens = 0;
+    this.thoughtTokens = 0;
+    this.cachedTokens = 0;
+    this.apiTotalTokens = 0;
+    this.toolUsage.clear();
+  }
+
   start(now = Date.now()) {
     this.startTimeMs = now;
   }

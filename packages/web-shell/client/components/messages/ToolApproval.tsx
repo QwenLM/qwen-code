@@ -142,6 +142,9 @@ function orderPermissionOptions(
 function getOptionI18nKey(
   option: PermissionRequest['options'][number],
 ): string | undefined {
+  if (option.id === 'proceed_once_and_switch_to_default') {
+    return 'approval.option.allowOnceAndSwitchToDefault';
+  }
   if (option.kind === 'allow_once') return 'approval.option.allowOnce';
   if (option.kind === 'reject_once') return 'approval.option.rejectOnce';
   if (option.kind === 'allow_always') {

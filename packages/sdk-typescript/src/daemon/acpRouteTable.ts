@@ -872,6 +872,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         ...numParam(q, 'maxBytes'),
         ...numParam(q, 'line'),
         ...numParam(q, 'limit'),
+        ...strParam(q, 'cursor'),
       }),
     },
   },

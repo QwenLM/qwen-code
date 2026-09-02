@@ -744,6 +744,23 @@ Skill 3 content`);
       ]);
     });
 
+    it('reads the committed cache without triggering discovery', async () => {
+      expect(manager.getCachedSkills()).toBeNull();
+      expect(fs.readdir).not.toHaveBeenCalled();
+
+      await manager.listSkills();
+      vi.mocked(fs.readdir).mockClear();
+      vi.mocked(fs.readFile).mockClear();
+
+      expect(manager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+        'skill1',
+        'skill2',
+        'skill3',
+      ]);
+      expect(fs.readdir).not.toHaveBeenCalled();
+      expect(fs.readFile).not.toHaveBeenCalled();
+    });
+
     it('should prioritize project level over user level', async () => {
       const skills = await manager.listSkills();
       const skill1 = skills.find((s) => s.name === 'skill1');
@@ -970,6 +987,62 @@ Body`);
       expect(() => manager.getSkillsBaseDirs('extension')).toThrow(
         'Extension skills do not have a base directory',
       );
+    });
+
+    it('should append custom skill dirs with ~ expansion to user-level dirs', () => {
+      const defaultDirs = manager.getSkillsBaseDirs('user');
+      const customConfig = makeFakeConfig({
+        customSkillDirs: ['~/custom-skills', '/abs/skills'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(defaultDirs.length + 2);
+      expect(baseDirs.slice(0, defaultDirs.length)).toEqual(defaultDirs);
+      expect(baseDirs).toContain(
+        path.resolve(path.join(os.homedir(), 'custom-skills')),
+      );
+      expect(baseDirs).toContain(path.resolve('/abs/skills'));
+    });
+
+    it('should deduplicate custom dirs against default dirs', () => {
+      const defaultDirs = manager.getSkillsBaseDirs('user');
+      const customConfig = makeFakeConfig({
+        customSkillDirs: [defaultDirs[0], '/unique/dir'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(defaultDirs.length + 1);
+      expect(baseDirs.filter((d) => d === defaultDirs[0])).toHaveLength(1);
+      expect(baseDirs).toContain(path.resolve('/unique/dir'));
+    });
+
+    it('should not crash when config lacks getCustomSkillDirs', () => {
+      const partialConfig = {
+        getProjectRoot: () => '/test/project',
+      } as Config;
+      const partialManager = new SkillManager(partialConfig);
+
+      const baseDirs = partialManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(2);
+    });
+
+    it('should resolve relative custom skill dirs against CWD', () => {
+      const customConfig = makeFakeConfig({
+        customSkillDirs: ['./relative-skills'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toContain(path.resolve('./relative-skills'));
     });
   });
 

@@ -52,6 +52,8 @@ export enum HookEventName {
   PostCompact = 'PostCompact',
   // SessionEnd - When a session is ending
   SessionEnd = 'SessionEnd',
+  // SessionDelete - After an explicitly selected session is deleted
+  SessionDelete = 'SessionDelete',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
   // When a tool call is denied before a permission dialog is displayed
@@ -257,6 +259,8 @@ export type HookDecision = 'ask' | 'block' | 'deny' | 'approve' | 'allow';
  */
 export interface HookInput {
   session_id: string;
+  source_type?: string;
+  source_id?: string;
   transcript_path: string;
   cwd: string;
   hook_event_name: string;
@@ -824,7 +828,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, and content_length.
+   * response_parts, result_display, error, error_type, content_length, and
+   * vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }
@@ -854,6 +859,7 @@ export interface PostToolBatchOutput extends HookOutput {
  */
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
+  submitted_prompt?: string;
 }
 
 /**
@@ -1067,6 +1073,13 @@ export interface SessionEndOutput extends HookOutput {
 }
 
 /**
+ * SessionDelete hook input
+ */
+export interface SessionDeleteInput extends HookInput {
+  deleted_session_id: string;
+}
+
+/**
  * PreCompress trigger types
  */
 export enum PreCompactTrigger {
@@ -1177,7 +1190,7 @@ export interface SubagentStopOutput extends HookOutput {
 
 /**
  * StopFailure error types
- * Fires instead of Stop when an API error ended the turn
+ * Fires instead of Stop when an API error or loop detection ended the turn
  */
 export type StopFailureErrorType =
   | 'rate_limit'
@@ -1186,6 +1199,7 @@ export type StopFailureErrorType =
   | 'invalid_request'
   | 'server_error'
   | 'max_output_tokens'
+  | 'loop_detected'
   | 'unknown';
 
 /**

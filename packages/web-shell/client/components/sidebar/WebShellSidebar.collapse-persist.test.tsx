@@ -234,6 +234,45 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar collapsed session group persistence', () => {
+  it('shows the complete session name in a native tooltip', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const sessionName = container.querySelector<HTMLElement>(
+      '[title="API review"]',
+    );
+    expect(sessionName?.textContent).toContain('API review');
+  });
+
+  it('shows the complete archived session name in a native tooltip', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    archived.sessions = [
+      makeSession('session-archived', {
+        displayName: 'Archived task',
+        isArchived: true,
+      }),
+    ];
+    archived.data = archived.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const archivedHeader = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((btn) => btn.textContent?.includes('Archived'));
+    expect(archivedHeader).not.toBeNull();
+    act(() => click(archivedHeader!));
+    await flushSidebar();
+
+    const sessionName = container.querySelector<HTMLElement>(
+      '[title="Archived task"]',
+    );
+    expect(sessionName?.textContent).toContain('Archived task');
+  });
+
   it('writes collapsed section ids with the qwen-code-web-shell-* key', async () => {
     renderSidebar();
     await flushSidebar();

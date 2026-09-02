@@ -39,6 +39,7 @@ import * as path from 'node:path';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -62,8 +63,9 @@ import type {
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
 import { createAcpSessionBridge } from '../bridge.js';
+import { isNotCurrentlyGeneratingCancelError } from '../bridgeErrors.js';
 import type { BridgeOptions } from '../bridgeOptions.js';
-import type { AcpSessionBridge } from '../bridgeTypes.js';
+import { PROMPT_CANCEL_METHOD, type AcpSessionBridge } from '../bridgeTypes.js';
 import type { AcpChannel } from '../channel.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -119,6 +121,8 @@ export interface FakeAgentOpts {
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
   cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
+  /** Make the fake expose only standard ACP cancellation. */
+  promptCancelExtension?: boolean;
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
@@ -234,6 +238,29 @@ export class FakeAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     this.extMethodCalls.push({ method, params });
+    if (method === PROMPT_CANCEL_METHOD) {
+      if (this.opts.promptCancelExtension === false) {
+        throw RequestError.methodNotFound(method);
+      }
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string') {
+        throw new Error('Invalid or missing sessionId');
+      }
+      let delayMs = 1;
+      while (true) {
+        try {
+          await this.cancel({ sessionId });
+          return { cancelled: true };
+        } catch (error) {
+          if (!isNotCurrentlyGeneratingCancelError(error)) throw error;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          timer.unref();
+        });
+        delayMs = Math.min(delayMs * 2, 100);
+      }
+    }
     if (this.opts.extMethodImpl) {
       return this.opts.extMethodImpl(method, params, this);
     }

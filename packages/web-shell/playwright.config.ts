@@ -36,6 +36,15 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+      testIgnore: ['**/visuals/**', '**/*.mobile.spec.ts'],
+    },
+    {
+      // Touch-device emulation for the mobile composer backend (#5958):
+      // coarse pointer + no hover + touch points, which flips the composer
+      // to the plain-textarea path.
+      name: 'mobile-chromium',
+      use: { ...devices['Pixel 7'] },
+      testMatch: '**/*.mobile.spec.ts',
     },
   ],
 });

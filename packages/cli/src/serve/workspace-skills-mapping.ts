@@ -6,6 +6,7 @@
 
 import type { SkillConfig } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
+import type { SkillDisablement } from '../config/skill-settings.js';
 
 /**
  * Maps a `SkillConfig` (as `SkillManager.listSkills()` returns) to the
@@ -16,18 +17,25 @@ import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
  */
 export function mapSkillConfigToStatus(
   skill: SkillConfig,
-  disabledSkillNames: ReadonlySet<string> = new Set(),
+  disablements: ReadonlyMap<string, SkillDisablement> = new Map(),
   opts: { disabled?: boolean } = {},
 ): ServeWorkspaceSkillStatus {
-  const userDisabled = disabledSkillNames.has(skill.name.toLowerCase());
+  const disablement = disablements.get(skill.name.toLowerCase());
+  const disabledReason = opts.disabled
+    ? 'inactive_extension'
+    : disablement?.reason;
   const modelInvocable = skill.disableModelInvocation !== true;
   return {
     kind: 'skill',
-    status: opts.disabled || userDisabled ? 'disabled' : 'ok',
+    status: disabledReason ? 'disabled' : 'ok',
     name: skill.name,
     description: skill.description,
     level: skill.level,
     modelInvocable,
+    ...(disabledReason ? { disabledReason } : {}),
+    ...(!opts.disabled && disablement?.lockedScope
+      ? { lockedScope: disablement.lockedScope }
+      : {}),
     ...(skill.userInvocable === false ? { userInvocable: false as const } : {}),
     installedPath: skill.filePath,
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),

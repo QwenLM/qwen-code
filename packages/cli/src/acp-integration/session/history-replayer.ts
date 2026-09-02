@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord, HistoryGap } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  GoalSnapshotV2,
+  HistoryGap,
+} from '@qwen-code/qwen-code-core';
 import {
   createTranscriptReplayMachine,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
@@ -59,6 +63,7 @@ export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
   finalizeDangling?: boolean;
   gaps?: HistoryGap[];
+  goalState?: GoalSnapshotV2;
 }
 
 export interface HistoryReplayPageState {
@@ -105,7 +110,10 @@ export class HistoryReplayer {
 
   async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
     try {
-      await this.replayPage(records, { finalizeDangling: true, gaps });
+      await this.replayPage(records, {
+        finalizeDangling: true,
+        gaps,
+      });
       await this.supersedeUnrestorableGoal(records);
     } finally {
       this.setActiveRecordId(null);
@@ -196,6 +204,7 @@ export class HistoryReplayer {
             candidateTokens: 0,
             apiTimeMs: 0,
           },
+      ...(options.goalState ? { goalState: options.goalState } : {}),
     };
     return createTranscriptReplayMachine({
       initialState,

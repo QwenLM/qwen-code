@@ -117,10 +117,15 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
         continue;
       }
 
+      // These files use gitignore syntax, so they follow gitignore whitespace
+      // rules: only a trailing CR is stripped here, leading whitespace is part
+      // of the pattern, and unescaped trailing whitespace is dropped by the
+      // `ignore` library itself. See the same fix in `gitIgnoreParser.ts` for
+      // why `trim()` inverted the match.
       const patterns = (content ?? '')
         .split('\n')
-        .map((p) => p.trim())
-        .filter((p) => p !== '' && !p.startsWith('#'));
+        .map((p) => (p.endsWith('\r') ? p.slice(0, -1) : p))
+        .filter((p) => p.trim() !== '' && !p.startsWith('#'));
       if (patterns.length > 0) {
         const sourceIgnorer = ignore();
         sourceIgnorer.add(patterns);

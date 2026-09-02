@@ -164,6 +164,25 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(appProps[0]?.lockedWorkspaceCwd).toBeUndefined();
   });
 
+  it('initializes an unlocked workspace selector from workspace id', () => {
+    workspaceCapabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+
+    render(<WebShellWithProviders workspaceId="secondary" />);
+
+    expect(sessionProviderProps[0]).toMatchObject({
+      workspaceCwd: '/work/secondary',
+    });
+    expect(appProps[0]).toMatchObject({
+      initialSelectedWorkspaceCwd: '/work/secondary',
+    });
+    expect(appProps[0]?.lockedWorkspaceCwd).toBeUndefined();
+  });
+
   it('does not register an unknown unlocked workspace path', () => {
     const container = render(
       <WebShellWithProviders workspaceCwd="/work/missing" />,

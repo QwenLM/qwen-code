@@ -45,9 +45,16 @@
   margin: 30px 0;
 }
 
+.chatMessageColumn {
+  display: flex;
+  max-width: 80%;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
 .chatBubble {
   display: inline-block;
-  max-width: 80%;
+  max-width: 100%;
   padding: 8px 12px;
   border-radius: 6px;
   background: var(--accent);
@@ -56,6 +63,44 @@
   font-size: 14px;
   line-height: 1.5;
   text-align: left;
+}
+
+.sendFailure {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  color: var(--destructive);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.retryButton {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.retryButton:hover {
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+}
+
+.retryButton:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.retryButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .chatContent {

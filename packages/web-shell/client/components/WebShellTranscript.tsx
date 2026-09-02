@@ -1,3 +1,4 @@
+import '../styles/globals.css';
 import {
   useLayoutEffect,
   useMemo,
@@ -41,7 +42,6 @@ import {
   type WebShellTheme,
 } from '../themeContext';
 import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
-import '../styles/globals.css';
 import styles from '../App.module.css';
 
 const DEFAULT_CHAT_MAX_WIDTH = 1000;

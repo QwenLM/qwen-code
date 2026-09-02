@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import mock from 'mock-fs';
 import * as path from 'node:path';
+import sharp from 'sharp';
 import { WorkspaceContext } from './workspaceContext.js';
 import { readPathFromWorkspace } from './pathReader.js';
 import type { Config } from '../config/config.js';
@@ -104,11 +105,17 @@ describe('readPathFromWorkspace', () => {
     expect(result).toEqual(['hello from cwd']);
   });
 
-  it('should read an image file and return it as inlineData (Part object)', async () => {
-    // Use a real PNG header for robustness
-    const imageData = Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-    ]);
+  it('should read an image file as overview text and inlineData', async () => {
+    const imageData = await sharp({
+      create: {
+        width: 20,
+        height: 10,
+        channels: 3,
+        background: '#306090',
+      },
+    })
+      .png()
+      .toBuffer();
     mock({
       [CWD]: {
         'image.png': imageData,
@@ -119,12 +126,17 @@ describe('readPathFromWorkspace', () => {
     } as unknown as FileDiscoveryService;
     const config = createMockConfig(CWD, [], mockFileService);
     const result = await readPathFromWorkspace('image.png', config);
-    // Expect [Part] for image content
+    // Expect overview text immediately followed by the bounded image.
     expect(result).toEqual([
       {
+        text: expect.stringContaining(
+          'Image overview: 20x10; oriented source: 20x10',
+        ),
+      },
+      {
         inlineData: {
-          mimeType: 'image/png',
-          data: imageData.toString('base64'),
+          mimeType: 'image/jpeg',
+          data: expect.any(String),
           displayName: 'image.png',
         },
       },
@@ -236,9 +248,16 @@ describe('readPathFromWorkspace', () => {
     });
 
     it('should handle mixed content and include files from subdirectories', async () => {
-      const imageData = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const imageData = await sharp({
+        create: {
+          width: 8,
+          height: 8,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toBuffer();
       mock({
         [CWD]: {
           'mixed-dir': {
@@ -274,8 +293,8 @@ describe('readPathFromWorkspace', () => {
       );
       expect(imagePart).toEqual({
         inlineData: {
-          mimeType: 'image/png',
-          data: imageData.toString('base64'),
+          mimeType: 'image/jpeg',
+          data: expect.any(String),
           displayName: 'photo.png',
         },
       });

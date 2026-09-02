@@ -299,6 +299,26 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('classifies SDK-wrapped transport codes nested in the cause chain', () => {
+    // The OpenAI SDK surfaces a pre-header reset as APIConnectionError ->
+    // TypeError('fetch failed') -> cause { code: 'ECONNRESET' }; the socket
+    // code sits two cause levels down and must still classify as transport.
+    const error = Object.assign(new Error('Connection error.'), {
+      cause: Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('read ECONNRESET'), {
+          code: 'ECONNRESET',
+        }),
+      }),
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      transportCode: 'ECONNRESET',
+      reason: 'transport-error',
+    });
+  });
+
   it('prefers a transport cause over an HTTP status when both are present', () => {
     // An SDK error can surface an HTTP status while its underlying cause is a
     // socket-level failure. The transport cause is the more fundamental

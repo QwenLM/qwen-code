@@ -48,6 +48,7 @@ function makeWorkspaceServiceWithProvider(
 
   return createDaemonWorkspaceService({
     boundWorkspace: WS_A,
+    isWorkspaceTrusted: () => true,
     contextFilename: 'QWEN.md',
     statusProvider,
     isChannelLive: opts.isChannelLive ?? (() => false),

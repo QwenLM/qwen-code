@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "timeoutMs": 5000,
+  "provider": {
+    "type": "generic-http-search-v1",
+    "baseUrl": "https://context.example.com",
+    "tokenEnv": "CONTEXT_API_TOKEN"
+  }
+}

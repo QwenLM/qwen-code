@@ -361,6 +361,7 @@ function getTelemetryConfig(
     cwd,
     model: '',
     debugMode: false,
+    chatRecording: false,
   });
   return config;
 }
@@ -435,6 +436,9 @@ export class ExtensionManager {
   private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
+  /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
+  private lastSourceFingerprint: string | undefined;
+  private inFlightSourceRevalidation: Promise<boolean> | undefined;
 
   private withNetworkPolicy(
     installMetadata: ExtensionInstallMetadata | undefined,
@@ -1084,6 +1088,11 @@ export class ExtensionManager {
     names?: string[];
   }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
+    // Captured before the load, not after: an install landing mid-refresh must
+    // leave the committed fingerprint stale so the next check still sees it.
+    // Stamping post-load would mask that change until something else moved.
+    const dirFingerprintBeforeLoad =
+      requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
         let loaded: Extension[];
@@ -1114,7 +1123,127 @@ export class ExtensionManager {
     });
     this.extensionCache = nextCache;
     this.applyStoreActivation(snapshot);
+    // Only a full refresh establishes a baseline. A name-filtered refresh leaves
+    // the cache partial, so claiming the whole directory is up to date would let
+    // `refreshCacheIfSourcesChanged` report "unchanged" over a partial set.
+    if (dirFingerprintBeforeLoad !== undefined) {
+      this.lastSourceFingerprint = this.sourceFingerprint(
+        dirFingerprintBeforeLoad,
+      );
+    }
     return snapshot;
+  }
+
+  private static stampPath(target: string): string {
+    try {
+      const stats = fs.statSync(target);
+      return `${stats.mtimeMs}:${stats.size}`;
+    } catch {
+      // Absent is a real state and must not collide with any present one —
+      // otherwise deleting the last extension would look unchanged.
+      return '-';
+    }
+  }
+
+  /**
+   * Fingerprints which extension directories exist (install / uninstall) and
+   * each manifest's mtime and size (in-place edits).
+   *
+   * A pure function of on-disk state, deliberately independent of the current
+   * cache, so the same disk yields the same value before and after a refresh.
+   * A refresh never writes these paths, which is what makes it safe to commit
+   * the pre-load value — see `refreshCacheWithSnapshot`.
+   *
+   * Deliberately cheap: one `readdir` plus one `stat` per entry, where
+   * `refreshCache()` parses every manifest and re-lists every extension skill
+   * directory. That difference is what lets a status read stay self-healing
+   * without becoming a directory scan.
+   *
+   * mtime-and-size is the usual stat-based approximation, so an edit that
+   * preserves both is not detected. That is acceptable here: this is only the
+   * out-of-band safety net — mutations made through the daemon invalidate
+   * explicitly and never rely on it.
+   */
+  private extensionDirFingerprint(): string {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.configDir);
+    } catch {
+      return 'dir:-';
+    }
+    const parts: string[] = [];
+    for (const entry of entries) {
+      const stamp = ExtensionManager.stampPath(
+        path.join(this.configDir, entry, EXTENSIONS_CONFIG_FILENAME),
+      );
+      // Entries with no manifest are not extensions — notably the enablement
+      // file, which lives in this directory and is created lazily by the store.
+      // Counting them would make the store's own bookkeeping look like an
+      // install and cost one spurious refresh.
+      if (stamp === '-') continue;
+      parts.push(`ext:${entry}:${stamp}`);
+    }
+    // Sorted so directory iteration order cannot make an unchanged set look
+    // moved.
+    return parts.sort().join('|');
+  }
+
+  /**
+   * Fingerprints the enablement file and the store's activation state — where
+   * `enable` / `disable` land.
+   *
+   * Unlike the directory part this is stamped *after* a refresh, because a
+   * refresh writes the store itself. That is safe: store mutations hold the
+   * store lock, so no external write can interleave with the refresh and be
+   * masked by the post-load stamp.
+   */
+  private extensionStoreFingerprint(): string {
+    return [
+      `enablement:${ExtensionManager.stampPath(this.configFilePath)}`,
+      `state:${ExtensionManager.stampPath(
+        path.join(this.extensionStore.storeDir, 'state.json'),
+      )}`,
+    ].join('|');
+  }
+
+  private sourceFingerprint(dirFingerprint: string): string {
+    return `${dirFingerprint}||${this.extensionStoreFingerprint()}`;
+  }
+
+  /**
+   * Refreshes the cache only when the on-disk extension sources moved since the
+   * last refresh. Returns whether a refresh actually ran.
+   *
+   * Extension sources have no watcher (skills do — see
+   * `SkillManager.startWatching`), so read-only consumers that must not scan on
+   * every call use this to stay eventually consistent with `qwen extensions
+   * install` / `enable` / `disable` run outside the process.
+   *
+   * Concurrent callers share one refresh, so a caller can join a refresh that
+   * started just before the change it cares about. That is bounded rather than
+   * lost: the committed baseline is the pre-load fingerprint, so the change is
+   * still visible to the next call.
+   */
+  async refreshCacheIfSourcesChanged(): Promise<boolean> {
+    const inFlight = this.inFlightSourceRevalidation;
+    if (inFlight) return await inFlight;
+    const current = this.sourceFingerprint(this.extensionDirFingerprint());
+    if (this.lastSourceFingerprint === current) return false;
+    const revalidation = (async () => {
+      // `refreshCache` commits the new baseline itself, from its pre-load
+      // fingerprint. A throw leaves the old baseline in place so the next call
+      // retries rather than assuming the refresh landed.
+      await this.refreshCache();
+      return true;
+    })();
+    this.inFlightSourceRevalidation = revalidation;
+    const clear = () => {
+      if (this.inFlightSourceRevalidation === revalidation) {
+        this.inFlightSourceRevalidation = undefined;
+      }
+    };
+    void revalidation.then(clear, clear);
+    return await revalidation;
   }
 
   getLoadedExtensions(): Extension[] {
@@ -2622,6 +2751,14 @@ export function getExtensionId(
     idValue = `https://github.com/${githubUrlParts.owner}/${githubUrlParts.repo}`;
   } else {
     idValue = installMetadata?.source ?? config.name;
+  }
+  // A marketplace repo can host several plugins; hashing only the repo URL
+  // collapses them into one id and the second install trips the store's
+  // id-ownership check (#7568). Suffix the plugin name so each plugin from
+  // the same source gets its own id. Installs recorded under the old
+  // repo-only id are re-keyed by ExtensionStore.ensureInitialized.
+  if (installMetadata?.pluginName) {
+    idValue += `:${installMetadata.pluginName}`;
   }
   return hashValue(idValue);
 }

@@ -36,7 +36,9 @@ interface RegisterWorkspaceAuthRoutesDeps {
   allowPrivateAuthBaseUrl: boolean;
   installAuthProvider?: (
     req: ServeAuthProviderInstallRequest,
+    assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /**
@@ -139,6 +141,7 @@ export function registerWorkspaceAuthRoutes(
     boundWorkspace,
     allowPrivateAuthBaseUrl,
     installAuthProvider,
+    captureGenerationAssertion,
   } = deps;
 
   app.post(
@@ -335,7 +338,13 @@ export function registerWorkspaceAuthRoutes(
         }
       }
       try {
-        res.status(200).json(await installAuthProvider(installRequest));
+        const assertGenerationOpen = captureGenerationAssertion?.();
+        assertGenerationOpen?.();
+        const result = assertGenerationOpen
+          ? await installAuthProvider(installRequest, assertGenerationOpen)
+          : await installAuthProvider(installRequest);
+        assertGenerationOpen?.();
+        res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',

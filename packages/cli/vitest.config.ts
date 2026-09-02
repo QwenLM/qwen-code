@@ -11,9 +11,21 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/goalWire': path.resolve(
+        __dirname,
+        '../core/src/goals/goal-wire.ts',
+      ),
       '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
         __dirname,
         '../core/src/utils/transcript-records.ts',
+      ),
+      '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
+        __dirname,
+        '../core/src/hooks/user-prompt-submit-context.ts',
+      ),
+      '@qwen-code/qwen-code-core/memoryScopes': path.resolve(
+        __dirname,
+        '../core/src/memory/scopes.ts',
       ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
@@ -44,6 +56,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/spawnChannel': path.resolve(
         __dirname,
         '../acp-bridge/src/spawnChannel.ts',
+      ),
+      '@qwen-code/acp-bridge/processRegistry': path.resolve(
+        __dirname,
+        '../acp-bridge/src/process-registry.ts',
       ),
       '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
         __dirname,
@@ -112,6 +128,10 @@ export default defineConfig({
     },
   },
   test: {
+    // See packages/core/vitest.config.ts: raise the per-test ceiling above
+    // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
+    // store's tempdir round-trip) don't blow it purely under CI contention.
+    testTimeout: 15000,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
     environment: 'jsdom',

@@ -1007,6 +1007,39 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('drops the adversarial personas when the plan records medium effort', () => {
+    // The wiring under test: the capturing command writes `effort` into the plan,
+    // and the roster reads it from there — no `--effort` flag on THIS command.
+    // A `medium` plan must build the reduced set (personas gone). If this reddens
+    // back to nine, `check-coverage` and `compose-review` — which read the same
+    // `plan.effort` — would flag the personas missing and escalate medium to high
+    // on every run. This is the boundary the pure-function test cannot reach.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-med-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ ...PLAN, effort: 'medium' }));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual([
+        '1a',
+        '1b',
+        '2',
+        '3',
+        '4',
+        '5',
+      ]);
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain('6 agents required');
+      expect(printed).not.toMatch(/Agent 6[abc]:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a whole block copied lazily — separator line included — still delivers', () => {
     // The point of one call is that the compliant move is mechanical. An
     // orchestrator that copies from one ───── line to the next has copied an
@@ -1249,6 +1282,50 @@ describe('--roster — every prompt the plan requires, in one call', () => {
           }),
         ).toThrow(/--roster builds every prompt/);
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits the working_dir parameter note when worktreePath is present', () => {
+    // A run that passed both `working_dir` and `isolation: "worktree"` failed
+    // all 11 agents (mutually exclusive). The roster is the last text the
+    // orchestrator reads before constructing agent calls — the parameter note
+    // must be there, not just 400 lines back in SKILL.md.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-wt-'));
+    try {
+      const wt = '.qwen/tmp/review-pr-9999';
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, worktreePath: wt, prNumber: '9999' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(`working_dir: "${wt}"`);
+      expect(printed).toContain('Do NOT set `isolation`');
+      expect(printed).toContain('mutually exclusive');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits the parameter note when worktreePath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-nowt-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).not.toContain('Do NOT set `isolation`');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1713,6 +1790,63 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
+    // The all-role test above proves every brief gets the diff and the format; it
+    // cannot see whether a *specific* lens reached its role. If prompt assembly
+    // ever drops or misassigns the equivalent-mutant paragraph, that test stays
+    // green while Agent 5 again flags unobservable mutations as coverage gaps.
+    const p = buildRoleBrief(PLAN, '5');
+    expect(p).toContain('Mutation-test the tests that matter');
+    expect(p).toContain('equivalent mutant');
+    // The discriminating-input requirement is what keeps the escape hatch from
+    // waving through a genuinely vacuous test.
+    expect(p).toContain('the input that makes it observable');
+    // And the lens must not bleed into a sibling dimension's brief.
+    expect(buildRoleBrief(PLAN, '2')).not.toContain('equivalent mutant');
+    // Severity must align with the shared ladder: a vacuous test is a Suggestion,
+    // escalated only by naming the concrete incorrect behaviour it lets ship —
+    // never Critical merely for being the sole guard, which would grade the same
+    // inert test above Agent 7's efficacy probe (a Suggestion) and inflate the
+    // verdict. This pins the semantic the "words Critical and Suggestion exist"
+    // check could not see.
+    expect(p).toContain('A vacuous test is a **Suggestion**');
+    expect(p).toContain('report **that behaviour** as the Critical');
+    expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
+    // it owns, so its severity must move in lockstep — a revert of just this bullet
+    // would let the two agents grade the same inert test differently on one PR.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'a **Suggestion** on its own, Critical only when',
+    );
+  });
+
+  it('gives the verifier the probe capability — run a claim, self-check the probe, tag [probe]', () => {
+    // Measured: read-only verification traced a real double-execute and called it
+    // correct. The verifier may RUN a probe for a runnable claim; the self-check
+    // (make the probe flip) is what keeps it evidence, and `Source: [probe]` is
+    // what makes compose-review treat it as deterministic.
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('do not just trace it — run it');
+    expect(p).toContain('write a **probe**');
+    expect(p).toContain('confirm the probe **flips**');
+    expect(p).toContain('Source: [probe]');
+    expect(p).toContain('Leave the tree as you found it');
+    // The capability is the verifier's; it must not bleed into a dimension brief.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('write a **probe**');
+  });
+
+  it('carries the command-aware subprocess-injection correction into Agent 2', () => {
+    // The all-role test sees only that Agent 2 gets the diff and the format; it
+    // cannot see whether the `--` correction reached it. If a revert restores the
+    // old "terminate the argv with `--`" guidance, that test stays green while
+    // Agent 2 again advises that `--` alone closes the injection — but
+    // `git checkout -- .` still discards unstaged changes. Pin the corrected wording.
+    const p = buildRoleBrief(PLAN, '2');
+    expect(p).toContain('does **not** neutralize a *pathspec*');
+    expect(p).toContain('the value allowlist is what closes the injection');
+    expect(p).not.toContain('terminate the argv with');
+  });
+
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
     // It runs the build. Requiring it to open the diff would be requiring a thing
     // its job does not involve, and reporting it "blind" for not doing so would
@@ -1730,6 +1864,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       '"${QWEN_CODE_CLI:-qwen}" review test-efficacy /tmp/plan.json',
     );
     expect(p).toContain('--base abc123');
+    // All three finding kinds are named, or the agent meets a `mutant-survived`
+    // it was never told how to file — and the skipped/inconclusive mutants must
+    // be fenced off from findings the same way the probes' inconclusive is.
+    expect(p).toContain('`kind: "mutant-survived"`');
+    expect(p).toContain('mutants.skippedForBudget');
+    expect(p).toContain('mutants.skippedForCap');
+    expect(p).toContain('mutants.skippedForBaseline');
+    expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the
     // SKILL.md sweep nor check-coverage's stderr hints can reach — and its shell
@@ -1819,6 +1961,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('/x/qwen-review-pr-6766-context.md');
     // The empty scope is a complete answer, and it needs evidence to be one.
     expect(p).toContain('scope empty');
+    expect(p).toContain('motivating evidence');
+    expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
   it('refuses Agent 0 on a plan with no pull request in it', () => {

@@ -15,7 +15,7 @@ export const updateCommand: CommandModule = {
   handler: async () => {
     const [
       { loadSettings },
-      { checkForUpdatesDetailed },
+      { checkForUpdatesDetailed, describeUpdateCheckFailure },
       installationInfoModule,
       standaloneUpdate,
       stdioHelpers,
@@ -54,7 +54,8 @@ export const updateCommand: CommandModule = {
     if (updateCheck.status === 'error') {
       writeStderrLine(
         t(
-          'Failed to check for updates. Please check your network or registry configuration.',
+          'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+          { reason: describeUpdateCheckFailure(updateCheck.error) },
         ),
       );
       process.exitCode = 1;

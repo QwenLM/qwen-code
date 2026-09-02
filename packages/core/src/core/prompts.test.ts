@@ -6,8 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  assembleSystemPrompt,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
@@ -44,6 +46,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
   });
 
@@ -362,6 +365,132 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
   });
 
+  describe('QWEN_SYSTEM_IDENTITY_MD environment variable', () => {
+    const customIdentity =
+      'You are Acme Code, an interactive CLI agent for Acme Corp.';
+
+    /** Sample the default identity from the live prompt to avoid drift. */
+    const sampleDefaultIdentity = (): string => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+      return getCoreSystemPrompt().split('\n\n', 1)[0];
+    };
+
+    it('should keep default prompt byte-identical when identity env is unset', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const prompt = getCoreSystemPrompt();
+      expect(prompt.startsWith(defaultIdentity)).toBe(true);
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should replace only the identity sentence when identity env points to a file', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return `${customIdentity}  \n\n`;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const withOverride = getCoreSystemPrompt();
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      const baseline = getCoreSystemPrompt();
+
+      expect(withOverride.startsWith(customIdentity)).toBe(true);
+      expect(withOverride).not.toContain('You are Qwen Code');
+      // trimEnd() strips trailing spaces/newlines from the identity file.
+      expect(withOverride.slice(customIdentity.length)).toBe(
+        baseline.slice(defaultIdentity.length),
+      );
+    });
+
+    it('should ignore identity env when QWEN_SYSTEM_MD is set', () => {
+      const systemPath = path.resolve('/custom/system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return 'full system override';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('full system override');
+      expect(fs.readFileSync).toHaveBeenCalledTimes(1);
+      expect(fs.readFileSync).toHaveBeenCalledWith(systemPath, 'utf8');
+    });
+
+    it('should not inject identity when QWEN_SYSTEM_MD points to an empty file', () => {
+      const systemPath = path.resolve('/custom/empty-system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return '';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('');
+      expect(prompt).not.toContain(customIdentity);
+      expect(prompt).not.toContain('You are Qwen Code');
+    });
+
+    it('should throw when identity env points to a missing file', () => {
+      const identityPath = path.resolve('/missing/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `missing system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when identity env points to an empty or whitespace-only file', () => {
+      const identityPath = path.resolve('/custom/blank-identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('  \n\t  ');
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `empty system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when a ~/ identity path cannot resolve the home directory', () => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '~/identity.md');
+      vi.spyOn(os, 'homedir').mockImplementation(() => {
+        throw new Error('homedir unavailable');
+      });
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `failed to resolve system identity path '~/identity.md'`,
+      );
+    });
+
+    it.each(['0', 'false', '1', 'true'] as const)(
+      'should not override identity when env is switch value %s',
+      (switchValue) => {
+        const defaultIdentity = sampleDefaultIdentity();
+        vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', switchValue);
+        const prompt = getCoreSystemPrompt();
+        expect(prompt.startsWith(defaultIdentity)).toBe(true);
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe('QWEN_WRITE_SYSTEM_MD environment variable', () => {
     it('should not write to file when QWEN_WRITE_SYSTEM_MD is "false"', () => {
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'false');
@@ -643,7 +772,12 @@ describe('getPlanModeSystemReminder', () => {
 
     expect(result).toContain('When a Tool is Blocked by Plan Mode');
     expect(result).toContain('Do NOT retry');
+    expect(result).toContain(
+      'wrappers, quoting tricks, aliases, or obfuscation',
+    );
     expect(result).toContain('Pivot to read-only');
+    expect(result).toContain('does not approve the plan');
+    expect(result).toContain('exit Plan mode');
   });
 
   it('should be deterministic', () => {
@@ -651,6 +785,27 @@ describe('getPlanModeSystemReminder', () => {
     const result2 = getPlanModeSystemReminder();
 
     expect(result1).toBe(result2);
+  });
+});
+
+describe('getManualPlanExitSystemReminder', () => {
+  it('should name the new mode and forbid exit_plan_mode', () => {
+    const result = getManualPlanExitSystemReminder('default');
+
+    expect(result).toBe(`<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: default.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
+</system-reminder>`);
+  });
+
+  it('should render whichever mode the user switched to', () => {
+    expect(getManualPlanExitSystemReminder('yolo')).toContain(
+      'current approval mode is: yolo',
+    );
+    expect(getManualPlanExitSystemReminder('auto-edit')).toContain(
+      'current approval mode is: auto-edit',
+    );
   });
 });
 
@@ -928,5 +1083,72 @@ describe('resolveInteractionMode', () => {
         isInteractive: () => false,
       }),
     ).toBe('headless');
+  });
+});
+
+describe('assembleSystemPrompt', () => {
+  it('joins all layers in stable -> context -> volatile order', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      contextFiles: 'CONTEXT_FILES',
+      appendPrompt: 'APPEND',
+      gitStatus: 'GIT_STATUS',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result).toBe(
+      'BASE\n\n---\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\nGIT_STATUS\n\n---\n\nAUTO_MEMORY',
+    );
+  });
+
+  it('returns only the base when every other layer is empty', () => {
+    expect(assembleSystemPrompt({ base: 'BASE' })).toBe('BASE');
+    expect(
+      assembleSystemPrompt({
+        base: 'BASE',
+        contextFiles: '',
+        appendPrompt: '   ',
+        gitStatus: null,
+        autoMemory: '',
+      }),
+    ).toBe('BASE');
+  });
+
+  it('skips empty slots without leaving separators behind', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      appendPrompt: 'APPEND',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result).toBe('BASE\n\n---\n\nAPPEND\n\n---\n\nAUTO_MEMORY');
+  });
+
+  it('keeps the volatile auto-memory slot last even after git status', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      gitStatus: 'GIT_STATUS',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result.endsWith('\n\n---\n\nAUTO_MEMORY')).toBe(true);
+    expect(result.indexOf('GIT_STATUS')).toBeLessThan(
+      result.indexOf('AUTO_MEMORY'),
+    );
+  });
+
+  it('matches the composition getCoreSystemPrompt produces for the same inputs', () => {
+    // getCoreSystemPrompt(userMemory, ..., appendInstruction) must be
+    // byte-identical to assembling its base with the same context slots —
+    // both paths go through assembleSystemPrompt.
+    const base = getCoreSystemPrompt(undefined, undefined, undefined);
+    const viaParams = getCoreSystemPrompt('MEMORY', undefined, 'APPEND');
+    const viaAssembler = assembleSystemPrompt({
+      base,
+      contextFiles: 'MEMORY',
+      appendPrompt: 'APPEND',
+    });
+
+    expect(viaParams).toBe(viaAssembler);
   });
 });

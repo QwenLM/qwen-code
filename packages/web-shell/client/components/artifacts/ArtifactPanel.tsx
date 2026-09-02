@@ -1,11 +1,28 @@
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
+} from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../../adapters/types';
+import type { WebShellRightPanelItem } from '../../customization';
 import {
   useWorkspaceActions,
+  type DaemonSessionActions,
   type DaemonWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
+import { DownloadIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  CirclePlusIcon,
+  MessageCirclePlusIcon,
+  PanelRightIcon,
+  PlusIcon,
+  SquareActivityIcon,
+  SquareTerminalIcon,
+} from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -17,8 +34,16 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
-import { isSafeHref } from '../messages/Markdown';
+import { isSafeHref, Markdown } from '../messages/Markdown';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import {
   buildCron,
   describeCron,
@@ -31,19 +56,29 @@ import {
   artifactKindLabel,
   formatArtifactSize,
   getArtifactLocation,
+  getArtifactImageMimeType,
+  getImageMimeTypeFromPath,
   normalizePath,
+  readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
 } from './artifactUtils';
 import {
   displayPath,
+  isRenderedFilePath,
   type TurnOutputFileChange,
   type TurnOutputFileDiff,
+  type TurnOutputOpenRequest,
   type TurnOutputScheduledTask,
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
+import { SubagentDetail } from './SubagentDetail';
+import { SideTaskPanel } from './SideTaskPanel';
+import {
+  MonitorTaskDetail,
+  ShellTaskDetail,
+} from '../messages/TasksStatusMessage';
 
-const MIN_PANEL_WIDTH_FOR_DEFAULT_TREE = 740;
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
   'daily',
@@ -54,12 +89,32 @@ const FREQUENCIES: Frequency[] = [
   'custom',
 ];
 const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+const ignoreSideTaskCreated = (_tabId: string, _sessionId: string) => undefined;
+const ignoreSideTaskTitleChange = (
+  _tabId: string,
+  _title: string,
+  _fromFirstPrompt?: boolean,
+) => undefined;
+const rejectMissingSideTaskCreate = () =>
+  Promise.reject(new Error('Side-task session creation is unavailable'));
 
 export type ArtifactPanelTab =
   | {
       id: string;
       kind: 'review';
       title: string;
+      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      changes?: readonly TurnOutputFileChange[];
+      selectedPath?: string;
+    }
+  | {
+      id: string;
+      kind: 'file';
+      title: string;
+      workspacePath: string;
+      workspaceActions?: DaemonWorkspaceActions;
+      previewContent?: string;
     }
   | {
       id: string;
@@ -75,7 +130,54 @@ export type ArtifactPanelTab =
       title: string;
       task: TurnOutputScheduledTask;
       workspaceActions?: DaemonWorkspaceActions;
+    }
+  | {
+      id: string;
+      kind: 'subagent';
+      title: string;
+      sessionId: string;
+      rootToolCallId: string;
+      rootTool: ACPToolCall;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'monitor';
+      title: string;
+      task: DaemonSessionMonitorTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'shell';
+      title: string;
+      task: DaemonSessionShellTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'side_task';
+      title: string;
+      sessionId?: string;
+      parentSessionId: string;
+      workspaceCwd?: string;
+      nameFromFirstPrompt?: boolean;
+      initialPrompt?: string;
     };
+
+export interface SideTaskListItem {
+  sessionId: string;
+  title: string;
+  workspaceCwd?: string;
+  updatedAt?: string;
+}
+
+const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'review',
+  'sideTask',
+];
 
 interface ArtifactPanelProps {
   artifacts: readonly DaemonSessionArtifact[];
@@ -89,7 +191,39 @@ interface ArtifactPanelProps {
   error?: string | null;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onOpenFilePreview: (
+    change: TurnOutputFileChange,
+    workspaceActions: DaemonWorkspaceActions,
+    workspaceCwd?: string,
+  ) => void;
+  latestReviewAvailable?: boolean;
+  onOpenLatestReview?: () => void;
+  items?: readonly WebShellRightPanelItem[];
+  sideTaskAvailable?: boolean;
+  sideTasks?: readonly SideTaskListItem[];
+  sideTasksLoading?: boolean;
+  onCreateSideTask?: () => void;
+  onOpenSideTask?: (sideTask: SideTaskListItem) => void;
+  onCreateSideTaskSession?: (
+    tabId: string,
+    parentSessionId: string,
+    title: string,
+  ) => Promise<{ sessionId: string; displayName?: string }>;
+  onSideTaskCreated?: (tabId: string, sessionId: string) => void;
+  onSideTaskTitleChange?: (
+    tabId: string,
+    title: string,
+    fromFirstPrompt?: boolean,
+  ) => void;
+  onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onNestedArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  onSideTaskError?: (error: unknown, fallback: string) => void;
   onClose: () => void;
+  variant?: 'docked' | 'drawer';
 }
 
 export function ArtifactPanel({
@@ -104,94 +238,395 @@ export function ArtifactPanel({
   error,
   onSelectTab,
   onCloseTab,
+  onOpenFilePreview,
+  latestReviewAvailable = false,
+  onOpenLatestReview,
+  items = DEFAULT_RIGHT_PANEL_ITEMS,
+  sideTaskAvailable = false,
+  sideTasks = [],
+  sideTasksLoading = false,
+  onCreateSideTask,
+  onOpenSideTask,
+  onCreateSideTaskSession,
+  onSideTaskCreated,
+  onSideTaskTitleChange,
+  onNestedRightPanelOpen,
+  onNestedArtifactsChange,
+  onSideTaskError,
   onClose,
+  variant = 'docked',
 }: ArtifactPanelProps) {
+  const { t } = useI18n();
+  const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
+  const sideTaskMenuCloseTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const openSideTaskMenu = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+      sideTaskMenuCloseTimerRef.current = null;
+    }
+    setSideTaskMenuOpen(true);
+  }, []);
+  const scheduleSideTaskMenuClose = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+    }
+    sideTaskMenuCloseTimerRef.current = setTimeout(() => {
+      setSideTaskMenuOpen(false);
+      sideTaskMenuCloseTimerRef.current = null;
+    }, 120);
+  }, []);
+  useEffect(
+    () => () => {
+      if (sideTaskMenuCloseTimerRef.current) {
+        clearTimeout(sideTaskMenuCloseTimerRef.current);
+      }
+    },
+    [],
+  );
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const showReviewMenuItem =
+    items.includes('review') && !tabs.some((tab) => tab.kind === 'review');
+  const showSideTaskMenuItems =
+    items.includes('sideTask') &&
+    sideTaskAvailable &&
+    Boolean(onCreateSideTask);
+  const showAddMenu =
+    Boolean(activeTab) && (showReviewMenuItem || showSideTaskMenuItems);
   const defaultWorkspaceActions = useWorkspaceActions();
   const activeWorkspaceActions =
-    activeTab?.kind === 'artifact' || activeTab?.kind === 'scheduled_task'
+    activeTab && 'workspaceActions' in activeTab
       ? (activeTab.workspaceActions ?? defaultWorkspaceActions)
       : defaultWorkspaceActions;
 
   return (
     <aside
-      className={styles.panel}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
       style={
-        panelWidth ? { flexBasis: panelWidth, width: panelWidth } : undefined
+        variant === 'docked' && panelWidth
+          ? { flexBasis: panelWidth, width: panelWidth }
+          : undefined
       }
       aria-label="Right panel"
     >
       <div className={styles.header}>
-        <div className={styles.tabs} role="tablist" aria-label="Right panel">
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={[
-                styles.tabItem,
-                tab.id === activeTab?.id ? styles.tabActive : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab.id === activeTab?.id}
-                className={styles.tab}
-                onClick={() => onSelectTab(tab.id)}
-                title={tab.title}
+        {tabs.length > 0 && (
+          <div className={styles.tabs} role="tablist" aria-label="Right panel">
+            {tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={[
+                  styles.tabItem,
+                  tab.id === activeTab?.id ? styles.tabActive : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
               >
-                <span className={styles.tabIcon} aria-hidden="true">
-                  {tab.kind === 'review' ? (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === activeTab?.id}
+                  className={styles.tab}
+                  onClick={() => onSelectTab(tab.id)}
+                  title={tab.title}
+                >
+                  <span className={styles.tabIcon} aria-hidden="true">
+                    {tab.kind === 'review' ? (
+                      <TabReviewIcon />
+                    ) : tab.kind === 'artifact' || tab.kind === 'file' ? (
+                      <TabArtifactIcon />
+                    ) : tab.kind === 'subagent' ? (
+                      <TabSubagentIcon />
+                    ) : tab.kind === 'monitor' ? (
+                      <SquareActivityIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'shell' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'side_task' ? (
+                      <MessageCirclePlusIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : (
+                      <TabScheduledTaskIcon />
+                    )}
+                  </span>
+                  <span className={styles.tabTitle}>{tab.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.tabCloseButton}
+                  onClick={() => onCloseTab(tab.id)}
+                  aria-label={`Close ${tab.title}`}
+                  title="Close"
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.headerActions}>
+          {showAddMenu && (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={`${styles.iconButton} ${styles.addButton}`}
+                  aria-label={t('rightPanel.add')}
+                  title={t('rightPanel.add')}
+                >
+                  <PlusIcon className={styles.toolbarIcon} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                {showReviewMenuItem && (
+                  <DropdownMenuItem
+                    disabled={!latestReviewAvailable || !onOpenLatestReview}
+                    onSelect={onOpenLatestReview}
+                  >
                     <TabReviewIcon />
-                  ) : tab.kind === 'artifact' ? (
-                    <TabArtifactIcon />
-                  ) : (
-                    <TabScheduledTaskIcon />
-                  )}
-                </span>
-                {tab.title}
-              </button>
+                    <span className={styles.sideTaskListTitle}>
+                      {t('turnOutputs.review')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showReviewMenuItem && showSideTaskMenuItems && (
+                  <DropdownMenuSeparator />
+                )}
+                {showSideTaskMenuItems && (
+                  <DropdownMenuItem
+                    disabled={sideTasksLoading}
+                    onSelect={onCreateSideTask}
+                  >
+                    <MessageCirclePlusIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('sideTask.create')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          <button
+            type="button"
+            className={`${styles.iconButton} ${styles.panelToggleButton}`}
+            onClick={onClose}
+            aria-label={t('chatHeader.toggleRightPanel')}
+            aria-pressed="true"
+            title={t('chatHeader.toggleRightPanel')}
+          >
+            <PanelRightIcon className={styles.panelToggleIcon} />
+          </button>
+        </div>
+      </div>
+      <div
+        className={`${styles.body} ${
+          activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
+        }`.trim()}
+      >
+        {!activeTab ? (
+          <div
+            className={styles.emptyActions}
+            data-testid="right-panel-empty-actions"
+          >
+            {items.includes('review') && (
               <button
                 type="button"
-                className={styles.tabCloseButton}
-                onClick={() => onCloseTab(tab.id)}
-                aria-label={`Close ${tab.title}`}
-                title="Close"
+                className={styles.emptyAction}
+                disabled={!latestReviewAvailable || !onOpenLatestReview}
+                onClick={onOpenLatestReview}
               >
-                <CloseIcon />
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <TabReviewIcon />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('turnOutputs.review')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
               </button>
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className={styles.iconButton}
-          onClick={onClose}
-          aria-label="Close artifacts panel"
-          title="Close"
-        >
-          ×
-        </button>
-      </div>
-      <div className={styles.body}>
-        {!activeTab ? (
-          <div className={styles.empty}>No panel selected.</div>
+            )}
+            {items.includes('sideTask') &&
+              sideTaskAvailable &&
+              onCreateSideTask &&
+              (sideTasks.length === 0 ? (
+                <button
+                  type="button"
+                  className={styles.emptyAction}
+                  disabled={sideTasksLoading}
+                  aria-busy={sideTasksLoading}
+                  onClick={onCreateSideTask}
+                >
+                  <span className={styles.emptyActionIcon} aria-hidden="true">
+                    <MessageCirclePlusIcon strokeWidth={1.6} />
+                  </span>
+                  <span className={styles.emptyActionTitle}>
+                    {t('sideTask.title')}
+                  </span>
+                  <span className={styles.emptyActionHint}>
+                    {t('sideTask.description')}
+                  </span>
+                  <ChevronRightIcon
+                    className={styles.emptyActionChevron}
+                    strokeWidth={1.6}
+                    aria-hidden="true"
+                  />
+                </button>
+              ) : (
+                <DropdownMenu
+                  open={sideTaskMenuOpen}
+                  onOpenChange={setSideTaskMenuOpen}
+                  modal={false}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.emptyAction}
+                      aria-expanded={sideTaskMenuOpen}
+                      onMouseEnter={openSideTaskMenu}
+                      onMouseLeave={scheduleSideTaskMenuClose}
+                    >
+                      <span
+                        className={styles.emptyActionIcon}
+                        aria-hidden="true"
+                      >
+                        <MessageCirclePlusIcon strokeWidth={1.6} />
+                      </span>
+                      <span className={styles.emptyActionTitle}>
+                        {t('sideTask.title')}
+                      </span>
+                      <span className={styles.emptyActionHint}>
+                        {t('sideTask.description')}
+                      </span>
+                      <ChevronRightIcon
+                        className={styles.emptyActionChevron}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    className="w-80"
+                    onMouseEnter={openSideTaskMenu}
+                    onMouseLeave={scheduleSideTaskMenuClose}
+                  >
+                    {sideTasks.map((sideTask) => (
+                      <DropdownMenuItem
+                        key={sideTask.sessionId}
+                        onSelect={() => onOpenSideTask?.(sideTask)}
+                      >
+                        <span className={styles.sideTaskListTitle}>
+                          {sideTask.title}
+                        </span>
+                        {sideTask.updatedAt && (
+                          <span className={styles.sideTaskListTime}>
+                            {formatRelativeTime(sideTask.updatedAt, t)}
+                          </span>
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={onCreateSideTask}>
+                      <CirclePlusIcon
+                        className={styles.sideTaskNewIcon}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.sideTaskListTitle}>
+                        {t('sideTask.new')}
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ))}
+          </div>
         ) : activeTab.kind === 'review' ? (
           <ReviewChanges
-            changes={reviewChanges}
-            selectedPath={selectedReviewPath}
-            panelWidth={panelWidth}
-            workspaceCwd={workspaceCwd}
+            changes={activeTab.changes ?? reviewChanges}
+            selectedPath={activeTab.selectedPath ?? selectedReviewPath}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            onOpenFilePreview={(change) =>
+              onOpenFilePreview(
+                change,
+                activeWorkspaceActions,
+                activeTab.workspaceCwd ?? workspaceCwd,
+              )
+            }
+          />
+        ) : activeTab.kind === 'file' ? (
+          <WorkspaceFilePreview
+            key={activeTab.id}
+            workspacePath={activeTab.workspacePath}
+            workspaceActions={activeWorkspaceActions}
+            previewContent={activeTab.previewContent}
           />
         ) : activeTab.kind === 'artifact' ? (
           <ArtifactDetailTab
+            key={activeTab.id}
             artifacts={artifacts}
             artifactId={activeTab.artifactId}
             workspaceActions={activeWorkspaceActions}
             previewContent={activeTab.previewContent}
             loading={loading}
             error={error}
+          />
+        ) : activeTab.kind === 'subagent' ? (
+          <SubagentDetail
+            sessionId={activeTab.sessionId}
+            rootToolCallId={activeTab.rootToolCallId}
+            initialRootTool={activeTab.rootTool}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+          />
+        ) : activeTab.kind === 'monitor' ? (
+          <MonitorTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'shell' ? (
+          <ShellTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'side_task' ? (
+          <SideTaskPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            parentSessionId={activeTab.parentSessionId}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            title={activeTab.title}
+            shouldNameFromFirstPrompt={activeTab.nameFromFirstPrompt}
+            initialPrompt={activeTab.initialPrompt}
+            createSession={
+              onCreateSideTaskSession ?? rejectMissingSideTaskCreate
+            }
+            onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
+            onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onSideTaskError}
           />
         ) : (
           <ScheduledTaskDetail
@@ -202,6 +637,26 @@ export function ArtifactPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function TabSubagentIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="8" r="3" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M6.5 19c.7-3.1 2.5-4.7 5.5-4.7s4.8 1.6 5.5 4.7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
@@ -837,18 +1292,16 @@ function ScheduledTaskDetail({
 function ReviewChanges({
   changes,
   selectedPath,
-  panelWidth,
   workspaceCwd,
+  onOpenFilePreview,
 }: {
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
-  panelWidth?: number;
   workspaceCwd?: string;
+  onOpenFilePreview: (change: TurnOutputFileChange) => void;
 }) {
   const { t } = useI18n();
-  const [isTreeOpen, setIsTreeOpen] = useState(
-    () => !panelWidth || panelWidth >= MIN_PANEL_WIDTH_FOR_DEFAULT_TREE,
-  );
+  const [isTreeOpen, setIsTreeOpen] = useState(false);
   const [isFileListOpen, setIsFileListOpen] = useState(true);
   const [isReviewStacked, setIsReviewStacked] = useState(false);
   const [reviewListWidth, setReviewListWidth] = useState(520);
@@ -1034,6 +1487,7 @@ function ReviewChanges({
           >
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
+              const canOpenPreview = isRenderedFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -1044,19 +1498,36 @@ function ReviewChanges({
                     .filter(Boolean)
                     .join(' ')}
                 >
-                  <button
-                    type="button"
+                  <div
                     className={styles.reviewRow}
                     data-selected={change.path === selectedPath || undefined}
-                    onClick={() => toggleDiff(change.path)}
                   >
+                    <button
+                      type="button"
+                      className={styles.reviewRowToggle}
+                      onClick={() => toggleDiff(change.path)}
+                      aria-label={change.path}
+                      aria-expanded={isExpanded}
+                    />
                     <span className={styles.fileIcon}>
                       {fileExtensionLabel(change.path)}
                     </span>
-                    <PathText
-                      path={displayPath(change.path, workspaceCwd)}
-                      title={change.path}
-                    />
+                    <span className={styles.reviewFileName}>
+                      <PathText
+                        path={displayPath(change.path, workspaceCwd)}
+                        title={change.path}
+                      />
+                      {canOpenPreview && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => onOpenFilePreview(change)}
+                          title={`${t('turnOutputs.preview')} ${change.path}`}
+                        >
+                          {t('turnOutputs.preview')}
+                        </button>
+                      )}
+                    </span>
                     <LineStats
                       additions={change.additions}
                       deletions={change.deletions}
@@ -1075,7 +1546,7 @@ function ReviewChanges({
                     >
                       <ChevronIcon />
                     </span>
-                  </button>
+                  </div>
                   {isExpanded && <DiffPreview change={change} />}
                 </div>
               );
@@ -1571,28 +2042,25 @@ function ArtifactDetail({
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
-  const canPreviewHtml =
-    canPreviewWorkspaceFile &&
-    artifact.workspacePath &&
-    isHtmlArtifact(artifact);
+  const imageMimeType = getArtifactImageMimeType(artifact);
 
-  if (canPreviewHtml && artifact.workspacePath) {
+  if (canPreviewWorkspaceFile && artifact.workspacePath) {
     return (
-      <HtmlArtifactPreview
+      <WorkspaceFilePreview
         workspacePath={artifact.workspacePath}
         artifactVersion={artifact.updatedAt}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
-      />
-    );
-  }
-
-  if (canPreviewWorkspaceFile && artifact.workspacePath) {
-    return (
-      <FileArtifactPreview
-        workspacePath={artifact.workspacePath}
-        artifactVersion={artifact.updatedAt}
-        workspaceActions={workspaceActions}
+        imageMimeType={imageMimeType}
+        previewKind={
+          isHtmlArtifact(artifact)
+            ? 'html'
+            : isMarkdownArtifact(artifact)
+              ? 'markdown'
+              : imageMimeType
+                ? 'image'
+                : 'source'
+        }
       />
     );
   }
@@ -1664,9 +2132,203 @@ function ArtifactDetail({
 
 function isHtmlArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
   return (
-    artifact.kind === 'html' || path.endsWith('.html') || path.endsWith('.htm')
+    artifact.kind === 'html' ||
+    path.endsWith('.html') ||
+    path.endsWith('.htm') ||
+    mimeType === 'text/html'
   );
+}
+
+function isMarkdownArtifact(artifact: DaemonSessionArtifact) {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  return (
+    path.endsWith('.md') ||
+    path.endsWith('.markdown') ||
+    artifact.mimeType?.toLowerCase() === 'text/markdown'
+  );
+}
+
+function WorkspaceFilePreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  imageMimeType,
+  previewKind,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+  imageMimeType?: string;
+  previewKind?: 'html' | 'markdown' | 'image' | 'source';
+}) {
+  const path = workspacePath.toLowerCase();
+  const resolvedImageMimeType =
+    imageMimeType ?? getImageMimeTypeFromPath(workspacePath);
+  const resolvedPreviewKind =
+    previewKind ??
+    (path.endsWith('.html') || path.endsWith('.htm')
+      ? 'html'
+      : path.endsWith('.md') || path.endsWith('.markdown')
+        ? 'markdown'
+        : resolvedImageMimeType
+          ? 'image'
+          : 'source');
+  if (resolvedPreviewKind === 'html') {
+    return (
+      <HtmlArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
+    );
+  }
+  if (resolvedPreviewKind === 'markdown') {
+    return (
+      <MarkdownArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
+    );
+  }
+  if (resolvedPreviewKind === 'image' && resolvedImageMimeType) {
+    return (
+      <ImageArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        mimeType={resolvedImageMimeType}
+      />
+    );
+  }
+  return (
+    <FileArtifactPreview
+      workspacePath={workspacePath}
+      artifactVersion={artifactVersion}
+      workspaceActions={workspaceActions}
+    />
+  );
+}
+
+function ImageArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  mimeType,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  mimeType: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    setSrc(null);
+    setError(null);
+    readWorkspaceFileAsBlob(
+      (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+      workspacePath,
+      mimeType,
+      {
+        statFile: (filePath) => workspaceActions.stat(filePath),
+        isCancelled: () => cancelled,
+      },
+    )
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifactVersion, mimeType, workspaceActions, workspacePath]);
+
+  return (
+    <div className={styles.imagePreviewWrap}>
+      {src ? (
+        <>
+          <img
+            className={styles.imagePreview}
+            src={src}
+            alt={fileName(workspacePath)}
+          />
+          <a
+            className={styles.imageDownloadButton}
+            href={src}
+            download={fileName(workspacePath)}
+            aria-label={`Download ${fileName(workspacePath)}`}
+            title="Download"
+          >
+            <DownloadIcon size={16} strokeWidth={1.8} />
+          </a>
+        </>
+      ) : !error ? (
+        <div className={styles.empty}>Loading image...</div>
+      ) : null}
+      {error && <div className={styles.previewError}>{error}</div>}
+    </div>
+  );
+}
+
+function useWorkspaceFileContent({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  truncatedMessage,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+  truncatedMessage: string;
+}) {
+  const [content, setContent] = useState<string | null>(previewContent ?? null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setContent(previewContent ?? null);
+    setError(null);
+    workspaceActions
+      .readWorkspaceFile(workspacePath)
+      .then((file) => {
+        if (cancelled) return;
+        setContent(file.content);
+        if (file.truncated) setError(truncatedMessage);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    artifactVersion,
+    previewContent,
+    truncatedMessage,
+    workspaceActions,
+    workspacePath,
+  ]);
+
+  return { content, error };
 }
 
 function HtmlArtifactPreview({
@@ -1680,41 +2342,24 @@ function HtmlArtifactPreview({
   workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
 }) {
-  const [html, setHtml] = useState<string | null>(previewContent ?? null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setHtml(previewContent ?? null);
-    setError(null);
-    workspaceActions
-      .readWorkspaceFile(workspacePath)
-      .then((file) => {
-        if (cancelled) return;
-        setHtml(file.content);
-        if (file.truncated) {
-          setError('Preview is truncated because the file is too large.');
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [artifactVersion, previewContent, workspaceActions, workspacePath]);
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    truncatedMessage: 'Preview is truncated because the file is too large.',
+  });
 
   return (
     <div className={styles.htmlPreviewWrap}>
-      {html === null ? (
+      {content === null ? (
         <div className={styles.empty}>Loading preview...</div>
       ) : (
         <iframe
           className={styles.htmlPreview}
           referrerPolicy="no-referrer"
-          sandbox=""
-          srcDoc={withArtifactPreviewCsp(html)}
+          sandbox="allow-scripts"
+          srcDoc={withArtifactPreviewCsp(content)}
           title={`Preview ${workspacePath}`}
         />
       )}
@@ -1733,35 +2378,19 @@ function FileArtifactPreview({
   workspaceActions: DaemonWorkspaceActions;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setContent(null);
-    setError(null);
-    workspaceActions
-      .readWorkspaceFile(workspacePath)
-      .then((file) => {
-        if (cancelled) return;
-        setContent(file.content);
-        if (file.truncated) {
-          setError('File is truncated because it is too large.');
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [artifactVersion, workspaceActions, workspacePath]);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    truncatedMessage: 'File is truncated because it is too large.',
+  });
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host || content === null) return;
     host.replaceChildren();
+    setRenderError(null);
     let view: EditorView;
     try {
       view = new EditorView({
@@ -1775,7 +2404,7 @@ function FileArtifactPreview({
         parent: host,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setRenderError(err instanceof Error ? err.message : String(err));
       return undefined;
     }
     return () => view.destroy();
@@ -1787,6 +2416,39 @@ function FileArtifactPreview({
         <div className={styles.empty}>Loading file...</div>
       ) : (
         <div ref={hostRef} className={styles.codeMirrorFile} />
+      )}
+      {(error || renderError) && (
+        <div className={styles.previewError}>{error || renderError}</div>
+      )}
+    </div>
+  );
+}
+
+function MarkdownArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+}) {
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    truncatedMessage: 'Preview is truncated because the file is too large.',
+  });
+
+  return (
+    <div className={styles.markdownPreviewWrap}>
+      {content === null ? (
+        <div className={styles.empty}>Loading preview...</div>
+      ) : (
+        <Markdown content={content} />
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>

@@ -10,6 +10,61 @@
 
 import { execFileSync } from 'node:child_process';
 
+// ---------------------------------------------------------------------------
+// Transient-error retry
+// ---------------------------------------------------------------------------
+
+const MAX_RETRIES = 2;
+const BASE_DELAY_MS = 3_000;
+
+/** Block the current thread without burning CPU (no busy-wait). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const TRANSIENT_RE =
+  /HTTP 5\d{2}|server is currently unavailable|service unavailable|bad gateway|internal server error/i;
+
+function isTransientGhError(err: unknown): boolean {
+  const stderr =
+    typeof (err as { stderr?: unknown }).stderr === 'string'
+      ? ((err as { stderr: string }).stderr as string)
+      : '';
+  const msg = err instanceof Error ? err.message : '';
+  return TRANSIENT_RE.test(stderr) || TRANSIENT_RE.test(msg);
+}
+
+/**
+ * `execFileSync('gh', …)` with automatic retry on transient GitHub errors
+ * (HTTP 5xx / "server is currently unavailable"). Non-transient failures
+ * throw immediately.
+ */
+function execGhWithRetry(args: string[], options: { input?: string }): string {
+  const execOptions: Parameters<typeof execFileSync>[2] = {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: ghEnv(),
+    ...(options.input !== undefined ? { input: options.input } : {}),
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return (execFileSync('gh', args, execOptions) as string)
+        .replace(/\r\n/g, '\n')
+        .trim();
+    } catch (err) {
+      if (attempt < MAX_RETRIES && isTransientGhError(err)) {
+        const delay = BASE_DELAY_MS * (attempt + 1);
+        process.stderr.write(
+          `gh transient error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms…\n`,
+        );
+        sleepSync(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 let ghHost: string | undefined;
 
 const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
@@ -39,6 +94,16 @@ export function setGhHost(host: string | undefined): void {
 }
 
 /**
+ * The host `gh` calls are currently routed at, or `undefined` for the
+ * default (github.com / an operator-exported GH_HOST). Lets a caller that
+ * overrides the host for a scoped block save and restore the prior value
+ * instead of leaking the override into module state.
+ */
+export function getGhHost(): string | undefined {
+  return ghHost;
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.
@@ -49,6 +114,7 @@ export function ghEnv(): NodeJS.ProcessEnv | undefined {
 
 /**
  * Run `gh` with args. Returns stdout, trimmed and CRLF-normalised.
+ * Retries automatically on transient GitHub errors (HTTP 5xx).
  *
  * `maxBuffer` is raised well past Node's 1 MiB default: paginated fetches
  * on comment-heavy PRs routinely exceed it, and the resulting ENOBUFS kills
@@ -57,17 +123,16 @@ export function ghEnv(): NodeJS.ProcessEnv | undefined {
  * still bounding a runaway response.
  */
 export function gh(...args: string[]): string {
-  return execFileSync('gh', args, {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: ghEnv(),
-  })
-    .replace(/\r\n/g, '\n')
-    .trim();
+  return execGhWithRetry(args, {});
 }
 
 /**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
+ *
+ * Unlike `gh()`, this does NOT retry on transient errors: the only caller
+ * (`submit.ts`) POSTs a review, which is not idempotent — a retry after a
+ * proxy-level 502/503 could duplicate the review if GitHub already processed
+ * the original request.
  *
  * Exists so a caller can send bytes it already holds in memory instead of a
  * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at
@@ -77,12 +142,14 @@ export function gh(...args: string[]): string {
  * closes that window: the bytes checked are the bytes posted.
  */
 export function ghWithInput(input: string, ...args: string[]): string {
-  return execFileSync('gh', args, {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: ghEnv(),
-    input,
-  })
+  return (
+    execFileSync('gh', args, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: ghEnv(),
+      input,
+    }) as string
+  )
     .replace(/\r\n/g, '\n')
     .trim();
 }
@@ -103,9 +170,18 @@ export function ghApi(path: string, jq?: string): unknown {
  *
  * Use this for endpoints that return arrays and may have more than 30
  * (the default `per_page`) entries — PR `/comments`, `/issues/{n}/comments`,
- * `/reviews`, etc. `gh --paginate` walks every `next` link and concatenates
- * each page's array into a single top-level array, so a single
- * `JSON.parse` recovers the full set.
+ * `/reviews`, etc.
+ *
+ * **Why a single `JSON.parse` is correct on multi-page output (a recurring
+ * review question):** for a TOP-LEVEL JSON array `gh --paginate` MERGES the
+ * pages into one array — it does NOT emit one array per page. So the output
+ * is a single well-formed array and `JSON.parse` recovers the full set. The
+ * per-page-concatenation failure mode (`}{` / `][` between pages that would
+ * throw) only happens for endpoints whose array is NESTED under a key (e.g.
+ * `check-runs`), and those go through {@link ghApiAllNested} with
+ * `--jq '.<key>[]'` + NDJSON parsing precisely because `--paginate` can't
+ * merge them. Verified empirically on a 4-page (`per_page=30`, 97-comment)
+ * `pulls/{n}/comments` response: zero `][` markers, one array, clean parse.
  *
  * Returns `[]` for empty responses or non-array payloads (defensive — the
  * endpoint may legitimately return an object on a 4xx-style 200, e.g. an
@@ -185,13 +261,25 @@ export function currentUser(): string {
  * Verify `gh` is installed and authenticated. Throws a clear error if not —
  * subcommands call this first so missing-auth failures don't show up as
  * cryptic 401s mid-run.
+ *
+ * Retries once after a short delay: the OS keyring can transiently fail to
+ * unlock (observed on macOS when the keyring prompt races with process
+ * startup), and a single retry avoids a spurious "not authenticated" abort
+ * that forces the orchestrating model to debug and re-run the subcommand.
  */
 export function ensureAuthenticated(): void {
-  try {
-    execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
-  } catch {
-    throw new Error(
-      'gh CLI is not authenticated. Run `gh auth login` and retry.',
-    );
+  for (let attempt = 0; ; attempt++) {
+    try {
+      execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
+      return;
+    } catch (err) {
+      if (attempt === 0 && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        sleepSync(2_000);
+        continue;
+      }
+      throw new Error(
+        'gh CLI is not authenticated. Run `gh auth login` and retry.',
+      );
+    }
   }
 }

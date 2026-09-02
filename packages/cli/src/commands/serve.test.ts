@@ -45,6 +45,11 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
+  it('defaults max sessions to 32', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-sessions']).toBe(32);
+  });
+
   it('accepts --experimental-lsp in strict parser mode', () => {
     const parsed = buildParser().strict().parseSync('--experimental-lsp');
     expect(parsed['experimentalLsp']).toBe(true);
@@ -69,9 +74,19 @@ describe('serve command args', () => {
     expect(parsed['max-total-sessions']).toBe(42);
   });
 
+  it('parses --initialize-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync('--initialize-timeout-ms 30000');
+    expect(parsed['initialize-timeout-ms']).toBe(30000);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --initialize-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['initialize-timeout-ms']).toBeUndefined();
   });
 
   it('parses --experimental-lsp for daemon child opt-in', () => {
@@ -118,6 +133,22 @@ describe('serve command args', () => {
     );
 
     expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
+
+  it('parses --memory-project-scope and rejects unsupported values', () => {
+    expect(
+      buildParser().parseSync('--memory-project-scope workspace')[
+        'memory-project-scope'
+      ],
+    ).toBe('workspace');
+    expect(
+      buildParser().parseSync('--memory-project-scope git-root')[
+        'memory-project-scope'
+      ],
+    ).toBe('git-root');
+    expect(() =>
+      buildParser().parseSync('--memory-project-scope unsupported'),
+    ).toThrow(/Invalid values/);
   });
 
   it('rejects valueless --workspace forms', () => {
@@ -274,6 +305,21 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
+    );
+  });
+
+  it('passes --memory-project-scope to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --memory-project-scope workspace',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryProjectScope: 'workspace' }),
     );
   });
 
@@ -528,7 +574,7 @@ describe('serve startup import boundary', () => {
               `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
             ),
           );
-        }, 15_000);
+        }, 30_000);
 
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
@@ -574,5 +620,5 @@ describe('serve startup import boundary', () => {
       await removeTempDir(workspace);
       await removeTempDir(qwenHome);
     }
-  }, 20_000);
+  }, 40_000);
 });

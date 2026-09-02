@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.19.12",
+  "version": "0.21.2",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -16,6 +16,18 @@
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
+    },
+    "./goalWire": {
+      "types": "./dist/src/goals/goal-wire.d.ts",
+      "import": "./dist/src/goals/goal-wire.js"
+    },
+    "./memoryScopes": {
+      "types": "./dist/src/memory/scopes.d.ts",
+      "import": "./dist/src/memory/scopes.js"
+    },
+    "./userPromptSubmitContext": {
+      "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
+      "import": "./dist/src/hooks/user-prompt-submit-context.js"
     },
     "./package.json": "./package.json",
     "./dist/*": "./dist/*",
@@ -75,6 +87,7 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
+    "sharp": "^0.34.5",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",

@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ChatRecord,
-  Config,
-  HistoryGap,
-  SessionTranscriptCursorState,
-  SessionTranscriptRecordPage,
+import {
+  parseGoalSnapshotV2,
+  type ChatRecord,
+  type Config,
+  type GoalSnapshotV2,
+  type HistoryGap,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
@@ -90,6 +92,7 @@ function parseTranscriptReplayState(
 ): {
   pendingToolCalls: PendingReplayToolCall[];
   cumulativeUsage: CumulativeUsage;
+  goalState?: GoalSnapshotV2;
 } {
   if (!isObjectRecord(replay)) {
     return {
@@ -132,7 +135,17 @@ function parseTranscriptReplayState(
   const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
     ? { ...replay['cumulativeUsage'] }
     : createReplayCumulativeUsage();
-  return { pendingToolCalls, cumulativeUsage };
+  const rawGoalState = replay['goalState'];
+  const goalState =
+    rawGoalState === undefined ? undefined : parseGoalSnapshotV2(rawGoalState);
+  if (logger && rawGoalState !== undefined && !goalState) {
+    logger.warn('[transcript] replay state dropped a malformed Goal state');
+  }
+  return {
+    pendingToolCalls,
+    cumulativeUsage,
+    ...(goalState ? { goalState } : {}),
+  };
 }
 
 function replayContext(
@@ -254,6 +267,7 @@ export async function replayTranscriptRecordPage({
         page.direction === 'backward' ? [] : state.pendingToolCalls,
       finalizeDangling: page.direction === 'backward' || !page.hasMore,
       gaps: page.gaps,
+      ...(state.goalState ? { goalState: state.goalState } : {}),
     });
     replayState = replayPageState.replay;
   } catch (error) {

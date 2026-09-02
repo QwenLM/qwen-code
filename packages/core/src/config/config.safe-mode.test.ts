@@ -290,16 +290,175 @@ describe('Config safe mode', () => {
       });
       expect(config.getAllowedHttpHookUrls()).toEqual([]);
     });
+
+    it('disables private network hooks in safe mode', () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowPrivateNetworkHooks: true,
+      });
+      expect(config.getAllowPrivateNetworkHooks()).toBe(false);
+    });
   });
 
-  describe('safe mode blocks MCP servers', () => {
-    it('should return empty MCP servers in safe mode', () => {
+  describe('safe mode blocks local/ambient MCP servers, preserves caller-supplied top-tier ones', () => {
+    it('should return empty MCP servers in safe mode when nothing was supplied as top-tier', () => {
       const config = new Config({
         ...baseParams,
         safeMode: true,
         mcpServers: { test: { command: 'test', args: [] } },
       });
       expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('should still return top-tier (ACP session/new / --mcp-config-supplied) MCP servers in safe mode', () => {
+      // `mcpServers` here stands in for the LOCAL/ambient map `loadCliConfig`
+      // assembles from settings.json/.mcp.json — dropped under safe mode.
+      // `topTierMcpServers` stands in for the caller's own explicit,
+      // per-invocation request (ACP `session/new`, `--mcp-config`) — an
+      // explicit argument, not ambient local state, so it survives.
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      expect(config.getMcpServers()).toEqual({
+        probe: {
+          command: 'probe',
+          args: [],
+        },
+      });
+    });
+
+    it('still applies allowedMcpServers to top-tier servers in safe mode (Copilot review, PR #7827)', () => {
+      // Safe mode is not an exemption from a session's own
+      // --allowed-mcp-server-names upper bound — a caller-supplied server
+      // outside that allow-list must still be filtered out, exactly like the
+      // non-safe-mode path a few lines below does.
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowedMcpServers: ['probe'],
+        topTierMcpServers: {
+          probe: { command: 'probe', args: [] },
+          notAllowed: { command: 'not-allowed', args: [] },
+        },
+      });
+      expect(config.getMcpServers()).toEqual({
+        probe: {
+          command: 'probe',
+          args: [],
+        },
+      });
+    });
+  });
+
+  describe('safe mode MCP discovery — a stranded-server regression (found live-testing PR #7827)', () => {
+    // `getMcpServers()` reporting a top-tier server as configured is not
+    // enough on its own — something has to actually CONNECT to it and
+    // register its tools. That's a separate gate in `initialize()`
+    // (`startMcpDiscoveryInBackground` behind `!this.isSafeMode()`), written
+    // when `getMcpServers()` always returned `{}` under safe mode and so
+    // discovery had nothing to do anyway. Left unpatched, a caller-supplied
+    // top-tier server survives `getMcpServers()` but never actually gets
+    // discovered/connected — confirmed live against a real ACP session
+    // before this fix (the agent reported the tool as configured-but-absent).
+    function getMcpManagerMock(config: Config) {
+      return (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+    }
+
+    it('still kicks off background MCP discovery in safe mode when a top-tier server is present', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).toHaveBeenCalledWith(config);
+    });
+
+    it('does not kick off background MCP discovery in safe mode when nothing was supplied (no wasted work)', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not kick off background MCP discovery in safe mode when the only top-tier server is filtered out by allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowedMcpServers: ['nope'],
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+
+    // The safe-mode half of this gate (`!this.isSafeMode() || getMcpServers()
+    // non-empty`) shipped in the commit above; the bare-mode half
+    // (`!this.getBareMode()`, unconditional) was left unfixed despite
+    // `loadCliConfig` feeding top-tier servers into bare mode's `mcpServers`
+    // param exactly the same way it does safe mode's `topTierMcpServers`
+    // field (`packages/cli/src/config/config.ts`'s `bareMode || safeMode ?
+    // { ...topTierMcpServers } : assembleMcpServers(...)`) — found
+    // live-testing `qwen --bare --mcp-config`, same stranded-server symptom.
+    // Unlike the safe-mode tests above, bare mode has no redundant
+    // `getMcpServers()`-level short-circuit of its own — bare mode's
+    // "local sources dropped" guarantee lives entirely in that CLI-layer
+    // assembly, so these tests set `mcpServers` directly (what `loadCliConfig`
+    // would have already produced by the time `Config` is constructed), not
+    // `topTierMcpServers` (only consulted by `getMcpServers()`'s safe-mode
+    // branch).
+    it('still kicks off background MCP discovery in bare mode when a top-tier server is present', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        mcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).toHaveBeenCalledWith(config);
+    });
+
+    it('does not kick off background MCP discovery in bare mode when nothing was supplied (no wasted work)', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not kick off background MCP discovery in bare mode when the only supplied server is filtered out by allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        allowedMcpServers: ['nope'],
+        mcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -308,6 +467,7 @@ describe('Config safe mode', () => {
       const config = new Config({ ...baseParams, safeMode: true });
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
+      expect(config.getAutoMemoryPrompt()).toBe('');
       expect(config.getGeminiMdFileCount()).toBe(0);
     });
 

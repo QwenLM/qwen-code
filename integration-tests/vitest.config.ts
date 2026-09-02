@@ -22,6 +22,7 @@ export default defineConfig({
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
       '**/qwen-daemon-loadtest*',
+      '**/qwen-daemon-first-output-benchmark*',
       '**/node_modules/**',
     ],
     retry: 2,

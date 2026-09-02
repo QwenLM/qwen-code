@@ -860,7 +860,9 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims:',
+          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          'probe it runs up to 8 single-statement deletion mutants, each a suite run, and ' +
+          'it budgets itself to finish inside that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
@@ -872,11 +874,18 @@ export function buildRoleBrief(
         'Read its `findings[]`. `kind: "unreachable"` is a test the project\'s test command ' +
           'never collects — it did not run here and it does not run in CI. `kind: "inert"` is ' +
           'a test that **still passed with the change reverted**: it is green whether or not ' +
-          'the feature exists, so it cannot catch a regression in it. Report each as a ' +
-          '**Suggestion** with `Source: [test]`, saying plainly which behaviour ships ' +
-          'unprotected. **`inconclusive` is not a finding** — reverting the source often ' +
-          "breaks the test's own compile, and that is not the test catching anything. Note it " +
-          'and move on.',
+          'the feature exists, so it cannot catch a regression in it. `kind: "mutant-survived"` ' +
+          'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
+          'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
+          'test in the diff fails when it is removed, which the whole-file ' +
+          "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
+          '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
+          'test in this diff that would catch its removal. **`inconclusive` is not a ' +
+          'finding** — for probes and mutants alike, ' +
+          "reverting or mutating the source often breaks the test's own compile, and that is " +
+          'not the test catching anything. Mutants counted in `mutants.skippedForBudget`, ' +
+          '`mutants.skippedForCap`, or `mutants.skippedForBaseline` never ran — not findings ' +
+          'either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }
@@ -910,8 +919,8 @@ export function buildRoleBrief(
 
   // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
   // Test) — it runs deterministic commands, not code review." The roster path
-  // hands the same --rules to every role, so the exclusion lives here, where
-  // both the single-role and roster builds pass through.
+  // hands the same --rules to every role, so the exclusion lives here, where both
+  // the single-role and roster builds pass through.
   parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }
@@ -1233,6 +1242,9 @@ function rosterLabel(req: RequiredAgent): string {
  * because both come from `requiredAgents(plan)`.
  */
 function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+  // The roster reads `plan.effort` (written by the capturing command), so a
+  // `medium` plan builds the reduced set here without an `--effort` flag — and
+  // `check-coverage` holds the run to that same set from the same field.
   const roster = requiredAgents(report as RosterPlan);
   const blocks = roster.map((req, i) => {
     const { key, prompt } = buildLaunch(
@@ -1257,6 +1269,35 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
     recordPrompt(planPath, key, prompt);
     return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
   });
+  // Worktree-mode reviews: remind the orchestrator of the exact Agent tool
+  // parameters at the point of action. A run that passed both `working_dir`
+  // and `isolation: "worktree"` failed all 11 agents (mutually exclusive) and
+  // the review produced nothing. The roster is the last text the orchestrator
+  // reads before constructing agent calls — a reminder here is worth more than
+  // one 400 lines back in SKILL.md.
+  const wt = report.worktreePath;
+  const paramNote =
+    typeof wt === 'string' && wt
+      ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
+        `\`working_dir: "${wt}"\` and ` +
+        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
+        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
+        `already exists; \`isolation\` creates a new copy and is mutually ` +
+        `exclusive with \`working_dir\`.`
+      : '';
+  // The Agent tool's `description` is the task name the user watches in the
+  // TUI while the agent runs, and nothing downstream reads it — the delivery
+  // check compares prompts, coverage reads transcripts. So it is the one part
+  // of a launch the orchestrator writes itself, in the session's output
+  // language. Said here, at the point of action, because every visible string
+  // in this output is English, and without the reminder a run under a Chinese
+  // output language still hands the user twelve English task names.
+  const descNote =
+    `\n\nThe \`description\` parameter of each Agent call is the task name ` +
+    `the user watches while the agent runs — write it in your output ` +
+    `language, translating the block's ───── separator label (keep the ` +
+    `role/chunk id visible). Display only: the prompt itself stays the ` +
+    `block VERBATIM.`;
   writeStdoutLine(
     [
       `${roster.length} agents required. Launch one agent per block below, ` +
@@ -1268,7 +1309,9 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `either is missing, this output was truncated in transit: every prompt ` +
         `is also recorded on disk, so rebuild just the missing blocks with ` +
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
-        `plus the same --rules this call was given.`,
+        `plus the same --rules this call was given.` +
+        descNote +
+        paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
     ].join('\n\n'),
@@ -1338,7 +1381,9 @@ function runAllChunks(
         `record. Blocks are numbered \`auditor k of ${chunks.length}\` and the ` +
         `output ends with an end-of-round line — if either is missing, the ` +
         `output was truncated in transit; rebuild just the missing chunks with ` +
-        `--chunk <id>.`,
+        `--chunk <id>. Write each Agent call's \`description\` (the task ` +
+        `name the user watches) in your output language, translating the ` +
+        `separator label — display only; the prompt stays the block VERBATIM.`,
       ...blocks,
       `───── end of round — ${chunks.length} auditors ─────`,
     ].join('\n\n'),

@@ -28,6 +28,16 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from './channel-webhook-ipc.js';
 import {
+  CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  ChannelDeliveryError,
+  createChannelDeliveryMessage,
+  isChannelDeliveryResultMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
+  type ChannelDeliveryAccepted,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
+import {
   createWorkerDiagnosticRedactor,
   normalizeWorkerDiagnostic,
   sanitizeWorkerDiagnostic,
@@ -40,8 +50,18 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelAdapterSnapshot,
   type ChannelStartupFailure,
 } from './channel-worker-startup-ipc.js';
+import {
+  CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS,
+  createChannelLoopMcpRequest,
+  isChannelLoopMcpControlMessage,
+  isChannelLoopMcpResultMessage,
+  MAX_CHANNEL_LOOP_MCP_IN_FLIGHT,
+  type ChannelLoopMcpControlMessage,
+  type ChannelLoopMcpIpcSend,
+} from './channel-loop-mcp-ipc.js';
 
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
 const MAX_WORKER_LOG_LINE_LENGTH = 4096;
@@ -119,6 +139,7 @@ export interface ChannelWorkerSnapshot {
   staleHeartbeatAt?: string;
   startupFailures?: ChannelStartupFailure[];
   startupFailuresTruncated?: boolean;
+  adapters?: ChannelAdapterSnapshot[];
 }
 
 export interface ChannelWorkerSupervisor {
@@ -132,6 +153,9 @@ export interface ChannelWorkerSupervisor {
   restart(): Promise<ChannelWorkerSnapshot>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
+  deliverChannelMessage?(
+    request: ChannelDeliveryRequest,
+  ): Promise<ChannelDeliveryAccepted>;
   enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
 }
 
@@ -200,6 +224,15 @@ export interface CreateChannelWorkerSupervisorOptions {
   onLog?: (entry: ChannelWorkerLogEntry) => void;
   restartPolicy?: ChannelWorkerRestartPolicy;
   heartbeatTimeoutMs?: number;
+  registerChannelLoopMcp?: (request: {
+    sessionId: string;
+    ownerId: string;
+    sendMessage: (payload: unknown) => Promise<unknown>;
+  }) => Promise<void>;
+  unregisterChannelLoopMcp?: (
+    sessionId: string,
+    ownerId: string,
+  ) => Promise<void>;
 }
 
 function selectionChannelArgs(selection: ServeChannelSelection): string[] {
@@ -471,6 +504,23 @@ export function createChannelWorkerSupervisor(
       timer: NodeJS.Timeout;
     }
   >();
+  const pendingChannelDeliveries = new Map<
+    string,
+    {
+      resolve: (accepted: ChannelDeliveryAccepted) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  const pendingChannelLoopMcpMessages = new Map<
+    string,
+    {
+      resolve: (payload: unknown) => void;
+      reject: (error: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  let cleanupChannelLoopMcpRegistrations: (() => void) | undefined;
   let restarting: Promise<ChannelWorkerSnapshot> | undefined;
   let disposed = false;
 
@@ -486,6 +536,9 @@ export function createChannelWorkerSupervisor(
             ...failure,
           })),
         }
+      : {}),
+    ...(snapshot.adapters
+      ? { adapters: snapshot.adapters.map((adapter) => ({ ...adapter })) }
       : {}),
   });
 
@@ -544,6 +597,69 @@ export function createChannelWorkerSupervisor(
           code,
           message.error || 'Channel webhook task failed.',
         ),
+      );
+    }
+    return true;
+  };
+
+  const rejectPendingChannelDeliveries = (
+    code: ChannelDeliveryErrorCode,
+    message: string,
+  ) => {
+    for (const pending of pendingChannelDeliveries.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new ChannelDeliveryError(code, message));
+    }
+    pendingChannelDeliveries.clear();
+  };
+
+  const rejectPendingChannelDelivery = (id: string, error: Error) => {
+    const pending = pendingChannelDeliveries.get(id);
+    if (!pending) return;
+    pendingChannelDeliveries.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  };
+
+  const settleChannelDelivery = (message: unknown): boolean => {
+    if (!isChannelDeliveryResultMessage(message)) return false;
+    const pending = pendingChannelDeliveries.get(message.id);
+    if (!pending) return true;
+    if (message.ok) {
+      pendingChannelDeliveries.delete(message.id);
+      clearTimeout(pending.timer);
+      pending.resolve({ delivered: true });
+    } else {
+      rejectPendingChannelDelivery(
+        message.id,
+        new ChannelDeliveryError(
+          message.code,
+          message.error || 'Channel delivery failed.',
+        ),
+      );
+    }
+    return true;
+  };
+
+  const rejectPendingChannelLoopMcpMessages = (message: string) => {
+    for (const pending of pendingChannelLoopMcpMessages.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    pendingChannelLoopMcpMessages.clear();
+  };
+
+  const settleChannelLoopMcpMessage = (message: unknown): boolean => {
+    if (!isChannelLoopMcpResultMessage(message)) return false;
+    const pending = pendingChannelLoopMcpMessages.get(message.id);
+    if (!pending) return true;
+    pendingChannelLoopMcpMessages.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.ok) {
+      pending.resolve(message.payload ?? {});
+    } else {
+      pending.reject(
+        new Error(message.error ?? 'Channel loop MCP request failed.'),
       );
     }
     return true;
@@ -673,6 +789,14 @@ export function createChannelWorkerSupervisor(
       state: 'starting',
       channels: channelSelectionNames(opts.selection),
       ...(requestedChannels ? { requestedChannels } : {}),
+      ...(requestedChannels
+        ? {
+            adapters: requestedChannels.map((name) => ({
+              name,
+              state: 'starting' as const,
+            })),
+          }
+        : {}),
       startedAt,
       restartCount: snapshot.restartCount ?? 0,
       ...(snapshot.lastExitAt ? { lastExitAt: snapshot.lastExitAt } : {}),
@@ -728,6 +852,67 @@ export function createChannelWorkerSupervisor(
     if (startedChild.pid !== undefined) {
       snapshot = { ...snapshot, pid: startedChild.pid };
     }
+
+    const channelLoopMcpOwnerId = `channel-worker:${randomUUID()}`;
+    const registeredChannelLoopMcpSessions = new Set<string>();
+    const activeChannelLoopMcpControls = new Set<string>();
+    const sendToStartedChild: ChannelLoopMcpIpcSend = (message, callback) => {
+      if (child !== startedChild || !startedChild.send) {
+        throw new Error('Channel worker IPC is unavailable.');
+      }
+      return callback
+        ? startedChild.send.call(startedChild, message, callback)
+        : startedChild.send.call(startedChild, message);
+    };
+    const sendChannelLoopMcpMessage = (
+      sessionId: string,
+      payload: unknown,
+    ): Promise<unknown> => {
+      if (
+        pendingChannelLoopMcpMessages.size >= MAX_CHANNEL_LOOP_MCP_IN_FLIGHT
+      ) {
+        return Promise.reject(new Error('Channel loop MCP IPC queue is full.'));
+      }
+      const message = createChannelLoopMcpRequest(sessionId, payload);
+      return new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingChannelLoopMcpMessages.delete(message.id);
+          reject(new Error('Channel loop MCP IPC timed out.'));
+        }, CHANNEL_LOOP_MCP_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingChannelLoopMcpMessages.set(message.id, {
+          resolve,
+          reject,
+          timer,
+        });
+        try {
+          sendToStartedChild(message, (error) => {
+            if (!error) return;
+            const pending = pendingChannelLoopMcpMessages.get(message.id);
+            if (!pending) return;
+            pendingChannelLoopMcpMessages.delete(message.id);
+            clearTimeout(pending.timer);
+            pending.reject(new Error('Channel loop MCP IPC send failed.'));
+          });
+        } catch {
+          const pending = pendingChannelLoopMcpMessages.get(message.id);
+          if (!pending) return;
+          pendingChannelLoopMcpMessages.delete(message.id);
+          clearTimeout(pending.timer);
+          pending.reject(new Error('Channel loop MCP IPC send failed.'));
+        }
+      });
+    };
+    const cleanupLaunchChannelLoopMcpRegistrations = () => {
+      for (const sessionId of registeredChannelLoopMcpSessions) {
+        void opts
+          .unregisterChannelLoopMcp?.(sessionId, channelLoopMcpOwnerId)
+          .catch(() => {});
+      }
+      registeredChannelLoopMcpSessions.clear();
+    };
+    cleanupChannelLoopMcpRegistrations =
+      cleanupLaunchChannelLoopMcpRegistrations;
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -881,6 +1066,15 @@ export function createChannelWorkerSupervisor(
         snapshot = {
           ...snapshot,
           startupFailures: [...(snapshot.startupFailures ?? []), failure],
+          adapters: snapshot.adapters?.map((adapter) =>
+            adapter.name === failure.channel
+              ? {
+                  name: adapter.name,
+                  state: 'error' as const,
+                  error: failure.message,
+                }
+              : adapter,
+          ),
         };
         acknowledgeStartupReport();
       };
@@ -909,6 +1103,24 @@ export function createChannelWorkerSupervisor(
         if (message.requestedChannels?.length) {
           next.requestedChannels = [...message.requestedChannels];
         }
+        const adapterNames = message.requestedChannels?.length
+          ? message.requestedChannels
+          : (next.requestedChannels ?? next.channels);
+        const connected = new Set(next.channels);
+        const failures = new Map(
+          next.startupFailures?.map((failure) => [failure.channel, failure]),
+        );
+        next.adapters = adapterNames.map((name) => {
+          if (connected.has(name)) {
+            return { name, state: 'connected' as const };
+          }
+          const failure = failures.get(name);
+          return {
+            name,
+            state: 'error' as const,
+            ...(failure ? { error: failure.message } : {}),
+          };
+        });
         snapshot = next;
         armStaleHeartbeatTimer(startedChild);
         notifyReady(opts.onReady, snapshotCopy());
@@ -928,9 +1140,95 @@ export function createChannelWorkerSupervisor(
         };
         armStaleHeartbeatTimer(startedChild);
       };
+      const sendChannelLoopMcpControlResult = (
+        id: string,
+        result: { ok: true } | { ok: false; error: string },
+      ) => {
+        try {
+          sendToStartedChild({
+            type: 'channel_loop_mcp_control_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // The worker request owns the timeout when IPC is already closed.
+        }
+      };
+      const handleChannelLoopMcpControl = (
+        message: ChannelLoopMcpControlMessage,
+      ) => {
+        if (
+          activeChannelLoopMcpControls.size >= MAX_CHANNEL_LOOP_MCP_IN_FLIGHT
+        ) {
+          sendChannelLoopMcpControlResult(message.id, {
+            ok: false,
+            error: 'Channel loop MCP IPC queue is full.',
+          });
+          return;
+        }
+        activeChannelLoopMcpControls.add(message.id);
+        const operation =
+          message.type === 'channel_loop_mcp_register'
+            ? (opts
+                .registerChannelLoopMcp?.({
+                  sessionId: message.sessionId,
+                  ownerId: channelLoopMcpOwnerId,
+                  sendMessage: (payload) =>
+                    sendChannelLoopMcpMessage(message.sessionId, payload),
+                })
+                .then(async () => {
+                  if (child !== startedChild) {
+                    await opts.unregisterChannelLoopMcp?.(
+                      message.sessionId,
+                      channelLoopMcpOwnerId,
+                    );
+                    throw new Error('Channel worker exited during MCP setup.');
+                  }
+                  registeredChannelLoopMcpSessions.add(message.sessionId);
+                }) ??
+              Promise.reject(
+                new Error('Channel loop MCP registration is unavailable.'),
+              ))
+            : (opts
+                .unregisterChannelLoopMcp?.(
+                  message.sessionId,
+                  channelLoopMcpOwnerId,
+                )
+                .then(() => {
+                  registeredChannelLoopMcpSessions.delete(message.sessionId);
+                }) ?? Promise.resolve());
+        void operation
+          .then(() => {
+            sendChannelLoopMcpControlResult(message.id, { ok: true });
+          })
+          .catch((error: unknown) => {
+            sendChannelLoopMcpControlResult(message.id, {
+              ok: false,
+              error:
+                sanitizeWorkerDiagnostic(
+                  error instanceof Error ? error.message : String(error),
+                  512,
+                  redaction,
+                ) || 'Channel loop MCP operation failed.',
+            });
+          })
+          .finally(() => {
+            activeChannelLoopMcpControls.delete(message.id);
+          });
+      };
       function handleMessage(message: unknown) {
         if (child !== startedChild) return;
+        if (settleChannelDelivery(message)) {
+          return;
+        }
         if (settleWebhookTask(message)) {
+          return;
+        }
+        if (settleChannelLoopMcpMessage(message)) {
+          return;
+        }
+        if (isChannelLoopMcpControlMessage(message)) {
+          handleChannelLoopMcpControl(message);
           return;
         }
         if (!ready && isChannelStartupReportType(message)) {
@@ -958,6 +1256,18 @@ export function createChannelWorkerSupervisor(
           'channel_worker_unavailable',
           'Channel worker exited.',
         );
+        rejectPendingChannelDeliveries(
+          'channel_worker_unavailable',
+          'Channel worker exited.',
+        );
+        rejectPendingChannelLoopMcpMessages('Channel worker exited.');
+        cleanupLaunchChannelLoopMcpRegistrations();
+        if (
+          cleanupChannelLoopMcpRegistrations ===
+          cleanupLaunchChannelLoopMcpRegistrations
+        ) {
+          cleanupChannelLoopMcpRegistrations = undefined;
+        }
         child = undefined;
         if ((ready || kind === 'restart') && !stopping) {
           scheduleRestart();
@@ -1036,6 +1346,11 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
+      rejectPendingChannelLoopMcpMessages('Channel worker stopped.');
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1093,6 +1408,13 @@ export function createChannelWorkerSupervisor(
         'channel_worker_unavailable',
         'Channel worker stopped.',
       );
+      rejectPendingChannelDeliveries(
+        'channel_worker_unavailable',
+        'Channel worker stopped.',
+      );
+      rejectPendingChannelLoopMcpMessages('Channel worker stopped.');
+      cleanupChannelLoopMcpRegistrations?.();
+      cleanupChannelLoopMcpRegistrations = undefined;
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -1120,6 +1442,64 @@ export function createChannelWorkerSupervisor(
     },
     snapshot() {
       return snapshotCopy();
+    },
+    async deliverChannelMessage(request) {
+      const startedChild = child;
+      if (!startedChild || snapshot.state !== 'running') {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker is not running.',
+        );
+      }
+      const send = startedChild.send;
+      if (!send) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker IPC send failed.',
+        );
+      }
+      if (pendingChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT) {
+        throw new ChannelDeliveryError(
+          'channel_delivery_queue_full',
+          'Channel delivery queue is full.',
+        );
+      }
+      const message = createChannelDeliveryMessage(request);
+      return await new Promise<ChannelDeliveryAccepted>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingChannelDeliveries.delete(message.id);
+          reject(
+            new ChannelDeliveryError(
+              'channel_delivery_timeout',
+              'Channel delivery IPC timed out.',
+            ),
+          );
+        }, CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+        timer.unref();
+        pendingChannelDeliveries.set(message.id, { resolve, reject, timer });
+        try {
+          send.call(startedChild, message, (error) => {
+            if (!error) return;
+            rejectPendingChannelDelivery(
+              message.id,
+              new ChannelDeliveryError(
+                'channel_worker_unavailable',
+                `Channel worker IPC send failed: ${error.message}`,
+              ),
+            );
+          });
+        } catch (error) {
+          rejectPendingChannelDelivery(
+            message.id,
+            new ChannelDeliveryError(
+              'channel_worker_unavailable',
+              `Channel worker IPC send failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
+      });
     },
     async enqueueWebhookTask(task) {
       const startedChild = child;

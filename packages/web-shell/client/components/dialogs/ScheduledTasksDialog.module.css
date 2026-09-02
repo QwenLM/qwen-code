@@ -146,6 +146,7 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  cursor: text;
 }
 
 .input:focus,
@@ -207,6 +208,34 @@
   white-space: nowrap;
 }
 
+.promptTagRemove {
+  appearance: none;
+  display: inline-flex;
+  width: 20px;
+  flex: 0 0 20px;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.promptTagRemove::before {
+  content: '×';
+  font-size: 14px;
+  line-height: 1;
+}
+
+.promptTagRemove:hover {
+  background: var(--background);
+  color: var(--foreground);
+}
+
 .referencePopover {
   min-width: 0;
 }
@@ -226,7 +255,7 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 5px 12px;
-  background: var(--muted);
+  background: var(--background);
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 600;
@@ -236,8 +265,8 @@
 
 .referenceButton:hover,
 .referenceButtonActive {
+  border-color: var(--foreground);
   color: var(--foreground);
-  background: var(--background);
 }
 
 .referenceButtonIcon {
@@ -256,6 +285,7 @@
   display: flex;
   flex-direction: column;
   overflow: auto;
+  pointer-events: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);

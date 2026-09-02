@@ -140,19 +140,37 @@ export function registerMcpHotReload(
     const cwd = config.getTargetDir();
     // Rebuild exactly the way Config boot did — including top-tier
     // (CLI / session-injected) servers layered above settings + `.mcp.json`.
-    const next = assembleMcpServers(
-      settings.merged.mcpServers,
-      cwd,
-      topTierMcpServers,
-    );
+    // Bare/safe mode: mirror loadCliConfig's own guard (config.ts) — a live
+    // settings.json edit must not smuggle local/ambient MCP servers into an
+    // already-running bare/safe-mode session; only the top-tier servers this
+    // session started with (explicit, per-invocation, not ambient state)
+    // survive.
+    const next =
+      config.getBareMode() || config.isSafeMode()
+        ? { ...topTierMcpServers }
+        : assembleMcpServers(
+            settings.merged.mcpServers,
+            cwd,
+            topTierMcpServers,
+          );
     const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
-    const nextGating = recomputeMcpGating(
-      settings,
-      next,
-      cwd,
-      config.getCliAllowedMcpServerNames(),
-      isYolo,
-    );
+    // Same bare/safe guard as `next` above, applied to the admission lists:
+    // `recomputeMcpGating` reads settings.merged.mcp.allowed/excluded
+    // unconditionally, with no bare/safe check of its own — a live
+    // settings.json edit during an already-running bare/safe session would
+    // otherwise smuggle a local-state-sourced allow-list back in, silently
+    // filtering the caller's own top-tier server out of `getMcpServers()`
+    // mid-session (the same stranded-server class of bug this PR fixes at
+    // boot, just reached through the gating list's SOURCE instead of the
+    // mcpServers map). Only the CLI `--allowed-mcp-server-names` bound
+    // (explicit, per-invocation, not ambient state) still applies, mirroring
+    // topTierMcpServers' own treatment; `excluded`/`pending` are irrelevant
+    // once nothing but the never-gated top-tier servers can be present.
+    const bootAllowed = config.getCliAllowedMcpServerNames();
+    const nextGating: McpGating =
+      config.getBareMode() || config.isSafeMode()
+        ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
+        : recomputeMcpGating(settings, next, cwd, bootAllowed, isYolo);
 
     const prevServers = config.getSettingsMcpServers();
     const prevGating = config.getMcpGating();

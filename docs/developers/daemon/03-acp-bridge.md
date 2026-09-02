@@ -45,7 +45,7 @@ Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production att
 | `defaultEntry`  | `SessionEntry \| null`          | The "single" session used when `sessionScope: 'single'`.                                                                                                                                                                                                                                                                                                                                                 |
 | `defaultPolicy` | `PermissionPolicy`              | Configured via `BridgeOptions.permissionPolicy`.                                                                                                                                                                                                                                                                                                                                                         |
 | `mediator`      | `MultiClientPermissionMediator` | One per bridge instance.                                                                                                                                                                                                                                                                                                                                                                                 |
-| Constants       | —                               | `DEFAULT_INIT_TIMEOUT_MS = 10_000`, `MCP_RESTART_TIMEOUT_MS = 300_000`, `DEFAULT_MAX_SESSIONS = 20`, `MAX_EVENT_RING_SIZE = 1_000_000`, `DEFAULT_PERMISSION_TIMEOUT_MS = 5min`, `DEFAULT_MAX_PENDING_PER_SESSION = 64`.                                                                                                                                                                                  |
+| Constants       | —                               | `DEFAULT_INIT_TIMEOUT_MS = 10_000`, `MCP_RESTART_TIMEOUT_MS = 300_000`, `DEFAULT_MAX_SESSIONS = 32`, `MAX_EVENT_RING_SIZE = 1_000_000`, `DEFAULT_PERMISSION_TIMEOUT_MS = 5min`, `DEFAULT_MAX_PENDING_PER_SESSION = 64`.                                                                                                                                                                                  |
 
 **`isDying` invariant**: any teardown path must set `ChannelInfo.isDying = true` synchronously **before** awaiting `channel.kill()`. `ensureChannel` treats a dying channel as absent and spawns a fresh one. Without this flag a concurrent `spawnOrAttach` arriving during the SIGTERM grace window (up to 10s) would attach to a transport about to close and the caller's sessionId would 404 on every follow-up. **Set sites** (must keep in sync): `ensureChannel` (initialize failure + late-shutdown re-check), `doSpawn` (newSession failure on empty channel), `killSession` (last session leaving), `shutdown` (bulk).
 
@@ -200,7 +200,7 @@ sequenceDiagram
 | `sessionScope`                                | `'single'`                                         | `'single'` shares one session across all clients; `'thread'` creates a separate session for each conversation thread. |
 | `channelFactory`                              | `defaultSpawnChannelFactory`                       | Pluggable ACP child factory.                                                                                          |
 | `initializeTimeoutMs`                         | `DEFAULT_INIT_TIMEOUT_MS = 10_000`                 | ACP `initialize` handshake timeout.                                                                                   |
-| `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 20`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                |
+| `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 32`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                |
 | `eventRingSize`                               | `DEFAULT_RING_SIZE` (from `eventBus.ts`)           | Per-session event ring; soft-capped at `MAX_EVENT_RING_SIZE`.                                                         |
 | `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 5 min`            | Per-request wallclock for the mediator.                                                                               |
 | `maxPendingPermissionsPerSession`             | `DEFAULT_MAX_PENDING_PER_SESSION = 64`             | Backpressure on high-volume agents.                                                                                   |
@@ -244,9 +244,13 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 `'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
 `liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
-(default 4 MiB, hard ceiling 256 MiB). If older retained replay was dropped,
-`compactedReplay[0]` is the id-less `history_truncated` marker. The full
-persisted transcript remains on disk and is not exposed by this bridge response.
+(default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
+separately capped by `BridgeOptions.maxJournalEvents` (default 10 000) and
+`BridgeOptions.maxJournalBytes` (default 8 MiB). If older retained replay was
+dropped, `compactedReplay[0]` is the id-less `history_truncated` marker; if
+journal entries were dropped, `liveJournal[0]` carries a `history_truncated`
+marker with `scope: 'live_journal'`. The full persisted transcript remains on
+disk and is not exposed by this bridge response.
 `BridgeClientRequestContext` is the request context threaded through bridge
 calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.
 

@@ -30,21 +30,35 @@ afterEach(() => {
 // The dialog is portaled to document.body, so query the document, not container.
 const input = () =>
   document.querySelector<HTMLInputElement>('#add-workspace-path')!;
+const displayNameInput = () =>
+  document.querySelector<HTMLInputElement>('#add-workspace-display-name')!;
 const alert = () => document.querySelector('[role="alert"]');
 const submitButton = () =>
   Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
     (b) => b.getAttribute('type') === 'submit',
   )!;
+const browseButton = () =>
+  Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+    (button) => button.textContent === 'Browse…',
+  )!;
 
-function type(value: string) {
+function typeInto(target: HTMLInputElement, value: string) {
   act(() => {
     const setter = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       'value',
     )!.set!;
-    setter.call(input(), value);
-    input().dispatchEvent(new Event('input', { bubbles: true }));
+    setter.call(target, value);
+    target.dispatchEvent(new Event('input', { bubbles: true }));
   });
+}
+
+function type(value: string) {
+  typeInto(input(), value);
+}
+
+function typeDisplayName(value: string) {
+  typeInto(displayNameInput(), value);
 }
 
 function submit() {
@@ -58,6 +72,12 @@ describe('AddWorkspaceDialog', () => {
     mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
 
     expect(document.activeElement).toBe(input());
+  });
+
+  it('hides the display name field unless the daemon supports it', () => {
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+
+    expect(document.querySelector('#add-workspace-display-name')).toBeNull();
   });
 
   it('describes the input with the hint and no error initially', () => {
@@ -106,10 +126,34 @@ describe('AddWorkspaceDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('submits with persist=false when the switch is toggled off', async () => {
+  it('submits an optional trimmed display name', async () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    mount(<AddWorkspaceDialog onClose={onClose} onAdd={onAdd} />);
+    mount(
+      <AddWorkspaceDialog onClose={onClose} onAdd={onAdd} displayNameEnabled />,
+    );
+
+    expect(displayNameInput().maxLength).toBe(256);
+    expect(displayNameInput().getAttribute('aria-describedby')).toBe(
+      'add-workspace-display-name-hint',
+    );
+    type('/abs/project');
+    typeDisplayName('  Payments API  ');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', true, 'Payments API');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits a display name with persist=false', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(
+      <AddWorkspaceDialog onClose={onClose} onAdd={onAdd} displayNameEnabled />,
+    );
 
     // Toggle the persist switch off (Radix renders it as a button[role="switch"]).
     const sw = document.querySelector<HTMLButtonElement>(
@@ -120,13 +164,38 @@ describe('AddWorkspaceDialog', () => {
     });
 
     type('/abs/project');
+    typeDisplayName('Local workspace');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith(
+      '/abs/project',
+      false,
+      'Local workspace',
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides persistence and always submits false when unsupported', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        persistenceSupported={false}
+      />,
+    );
+
+    expect(document.querySelector('[role="switch"]')).toBeNull();
+    type('/abs/project');
     submit();
     await act(async () => {
       await Promise.resolve();
     });
 
     expect(onAdd).toHaveBeenCalledWith('/abs/project', false);
-    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces an onAdd failure as an inline error and stays open', async () => {
@@ -233,6 +302,64 @@ describe('AddWorkspaceDialog', () => {
         'coding-katas/',
       ]);
       expect(input().getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('opens the system picker and fills the selected absolute path', async () => {
+      const onPick = vi.fn().mockResolvedValue('/Users/me/code');
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+      });
+
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(input().value).toBe('/Users/me/code');
+    });
+
+    it('leaves the path unchanged when the system picker is cancelled', async () => {
+      const onPick = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+      });
+
+      expect(input().value).toBe('');
+    });
+
+    it('shows an error when the system picker fails', async () => {
+      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(alert()?.textContent).toContain(
+        'Unable to open the system folder picker',
+      );
     });
 
     it('never queries for a non-absolute value', async () => {

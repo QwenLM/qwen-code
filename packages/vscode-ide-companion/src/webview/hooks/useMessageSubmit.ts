@@ -9,6 +9,7 @@ import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
 import type { ImageAttachment } from './useImage.js';
 import { ZERO_WIDTH_SPACE, stripZeroWidthSpaces } from '@qwen-code/webui';
+import { isDisplayableImagePath } from '../../utils/imageSupport.js';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
@@ -56,6 +57,44 @@ export const shouldSendMessage = ({
   const hasAttachments = (attachedImages?.length ?? 0) > 0;
   return hasText || hasAttachments;
 };
+
+function findFileReferences(
+  text: string,
+  getFileReference: (fileName: string) => string | undefined,
+): Array<{ name: string; value: string }> {
+  const references: Array<{ name: string; value: string }> = [];
+  let currentIndex = 0;
+
+  while (currentIndex < text.length) {
+    const atIndex = text.indexOf('@', currentIndex);
+    if (atIndex === -1) {
+      break;
+    }
+
+    let matched = false;
+    // ponytail: O(n²) against short composer text; replace with map-key scan if composer parsing gets hot.
+    for (let end = text.length; end > atIndex + 1; end -= 1) {
+      const name = text.slice(atIndex + 1, end).trimEnd();
+      const value = getFileReference(name);
+      if (value) {
+        const nextChar = end < text.length ? text[end] : '';
+        if (nextChar !== '' && nextChar !== '@' && !/\s/.test(nextChar)) {
+          continue;
+        }
+        references.push({ name, value });
+        currentIndex = end;
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      currentIndex = atIndex + 1;
+    }
+  }
+
+  return references;
+}
 
 /**
  * Message submit Hook
@@ -136,21 +175,18 @@ export const useMessageSubmit = ({
         value: string;
         startLine?: number;
         endLine?: number;
+        isImage?: boolean;
       }> = [];
-      const fileRefPattern = /@([^\s]+)/g;
-      let match;
-
-      while ((match = fileRefPattern.exec(textToSend)) !== null) {
-        const fileName = match[1];
-        const filePath = fileContext.getFileReference(fileName);
-
-        if (filePath) {
-          context.push({
-            type: 'file',
-            name: fileName,
-            value: filePath,
-          });
-        }
+      for (const reference of findFileReferences(
+        textToSend,
+        fileContext.getFileReference,
+      )) {
+        context.push({
+          type: 'file',
+          name: reference.name,
+          value: reference.value,
+          isImage: isDisplayableImagePath(reference.value),
+        });
       }
 
       // Add active file selection context if present and not skipped

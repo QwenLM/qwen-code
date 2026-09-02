@@ -22,9 +22,19 @@ const mockTokenizer = {
   calculateTokens: vi.fn(),
   dispose: vi.fn(),
 };
+const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
+const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportAnthropicRequest: mockReportAnthropicRequest,
+  reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
+  reportAnthropicResponse: mockReportAnthropicResponse,
+  reportAnthropicEvent: mockReportAnthropicEvent,
 }));
 
 type AnthropicCreateArgs = [
@@ -87,6 +97,13 @@ describe('AnthropicContentGenerator', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    // The generator's constructor builds undici-backed fetch options
+    // synchronously; production code preloads undici in
+    // createContentGenerator, and resetModules() clears that state.
+    const { preloadRuntimeFetchModule } = await import(
+      '../../utils/runtimeFetchOptions.js'
+    );
+    await preloadRuntimeFetchModule();
     savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
     delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
@@ -111,6 +128,7 @@ describe('AnthropicContentGenerator', () => {
       getProxy: vi.fn().mockReturnValue(undefined),
       getTelemetryEnabled: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session'),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -959,6 +977,58 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
+      // End-to-end through the generator: `GeminiClient` records the
+      // gitStatus-free base on Config, the generator reads it per request,
+      // and the converter splits the system prompt there — static prefix
+      // carries scope:'global' (cross-session reuse), volatile suffix stays
+      // per-session. Together with the last-tool and last-user-message
+      // markers this fills all 4 Anthropic breakpoints.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      (
+        mockConfig.getStaticSystemPrefix as ReturnType<typeof vi.fn>
+      ).mockReturnValue('sys-base');
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys-base\n\n# Git Status\nbranch: main',
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys-base',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+        {
+          type: 'text',
+          text: '\n\n# Git Status\nbranch: main',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      // The scope entry on the split prefix block is enough for the
+      // body-scan beta gate to fire.
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
+    });
+
     it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
@@ -1179,6 +1249,8 @@ describe('AnthropicContentGenerator', () => {
         { ...baseConfig, reasoning: { effort: 'medium' } },
         mockConfig,
       );
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hi',
@@ -1196,7 +1268,13 @@ describe('AnthropicContentGenerator', () => {
       // fallback (which would double latency + API cost).
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
-      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const [streamingRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(streamingRequest);
+      expect(mockReportAnthropicEvent).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ type: 'message_delta' }),
+      );
       const headers = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(headers['anthropic-beta']).toContain(
@@ -1205,6 +1283,27 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
       expect(headers['anthropic-beta']).toContain(
         'prompt-caching-scope-2026-01-05',
+      );
+    });
+
+    it('sends extended-cache-ttl-2025-04-11 when cacheRetention is "1h"', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+        cacheRetention: '1h',
+      });
+      expect(headers['anthropic-beta']).toContain(
+        'extended-cache-ttl-2025-04-11',
+      );
+    });
+
+    it('omits extended-cache-ttl-2025-04-11 when cacheRetention is unset (ephemeral default)', async () => {
+      const headers = await callOnce({
+        ...baseConfig,
+        reasoning: false,
+      });
+      expect(headers['anthropic-beta']).not.toContain(
+        'extended-cache-ttl-2025-04-11',
       );
     });
   });
@@ -1379,6 +1478,8 @@ describe('AnthropicContentGenerator', () => {
         },
       };
 
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const result = await generator.generateContent(request);
       expect(result.responseId).toBe('gemini-1');
 
@@ -1405,6 +1506,11 @@ describe('AnthropicContentGenerator', () => {
           thinking: { type: 'enabled', budget_tokens: 1000 },
           output_config: { effort: 'high' },
         }),
+      );
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(anthropicRequest);
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ id: 'anthropic-1' }),
       );
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
@@ -1611,7 +1717,7 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({
           output_config: { effort: 'max' },
           // 4.6+ uses adaptive thinking; the server controls the budget.
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -1648,7 +1754,7 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           output_config: { effort: 'xhigh' },
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -2084,12 +2190,15 @@ describe('AnthropicContentGenerator', () => {
       it('selects adaptive for claude-opus-4-6 / sonnet-4-6 / opus-4-7', async () => {
         expect(await thinkingFor('claude-opus-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-sonnet-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-opus-4-7')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2097,6 +2206,7 @@ describe('AnthropicContentGenerator', () => {
         // Single-digit character-class regex would have missed haiku entirely.
         expect(await thinkingFor('claude-haiku-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2105,12 +2215,14 @@ describe('AnthropicContentGenerator', () => {
         // invalid `{ type: 'enabled', budget_tokens: ... }` body.
         expect(await thinkingFor('claude-opus-4-10')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
       it('selects adaptive for a future major like claude-opus-5-1', async () => {
         expect(await thinkingFor('claude-opus-5-1')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2119,6 +2231,24 @@ describe('AnthropicContentGenerator', () => {
           type: 'enabled',
           budget_tokens: 32_000,
         });
+      });
+
+      it('never sets display on the budget_tokens shape (pre-4.6 models and the explicit-override escape hatch)', async () => {
+        // display is a field on the 'enabled'/'adaptive' Anthropic thinking
+        // shapes, but the summarized-default-changed-to-omitted problem
+        // documented by Anthropic is scoped to adaptive thinking only
+        // (Opus 4.7+ / every 5.x family). Pre-4.6 models on the manual
+        // budget path, and the explicit reasoning.budget_tokens escape
+        // hatch on models that still accept it, must not carry `display`.
+        expect(await thinkingFor('claude-opus-4-5')).not.toHaveProperty(
+          'display',
+        );
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).not.toHaveProperty('display');
       });
 
       it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
@@ -2156,7 +2286,7 @@ describe('AnthropicContentGenerator', () => {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'adaptive' });
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
@@ -2203,6 +2333,7 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect((req as { thinking?: unknown }).thinking).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(req).toEqual(
           expect.not.objectContaining({ output_config: expect.anything() }),
@@ -2216,6 +2347,99 @@ describe('AnthropicContentGenerator', () => {
         expect(headers['anthropic-beta']).toContain(
           'prompt-caching-scope-2026-01-05',
         );
+      });
+    });
+
+    describe('assistant-turn prefill stripping (generator wiring)', () => {
+      // stripTrailingAssistantPrefill is derived from
+      // modelSupportsAdaptiveThinking() (anthropicContentGenerator.ts),
+      // the same 4.6+ gate used for the thinking shape. These pin that the
+      // generator actually turns the converter option on/off per model,
+      // not just that the converter behaves correctly when told to.
+      it('strips a trailing assistant turn and appends a synthetic user turn on claude-opus-4-6', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-6',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-6',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        // enableCacheControl defaults to on at the generator level (unlike
+        // the converter-level tests above, which pass it explicitly), so
+        // the synthetic turn also picks up the same cache_control the
+        // trailing user message would otherwise carry.
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Continue.',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        });
+      });
+
+      it('leaves a trailing assistant turn untouched on claude-opus-4-5 (pre-4.6)', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-5',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-5',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        });
       });
     });
 
@@ -2539,7 +2763,10 @@ describe('AnthropicContentGenerator', () => {
         'https://internal-proxy.example/anthropic',
       );
 
-      expect(request.thinking).toEqual({ type: 'adaptive' });
+      expect(request.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
       expect(request.messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'text', text: 'Visible answer' }],
@@ -3452,8 +3679,71 @@ describe('AnthropicContentGenerator', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('preserves message_start usage when the stream fails after content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 4,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw new Error('stream interrupted');
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('stream interrupted');
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.usageMetadata).toEqual({
+        promptTokenCount: 9,
+        cachedContentTokenCount: 3,
+      });
+      expect(getGenAiUsageProvenance(chunks[0]?.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 4,
+      });
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3582,12 +3872,19 @@ describe('AnthropicContentGenerator', () => {
 
       // Usage/finish chunks exist; check the last one.
       const last = chunks[chunks.length - 1]!;
+      expect(
+        chunks.every((chunk) => chunk.modelVersion === 'claude-test'),
+      ).toBe(true);
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
         cachedContentTokenCount: 7,
         promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: undefined,
       });
     });
 
@@ -3601,6 +3898,9 @@ describe('AnthropicContentGenerator', () => {
       // dropped from the displayed total and the Footer under-reports by
       // exactly that many tokens.
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3666,6 +3966,55 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the requested model when a stream omits it', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: { id: 'msg-1', usage: { input_tokens: 1 } },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'requested-model',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      expect(chunks).not.toHaveLength(0);
+      expect(chunks.every((chunk) => chunk.modelVersion === undefined)).toBe(
+        true,
+      );
     });
 
     it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
@@ -3711,10 +4060,18 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({ stream: true }),
       );
       expect(fallbackRequest).not.toHaveProperty('stream');
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        undefined,
+      );
     });
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const streamingAttempt = { generation: 1 };
+      const fallbackAttempt = { generation: 2 };
+      mockReportAnthropicRequest.mockReturnValueOnce(streamingAttempt);
+      mockReportAnthropicFollowingRequest.mockReturnValueOnce(fallbackAttempt);
       anthropicState.createImpl
         .mockResolvedValueOnce(
           (async function* () {
@@ -3752,12 +4109,26 @@ describe('AnthropicContentGenerator', () => {
       }
 
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
       expect(chunks).toHaveLength(1);
       expect(chunks[0]?.responseId).toBe('msg-fallback');
       expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
         { text: 'fallback ok' },
       ]);
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        streamingAttempt,
+      );
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        fallbackAttempt,
+        expect.objectContaining({ id: 'msg-fallback' }),
+      );
+      expect(mockReportAnthropicResponse).not.toHaveBeenCalledWith(
+        streamingAttempt,
+        expect.anything(),
+      );
     });
   });
 

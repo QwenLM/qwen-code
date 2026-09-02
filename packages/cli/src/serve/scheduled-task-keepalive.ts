@@ -36,6 +36,7 @@ import {
   getCronFilePath,
   createDebugLogger,
   SessionService,
+  Storage,
   taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -126,6 +127,7 @@ async function bindAndNameSessions(
   renamed: Set<string>,
   spawnTimeoutMs: number,
   binding: Set<string>,
+  cleanupSession: (sessionId: string) => Promise<unknown>,
 ): Promise<void> {
   const unbound = tasks.filter(
     (t) =>
@@ -158,17 +160,14 @@ async function bindAndNameSessions(
       // binding guard on TRUE settlement so retries are possible.
       let timedOut = false;
       rawSpawn
-        .then(({ sessionId }) => {
+        .then(async ({ sessionId }) => {
           if (timedOut) {
             log.debug(
               'keepalive: late spawn resolved, cleaning up',
               task.id,
               sessionId,
             );
-            bridge.closeSession(sessionId).catch(() => {});
-            new SessionService(boundWorkspace)
-              .removeSession(sessionId)
-              .catch(() => {});
+            await cleanupSession(sessionId).catch(() => {});
           }
         })
         .catch(() => {})
@@ -226,10 +225,7 @@ async function bindAndNameSessions(
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
       if (spawnedSessionId !== undefined) {
-        await bridge.closeSession(spawnedSessionId).catch(() => {});
-        await new SessionService(boundWorkspace)
-          .removeSession(spawnedSessionId)
-          .catch(() => {});
+        await cleanupSession(spawnedSessionId).catch(() => {});
       }
     }
   }
@@ -257,12 +253,15 @@ export interface ScheduledTaskKeepalive {
 export interface StartScheduledTaskKeepaliveOptions {
   bridge: KeepaliveBridge;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
+  cleanupSession?: (sessionId: string) => Promise<unknown>;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
   /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
   reviveTimeoutMs?: number;
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }
 
 export function startScheduledTaskKeepalive(
@@ -271,6 +270,14 @@ export function startScheduledTaskKeepalive(
   const { bridge, boundWorkspace, intervalMs } = opts;
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
   const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
+  const cleanupSession =
+    opts.cleanupSession ??
+    (async (sessionId: string) => {
+      await bridge.closeSession(sessionId);
+      await new SessionService(boundWorkspace, {
+        runtimeBaseDir: opts.runtimeBaseDir,
+      }).removeSession(sessionId);
+    });
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
   // permanently-gone session isn't reloaded every interval; cleared on success.
@@ -293,7 +300,7 @@ export function startScheduledTaskKeepalive(
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
 
-  const tick = async (): Promise<void> => {
+  const tickInRuntime = async (): Promise<void> => {
     let tasks;
     try {
       tasks = await readCronTasks(boundWorkspace);
@@ -304,6 +311,11 @@ export function startScheduledTaskKeepalive(
       // is diagnosable rather than silent.
       log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
+    }
+    try {
+      opts.onTasksRead?.(tasks);
+    } catch (err) {
+      log.debug('keepalive: onTasksRead failed', err);
     }
     for (const sessionId of collectBoundSessionIds(tasks)) {
       try {
@@ -382,8 +394,16 @@ export function startScheduledTaskKeepalive(
       renamed,
       spawnTimeoutMs,
       binding,
+      cleanupSession,
     );
   };
+  const tick = (): Promise<void> =>
+    opts.runtimeBaseDir === undefined
+      ? tickInRuntime()
+      : Storage.runWithResolvedRuntimeBaseDir(
+          opts.runtimeBaseDir,
+          tickInRuntime,
+        );
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
   // the revive timeout), so skip a tick while the previous is still running —
@@ -404,7 +424,12 @@ export function startScheduledTaskKeepalive(
   // dedicated session immediately, not after the next interval. Same
   // directory-watch + debounce pattern the scheduler uses.
   let bindDebounce: ReturnType<typeof setTimeout> | undefined;
-  const cronFilePath = getCronFilePath(boundWorkspace);
+  const cronFilePath =
+    opts.runtimeBaseDir === undefined
+      ? getCronFilePath(boundWorkspace)
+      : Storage.runWithResolvedRuntimeBaseDir(opts.runtimeBaseDir, () =>
+          getCronFilePath(boundWorkspace),
+        );
   const cronDir = path.dirname(cronFilePath);
   const cronFileName = path.basename(cronFilePath);
   let fileWatcher: ReturnType<typeof fsSync.watch> | undefined;
@@ -488,6 +513,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
   loadTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
@@ -497,6 +523,11 @@ export async function rehydrateScheduledTaskSessions(deps: {
   } catch (err) {
     log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
+  }
+  try {
+    deps.onTasksRead?.(tasks);
+  } catch (err) {
+    log.debug('rehydrate: onTasksRead failed', err);
   }
 
   // Distinct sessions of enabled bound tasks — same filter the heartbeat uses.

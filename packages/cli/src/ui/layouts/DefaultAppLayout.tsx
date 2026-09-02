@@ -8,6 +8,7 @@ import type React from 'react';
 import { useEffect, useRef } from 'react';
 import { Box } from 'ink';
 import { MainContent } from '../components/MainContent.js';
+import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
@@ -68,6 +69,9 @@ export const DefaultAppLayout: React.FC = () => {
           {/* Agent view: chat history + agent-specific composer */}
           <AgentChatView agentId={activeView} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {!uiState.dialogsVisible && uiState.updateInfo && (
+              <UpdateNotification message={uiState.updateInfo.message} />
+            )}
             <AgentComposer key={activeView} agentId={activeView} />
             <ExitWarning />
           </Box>
@@ -77,6 +81,9 @@ export const DefaultAppLayout: React.FC = () => {
           {/* Main view: conversation history + main composer / dialogs */}
           <MainContent />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {!uiState.dialogsVisible && uiState.updateInfo && (
+              <UpdateNotification message={uiState.updateInfo.message} />
+            )}
             {uiState.dialogsVisible ? (
               <Box
                 marginX={2}

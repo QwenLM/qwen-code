@@ -22,6 +22,7 @@ import {
   validateDnsResolutionOrder,
 } from './gemini.js';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
+import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
@@ -29,6 +30,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
@@ -967,9 +969,13 @@ describe('gemini.tsx main function', () => {
     const { relaunchOnExitCode } = await import('./utils/relaunch.js');
     const [, options] = vi.mocked(relaunchOnExitCode).mock.calls[0]!;
 
-    await expect(options?.onUpdateRelaunch?.()).resolves.toBe(44);
+    await expect(options?.onUpdateRelaunch?.(true)).resolves.toBe(44);
 
-    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      true,
+    );
   });
 
   it('passes host update capability into a container sandbox', async () => {
@@ -1129,7 +1135,7 @@ describe('gemini.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -1800,6 +1806,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       expect.any(Object),
       expect.any(Object),
+      {
+        privateParentCapability: undefined,
+      },
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
@@ -2048,6 +2057,55 @@ describe('gemini.tsx main function kitty protocol', () => {
     processExitSpy.mockRestore();
   });
 
+  it('still exits on SIGHUP with code 129', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (
+        eventName === 'SIGTERM' ||
+        eventName === 'SIGINT' ||
+        eventName === 'SIGHUP'
+      ) {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    await main();
+    signalHandlers.get('SIGHUP')?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(processExitSpy).toHaveBeenCalledWith(129);
+
+    processOnSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
   it('rejects --json-schema when running in interactive (TUI) mode', async () => {
     // The synthetic structured_output tool only terminates the run inside
     // runNonInteractive. In TUI mode it's an inert tool that prints
@@ -2201,6 +2259,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    pushKittyProtocolFlags: vi.fn(),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
@@ -2213,8 +2272,52 @@ describe('startInteractiveUI', () => {
     render: vi.fn().mockReturnValue({ unmount: vi.fn() }),
   }));
 
+  vi.mock('./ui/components/shared/ErrorBoundary.js', async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('./ui/components/shared/ErrorBoundary.js')
+      >();
+    return {
+      ...original,
+      consumeLastRenderError: mockConsumeLastRenderError,
+    };
+  });
+
+  let initialExitListeners: NodeJS.ExitListener[] = [];
+  let originalStdoutIsTTY: boolean | undefined;
+  let restoreCiEnv = () => {};
+
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreCiEnv = clearCiEnv();
+    vi.stubEnv('TERM', 'xterm-256color');
+    originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    initialExitListeners = process.listeners('exit') as NodeJS.ExitListener[];
+  });
+
+  afterEach(() => {
+    if (originalStdoutIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+    }
+    vi.unstubAllEnvs();
+    restoreCiEnv();
+    const currentExitListeners = process.listeners(
+      'exit',
+    ) as NodeJS.ExitListener[];
+    for (const listener of currentExitListeners) {
+      if (!initialExitListeners.includes(listener)) {
+        process.removeListener('exit', listener);
+      }
+    }
   });
 
   it('should render the UI with proper React context and exitOnCtrlC disabled', async () => {
@@ -2244,11 +2347,189 @@ describe('startInteractiveUI', () => {
     expect(options).toEqual({
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
-      alternateScreen: false,
+      alternateScreen: true,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
     expect(reactElement).toBeDefined();
+  });
+
+  it('should not use alternate screen when VP mode is explicitly disabled', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const legacySettings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: {
+          ...mockSettings.merged.ui,
+          useTerminalBuffer: false,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      legacySettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when stdout is not interactive', async () => {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when TERM is dumb', async () => {
+    vi.stubEnv('TERM', 'dumb');
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen in CI with a TTY stdout', async () => {
+    vi.stubEnv('CI', 'true');
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen in screen reader mode when VP mode is unset', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const screenReaderConfig = {
+      ...mockConfig,
+      getScreenReader: () => true,
+    } as Config;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      screenReaderConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({
+      isScreenReaderEnabled: true,
+      alternateScreen: false,
+    });
+  });
+
+  it('should not use alternate screen in screen reader mode even when VP mode is explicitly enabled', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const screenReaderConfig = {
+      ...mockConfig,
+      getScreenReader: () => true,
+    } as Config;
+    const vpSettings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: {
+          ...mockSettings.merged.ui,
+          useTerminalBuffer: true,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      screenReaderConfig,
+      vpSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({
+      isScreenReaderEnabled: true,
+      alternateScreen: false,
+    });
   });
 
   it('should perform all startup tasks in correct order', async () => {
@@ -2385,6 +2666,70 @@ describe('startInteractiveUI', () => {
     expect(
       vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
+  });
+
+  it('echoes a stored render error to stderr on cleanup (VP exit-time echo)', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(new Error('render boom'));
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '\nRendering error: render boom',
+    );
+  });
+
+  it('does not echo when no render error was stored', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(undefined);
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    await cleanupFn?.();
+
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Rendering error'),
+    );
   });
 
   describe('periodic memory-pressure check', () => {

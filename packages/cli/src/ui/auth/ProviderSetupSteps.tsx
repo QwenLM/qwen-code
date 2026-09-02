@@ -11,6 +11,7 @@ import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
 import { TextInput } from '../components/shared/TextInput.js';
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
@@ -477,7 +478,9 @@ function ModelIdsStep({
               return (
                 <Box key={item.key} alignItems="flex-start">
                   <Box minWidth={4} flexShrink={0}>
-                    <Text color={textColor}>{isSelected ? '◉' : '○'}</Text>
+                    <Text color={textColor}>
+                      {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                    </Text>
                   </Box>
                   <Box flexGrow={1}>
                     <Text color={textColor}>{item.label}</Text>
@@ -556,7 +559,7 @@ function AdvancedConfigStep({
     modalityPdf,
     contextWindowSize,
   } = flow.state;
-  const checkmark = (v: boolean) => (v ? '◉' : '○');
+  const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
 
   const ctxIdx = modalityEnabled ? 6 : 2;
