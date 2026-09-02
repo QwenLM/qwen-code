@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
@@ -46,7 +47,11 @@ import {
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  extractErrorCode,
+  extractErrorMessage,
+  parseSessionSource,
+} from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -448,6 +453,31 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
+}
+
+/**
+ * Renders a prompt-turn rejection for the daemon log. Non-Error rejections
+ * (bare JSON-RPC error objects forwarded by the bridge) must not degrade to
+ * `[object Object]` — that hid the failure cause in production incidents
+ * (#10710), so extract the structured message/code instead.
+ */
+export function describePromptTurnFailure(err: unknown): string {
+  const detail = extractErrorMessage(err);
+  if (err instanceof Error) {
+    return `[${err.name}] ${detail}`;
+  }
+  const code = extractErrorCode(err);
+  // `extractErrorMessage` terminates in `String(err)`, which renders a plain
+  // object as `[object Object]`. Fall back to `inspect` for those: unlike
+  // `JSON.stringify` it never throws, so circular and non-serializable
+  // rejections stay readable instead of degrading again.
+  const rendered =
+    typeof err === 'object' &&
+    err !== null &&
+    (detail === '' || detail === String(err))
+      ? inspect(err, { depth: 2, breakLength: Infinity })
+      : detail;
+  return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
 function parseTranscriptLimitQuery(
@@ -5397,9 +5427,8 @@ export function registerSessionRoutes(
             },
             (err) => {
               if (daemonLog) {
-                const errName = err instanceof Error ? err.name : undefined;
                 daemonLog.warn(
-                  `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+                  `prompt turn failed: ${describePromptTurnFailure(err)}`,
                   { sessionId, promptId, clientId },
                 );
               }
