@@ -420,6 +420,9 @@ describe('workspace Skill management routes', () => {
 
     expect(response.status).toBe(404);
     expect(response.body.code).toBe('skill_not_found');
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
   });
 
   it('rejects wrong scopes and untrusted qualified config writes', async () => {

@@ -207,7 +207,9 @@ export function SkillsManagerPage({
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
   );
+  const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
   const activeWorkspaceCwd = connection.workspaceCwd ?? workspace.workspaceCwd;
+  const targetsActiveWorkspace = targetWorkspaceCwd === activeWorkspaceCwd;
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],
@@ -245,10 +247,7 @@ export function SkillsManagerPage({
     setNotice(null);
     try {
       const result = await setEnabled(skill.name, enabled, {
-        clientId:
-          workspaceCwd === undefined || workspaceCwd === activeWorkspaceCwd
-            ? connection.clientId
-            : undefined,
+        clientId: targetsActiveWorkspace ? connection.clientId : undefined,
       });
       const refreshed = await reloadConfig();
       const refreshedSkill = refreshed?.skills.find(
@@ -412,9 +411,7 @@ export function SkillsManagerPage({
             </div>
             <Button
               disabled={
-                selectedSkill.status === 'disabled' ||
-                (workspaceCwd !== undefined &&
-                  workspaceCwd !== activeWorkspaceCwd)
+                selectedSkill.status === 'disabled' || !targetsActiveWorkspace
               }
               onClick={() => onUseSkill(selectedSkill.name)}
             >

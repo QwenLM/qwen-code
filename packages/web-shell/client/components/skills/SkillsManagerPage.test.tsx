@@ -254,6 +254,14 @@ describe('SkillsManagerPage', () => {
       true,
       { clientId: undefined },
     );
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    await renderPage();
+    await enableSelectedSkill();
+    expect(skillsState.current.setEnabled).toHaveBeenLastCalledWith(
+      'review',
+      true,
+      { clientId: undefined },
+    );
   });
 
   it('keeps the client id for an explicitly selected active workspace', async () => {
@@ -291,7 +299,6 @@ describe('SkillsManagerPage', () => {
         level: 'project',
         modelInvocable: true,
         disabledReason: 'hard',
-        installedPath: '/workspace/demo/.qwen/skills/external/SKILL.md',
       },
     ];
     skillsState.current.configSkills = [];
@@ -320,13 +327,13 @@ describe('SkillsManagerPage', () => {
       },
     ];
 
-    await renderPage('/workspace/secondary', onUseSkill);
+    connectionState.current.workspaceCwd = '/workspace/secondary';
+    await renderPage(undefined, onUseSkill);
     await openSkill('deploy');
 
     expect(runButton()?.disabled).toBe(true);
     runButton()?.click();
     expect(onUseSkill).not.toHaveBeenCalled();
-    connectionState.current.workspaceCwd = '/workspace/secondary';
     await renderPage('/workspace/secondary', onUseSkill);
     expect(runButton()?.disabled).toBe(false);
   });
