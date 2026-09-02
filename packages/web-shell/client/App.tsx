@@ -267,7 +267,10 @@ import {
   SLASH_COMMAND_PATTERN,
 } from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { isVisibleComposerModel } from './utils/composerModels';
+import {
+  isStandaloneModelPickerUnavailable,
+  isVisibleComposerModel,
+} from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -3403,6 +3406,11 @@ export function App({
     [pendingSessionContext, settledSessionContext],
   );
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  // The composer picker chooses the target of the next session, so a
+  // projectless draft keeps it enabled: that is where "no workspace" is
+  // chosen. An attached projectless session hides it again.
+  const composerWorkspaceSelectEnabled =
+    workspaceContextActive || connection.sessionId === undefined;
   const pendingNonWorkspaceNavigation =
     pendingSessionContext !== undefined &&
     pendingSessionContext.kind !== 'workspace' &&
@@ -3488,6 +3496,8 @@ export function App({
   const [currentSessionSummary, setCurrentSessionSummary] = useState<
     DaemonSessionSummary | undefined
   >(undefined);
+  const currentSessionSummaryRef = useRef(currentSessionSummary);
+  currentSessionSummaryRef.current = currentSessionSummary;
   // Tracks the logical session from the latest effect run. In-flight fetches
   // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -3604,6 +3614,7 @@ export function App({
             setSessionStatusDisplayName(
               listedSession?.displayName ?? summary.displayName,
             );
+            setCurrentSessionSummary(listedSession ?? summary);
           })
           .catch(() => undefined);
       })
@@ -8151,6 +8162,14 @@ export function App({
   // window is narrower than the large-screen breakpoint. Growing back past the
   // breakpoint restores it, so a transient resize doesn't drop the user's panes.
   const splitFoldedByShrinkRef = useRef(false);
+  // The manual title an armed `/clear` carries into the next created session
+  // (consumed by the deferred creation in ensureSessionForPrompt). Session
+  // binding outside the carry flow — sidebar navigation, workspace switches,
+  // the shrink-fold landing, workspace-resolver creation — must discard it,
+  // or a cleared title resurfaces on an unrelated session's successor.
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   useEffect(() => {
     if (isLargeScreen) {
       // Grew back above the breakpoint: restore a split that a shrink folded
@@ -8184,6 +8203,10 @@ export function App({
         // pane the single connection can't own) just leaves the empty chat.
         const firstPane = splitSessionIdsRef.current[0];
         if (firstPane && !currentSessionIdRef.current) {
+          // Landing on a pane is session navigation: discard an armed
+          // `/clear` carry so the pane session's lineage never inherits the
+          // cleared session's title.
+          pendingManualTitleRef.current = undefined;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -8700,6 +8723,7 @@ export function App({
       return Promise.resolve(undefined);
     }
     if (currentSessionId) return Promise.resolve(undefined);
+    const pendingManualTitle = pendingManualTitleRef.current;
     const promise = (async () => {
       let allocatedSessionId: string | undefined;
       const modelId =
@@ -8787,7 +8811,21 @@ export function App({
               ? { name: gitModeIntentRef.current.name }
               : undefined,
           sessionSourceType: sessionSourceTypeRef.current,
-          onSessionCreated: onSessionCreatedRef.current,
+          onSessionCreated: async (sessionId) => {
+            if (
+              pendingManualTitle &&
+              pendingManualTitleRef.current === pendingManualTitle
+            ) {
+              try {
+                await sessionActions.renameSession(
+                  pendingManualTitle.displayName,
+                );
+              } catch {
+                pendingManualTitleRef.current = undefined;
+              }
+            }
+            await onSessionCreatedRef.current?.(sessionId);
+          },
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
             allocatedSessionId = sessionId;
@@ -8804,6 +8842,9 @@ export function App({
           },
           getCurrentSessionId: () => connectionRef.current.sessionId,
         }).then((result) => {
+          if (pendingManualTitleRef.current === pendingManualTitle) {
+            pendingManualTitleRef.current = undefined;
+          }
           if (result.worktree) {
             setSessionWorktree(result.worktree);
           }
@@ -9237,7 +9278,10 @@ export function App({
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
-        // No session exists or forced: create one.
+        // No session exists or forced: create one. Creating binds the chat
+        // connection — session navigation that must discard an armed
+        // `/clear` carry, mirroring loadSidebarSession.
+        pendingManualTitleRef.current = undefined;
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({ workspaceCwd: cwd });
@@ -10927,12 +10971,26 @@ export function App({
     onError(new Error(connection.error));
   }, [connection.error, onError]);
 
+  const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
-    setCurrentModel(connection.currentModel ?? '');
+    const next = connection.currentModel;
+    // A late standalone options publish lands as an undefined→value change;
+    // never let it overwrite a model the user already picked while waiting.
+    const wasLateHydration =
+      prevConnectionModelRef.current === undefined && next !== undefined;
+    prevConnectionModelRef.current = next;
+    setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
+  const prevConnectionModeRef = useRef(connection.currentMode);
   useLayoutEffect(() => {
-    setCurrentMode(connection.currentMode ?? 'default');
+    const next = connection.currentMode;
+    const wasLateHydration =
+      prevConnectionModeRef.current === undefined && next !== undefined;
+    prevConnectionModeRef.current = next;
+    setCurrentMode((prev) =>
+      wasLateHydration && prev !== 'default' ? prev : (next ?? 'default'),
+    );
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
@@ -11378,6 +11436,7 @@ export function App({
          * prompt sees it even while the clear is still in flight.
          */
         gitIntent?: SessionGitIntent;
+        carryManualTitle?: string;
       },
     ) => {
       if (
@@ -11387,6 +11446,9 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      pendingManualTitleRef.current = opts?.carryManualTitle
+        ? { displayName: opts.carryManualTitle }
+        : undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
@@ -11406,6 +11468,7 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live') {
+          pendingManualTitleRef.current = undefined;
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
           try {
@@ -11578,6 +11641,7 @@ export function App({
         // intent. Compared before the ref is overwritten below. `undefined`
         // is the primary selection on both sides.
         const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
+        if (!sameTarget) pendingManualTitleRef.current = undefined;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -11755,6 +11819,9 @@ export function App({
     },
     [switchWorkspace],
   );
+  const handleSelectComposerStandalone = useCallback(() => {
+    void createNewSession({ kind: 'global' });
+  }, [createNewSession]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -12071,6 +12138,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       const previousPendingContext = pendingSessionContextRef.current;
@@ -13529,6 +13597,16 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
+              if (
+                isStandaloneModelPickerUnavailable({
+                  sessionId: connectionRef.current.sessionId,
+                  sessionContextKind: effectiveSessionContext?.kind,
+                  models: connectionRef.current.models,
+                })
+              ) {
+                pushToast('info', t('model.unavailable'));
+                return true;
+              }
               setModelDialogMode('main');
             }
             return true;
@@ -13838,7 +13916,23 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            void createNewSession({ kind: 'inherit' });
+            const current = connectionRef.current;
+            const summary = currentSessionSummaryRef.current;
+            const carryManualTitle = current.sessionId
+              ? current.titleSource === 'manual'
+                ? current.displayName
+                : current.titleSource === undefined &&
+                    summary?.sessionId === current.sessionId &&
+                    summary.titleSource === 'manual'
+                  ? summary.displayName
+                  : current.titleSource === undefined
+                    ? pendingManualTitleRef.current?.displayName
+                    : undefined
+              : pendingManualTitleRef.current?.displayName;
+            void createNewSession(
+              { kind: 'inherit' },
+              carryManualTitle?.trim() ? { carryManualTitle } : undefined,
+            );
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
@@ -13846,6 +13940,7 @@ export function App({
             return true;
           }
           if (cmd === 'rename') {
+            pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (commandBlocked) {
@@ -15286,18 +15381,29 @@ export function App({
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
-    if (composerToolbarActions) return composerToolbarActions;
     const defaults =
       isChatEmptyState || !environmentGitReplacementEnabled
         ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
         : DEFAULT_COMPOSER_TOOLBAR_ACTIONS;
-    return composerToolbarAdditionalActions?.length
-      ? [...defaults, ...composerToolbarAdditionalActions]
-      : defaults;
+    const configured =
+      composerToolbarActions ??
+      (composerToolbarAdditionalActions?.length
+        ? [...defaults, ...composerToolbarAdditionalActions]
+        : defaults);
+    return isStandaloneModelPickerUnavailable({
+      sessionId: connection.sessionId,
+      sessionContextKind: effectiveSessionContext?.kind,
+      models: connection.models,
+    })
+      ? configured.filter((action) => action !== 'model')
+      : configured;
   }, [
     composerToolbarActions,
     composerToolbarAdditionalActions,
+    connection.models,
+    connection.sessionId,
     environmentGitReplacementEnabled,
+    effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
   const useMobileWelcomeMiddleLayout =
@@ -16049,15 +16155,16 @@ export function App({
                       );
                     }
                   }}
+                  // A cwd-less New task inherits the current context: a
+                  // workspace chat stays in its workspace and a cold draft
+                  // lands on the primary one. Projectless targets are chosen
+                  // in the composer's workspace picker instead.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                        : { kind: 'inherit' },
                     )
-                  }
-                  globalNewSessionUsesStandalone={
-                    standaloneSessionsSupported && !lockedWorkspaceCwd
                   }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
@@ -17692,7 +17799,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
                           }
@@ -17707,7 +17814,9 @@ export function App({
                                 : selectedWorkspaceCwd
                               : undefined
                           }
-                          workspaceSelectionDisabled={!workspaceContextActive}
+                          workspaceSelectionDisabled={
+                            !composerWorkspaceSelectEnabled
+                          }
                           atWorkspaceCwd={
                             workspaceContextActive
                               ? (ordinaryWorkspaces.find(
@@ -17727,8 +17836,21 @@ export function App({
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
                           onSelectWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          standaloneTargetSupported={
+                            composerWorkspaceSelectEnabled &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                          }
+                          selectedStandaloneTarget={
+                            effectiveSessionContext?.kind === 'standalone'
+                          }
+                          onSelectStandaloneTarget={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectComposerStandalone
                               : undefined
                           }
                           scratchWorkspaceSupported={
@@ -17840,7 +17962,15 @@ export function App({
                             setShowApprovalModeDialog((v) => !v)
                           }
                           onSelectModel={() =>
-                            setModelDialogMode((v) => (v ? null : 'main'))
+                            isStandaloneModelPickerUnavailable({
+                              sessionId: connection.sessionId,
+                              sessionContextKind: effectiveSessionContext?.kind,
+                              models: connection.models,
+                            })
+                              ? pushToast('info', t('model.unavailable'))
+                              : setModelDialogMode((v) =>
+                                  v ? null : 'main',
+                                )
                           }
                           onShowContext={() =>
                             showContextUsage('/context', false)

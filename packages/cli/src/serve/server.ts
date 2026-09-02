@@ -311,7 +311,7 @@ import {
   type parseChannelWebhookConfig,
 } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
@@ -1526,6 +1526,7 @@ export function createServeApp(
   let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
   let liveRuntimeBootPromise: Promise<void> | undefined;
   let liveRuntimeBootResult: WorkspaceRuntime | undefined;
+  let liveRuntimeBootWarned = false;
   let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
   const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
@@ -1606,11 +1607,42 @@ export function createServeApp(
     liveBindingPromise = pending;
     return pending;
   };
+  const describeConversationBootError = (error: unknown): string => {
+    // Boot errors wrap the real failure in generic ownership messages; walk
+    // the cause chain so the log names the innermost root cause.
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (
+      current instanceof Error &&
+      !seen.has(current) &&
+      messages.length < 8
+    ) {
+      seen.add(current);
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.length > 0 ? messages.join(' <- ') : String(error);
+  };
   const startConversationRuntimeBoot = (): Promise<void> => {
     if (liveRuntimeBootPromise) return liveRuntimeBootPromise;
     const pending = ensureLiveConversationRuntime()
       .then((runtime) => {
         liveRuntimeBootResult = runtime;
+        liveRuntimeBootWarned = false;
+      })
+      .catch((error) => {
+        // Boot failures surface to clients only as a generic 503; log the
+        // root cause once per failure episode so stalls are diagnosable.
+        if (!liveRuntimeBootWarned) {
+          liveRuntimeBootWarned = true;
+          // writeStderrLineSafe must not throw even on a dead stderr; the
+          // latch stays set so a lost line cannot spin per retry either.
+          writeStderrLineSafe(
+            `qwen serve: Conversations runtime boot failed: ${describeConversationBootError(error)}`,
+          );
+        }
+        throw error;
       })
       .finally(() => {
         if (liveRuntimeBootPromise === pending) {
@@ -2619,11 +2651,35 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    primaryBridge.publishWorkspaceEvent({
+    const event = {
       type: 'settings_changed',
       data: { key, value, scope },
-      ...(clientId ? { originatorClientId: clientId } : {}),
-    });
+    } as const;
+    const publish = (
+      bridge: AcpSessionBridge,
+      workspace: string,
+      originatorClientId?: string,
+    ) => {
+      try {
+        bridge.publishWorkspaceEvent({
+          ...event,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: settings_changed broadcast to workspace ${workspace} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    };
+
+    publish(primaryBridge, primaryBoundWorkspace, clientId);
+    if (scope !== 'user') return;
+    for (const runtime of workspaceRegistry.listAll()) {
+      if (runtime.primary) continue;
+      publish(runtime.bridge, runtime.workspaceCwd);
+    }
   };
 
   if (deps.persistSetting) {

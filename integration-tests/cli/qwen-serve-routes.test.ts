@@ -391,6 +391,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_organization',
       'session_export',
       'standalone_sessions_v1',
+      'standalone_session_options_v1',
       'session_transcript',
       'session_transcript_pagination',
       'mcp_guardrails',

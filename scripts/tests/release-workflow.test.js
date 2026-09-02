@@ -537,8 +537,11 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests',
+    expect(testStep.run).toContain(
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
+    );
+    expect(testStep.env.VITEST_RETRY).toBe(
+      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -553,6 +556,59 @@ describe('release workflow', () => {
         packageJson.scripts['test:ci'].split('&&').pop()?.trim(),
         path,
       ).toMatch(/^vitest run(?:\s|$)/);
+    }
+  });
+
+  it('passes --retry only when the release schedule asks for one', () => {
+    // The flag reaches every workspace's vitest, where a command line option
+    // outranks the config. Passing --retry=0 on stable releases would switch
+    // off a workspace's own retry (packages/sdk-typescript) on this lane
+    // alone, so the stable path must omit the flag rather than zero it.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [retry, expected] of [
+      ['2', '--retry=2'],
+      ['', null],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+      try {
+        const stub = join(dir, 'npm');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
+        chmodSync(stub, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: retry,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, result.stderr).toBe(0);
+        const args = result.stdout.split('\0');
+        expect(args.pop()).toBe('');
+        expect(args, retry).toContain('--passWithNoTests');
+        // An empty positional would reach vitest as a test-name filter.
+        expect(args, retry).not.toContain('');
+        if (expected) {
+          expect(args, retry).toContain(expected);
+        } else {
+          expect(
+            args.some((arg) => arg.startsWith('--retry')),
+            retry,
+          ).toBe(false);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1305,8 +1361,26 @@ describe('release workflow', () => {
 
   it('stages every integration package manifest after versioning', () => {
     expect(workflow).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json',
+      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
+  });
+
+  it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
+    const publishSteps = releaseYaml.jobs.publish.steps;
+    const mem0Step = publishSteps.find(
+      (step) => step.name === 'Publish @qwen-code/external-context-mem0',
+    );
+    const audioStepIndex = publishSteps.findIndex(
+      (step) => step.name === 'Publish @qwen-code/audio-capture',
+    );
+
+    expect(mem0Step.if).toContain(
+      "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    expect(mem0Step['working-directory']).toBe(
+      'integrations/external-context-mem0',
+    );
+    expect(publishSteps.indexOf(mem0Step)).toBeLessThan(audioStepIndex);
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
@@ -1539,7 +1613,7 @@ describe('Live Host feed contract', () => {
 
 describe('release lane runner routing', () => {
   const ecsRunsOn =
-    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
+    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
 
   it('routes validation jobs to ECS with a hosted emergency fallback', () => {
     const validationJobs = [
@@ -1557,6 +1631,28 @@ describe('release lane runner routing', () => {
       expect(job, `job missing from release.yml: ${name}`).toBeTruthy();
       expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(ecsRunsOn);
     }
+  });
+
+  it('classifies each schedule cron by the exact string it fires with', () => {
+    // prepare tells nightly from preview by comparing github.event.schedule
+    // against the cron text; a cron edited here without its comparison
+    // silently turns that schedule into a no-op run.
+    const crons = releaseYaml.on.schedule.map((entry) => entry.cron);
+    expect(crons).toHaveLength(2);
+    const vars = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'vars',
+    );
+    for (const cron of crons) {
+      expect(vars.run).toContain(`"\${CRON}" == "${cron}"`);
+    }
+  });
+
+  it('serializes scheduled release validation without coupling manual runs', () => {
+    expect(releaseYaml.concurrency).toEqual({
+      group:
+        "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}",
+      'cancel-in-progress': false,
+    });
   });
 
   it('passes the runner environment to integration test configuration', () => {

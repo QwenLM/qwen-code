@@ -385,6 +385,7 @@ export {
 export {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,
   isStandaloneSessionNotFoundError,
@@ -399,6 +400,7 @@ export {
   type DaemonStandaloneFields,
   type DaemonStandaloneMetadataResult,
   type DaemonStandaloneSession,
+  type DaemonStandaloneSessionOptions,
   type DaemonStandaloneSessionCreating,
   type DaemonStandaloneSessionListOptions,
   type DaemonStandaloneSessionListPage,
