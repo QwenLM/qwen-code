@@ -11364,6 +11364,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (metadata.displayName !== undefined) {
         if (
+          metadata.titleSource !== undefined &&
+          metadata.titleSource !== 'manual' &&
+          metadata.titleSource !== 'auto'
+        ) {
+          throw new InvalidSessionMetadataError(
+            'titleSource',
+            'must be either `manual` or `auto`',
+          );
+        }
+        if (
           typeof metadata.displayName !== 'string' ||
           metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
         ) {
@@ -11393,6 +11403,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
         const nextDisplayName = metadata.displayName || undefined;
+        const titleSource = metadata.titleSource ?? 'manual';
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
           // The catalog exposes display names; an actual rename is a
@@ -11411,7 +11422,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
                 sessionId,
                 displayName: nextDisplayName,
-                titleSource: 'manual',
+                titleSource,
               })
               .then((res: unknown) => {
                 const r = res as { persisted?: boolean } | undefined;
@@ -11435,7 +11446,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               data: {
                 sessionId,
                 displayName: entry.displayName,
-                ...(entry.displayName ? { titleSource: 'manual' } : {}),
+                ...(entry.displayName ? { titleSource } : {}),
               },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }

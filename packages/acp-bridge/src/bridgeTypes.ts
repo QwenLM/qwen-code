@@ -812,6 +812,7 @@ export interface SessionPrIssueInfo {
 
 export interface SessionMetadataUpdate {
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Issues are daemon-derived, never client-bound — the input omits them. */
   pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */

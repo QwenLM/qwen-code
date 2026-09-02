@@ -29007,6 +29007,52 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('uses automatic provenance for programmatic renames', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const event of sub) events.push(event);
+      })();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+      await vi.waitFor(() =>
+        expect(
+          events.find((event) => event.type === 'session_metadata_updated')
+            ?.data,
+        ).toMatchObject({
+          displayName: 'Voice chat',
+          titleSource: 'auto',
+        }),
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
     it('rejects an empty displayName instead of clearing only the live entry', async () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,

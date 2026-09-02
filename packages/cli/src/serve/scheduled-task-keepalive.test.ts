@@ -235,7 +235,9 @@ describe('scheduled-task keepalive', () => {
         condition: 'files_changed',
       } as unknown as Partial<DurableCronTask>),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
       recordHeartbeat: () => {
@@ -243,7 +245,10 @@ describe('scheduled-task keepalive', () => {
         // be attempted for this session in the first place.
         throw new Error('unexpected heartbeat for legacy session');
       },
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -694,6 +699,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
     expect(names[0]![1].displayName).toBe('check build');
+    expect(names[0]![1].titleSource).toBe('auto');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
@@ -707,10 +713,15 @@ describe('scheduled-task keepalive', () => {
         sessionOwnedByTask: false,
       }),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -725,6 +736,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
     expect(names[0]![1].displayName).toBe('lint');
+    expect(names[0]![1].titleSource).toBe('auto');
   });
 
   it('does not bind disabled unbound tasks', async () => {
