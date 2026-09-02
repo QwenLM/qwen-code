@@ -129,7 +129,7 @@ describe('extension skill activity helpers', () => {
     );
   });
 
-  it('collects inactive extension skill names for commands without extensionName', () => {
+  it('collects inactive extension skill registry names', () => {
     const names = inactiveExtensionSkillNames(
       configWithExtensions([
         extension({
@@ -145,7 +145,7 @@ describe('extension skill activity helpers', () => {
       ]),
     );
 
-    expect(names).toEqual(new Set(['audit']));
+    expect(names).toEqual(new Set(['inactive-ext:audit']));
   });
 
   it('ignores non-extension skills', () => {

@@ -6,6 +6,7 @@
 
 import {
   authoredSkillName,
+  qualifySkillName,
   type Config,
   type SkillConfig,
 } from '@qwen-code/qwen-code-core';
@@ -30,7 +31,10 @@ export function inactiveExtensionSkillNames(config: Config): Set<string> {
   for (const extension of config.getExtensions()) {
     if (extension.isActive) continue;
     for (const skill of extension.skills ?? []) {
-      names.add(skill.name.toLowerCase());
+      // Registry spelling, matching the live registry rows: callers compare
+      // these against registry identities, where the authored spelling would
+      // read as "not inactive" for a renamed skill (fail-open).
+      names.add(qualifySkillName(extension.name, skill.name).toLowerCase());
     }
   }
   return names;

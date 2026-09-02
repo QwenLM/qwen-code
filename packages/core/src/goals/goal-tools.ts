@@ -703,7 +703,19 @@ export const PROPOSE_GOAL_UNTRUSTED_MESSAGE =
   'Goals can only be set in trusted workspaces. Tell the user to trust the folder with /trust and then run /goal set themselves.';
 export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
   'This session cannot persist Goals, so no Goal can be set.';
-export const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
+/**
+ * Defensive only: the model never reads this.
+ *
+ * A declined dialog resolves as `ToolConfirmationOutcome.Cancel`, and the
+ * scheduler settles the call as `cancelled` without ever entering
+ * `execute()` -- the model is handed the scheduler's own cancellation
+ * notice instead. The guard below stays for a host that one day runs
+ * `execute()` after a cancelled confirmation, so a decline can never fall
+ * through to parking an approval. It is deliberately not exported: nothing
+ * outside this module should assert on a string the model cannot receive.
+ * What actually keeps the model from re-proposing is the tool description.
+ */
+const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
   'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
 export const PROPOSE_GOAL_NO_TURN_MESSAGE =
   'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';

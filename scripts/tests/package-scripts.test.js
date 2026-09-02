@@ -444,6 +444,12 @@ describe('package scripts', () => {
       buildJob,
       'Check Serve Fast Path Bundle',
     );
+    const packStep = getWorkflowStep(buildJob, 'Pack Build Outputs');
+    const uploadStep = getWorkflowStep(buildJob, 'Upload Build Outputs');
+    const verifyPackageStep = getWorkflowStep(
+      buildJob,
+      'Verify Prepared Package',
+    );
     const workspaceTestStep = getWorkflowStep(
       workspaceTestJob,
       'Run Workspace Tests',
@@ -458,6 +464,15 @@ describe('package scripts', () => {
     expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
       buildJob.indexOf(buildStep),
     );
+    expect(buildJob.indexOf(uploadStep)).toBeGreaterThan(
+      buildJob.indexOf(packStep),
+    );
+    expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
+      buildJob.indexOf(uploadStep),
+    );
+    expect(verifyPackageStep).toContain('npm run bundle');
+    expect(verifyPackageStep).toContain('dist/review-sources.sha256');
+    expect(verifyPackageStep).toContain('npm run prepare:package');
     expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
     expect(scriptsTestStep).toContain('npm run test:scripts');

@@ -142,7 +142,7 @@ describe('Live Host protocol', () => {
       /LIVE_HOST_BUNDLE_ID = '([^']+)'/u,
     )?.[1];
 
-    assert.equal(LIVE_PROTOCOL_VERSION, 6);
+    assert.equal(LIVE_PROTOCOL_VERSION, 7);
     assert.equal(daemonVersion, LIVE_PROTOCOL_VERSION);
     assert.equal(daemonBundleId, LIVE_HOST_BUNDLE_ID);
     assert.equal(Object.values(PROTOCOL_TYPE_PARITY).every(Boolean), true);

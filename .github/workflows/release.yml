@@ -455,6 +455,23 @@ jobs:
           if-no-files-found: 'error'
           overwrite: true
 
+      # prepare:package's guards (unpacked size budget, forbidden literals,
+      # missing bundle artifacts) had no gate before the publish job, so the
+      # first thing that tripped one was the Dockerfile's builder stage in
+      # integration_docker — a ~20 minute wait for a one-line error, and
+      # before the build_sandbox.js output fix, one that printed nothing.
+      # Running the same steps here reports it in minutes instead. Kept after
+      # the upload so the packed artifact stays exactly what the build steps
+      # above produced.
+      - name: 'Verify Prepared Package'
+        run: |-
+          npm run bundle
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
+          npm run prepare:package
+
   quality_typecheck:
     name: 'Quality Checks (Typecheck)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
@@ -523,10 +540,19 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          # Nightly and preview releases may absorb a transient timing failure;
-          # stable releases remain strict and never retry a failed test.
-          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}"
-        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
+          # Nightly and preview releases may absorb a transient timing
+          # failure. Stable releases add no retry of their own and stay on
+          # whatever each workspace's Vitest config asks for; the flag is
+          # omitted rather than set to 0, because a command-line --retry=0
+          # outranks the config and would disable a workspace's deliberate
+          # retry (packages/sdk-typescript) on the release lane alone.
+          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}"
+        run: |-
+          retry_arg=()
+          if [ -n "${VITEST_RETRY}" ]; then
+            retry_arg=("--retry=${VITEST_RETRY}")
+          fi
+          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
@@ -966,7 +992,13 @@ jobs:
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
-        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: |-
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone ${PREVIEW_ARGS}
 
       # npm trusted publishing can only be configured after a package exists.
       # Keep this disabled until the one-time bootstrap publish and trusted
@@ -1074,8 +1106,14 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
-          npm run verify:installation-release -- --dir dist/standalone
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
 
       - name: 'Auto-label internal CI PRs for release notes exclusion'
         continue-on-error: true
