@@ -670,7 +670,9 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'unbound-1', prompt: 'check build' }),
     ]);
     const spawns: unknown[] = [];
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const binding = {
       ...bridge,
       spawnOrAttach: async (req: unknown) => {
@@ -678,7 +680,10 @@ describe('scheduled-task keepalive', () => {
         return { sessionId: 'new-sess-1' };
       },
       closeSession: async () => {},
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
