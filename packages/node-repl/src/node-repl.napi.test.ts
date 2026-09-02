@@ -7,8 +7,9 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NodeReplKernelManager } from './kernel-manager.js';
 import { NodeReplSecurityPolicy } from './security-policy.js';
@@ -22,18 +23,18 @@ import { NodeReplSecurityPolicy } from './security-policy.js';
 // test is skipped with a logged reason (the fixture is real, not synthesized).
 
 const fixtureDir = fileURLToPath(new URL('./fixtures/napi', import.meta.url));
+const execFileAsync = promisify(execFile);
 let builtAddonPath: string | null = null;
 let buildError: string | null = null;
 let manager: NodeReplKernelManager | null = null;
 
-beforeAll(() => {
+beforeAll(async () => {
   try {
     const nodeGyp = fileURLToPath(
       new URL('../../../node_modules/.bin/node-gyp', import.meta.url),
     );
-    execFileSync(nodeGyp, ['rebuild'], {
+    await execFileAsync(nodeGyp, ['rebuild'], {
       cwd: fixtureDir,
-      stdio: 'pipe',
     });
     const candidate = path.join(
       fixtureDir,
