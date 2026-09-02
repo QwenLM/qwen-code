@@ -36,20 +36,20 @@ After measuring the two changes together, evaluate whether streaming content can
 - Variants: the pre-change base build (control) versus this PR built and bundled from commit `712ea6d50a` (candidate), both from the same lockfile.
 - Host: macOS, idle system. Paired runs were collected serially. Hook-off runs were the authoritative source for CPU, stdout volume, event-loop lag, and input latency; React instrumentation perturbs timing and ran separately.
 - Driver: the bundled CLI in a deterministic 100×32 PTY against a local fake OpenAI-compatible SSE provider emitting 180 Markdown chunks at 10 ms intervals. Workloads: burst paste, 213 paced input characters, streamed Markdown, 24 PageUp/PageDown keys, 200 SGR wheel events, and 112 paced characters after the long response was visible.
-- Driver script: [`scripts/benchmark-tui-pty.mjs`](../../scripts/benchmark-tui-pty.mjs) implements this protocol (PTY driver, fake SSE provider, workload phases, and the per-phase metric collection) so paired re-runs — including the deferred-work acceptance criterion below — have a shared reference to execute against. The tables in this document record the original paired runs.
+- Driver script: [`scripts/benchmark-tui-pty.mjs`](../../scripts/benchmark-tui-pty.mjs) implements this protocol (PTY driver, fake SSE provider, workload phases, and the per-phase metric collection) so paired re-runs — including the deferred-work acceptance criterion below — have a shared reference to execute against. The original burst-paste and wheel rows were invalidated after the driver was corrected to emit bracketed-paste markers and 200 press-only wheel events separated by more than one scroll-coalescing frame; those two workloads require a new paired run before their results can be used for comparison.
 
 ### Paired PTY results
 
-| Phase                                          | Writes, before → after | stdout bytes, before → after |                    CPU, before → after |         Event-loop p95, before → after |
-| ---------------------------------------------- | ---------------------: | ---------------------------: | -------------------------------------: | -------------------------------------: |
-| 212-character burst paste                      |                  3 → 3 |         3,315 → 851 (-74.3%) | Not compared due async snapshot timing | Not compared due async snapshot timing |
-| Paced input, 213 characters                    |      204 → 216 (+5.9%) |    218,833 → 13,710 (-93.7%) |                2,258 → 873 ms (-61.3%) |               12.65 → 4.30 ms (-66.0%) |
-| Streaming Markdown                             |     171 → 213 (+24.6%) |   254,033 → 162,989 (-35.8%) |              2,197 → 1,049 ms (-52.3%) |               18.77 → 3.57 ms (-81.0%) |
-| 24 PageUp/PageDown keys                        |        45 → 48 (+6.7%) |     70,338 → 57,460 (-18.3%) |                  739 → 342 ms (-53.8%) |               25.02 → 4.15 ms (-83.4%) |
-| 200 wheel events                               |       21 → 33 (+57.1%) |     33,430 → 41,565 (+24.3%) |                  351 → 131 ms (-62.8%) |               11.30 → 3.11 ms (-72.4%) |
-| Paced input after long history, 112 characters |      99 → 119 (+20.2%) |    151,754 → 16,765 (-89.0%) |                1,040 → 319 ms (-69.4%) |               15.47 → 1.69 ms (-89.1%) |
+| Phase                                          |              Writes, before → after |        stdout bytes, before → after |                 CPU, before → after |      Event-loop p95, before → after |
+| ---------------------------------------------- | ----------------------------------: | ----------------------------------: | ----------------------------------: | ----------------------------------: |
+| 212-character burst paste                      | Invalidated; paired re-run required | Invalidated; paired re-run required | Invalidated; paired re-run required | Invalidated; paired re-run required |
+| Paced input, 213 characters                    |                   204 → 216 (+5.9%) |           218,833 → 13,710 (-93.7%) |             2,258 → 873 ms (-61.3%) |            12.65 → 4.30 ms (-66.0%) |
+| Streaming Markdown                             |                  171 → 213 (+24.6%) |          254,033 → 162,989 (-35.8%) |           2,197 → 1,049 ms (-52.3%) |            18.77 → 3.57 ms (-81.0%) |
+| 24 PageUp/PageDown keys                        |                     45 → 48 (+6.7%) |            70,338 → 57,460 (-18.3%) |               739 → 342 ms (-53.8%) |            25.02 → 4.15 ms (-83.4%) |
+| 200 wheel events                               | Invalidated; paired re-run required | Invalidated; paired re-run required | Invalidated; paired re-run required | Invalidated; paired re-run required |
+| Paced input after long history, 112 characters |                   99 → 119 (+20.2%) |           151,754 → 16,765 (-89.0%) |             1,040 → 319 ms (-69.4%) |            15.47 → 1.69 ms (-89.1%) |
 
-Incremental rendering allows more small writes but sharply reduces the size and CPU cost of input frames. Wheel scrolling is the output-volume exception (writes and bytes increase) while CPU and event-loop lag still improve substantially. Input latency: the empty-history median increased by about 2 ms; its p95/max and every measured long-history latency improved.
+Incremental rendering allows more small writes but sharply reduces the size and CPU cost of the valid input frames. The corrected burst-paste and wheel workloads must be measured again before drawing conclusions from their output volume, CPU, event-loop lag, or input latency.
 
 The full report — input-latency tables, identity-aware React attribution per phase, additional verification, and remaining scope (Windows and Linux interactive PTY behavior was not measured) — is recorded in the PR's E2E test report comment: https://github.com/QwenLM/qwen-code/pull/9970#issuecomment-5403787518
 

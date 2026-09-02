@@ -300,6 +300,10 @@ class Session {
     this.term.write(input);
   }
 
+  async pasteText(input) {
+    this.term.write(`\x1b[200~${input}\x1b[201~`);
+  }
+
   async measureCpu(fn) {
     const before = await cpuTimeMs(this.pid);
     await fn();
@@ -405,7 +409,7 @@ async function main() {
       // so the fake provider's streamed response does not land in the burst
       // metrics and no committed turn is visible before the paced phases.
       await runPhase(session, 'burst paste (212 chars)', async (s) => {
-        await s.paste(BURST);
+        await s.pasteText(BURST);
         await sleep(2_000);
       }),
     );
@@ -446,9 +450,10 @@ async function main() {
     phases.push(
       await runPhase(session, '200 wheel events (SGR)', async (s) => {
         for (let i = 0; i < 100; i++) {
-          await s.paste('\x1b[<64;50;16M\x1b[<64;50;16m'); // wheel up press+release
-          await s.paste('\x1b[<65;50;16M\x1b[<65;50;16m'); // wheel down press+release
-          await sleep(15);
+          await s.paste('\x1b[<64;50;16M'); // wheel up
+          await sleep(20); // Exceeds the 16 ms scroll-coalescing frame.
+          await s.paste('\x1b[<65;50;16M'); // wheel down
+          await sleep(20);
         }
       }),
     );
