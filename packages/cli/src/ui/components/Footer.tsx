@@ -7,6 +7,7 @@
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
+import wrapAnsi from 'wrap-ansi';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -99,9 +100,27 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   // Hide "? for shortcuts" when a custom status line is active (it already
   // occupies the footer, so the hint is redundant). Matches upstream behavior.
   const suppressHint = statusLineLines.length > 0;
+  // Budget on wrapped visual rows, not logical lines: a single logical
+  // status line can soft-wrap to more than one rendered row (the idle box
+  // below renders with wrap="wrap" clipped at maxHeight={MAX_STATUS_LINES}),
+  // so counting logical lines alone under-counts the armed height and the
+  // footer still loses a row when the exit warning arms -- the exact bug
+  // this PR exists to fix, just for a status line that wraps.
   const statusRowCount =
     statusLineLines.length > 0
-      ? Math.min(MAX_STATUS_LINES, statusLineLines.length)
+      ? Math.min(
+          MAX_STATUS_LINES,
+          statusLineLines.reduce(
+            (rows, line) =>
+              rows +
+              wrapAnsi(
+                line,
+                Math.max(1, statusLineWidth ?? terminalWidth - 4),
+                { trim: false, hard: true },
+              ).split('\n').length,
+            0,
+          ),
+        )
       : 0;
   const exitWarningText = uiState.ctrlCPressedOnce
     ? t('Press Ctrl+C again to exit.')
@@ -126,48 +145,48 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     exitWarningText && statusRowCount === 0 ? (
       <Text color={theme.status.warning}>{exitWarningText}</Text>
     ) : uiState.showEscapePrompt ? (
-    <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
-  ) : pasteProgress.active ? (
-    <PasteProgressBar progress={pasteProgress} />
-  ) : uiState.rewindEscPending ? (
-    <Text color={theme.text.secondary}>
-      {t('Press Esc again to rewind conversation.')}
-    </Text>
-  ) : vimEnabled && vimMode === 'INSERT' ? (
-    <Text color={theme.text.secondary}>-- INSERT --</Text>
-  ) : vimEnabled && vimMode === 'NORMAL' ? (
-    <Text color={theme.text.secondary}>-- NORMAL --</Text>
-  ) : uiState.shellModeActive ? (
-    <ShellModeIndicator />
-  ) : configInitMessage ? (
-    <Text color={theme.text.secondary}>
-      <Spinner /> {configInitMessage}
-    </Text>
-  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
-    <Text color={theme.text.secondary}>
-      <Spinner /> {t('IDE connecting... context may be unavailable')}
-    </Text>
-  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
-    <Text color={theme.status.warning}>
-      {t('IDE connection unavailable: {{message}}', {
-        message: uiState.startupIdeConnectionStatus.message,
-      })}
-    </Text>
-  ) : uiState.streamingState === StreamingState.Responding ? (
-    <Text color={theme.text.secondary}>
-      {t('Enter to steer · Ctrl+Q to queue')}
-      {showAutoAcceptIndicator !== undefined && (
-        <>
-          {' · '}
-          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-        </>
-      )}
-    </Text>
-  ) : showAutoAcceptIndicator !== undefined ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : suppressHint ? null : (
-    <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
-  );
+      <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+    ) : pasteProgress.active ? (
+      <PasteProgressBar progress={pasteProgress} />
+    ) : uiState.rewindEscPending ? (
+      <Text color={theme.text.secondary}>
+        {t('Press Esc again to rewind conversation.')}
+      </Text>
+    ) : vimEnabled && vimMode === 'INSERT' ? (
+      <Text color={theme.text.secondary}>-- INSERT --</Text>
+    ) : vimEnabled && vimMode === 'NORMAL' ? (
+      <Text color={theme.text.secondary}>-- NORMAL --</Text>
+    ) : uiState.shellModeActive ? (
+      <ShellModeIndicator />
+    ) : configInitMessage ? (
+      <Text color={theme.text.secondary}>
+        <Spinner /> {configInitMessage}
+      </Text>
+    ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+      <Text color={theme.text.secondary}>
+        <Spinner /> {t('IDE connecting... context may be unavailable')}
+      </Text>
+    ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+      <Text color={theme.status.warning}>
+        {t('IDE connection unavailable: {{message}}', {
+          message: uiState.startupIdeConnectionStatus.message,
+        })}
+      </Text>
+    ) : uiState.streamingState === StreamingState.Responding ? (
+      <Text color={theme.text.secondary}>
+        {t('Enter to steer · Ctrl+Q to queue')}
+        {showAutoAcceptIndicator !== undefined && (
+          <>
+            {' · '}
+            <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+          </>
+        )}
+      </Text>
+    ) : showAutoAcceptIndicator !== undefined ? (
+      <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+    ) : suppressHint ? null : (
+      <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
+    );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
   if (sandboxInfo) {
@@ -241,32 +260,32 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
         minWidth={0}
       >
         {statusRowCount > 0 && (
-            <Box
-              flexDirection="column"
-              height={exitWarningText ? statusRowCount : undefined}
-              maxHeight={MAX_STATUS_LINES}
-              overflow="hidden"
-              width="100%"
-            >
-              {exitWarningText ? (
-                <Text color={theme.status.warning}>{exitWarningText}</Text>
-              ) : (
-                <Text
-                  color={
-                    respectUserColors
-                      ? undefined
-                      : useThemeColors
-                        ? theme.text.accent
-                        : undefined
-                  }
-                  dimColor={respectUserColors ? false : !useThemeColors}
-                  wrap="wrap"
-                >
-                  {statusLineLines.join('\n')}
-                </Text>
-              )}
-            </Box>
-          )}
+          <Box
+            flexDirection="column"
+            height={exitWarningText ? statusRowCount : undefined}
+            maxHeight={MAX_STATUS_LINES}
+            overflow="hidden"
+            width="100%"
+          >
+            {exitWarningText ? (
+              <Text color={theme.status.warning}>{exitWarningText}</Text>
+            ) : (
+              <Text
+                color={
+                  respectUserColors
+                    ? undefined
+                    : useThemeColors
+                      ? theme.text.accent
+                      : undefined
+                }
+                dimColor={respectUserColors ? false : !useThemeColors}
+                wrap="wrap"
+              >
+                {statusLineLines.join('\n')}
+              </Text>
+            )}
+          </Box>
+        )}
         {/* Built-in worktree indicator. Shown by default whenever a
             worktree is active so the user always has a UI affordance,
             even when a custom statusline is configured — their script

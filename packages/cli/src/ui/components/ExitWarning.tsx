@@ -8,6 +8,7 @@ import type React from 'react';
 import { Text } from 'ink';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
 
 export const ExitWarning: React.FC = () => {
   const uiState = useUIState();
@@ -19,12 +20,16 @@ export const ExitWarning: React.FC = () => {
   // off. Keep this to a single replacement row (matches Footer).
   if (uiState.ctrlCPressedOnce) {
     return (
-      <Text color={theme.status.warning}>Press Ctrl+C again to exit.</Text>
+      <Text color={theme.status.warning}>
+        {t('Press Ctrl+C again to exit.')}
+      </Text>
     );
   }
   if (uiState.ctrlDPressedOnce) {
     return (
-      <Text color={theme.status.warning}>Press Ctrl+D again to exit.</Text>
+      <Text color={theme.status.warning}>
+        {t('Press Ctrl+D again to exit.')}
+      </Text>
     );
   }
   return null;

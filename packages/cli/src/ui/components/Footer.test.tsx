@@ -700,6 +700,63 @@ describe('<Footer />', () => {
       armed.unmount();
     });
 
+    it('does not change footer height when Ctrl+D exit warning overrides a two-line status line', () => {
+      // Mirrors the Ctrl+C case above -- exitWarningText (Footer.tsx) has a
+      // separate ctrlDPressedOnce branch that was previously untested here,
+      // so a mutant dropping it would pass the whole suite.
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const idle = renderAtLayoutWidth(120, createMockUIState());
+      const armed = renderAtLayoutWidth(
+        120,
+        createMockUIState({ ctrlDPressedOnce: true }),
+      );
+      const idleFrame = stripAnsi(idle.lastFrame());
+      const armedFrame = stripAnsi(armed.lastFrame());
+      const lineCount = (frame: string) =>
+        frame.length === 0 ? 0 : frame.split('\n').length;
+
+      expect(armedFrame).toContain('Press Ctrl+D again to exit.');
+      expect(lineCount(armedFrame)).toBe(lineCount(idleFrame));
+      idle.unmount();
+      armed.unmount();
+    });
+
+    it('does not change footer height when a wrapping status line arms the exit warning at a narrow width', () => {
+      // The two tests above use two SHORT status lines at width 120, where
+      // nothing soft-wraps -- they cannot catch a budget that counts logical
+      // lines instead of rendered rows. This uses one LONG line at a narrow
+      // width so the idle status box itself wraps to more than one row,
+      // matching the PR review's witness scenario (width 60, one wrapping
+      // logical status line): must still be the same height once armed.
+      useStatusLineMock.mockReturnValue({
+        lines: [
+          'model-name (main) branch:feature/very-long-branch-name ctx:34%',
+        ],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const idle = renderAtLayoutWidth(60, createMockUIState());
+      const armed = renderAtLayoutWidth(
+        60,
+        createMockUIState({ ctrlCPressedOnce: true }),
+      );
+      const idleFrame = stripAnsi(idle.lastFrame());
+      const armedFrame = stripAnsi(armed.lastFrame());
+      const lineCount = (frame: string) =>
+        frame.length === 0 ? 0 : frame.split('\n').length;
+
+      expect(armedFrame).toContain('Press Ctrl+C again to exit.');
+      expect(lineCount(armedFrame)).toBe(lineCount(idleFrame));
+      idle.unmount();
+      armed.unmount();
+    });
+
     it('suppresses hint when status line is active', () => {
       useStatusLineMock.mockReturnValue({
         lines: ['status info'],
