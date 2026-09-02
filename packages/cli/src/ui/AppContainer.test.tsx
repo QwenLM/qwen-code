@@ -7636,6 +7636,24 @@ describe('AppContainer State Management', () => {
       expect(noticeCount()).toBe(2);
     });
 
+    it("identifies a held message from the session's own process", () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([{ ...heldMessage('a'), selfSent: true }]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a process this session started',
+      );
+      expect(notice).not.toContain('another session');
+    });
+
     it('does not announce arrivals that only replace an evicted entry', () => {
       // Once the hold buffer is full, every further frame evicts the
       // oldest while carrying a fresh id; announcing those would add a
