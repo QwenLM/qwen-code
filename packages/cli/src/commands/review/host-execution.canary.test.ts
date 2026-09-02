@@ -40,7 +40,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   adminEntryInsideReviewTmp,
@@ -51,6 +51,9 @@ import {
 } from './lib/worktree.js';
 import { makeGitProbe } from './comment-status.js';
 import { captureLocalDiff } from './lib/local-diff.js';
+import { runBaseTree } from './base-tree.js';
+import type { BuildTestReport } from './build-test.js';
+import { baseWorktreePath } from './lib/paths.js';
 
 // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
 // colon), so containment cannot exist there and the question this file asks has
@@ -255,6 +258,63 @@ describe('a planted repository reaches no host-side execution', () => {
       } finally {
         process.chdir(saved);
       }
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'the base-tree reuse fast path does not certify a planted tree (base-tree)',
+    () => {
+      // The entrance a census found rather than the review: the reuse branch
+      // RETURNS before the gate that guards the rebuild, on two facts that both
+      // live inside the mount — a marker file in the base tree, and
+      // `rev-parse HEAD` resolved through that tree's own `.git`. Reused, the
+      // A/B's BASE side is the reviewed code's own tree, and every "the base
+      // behaves differently" verdict belongs to its author.
+      const repo = repository();
+      const canaryDir = tmp('qwen-canary-out-');
+      const canary = join(canaryDir, 'PWNED');
+      const worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+      g(repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD');
+      const baseSha = g(worktree, 'rev-parse', 'HEAD');
+      // The base tree the pipeline would build, standing and marked. Through
+      // the real path helper, so the fixture cannot drift from the location
+      // the command actually reuses.
+      const tree = baseWorktreePath(worktree);
+      g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
+      writeFileSync(join(tree, '.qwen-review-base-ok'), `${baseSha}\n`);
+      const common = plantedRepositoryAt(
+        join(repo, '.qwen', 'tmp', '.evil-common'),
+        join(repo, '.git'),
+        canary,
+      );
+      plantedAdminEntryAt(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        join(repo, '.git', 'worktrees', basename(tree)),
+        tree,
+        common,
+      );
+      const plan = join(repo, 'plan.json');
+      writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);
+
+      const report = runBaseTree({
+        plan,
+        worktree,
+        timeout: 60_000,
+        install: false,
+        // The build seam: reaching it at all means the tree was REBUILT, which
+        // is the acceptable outcome here — what must not happen is the reuse
+        // branch returning the planted tree as an already-built base.
+        build: () =>
+          ({
+            ok: true,
+            toolchain: 'npm',
+            build: [],
+            note: 'built',
+          }) as unknown as BuildTestReport,
+      });
+
+      expect(JSON.stringify(report)).not.toContain('reusing it');
       expect(existsSync(canary)).toBe(false);
     },
   );

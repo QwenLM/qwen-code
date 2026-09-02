@@ -181,6 +181,20 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     if (
       existsSync(tree) &&
       readFileSync(marker(), 'utf8').trim() === baseSha &&
+      // The reuse path RETURNS, so the gate below the rebuild never runs for
+      // it — and both facts it reuses on come from inside the mount: the
+      // marker is a file in the base tree, and `rev-parse HEAD` resolves
+      // through that tree's own `.git`. A planted repository answers the right
+      // sha for a working tree holding anything at all, and the A/B's BASE
+      // side is then the reviewed code's own — every "the base behaves
+      // differently" verdict the shard reports would be its author's.
+      //
+      // Not a refusal: an unusable leftover is what the rebuild exists for.
+      // Falling through discards the tree (removing the plant with it) and
+      // creates a fresh one through the review worktree's pointer, which the
+      // gate before `worktree add` checks. Same shape as `scratch-tree`'s
+      // reuse path, for the same reason.
+      untrustedGitfile(tree, mountRootFor) === null &&
       gitOut(tree, 'rev-parse', 'HEAD') === baseSha
     ) {
       return {
