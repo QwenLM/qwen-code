@@ -5014,6 +5014,15 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('/help hides /btw when the active bridge does not support it', async () => {
+      delete bridge.btw;
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '/help' }));
+
+      expect(ch.sent[0]!.text).not.toContain('/btw');
+    });
+
     it("/help shows this session's agent commands when available", async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: 'start session' }));
@@ -16235,6 +16244,30 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(bridge.btw).toHaveBeenCalledTimes(2));
     });
 
+    it('releases the concurrency slot when acknowledgement delivery fails', async () => {
+      const ch = createChannel();
+      ch.sendMessageError = new Error('transient send failure');
+
+      await expect(
+        ch.handleInbound(envelope({ text: '/btw first' })),
+      ).rejects.toThrow('transient send failure');
+
+      ch.sendMessageError = undefined;
+      await ch.handleInbound(envelope({ text: '/btw second' }));
+
+      expect(bridge.btw).toHaveBeenCalledOnce();
+      expect(bridge.btw).toHaveBeenCalledWith(
+        's-1',
+        'second',
+        expect.any(AbortSignal),
+      );
+      await vi.waitFor(() =>
+        expect(ch.sent.some(({ text }) => text.endsWith('side answer'))).toBe(
+          true,
+        ),
+      );
+    });
+
     it('runs side questions concurrently for different sessions', async () => {
       const pending = new Map<
         string,
@@ -16294,10 +16327,13 @@ describe('ChannelBase', () => {
         sessionId: string;
         answer: string | null;
       }) => void;
-      (bridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
-        new Promise((resolve) => {
-          resolveBtw = resolve;
-        }),
+      let signal: AbortSignal | undefined;
+      (bridge.btw as ReturnType<typeof vi.fn>).mockImplementation(
+        (_sessionId: string, _question: string, requestSignal?: AbortSignal) =>
+          new Promise((resolve) => {
+            signal = requestSignal;
+            resolveBtw = resolve;
+          }),
       );
       const ch = createChannel();
 
@@ -16309,28 +16345,50 @@ describe('ChannelBase', () => {
       expect(ch.sent.some(({ text }) => text.includes('stale answer'))).toBe(
         false,
       );
+      expect(signal?.aborted).toBe(true);
       expect(ch.sent.at(-1)?.text).toContain('Session cleared.');
     });
 
-    it('suppresses a late result after bridge replacement', async () => {
-      let resolveBtw!: (result: {
+    it('keeps a replacement BTW active after the stale bridge settles', async () => {
+      let resolveStaleBtw!: (result: {
         sessionId: string;
         answer: string | null;
       }) => void;
       (bridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise((resolve) => {
-          resolveBtw = resolve;
+          resolveStaleBtw = resolve;
         }),
       );
       const ch = createChannel();
 
-      await ch.handleInbound(envelope({ text: '/btw question' }));
-      ch.setBridge(createBridge());
-      resolveBtw({ sessionId: 's-1', answer: 'stale answer' });
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await ch.handleInbound(envelope({ text: '/btw stale' }));
+      const nextBridge = createBridge();
+      let resolveFreshBtw!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      (nextBridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveFreshBtw = resolve;
+        }),
+      );
+      ch.setBridge(nextBridge);
 
-      expect(ch.sent).toHaveLength(1);
-      expect(ch.sent[0]?.text).toContain('received');
+      await ch.handleInbound(envelope({ text: '/btw fresh' }));
+      expect(nextBridge.btw).toHaveBeenCalledOnce();
+
+      resolveStaleBtw({ sessionId: 's-1', answer: 'stale answer' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      resolveFreshBtw({ sessionId: 's-1', answer: 'fresh answer' });
+      await vi.waitFor(() =>
+        expect(ch.sent.some(({ text }) => text.endsWith('fresh answer'))).toBe(
+          true,
+        ),
+      );
+
+      expect(ch.sent.some(({ text }) => text.includes('stale answer'))).toBe(
+        false,
+      );
     });
 
     it('releases the concurrency slot when the route changes during acknowledgement', async () => {
@@ -20692,12 +20750,19 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('times out a loop even when cancelSession never resolves', async () => {
+    it('retires a timed-out loop and aborts its active BTW when cancellation stalls', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise<string>(() => undefined),
       );
       (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise<void>(() => undefined),
+      );
+      let btwSignal: AbortSignal | undefined;
+      (bridge.btw as ReturnType<typeof vi.fn>).mockImplementation(
+        (_sessionId: string, _question: string, signal?: AbortSignal) => {
+          btwSignal = signal;
+          return new Promise(() => undefined);
+        },
       );
       const ch = createChannel();
       ch.proactiveSupported = true;
@@ -20729,6 +20794,10 @@ describe('ChannelBase', () => {
         );
         const loopResult = loopRun.catch((error: unknown) => error);
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+        await ch.handleInbound(
+          envelope({ senderId: 'alice', text: '/btw question' }),
+        );
+        expect(bridge.btw).toHaveBeenCalledOnce();
 
         await vi.advanceTimersByTimeAsync(6000);
 
@@ -20737,6 +20806,7 @@ describe('ChannelBase', () => {
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(btwSignal?.aborted).toBe(true);
         expect(
           (
             ch as unknown as {

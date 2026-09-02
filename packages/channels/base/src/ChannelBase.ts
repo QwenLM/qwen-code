@@ -363,6 +363,7 @@ const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
 const MAX_DISPLAY_PROJECTION_CHARS = 8000;
+// Mirrors BTW_MAX_INPUT_LENGTH in core without adding core to channel-base.
 const CHANNEL_BTW_MAX_INPUT_LENGTH = 4096;
 
 /**
@@ -2455,6 +2456,7 @@ export abstract class ChannelBase {
         }),
       ]);
       if (!cancelled) {
+        this.cancelBtw(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -3919,7 +3921,11 @@ export abstract class ChannelBase {
         '/approve [request-id] — Approve a pending permission request',
         '/approve-always [request-id] — Always approve a pending permission request',
         '/deny [request-id] — Deny a pending permission request',
-        '/btw <question> — Ask a side question without interrupting the current task',
+        ...(this.bridge.btw
+          ? [
+              '/btw <question> — Ask a side question without interrupting the current task',
+            ]
+          : []),
         ...(this.namedSessions
           ? [
               '/sessions [all] — List your named tasks',
