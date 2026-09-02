@@ -142,25 +142,31 @@ describe('ToolCallTool', () => {
     });
   });
 
-  it('resolves case-colliding names with the same last-match rule as tool_search', async () => {
-    // R7-14: the discovery half builds a lowercase-keyed Map (last
-    // registered variant overwrites earlier ones); the invocation half must
-    // resolve the same tool for a case-variant request. Mutation check:
-    // switching the fallback to first-match turns this red.
-    const first = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const second = new MockTool({
-      name: 'Deferred_Target',
-      shouldDefer: true,
-    });
-    const result = await resolveDeferredToolCall(
-      makeRegistry([first, second], new Set([first.name, second.name])),
-      { name: 'DEFERRED_TARGET', arguments: {} },
-    );
+  it.each(['deferred_target', 'Deferred_Target', 'DEFERRED_TARGET'])(
+    'resolves case-colliding name %s with the same last-match rule as tool_search',
+    async (requestedName) => {
+      // R7-14: the discovery half builds a lowercase-keyed Map (last
+      // registered variant overwrites earlier ones); the invocation half must
+      // resolve the same tool for a case-variant request. Mutation check:
+      // switching the fallback to first-match turns this red.
+      const first = new MockTool({
+        name: 'deferred_target',
+        shouldDefer: true,
+      });
+      const second = new MockTool({
+        name: 'Deferred_Target',
+        shouldDefer: true,
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([first, second], new Set([first.name, second.name])),
+        { name: requestedName, arguments: {} },
+      );
 
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: 'Deferred_Target' }),
-    });
-  });
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'Deferred_Target' }),
+      });
+    },
+  );
 
   it('rejects case-variant spellings of the bridge tools themselves', async () => {
     // Companion pin: the case-insensitive fallback must feed the recursive
@@ -313,10 +319,13 @@ describe('ToolCallTool', () => {
     };
 
     const resolved = await runWithTeammateIdentity(identity, () =>
-      resolveDeferredToolCall(makeRegistry([allowed], new Set([allowed.name])), {
-        name: allowed.name,
-        arguments: { to: 'lead' },
-      }),
+      resolveDeferredToolCall(
+        makeRegistry([allowed], new Set([allowed.name])),
+        {
+          name: allowed.name,
+          arguments: { to: 'lead' },
+        },
+      ),
     );
     expect(resolved).toMatchObject({
       tool: expect.objectContaining({ name: ToolNames.SEND_MESSAGE }),

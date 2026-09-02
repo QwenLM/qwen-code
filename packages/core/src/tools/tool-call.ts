@@ -93,26 +93,19 @@ export async function resolveDeferredToolCall(
   // The discovery half (tool_search's select:) resolves requested names
   // case-insensitively against the registered names; the invocation half
   // must agree, otherwise a schema reviewed as e.g. `Read_File` would not be
-  // callable through the bridge (round-5 deferred item). Exact-case names
-  // take the fast path; the fallback only fires when the exact name is not
-  // registered.
-  if (!registry.getTool(targetName)) {
-    const lower = targetName.toLowerCase();
-    const registered = registry.getAllToolNames?.() ?? [];
-    // Last match wins, mirroring the discovery half's lowerIndex
-    // (tool_search builds a Map keyed by lowercase name, so the last
-    // registered case-variant overwrites earlier ones) — the two bridge
-    // halves must resolve the same tool for a case-variant request
-    // (round-7 review, R7-14).
-    let match: string | undefined;
-    for (const name of registered) {
-      if (name.toLowerCase() === lower) {
-        match = name;
-      }
+  // callable through the bridge (round-5 deferred item). Last match wins,
+  // mirroring the discovery half's lowercase Map even when an earlier tool
+  // exactly matches the requested casing.
+  const lower = targetName.toLowerCase();
+  const registered = registry.getAllToolNames?.() ?? [];
+  let match: string | undefined;
+  for (const name of registered) {
+    if (name.toLowerCase() === lower) {
+      match = name;
     }
-    if (match !== undefined) {
-      targetName = match;
-    }
+  }
+  if (match !== undefined) {
+    targetName = match;
   }
   if (
     targetName === ToolNames.TOOL_CALL ||
