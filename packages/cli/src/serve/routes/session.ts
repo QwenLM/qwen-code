@@ -2810,6 +2810,7 @@ export function registerSessionRoutes(
       | { slug: string; path: string; branch: string }
       | undefined;
     let worktreeDurablyAttached = false;
+    let spawnCompleted = false;
 
     try {
       // ── Branch creation ────────────────────────────────────────────
@@ -3117,6 +3118,7 @@ export function registerSessionRoutes(
           ? { sessionId: requestedSessionId }
           : {}),
       });
+      spawnCompleted = true;
       // Defensive: the bridge/agent must honor a caller-supplied id. If it was
       // dropped anywhere in the chain (older agent binary, coalesced attach),
       // never return a surprise id — fail the request instead.
@@ -3456,7 +3458,7 @@ export function registerSessionRoutes(
       // Roll back the worktree if spawn failed — otherwise the directory
       // and branch are orphaned (the agent-* stale cleanup won't collect
       // user-named worktrees).
-      if (worktreeMeta && !worktreeDurablyAttached) {
+      if (worktreeMeta && !worktreeDurablyAttached && !spawnCompleted) {
         await new GitWorktreeService(workspaceCwd)
           .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
           .catch(() => {});
@@ -3916,6 +3918,7 @@ export function registerSessionRoutes(
               action === 'load' &&
               !restored.attached &&
               !restored.hasActivePrompt &&
+              !deferRestoreAskUserQuestionPrompt &&
               runtime.provenance !== 'live-conversation'
             ) {
               try {
@@ -3928,12 +3931,7 @@ export function registerSessionRoutes(
                 // (fail-closed) and must never fail the load itself.
               }
             }
-            return withPromptTerminals(
-              restored,
-              action === 'load'
-                ? readRecentPromptTerminals(sessionService, sessionId)
-                : undefined,
-            );
+            return restored;
           },
         );
         const cleanupRestoredSession = async (): Promise<void> => {
@@ -4200,14 +4198,31 @@ export function registerSessionRoutes(
           await cleanupRestoredSession();
           throw error;
         }
-        if (
+        const deferredRestorePromptAdmitted =
           deferRestoreAskUserQuestionPrompt &&
-          runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          (runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
             session.sessionId,
             session.clientId,
-          )
-        ) {
+          ) ??
+            false);
+        if (deferredRestorePromptAdmitted) {
           session.hasActivePrompt = true;
+        } else if (
+          deferRestoreAskUserQuestionPrompt &&
+          action === 'load' &&
+          !session.attached &&
+          !session.hasActivePrompt &&
+          runtime.provenance !== 'live-conversation'
+        ) {
+          try {
+            await reconcileDanglingPromptTerminals(
+              createWorkspaceRuntimeSessionService(runtime),
+              sessionId,
+            );
+          } catch {
+            // Best-effort: a failure leaves dangling prompts unknown
+            // (fail-closed) and must never fail the load itself.
+          }
         }
         try {
           assertRuntimeGenerationOpen?.();
@@ -4221,7 +4236,18 @@ export function registerSessionRoutes(
         );
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        res.status(200).json(redactSdkSurfaceReplay(session, runtime.trusted));
+        const responseSession = withPromptTerminals(
+          session,
+          action === 'load'
+            ? readRecentPromptTerminals(
+                createWorkspaceRuntimeSessionService(runtime),
+                sessionId,
+              )
+            : undefined,
+        );
+        res
+          .status(200)
+          .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);

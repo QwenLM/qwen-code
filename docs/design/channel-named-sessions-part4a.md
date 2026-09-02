@@ -447,21 +447,23 @@ repair/retry. If an absent sidecar is indistinguishable from an ordinary shared
 session at the route, the Channel bridge/SDK response validator performs the
 same client detach before it rejects the missing attestation.
 
-For restores of sessions whose persisted creation source is Channel-owned, a
-Part 4A sidecar or sidecar state whose ownership cannot be classified safely
-causes the daemon route to set an internal ACP metadata flag that suppresses
-the generic best-effort worktree restore performed by the ACP agent. Persisted
-source metadata takes precedence over the current load/resume caller. The
-best-effort path clears sidecars it deems invalid, so suppressing it is what
-keeps these Channel-sourced restore failures non-destructive. The route then
-owns the strict sidecar, marker, containment, and relocation checks. A
+For restores whose effective source is Channel-owned, a Part 4A sidecar or
+sidecar state whose ownership cannot be classified safely causes the daemon
+route to set an internal ACP metadata flag that suppresses the generic
+best-effort worktree restore performed by the ACP agent. Persisted source
+metadata takes precedence; when it is absent, the load/resume request supplies
+the effective source. The best-effort path clears sidecars it deems invalid, so
+suppressing it is what keeps these Channel-sourced restore failures
+non-destructive. The route then owns the strict sidecar, marker, containment,
+and relocation checks. A
 persisted ask-user prompt is deferred until those checks and any required
 relocation succeed, then fired exactly once; this prevents the prompt from
 blocking relocation while preserving it on a valid restore. A structurally
 valid legacy sidecar without the Part 4A `workspaceCwd` attestation keeps the
 pre-existing generic best-effort restore behavior and may return worktree
 metadata without `worktreeState`. It is never upgraded to Part 4A isolation.
-Sessions without a persisted Channel source also retain the generic behavior.
+Apart from that explicit legacy compatibility case, only sessions whose
+effective source is not Channel-owned retain the generic behavior.
 
 Missing or invalid marker ownership intentionally fails closed and preserves
 the uncertain checkout evidence, even though a task-local `git clean -fdx` can

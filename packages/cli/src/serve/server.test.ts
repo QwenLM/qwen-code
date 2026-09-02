@@ -114,6 +114,10 @@ import {
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
 import {
+  appendPromptLedgerRecord,
+  readPromptLedgerRecords,
+} from '@qwen-code/acp-bridge/promptLedger';
+import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -12341,6 +12345,85 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it.each(['live', 'probe-error'] as const)(
+      'preserves a worktree when post-spawn cleanup is inconclusive (%s)',
+      async (cleanupState) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const removed: string[] = [];
+        const bridge = fakeBridge({
+          spawnImpl: async (req) => {
+            generationGuard.close();
+            return {
+              sessionId: 'stale-worktree-session',
+              workspaceCwd: req.workspaceCwd,
+              attached: false,
+              clientId: 'stale-worktree-client',
+            };
+          },
+          killImpl: async () => false,
+          summaryImpl: (sessionId) => {
+            if (cleanupState === 'probe-error') {
+              throw new Error('bridge invariant');
+            }
+            return {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'session-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+          generationGuard,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+        mockWt.impl = () => ({
+          isGitRepository: () => Promise.resolve(true),
+          getCurrentBranch: () => Promise.resolve('main'),
+          createUserWorktree: () =>
+            Promise.resolve({
+              success: true,
+              worktree: {
+                path: `${WS_BOUND}/.qwen/worktrees/my-task`,
+                branch: 'worktree-my-task',
+              },
+            }),
+          removeUserWorktree: (slug: string) => {
+            removed.push(slug);
+            return Promise.resolve();
+          },
+        });
+
+        try {
+          const res = await request(app)
+            .post('/session')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ worktree: { slug: 'my-task' } });
+
+          expect(res.status).toBe(503);
+          expect(res.body.code).toBe('workspace_runtime_unavailable');
+          expect(bridge.killCalls).toEqual([
+            {
+              sessionId: 'stale-worktree-session',
+              opts: { requireZeroAttaches: true },
+            },
+          ]);
+          expect(removed).toEqual([]);
+        } finally {
+          mockWt.impl = undefined;
+        }
+      },
+    );
+
     it('does not create after the generation closes during requested-id admission', async () => {
       const bridge = fakeBridge();
       const runtime = makeWorkspaceRuntimeForTest({
@@ -14931,6 +15014,45 @@ describe('createServeApp', () => {
       },
     );
 
+    it.each(['load', 'resume'] as const)(
+      'uses a declared Channel source for a legacy %s without persisted source metadata',
+      async (action) => {
+        const bridge = fakeBridge();
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/legacy-channel-session/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ sourceType: 'channel', sourceId: 'telegram' });
+
+          expect(res.status).toBe(200);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toEqual([
+            {
+              sessionId: 'legacy-channel-session',
+              workspaceCwd: WS_BOUND,
+              suppressWorktreeContextRestore: true,
+              deferRestoreAskUserQuestionPrompt: true,
+              sourceType: 'channel',
+              sourceId: 'telegram',
+              ...(action === 'load' ? { historyReplay: 'response' } : {}),
+            },
+          ]);
+        } finally {
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
     it('does not defer a Channel restore on a bridge without deferred admission', async () => {
       const bridge = fakeBridge();
       delete (bridge as Partial<AcpSessionBridge>)
@@ -16684,6 +16806,113 @@ describe('createServeApp', () => {
         readCreationMetadata.mockRestore();
       }
     });
+
+    it.each([true, false])(
+      'reconciles a deferred restore question only after admission returns %s',
+      async (promptAdmitted) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440164';
+        const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+        const sessionService = new SessionService(WS_BOUND);
+        const transcriptPath =
+          sessionService.getSessionTranscriptPath(sessionId);
+        const ledgerPath = sessionService.getPromptLedgerPath(sessionId);
+        const admittedAt = Date.now() - 5_000;
+        await fsp.mkdir(path.dirname(transcriptPath), { recursive: true });
+        await fsp.writeFile(
+          transcriptPath,
+          `${JSON.stringify({
+            uuid: 'restored-user-record',
+            parentUuid: null,
+            sessionId,
+            timestamp: new Date(admittedAt + 1_000).toISOString(),
+            type: 'user',
+            provenance: 'real_user',
+            cwd: WS_BOUND,
+            version: '1.0.0',
+            message: { role: 'user', parts: [{ text: 'answer the question' }] },
+          })}\n`,
+          'utf8',
+        );
+        appendPromptLedgerRecord(ledgerPath, {
+          v: 1,
+          promptId: 'p-original',
+          state: 'in_flight',
+          at: admittedAt,
+        });
+        const bridge = fakeBridge({
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          }),
+          fireDeferredRestoreAskUserQuestionPromptImpl: () => {
+            expect(readPromptLedgerRecords(ledgerPath)).toEqual([
+              {
+                v: 1,
+                promptId: 'p-original',
+                state: 'in_flight',
+                at: admittedAt,
+              },
+            ]);
+            return promptAdmitted;
+          },
+        });
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        mockWt.realpath = (p) => p;
+        mockWt.readMarker = () =>
+          Promise.resolve({ state: 'valid', sessionId });
+        mockWt.readSidecar = () =>
+          Promise.resolve({
+            slug: 'my-task',
+            worktreePath,
+            worktreeBranch: 'worktree-my-task',
+            originalCwd: WS_BOUND,
+            workspaceCwd: WS_BOUND,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          });
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/load`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_BOUND });
+
+          expect(res.status).toBe(200);
+          expect(res.body.hasActivePrompt).toBe(promptAdmitted);
+          if (promptAdmitted) {
+            expect(res.body.promptTerminals).toBeUndefined();
+            expect(readPromptLedgerRecords(ledgerPath)).toHaveLength(1);
+          } else {
+            expect(res.body.promptTerminals).toEqual([
+              expect.objectContaining({
+                promptId: 'p-original',
+                terminal: 'interrupted',
+                code: 'daemon_lost',
+              }),
+            ]);
+            expect(readPromptLedgerRecords(ledgerPath)).toHaveLength(2);
+          }
+        } finally {
+          mockWt.readSidecar = undefined;
+          mockWt.readMarker = undefined;
+          mockWt.realpath = undefined;
+          readCreationMetadata.mockRestore();
+          await fsp.rm(transcriptPath, { force: true });
+          await fsp.rm(ledgerPath, { force: true });
+        }
+      },
+    );
 
     it('fails closed when an attested sidecar names another daemon workspace', async () => {
       const bridge = fakeBridge();
