@@ -44,6 +44,13 @@ export interface RegisteredAgent {
   /** Human-friendly model name (e.g. "GLM 5"). */
   modelName?: string;
   color: string;
+  /**
+   * Which in-process surface registered this agent. Team-managed agents are
+   * owned by TeamManager, which treats every terminal status (FAILED
+   * included) as final and tears the agent down synchronously — see the
+   * delivery gate in AgentQueueFlusher. Undefined means arena-owned.
+   */
+  source?: 'arena' | 'team';
 }
 
 export interface AgentViewState {
@@ -80,6 +87,7 @@ export interface AgentViewActions {
     modelId: string,
     color: string,
     modelName?: string,
+    source?: 'arena' | 'team',
   ): void;
   unregisterAgent(agentId: string): void;
   unregisterAll(): void;
@@ -158,7 +166,8 @@ const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
 function AgentQueueFlusher({ agentId }: { agentId: string }) {
   const { agents, agentMessageQueues } = useAgentViewState();
   const { setAgentMessageQueue } = useAgentViewActions();
-  const interactiveAgent = agents.get(agentId)?.interactiveAgent;
+  const registered = agents.get(agentId);
+  const interactiveAgent = registered?.interactiveAgent;
   const { status, streamingState } = useAgentStreamingState(interactiveAgent);
   const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
 
@@ -168,13 +177,36 @@ function AgentQueueFlusher({ agentId }: { agentId: string }) {
   const flushedQueueRef = useRef<readonly string[] | null>(null);
 
   useEffect(() => {
-    if (status === AgentStatus.COMPLETED || status === AgentStatus.CANCELLED) {
-      // COMPLETED/CANCELLED agents can never accept these messages (master
-      // abort tripped / agent shut down), so drop them — otherwise the
-      // display shows undeliverable "queued" follow-ups forever. FAILED is
-      // not terminal for delivery: enqueueMessage has no terminal guard and
-      // restarts the run loop (core agent-interactive.ts), so a failed
-      // agent still processes queued follow-ups — fall through and deliver.
+    // A FAILED agent is only deliverable when the failure is a recoverable
+    // round error on a live, still-listened-to agent. Two FAILED flavors
+    // cannot accept delivery:
+    // - Fatal failure (core sets `error`, not `lastRoundError`): the chat
+    //   was never created or the run loop threw. enqueueMessage restarts a
+    //   loop whose runOneRound early-returns on `!this.chat`, silently
+    //   consuming the message while settleRoundStatus flips FAILED → IDLE,
+    //   erasing the failure state (core agent-interactive.ts).
+    // - Team-managed teammate: TeamManager handles a terminal status
+    //   synchronously in the same STATUS_CHANGE emit — unassigns tasks,
+    //   emits TEAMMATE_EXITED, detaches the event bridge, drops per-agent
+    //   state ("a terminated teammate can never reach IDLE again") — and
+    //   the backend releases the agent's resources, so a delivered
+    //   follow-up would resurrect a deaf agent nobody accounts for.
+    // A FAILED arena agent whose round merely errored is alive and still
+    // listened to: core's intentionally unguarded enqueueMessage restarts
+    // its run loop — fall through and deliver.
+    const failedUndeliverable =
+      status === AgentStatus.FAILED &&
+      (interactiveAgent?.getError() !== undefined ||
+        registered?.source === 'team');
+    if (
+      status === AgentStatus.COMPLETED ||
+      status === AgentStatus.CANCELLED ||
+      failedUndeliverable
+    ) {
+      // These agents can never accept the queued messages (master abort
+      // tripped / agent shut down / fatally failed / torn down by the
+      // team), so drop them — otherwise the display shows undeliverable
+      // "queued" follow-ups forever.
       if (messageQueue.length > 0) {
         setAgentMessageQueue(agentId, []);
       }
@@ -195,6 +227,7 @@ function AgentQueueFlusher({ agentId }: { agentId: string }) {
     streamingState,
     messageQueue,
     interactiveAgent,
+    registered,
     status,
     agentId,
     setAgentMessageQueue,
@@ -287,6 +320,7 @@ export function AgentViewProvider({
       modelId: string,
       color: string,
       modelName?: string,
+      source?: 'arena' | 'team',
     ) => {
       registeredIdsRef.current.add(agentId);
       setAgents((prev) => {
@@ -296,6 +330,7 @@ export function AgentViewProvider({
           modelId,
           color,
           modelName,
+          source,
         });
         return next;
       });
