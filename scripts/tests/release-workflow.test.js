@@ -537,11 +537,11 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"',
+    expect(testStep.run).toContain(
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
     expect(testStep.env.VITEST_RETRY).toBe(
-      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}",
+      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -556,6 +556,59 @@ describe('release workflow', () => {
         packageJson.scripts['test:ci'].split('&&').pop()?.trim(),
         path,
       ).toMatch(/^vitest run(?:\s|$)/);
+    }
+  });
+
+  it('passes --retry only when the release schedule asks for one', () => {
+    // The flag reaches every workspace's vitest, where a command line option
+    // outranks the config. Passing --retry=0 on stable releases would switch
+    // off a workspace's own retry (packages/sdk-typescript) on this lane
+    // alone, so the stable path must omit the flag rather than zero it.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [retry, expected] of [
+      ['2', '--retry=2'],
+      ['', null],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+      try {
+        const stub = join(dir, 'npm');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
+        chmodSync(stub, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: retry,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, result.stderr).toBe(0);
+        const args = result.stdout.split('\0');
+        expect(args.pop()).toBe('');
+        expect(args, retry).toContain('--passWithNoTests');
+        // An empty positional would reach vitest as a test-name filter.
+        expect(args, retry).not.toContain('');
+        if (expected) {
+          expect(args, retry).toContain(expected);
+        } else {
+          expect(
+            args.some((arg) => arg.startsWith('--retry')),
+            retry,
+          ).toBe(false);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1217,10 +1270,24 @@ describe('release workflow', () => {
       'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
     );
     expect(testStep.run).toContain('flock --shared --wait 1800 9');
-    expect(testStep.run).toContain('flock --shared 9');
-    expect(testStep.run).toContain('until flock --nonblock 9');
-    expect(testStep.run).toContain('integration-tests cli');
-    expect(testStep.run).toContain('integration-tests interactive');
+    // The daemon lock stays shared for the whole step: upgrading it to
+    // exclusive to build an image starves the build behind the test phase of
+    // any run already on the host (run 33637097713). Builds serialize on a
+    // separate host mutex that no test phase holds.
+    expect(testStep.run).toContain(
+      'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+    );
+    expect(testStep.run).toContain('flock --wait 1800 7');
+    expect(testStep.run).not.toContain('acquire_daemon_write_lock');
+    expect(testStep.run).not.toContain('flock --unlock 9');
+    expect(testStep.run).not.toContain('flock --nonblock 9');
+    // A flock lives on the open file description: a descendant inheriting
+    // the descriptor past the job would keep the lock on the host.
+    expect(testStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+    expect(testStep.run).toContain('exec 7>&-');
+    expect(testStep.run).toContain('exec 8>&-');
+    expect(testStep.run).toContain('integration-tests cli 9>&-');
+    expect(testStep.run).toContain('integration-tests interactive 9>&-');
   });
 
   it('digest-pins every sandbox base image', () => {
