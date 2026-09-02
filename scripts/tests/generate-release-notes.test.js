@@ -22,7 +22,6 @@ import {
   classifyChange,
   createOpenAiCompleter,
   enrichEntries,
-  escapeWorkflowCommand,
   extractImages,
   generateAiContent,
   generateReleaseNotes,
@@ -33,6 +32,7 @@ import {
   renderReleaseNotesV2,
   tryAppendDegradedStepSummary,
 } from '../generate-release-notes.js';
+import { escapeWorkflowCommand } from '../release-script-utils.js';
 
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
 

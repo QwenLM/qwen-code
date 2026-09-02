@@ -1363,10 +1363,6 @@ async function main() {
   }
 }
 
-// Re-exported from its shared home so existing importers keep working; the
-// escape contract has one implementation, not one per emitter.
-export { escapeWorkflowCommand };
-
 export function tryAppendDegradedStepSummary(result, summaryPath) {
   // The step summary is auxiliary; a filesystem failure there (EACCES,
   // ENOSPC) must not cost the primary release-notes artifact.

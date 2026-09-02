@@ -11,6 +11,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -323,7 +324,15 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
         '--passWithNoTests',
       ],
       {
-        env: { ...process.env, PATH: `${binDir}:${process.env['PATH']}` },
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env['PATH']}`,
+          GITHUB_STEP_SUMMARY: path.join(dir, 'step-summary.md'),
+          // The spawned wrapper bypasses this process's appendFileSync mock,
+          // so on GitHub Actions it would append its report to the running
+          // job's real step summary. Redirect it to a scratch file instead,
+          // which also turns that side effect into asserted coverage below.
+        },
         encoding: 'utf8',
       },
     );
@@ -356,6 +365,18 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
 
     expect(result.stdout).toContain('test:release:workspaces');
     expect(result.status).toBe(3);
+  });
+
+  it('writes the silent-exit report to the redirected step summary', () => {
+    const result = runEntry(path.join(dir, 'summarized'), { exitCode: 7 });
+
+    expect(result.status).toBe(7);
+    // The child writes through its real appendFileSync; the scratch file only
+    // exists because runEntry redirected GITHUB_STEP_SUMMARY — drop that
+    // redirect and this assertion goes red.
+    expect(readFileSync(path.join(dir, 'step-summary.md'), 'utf8')).toContain(
+      '### Workspace tests exited 7 with no failing test',
+    );
   });
 
   it('does not spawn anything when the module is only imported', async () => {
