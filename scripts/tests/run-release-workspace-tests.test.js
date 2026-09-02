@@ -177,6 +177,24 @@ describe('createRunClassifier', () => {
     expect(classifier.finish(pending).hasFailingTests).toBe(true);
   });
 
+  it('flushes a block that is still open when the stream ends', () => {
+    // A kill or a truncated log can take the closing rule line with it; the
+    // half-read block is still the best explanation of the exit, so finish()
+    // has to hand it over rather than drop it.
+    const truncated = GREEN_WITH_UNHANDLED_ERROR.slice(
+      0,
+      GREEN_WITH_UNHANDLED_ERROR.indexOf('Error: write after end') +
+        'Error: write after end'.length,
+    );
+    const classifier = createRunClassifier();
+    const pending = classifier.write(truncated, '');
+
+    const { unhandledBlocks } = classifier.finish(pending);
+    expect(unhandledBlocks).toHaveLength(1);
+    expect(unhandledBlocks[0]).toMatch(/^Unhandled Errors\n/);
+    expect(unhandledBlocks[0]).toContain('Error: write after end');
+  });
+
   it('keeps only the last few summary lines however many workspaces ran', () => {
     const classifier = createRunClassifier();
     let pending = '';
@@ -403,13 +421,13 @@ describe('runAndReport', () => {
     };
   });
 
-  /** Runs a fake suite that prints `output` and exits with `code`. */
-  function fakeRun(output, code, summaryTarget = undefined) {
+  /** Runs a fake suite that prints `output` to `stream` and exits `code`. */
+  function fakeRun(output, code, summaryTarget = undefined, stream = 'stdout') {
     return runAndReport({
       command: process.execPath,
       args: [
         '-e',
-        `process.stdout.write(${JSON.stringify(output)}); process.exit(${code});`,
+        `process.${stream}.write(${JSON.stringify(output)}); process.exit(${code});`,
       ],
       stdout,
       stderr,
@@ -457,6 +475,24 @@ describe('runAndReport', () => {
     expect(exitCode).toBe(1);
     expect(stdoutText).not.toContain('::error');
     expect(stderrText).toBe('');
+  });
+
+  it('stays quiet when the FAIL line only reached stderr', async () => {
+    // Vitest prints its report on stdout, but a failure line that lands on
+    // stderr still has to suppress the annotation — otherwise the wrapper
+    // reports a silent failure over a log whose failing tests are right
+    // there.
+    const exitCode = await fakeRun(
+      ORDINARY_TEST_FAILURE,
+      1,
+      undefined,
+      'stderr',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stdoutText).not.toContain('::error');
+    // The stderr passthrough still delivered the suite's words untouched.
+    expect(stderrText).toContain('FAIL  components/MessageList.dom.test.tsx');
   });
 
   it('stays quiet when the run passed', async () => {
