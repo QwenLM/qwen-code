@@ -10,10 +10,11 @@ other isolation, persistence, and lifecycle requirements remain in force. The
 current implementation still enforces process-global Conversations ownership
 until the source changes in this design are delivered.
 
-This decision adopts Issue #10810's identity-qualified stale-writer recovery
-and legacy-owner migration guard. It intentionally narrows the issue's Web
-Shell packaging: inline conflict presentation remains an independent follow-up
-because it changes no storage or wire-safety guarantee.
+This decision adopts Issue #10810's session-keyed concurrency boundary,
+identity-qualified stale-writer recovery, legacy-owner migration guard, and
+minimum Web Shell degradation. Backend and Web Shell implementation may land in
+separate pull requests, but both are required in the same release. A proactive
+`activeElsewhere` listing hint remains a follow-up.
 
 ## Decision
 
@@ -35,22 +36,25 @@ multiple daemons may point at the same persistent workspace, while each daemon
 keeps its own ACP bridge, child process, live-session index, caches, and runtime
 generation.
 
-This is a serialized-use contract, not multi-master support. Cross-daemon
-concurrent access to the Conversations root is unsupported and is not detected
-or fully coordinated by this change. The writer lease only fences competing
-writers for the same session.
+This is a session-partitioned concurrent-use contract, not unrestricted
+multi-master support. Updated daemons may concurrently list the shared catalog,
+create sessions, and host different session IDs. Competing writers and
+lifecycle mutations for the same session remain serialized by that session's
+writer lease. The change does not add cross-daemon routing, a shared live-state
+index, atomic multi-session operations, or distributed cache invalidation.
 
 ## Motivation
 
 The current user-global owner record makes the first daemon that touches
 standalone or Live block standalone access from every other live daemon. A Web
 Shell connected to a second daemon therefore receives
-`503 conversation_runtime_in_use` even when the two daemons are never used for
-standalone at the same time.
+`503 conversation_runtime_in_use` even when it only needs the shared catalog, a
+new chat, or a different session.
 
 Ordinary workspaces do not impose a process-global runtime owner. The simpler
-and more consistent policy is to let the operator choose a daemon endpoint and
-accept the same cross-process usage constraints for standalone.
+and more consistent policy is to let each daemon serve independent sessions
+while the existing session writer protocol protects the actual shared-write
+boundary.
 
 ## Behavioral contract
 
@@ -60,17 +64,27 @@ accept the same cross-process usage constraints for standalone.
 - Another updated daemon no longer causes `conversation_runtime_in_use`. During
   migration, a live legacy runtime-owner record still returns that error until
   the old daemon exits.
+- If daemon A has session S loaded, daemon B may still list the shared catalog,
+  create a new standalone session, and create, restore, or use a different
+  session that is not held by another writer. Different session IDs may remain
+  active in different daemons at the same time.
 - A client remains attached to the daemon on which it created or restored an
   active session. Prompt, cancel, permission, status, heartbeat, detach, and
   SSE event routes are not forwarded to another daemon.
 - Creating or restoring a standalone session acquires its session writer lease
   regardless of the user's `experimental.sessionWriterLease` setting. A second
   daemon attempting to open the same active session receives the existing
-  `409 session_writer_conflict` response.
+  `409 session_writer_conflict` response. Single-session rename or repair uses
+  the same top-level response. Batch lifecycle routes keep their existing `200`
+  result envelope but preserve any session-writer error kind in the affected
+  item's `errors[]` entry. No new active-elsewhere error kind is added.
 - Every other session hosted by the Conversations runtime, including Live and
   scheduled-task sessions, uses the same mandatory lease. This prevents
   background keepalive or task rehydration from silently restoring an already
   active transcript through a non-standalone source.
+- Live discovery remains single-publisher, but a Live session on its elected
+  daemon may coexist with different standalone sessions on another daemon.
+  Standalone routes continue to reject Live records.
 - An unsealed active lock left by a non-cooperative process exit is reclaimed
   only when the new daemon can prove that the record belongs to the same local
   identity domain and that the recorded process has exited or its PID has been
@@ -101,12 +115,16 @@ accept the same cross-process usage constraints for standalone.
   `session_writer_conflict` treats the entry as being handled by another daemon,
   skips that UUID, and continues without converting contention into a
   compromised-record result.
-- Concurrent use by multiple daemons, including concurrent standalone and Live
-  use of the same Conversations root, is outside the supported contract.
+- If two daemons simultaneously rehydrate the same scheduled-task-bound
+  session, the mandatory writer lease admits exactly one resident session. The
+  losing rehydration records the restore failure through the existing
+  rehydration result and error-reporting path, then follows the existing
+  keepalive backoff without firing that session's task.
 
-"Not concurrent" applies to the complete active-session lifetime, not only to
-overlapping HTTP requests. A session that remains loaded in daemon A must not be
-continued through daemon B merely because daemon A is idle between requests.
+Same-session exclusivity applies to the complete active-session lifetime, not
+only to overlapping HTTP requests. A session that remains loaded in daemon A
+cannot be continued or mutated through daemon B merely because daemon A is idle
+between requests.
 
 ## Safety retained
 
@@ -124,12 +142,15 @@ ordinary user-selected workspace. The implementation retains:
 - the legacy runtime-owner compatibility check during migration;
 - Live discovery's own single-publisher record and validation.
 
-These mechanisms can reject some accidental overlap, but they do not make the
-new contract safe for general concurrent use. In particular, create admission,
-live owner indexes, lifecycle coordinators, directory state, reconciliation
-singleflight, and cache invalidation remain process-local. Only the
-per-journal-entry writer lease crosses the process boundary during deletion
-reconciliation.
+Daemon-local create admission, live owner indexes, lifecycle coordinators,
+directory state, reconciliation singleflight, and cache invalidation are not
+cross-process authorities. They may make remote live state appear inactive or
+delay catalog freshness, but they do not decide write ownership. The
+cross-process writer lease remains authoritative for each transcript and its
+lifecycle, scheduled-task file mutations retain their existing cross-process
+file lock, and deletion reconciliation acquires the affected session's lease.
+The contract does not promise globally fresh live state, cross-daemon event
+routing, or atomic operations spanning multiple session IDs.
 
 ## Implementation
 
@@ -181,6 +202,11 @@ was accepted or the user's startup setting enabled the lease. Per-request
 settings reloads continue to use that frozen value, so one ACP process never
 mixes leased and legacy writers.
 
+The accepted marker remains an immutable Conversations-runtime provenance
+signal inside the ACP process. The same captured boolean drives both mandatory
+writer leasing and the scheduled-task eligibility rule below; no second
+environment marker or public setting is added.
+
 For a trusted managed child carrying the Conversations marker, `runAcpAgent`
 sets `reclaimPolicy: 'local'` and keeps `takeoverPolicy: 'certified'`. Other
 trusted managed workspace children keep `reclaimPolicy: 'never'`; the marker
@@ -228,10 +254,11 @@ reconciliation. This lets archive, unarchive, delete, repair, and recovery make
 the same stale-owner decision as the ACP writer they fence. Generic workspace
 lifecycle routes and other managed runtimes keep their existing `never` policy.
 
-The lease protects one transcript. It does not coordinate session-list reads,
-random-ID creation admission, managed-directory state, deletion-journal scans,
-SSE routing, or Live discovery. Those remain governed by the serialized-use
-contract and existing daemon-local checks.
+The lease protects one transcript and its lifecycle. It does not coordinate
+session-list reads, random-ID generation, daemon-local managed-directory state,
+SSE routing, or Live discovery. Those paths keep their existing persistence,
+identity, and source-isolation checks; their daemon-local observations are not
+used as proof that a remote writer is absent.
 
 The fence covers only updated, cooperating writers hosted by the marked
 Conversations runtime. A legacy daemon or another process that writes the same
@@ -355,34 +382,75 @@ validated handoff before publication. An active foreign Live owner still blocks
 publication, and failure to publish Live discovery does not disable standalone
 routes on that daemon.
 
-This deliberately does not solve concurrent Live and standalone access from
-different daemons. Operators relying on the serialized-use contract must keep
-Live inactive on other daemons while standalone is in use.
+Live discovery remains single-publisher, while the Conversations writer lease
+is session-scoped. A Live session on the elected publisher may therefore run at
+the same time as a different standalone session on another daemon. If another
+daemon reaches the same transcript, the writer lease rejects it; standalone
+routes continue to reject Live-owned records regardless of lease availability.
 
-### Keep scheduled-task logic unchanged
+### Harden scheduled-task activation without adding another lease
 
-Do not change scheduled-task persistence, cron execution, keepalive, or boot
-rehydration. Scheduled-task controller and run sessions inherit the mandatory
-writer lease from the Conversations runtime before restore succeeds. A daemon
-that loses the lease cannot make that bound session resident; boot rehydration
-records the failure, and keepalive uses its existing retry backoff.
+Keep scheduled-task persistence, keepalive, and boot rehydration. Scheduled-task
+controller and run sessions inherit the mandatory writer lease from the
+Conversations runtime before restore succeeds. A daemon that loses the lease
+cannot make that bound session resident; boot rehydration records the failure,
+and keepalive uses its existing retry backoff.
+
+Multiple daemons may read the same scheduled-task file and simultaneously try
+to restore the same bound session while otherwise idle. Lease acquisition
+occurs before that session's scheduler can activate, so exactly one restore may
+become resident and fire bound tasks. The losing restore must not execute or
+book the task. Its conflict is retained in the existing rehydration result and
+`onError` path, not appended as a scheduled-task run. Existing cross-process
+task-file mutation locking and persisted `lastFiredAt` state remain unchanged.
+
+This prevents duplication caused solely by concurrent restore. It does not
+upgrade the scheduler to exactly-once delivery: the existing at-least-once
+window after a prompt is dispatched but before its fired state is durably
+persisted remains unchanged, including across a subsequent owner crash.
+
+Unbound durable tasks need a separate admission rule because two keepalive
+workers may initially mint different controller session IDs, so a session
+writer lease cannot elect between them yet. In the marked Conversations ACP
+runtime, install a scheduler eligibility predicate before durable loading that
+refuses to fire any unbound durable task. The daemon keepalive remains the only
+component that binds such a task. Its existing `updateCronTasks` transaction
+rechecks the unbound state under the cross-process task-file lock, commits one
+controller session ID, and tears down a losing orphan. Once that binding is
+visible, only the matching bound session is eligible to fire the task. Ordinary
+workspace schedulers retain the existing unbound lock-owner behavior.
+
+The default `runQwenServe` path enables the daemon-managed binding worker. An
+embedded host that opts into the Conversations marker without enabling that
+worker leaves unbound Conversations tasks dormant; it must not fall back to
+legacy lock-owner execution. Bound tasks continue to use their recorded session
+ID and the session writer lease in either host shape.
 
 Keep the existing product boundaries: durable cron jobs remain unsupported in
 standalone sessions, and generic scheduled-task routes cannot create a new
 session in the Conversations workspace. This change only fences existing
 background writers; it does not add standalone scheduling functionality.
 
-### Keep the Web Shell contract unchanged
+### Ship minimum Web Shell degradation in the same release
 
 Do not add an `activeElsewhere` list field or a new client-side owner-discovery
 protocol. Every daemon can list persisted standalone sessions after the outer
 gate is removed, while an attempt to restore a session held by another daemon
-continues to return the existing `409 session_writer_conflict`. The Web Shell
-may surface that real attach conflict through its existing error path.
+continues to return the existing `409 session_writer_conflict`.
 
-A quieter inline conflict treatment can be delivered independently as product
-polish. It is not required for storage safety and does not belong in the
-backend ownership change.
+The backend and Web Shell work may land as separate pull requests, but the
+release is incomplete until the client presents the resulting states locally:
+
+- standalone list failures and the transitional
+  `conversation_runtime_in_use` response render once in the Recents section,
+  not through the global error toast on every navigation-triggered refetch;
+- `session_writer_conflict` and `session_writer_unavailable` from opening a
+  session render on the affected row or section with a retry action rather than
+  as a global toast.
+
+An `activeElsewhere` hint remains deferred because listing has no authoritative
+cross-daemon live-state index. The client reacts to the existing attach-time
+error contract instead.
 
 ### Do not add routing or coordination
 
@@ -399,7 +467,9 @@ mixed-mode compatibility problem without serving the requested default.
 
 | Condition                                                                        | Result                                                                                               |
 | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Another updated daemon has the session loaded                                    | `409 session_writer_conflict` for that session                                                       |
+| Another updated daemon has a different session loaded                            | Listing, new-session creation, and operations on the different session continue                      |
+| Another updated daemon has the session loaded for open, rename, or repair        | `409 session_writer_conflict` for that session                                                       |
+| A batch archive or delete includes a session loaded by another updated daemon    | Existing `200` batch envelope with that item's `errors[].code` set to `session_writer_conflict`      |
 | A well-formed active owner is provably dead in the same local identity domain    | Reclaim, authoritative transcript reload, then continue                                              |
 | The active owner is live, stalled, foreign, or missing required reclaim identity | `409 session_writer_conflict` for that session                                                       |
 | The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                    |
@@ -408,11 +478,23 @@ mixed-mode compatibility problem without serving the requested default.
 | A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                        |
 | Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response |
 
+For every writer-state row, a batch lifecycle route preserves the same error
+kind in its existing `200` per-item result rather than changing the batch's
+transport status.
+
+The Web Shell renders list-level failures and the transitional runtime-owner
+error in the Recents section. It renders same-session writer errors on the
+affected session or section with retry, without sending navigation-triggered
+refetch failures through the global toast path.
+
 ## Compatibility and rollout
 
-The REST and SDK shapes are unchanged. `standalone_sessions_v1` and
-`standalone_session_options_v1` continue to describe API support; no capability
-is added for a weaker concurrency guarantee.
+The REST and SDK object shapes are unchanged. The daemon batch serializer must
+stop collapsing session-writer errors into
+`standalone_session_operation_failed` and preserve the existing writer error
+kind in the affected item's string `code`; the SDK already accepts string batch
+codes. `standalone_sessions_v1` and `standalone_session_options_v1` continue to
+describe API support, and no capability is added for the concurrency guarantee.
 
 Rollout is a drain-and-cutover, not a rolling mixed-version upgrade. Stop every
 daemon version that can host standalone sessions without the mandatory lease,
@@ -447,10 +529,20 @@ Release notes must state that:
 
 - multiple daemons may expose standalone sessions for the same user;
 - active sessions are daemon-local;
-- callers are responsible for avoiding cross-daemon concurrent use;
+- different session IDs may be active concurrently across updated daemons,
+  while a second writer or lifecycle mutation for the same session is fenced;
+- same-session conflicts reuse `session_writer_conflict`, including in the
+  existing per-item error of a batch lifecycle response;
 - standalone sessions always use the writer lease, even when the experimental
   setting is absent or false;
 - Live and scheduled-task writers in the Conversations runtime use it as well;
+- simultaneous scheduled-task rehydration admits only one resident owner and
+  does not provide exactly-once delivery beyond the scheduler's existing
+  persistence semantics;
+- an unbound task cannot fire from a Conversations session until the
+  cross-process task-file transaction has committed its controller binding;
+- standalone list and attach failures use the inline Web Shell treatment above
+  instead of repeated global navigation toasts;
 - a provably dead same-domain active writer is recovered automatically; on
   Linux that requires the same hostname, boot, and PID namespace, while a live
   or unverifiable writer stays fenced;
@@ -476,7 +568,10 @@ rejection without a private parent capability, capture before environment-file
 loading, user-level and project-level environment scrubbing, sandbox
 propagation, and isolation between primary, secondary, and Conversations bridge
 child environments. Standalone parent lifecycle and maintenance acquisitions
-must select the same `local` policy.
+must select the same `local` policy. Scheduler coverage verifies that the
+captured Conversations marker installs the unbound-durable-task skip before
+loading or catch-up detection, allows a task after it is bound to that session,
+and leaves ordinary workspace lock-owner behavior unchanged.
 
 Core lease coverage records and validates the Linux PID namespace, treats a
 missing reclaim identity as live, reclaims dead and PID-reused owners only in
@@ -504,26 +599,40 @@ Conversations root and verifies:
 3. a live legacy runtime-owner record returns
    `503 conversation_runtime_in_use`, and after its process exits the next
    request retires the stale record and returns `200` without restarting;
-4. while daemon A keeps a standalone session active, daemon B receives
-   `409 session_writer_conflict` when it tries to restore that session;
-5. after an explicit close releases A's lease, B restores that session through
+4. while daemon A keeps standalone session S active, daemon B can still list
+   the catalog, create a new chat T, and restore and use a different persisted
+   session without closing S;
+5. while A keeps S active, B receives `409 session_writer_conflict` when it
+   tries to restore, rename, or repair S; archive and delete keep their `200`
+   batch envelope and report `session_writer_conflict` for S without inventing
+   a new error kind;
+6. after an explicit close releases A's lease, B restores S through
    ordinary acquisition; independently, after graceful shutdown seals another
    session owned by A, B restores it through certified takeover;
-6. after A's lock-owning ACP writer is killed in a steady active state, B in the
+7. after A's lock-owning ACP writer is killed in a steady active state, B in the
    same local identity domain reclaims the lock, authoritatively reloads the
    transcript, and continues it without manual cleanup; killing only A's parent
    while that writer remains live still returns a conflict;
-7. a matching live or stalled A, and records from a foreign host, boot, or PID
+8. a matching live or stalled A, and records from a foreign host, boot, or PID
    namespace, remain `409 session_writer_conflict`; identity-less and residual
    claim states remain fail closed;
-8. shutting down either daemon does not remove or invalidate the other's local
+9. shutting down either daemon does not remove or invalidate the other's local
    runtime;
-9. a scheduled-task session active in A cannot be rehydrated in B, and only A's
-   scheduler fires its bound task;
-10. two daemons reconciling the same prepared deletion elect one lease holder;
+10. two otherwise idle daemons that simultaneously rehydrate the same
+    scheduled-task-bound session elect one resident session through the writer
+    lease; the loser records a restore failure and backs off, and only the
+    winner fires the bound task for that slot;
+11. two keepalive workers that observe the same unbound task may mint competing
+    controller sessions, but no Conversations session fires it while unbound;
+    the task-file transaction commits exactly one binding, cleans up the losing
+    orphan, and only the bound controller becomes eligible to fire;
+12. two daemons reconciling the same prepared deletion elect one lease holder;
     the contender skips that UUID without failing the unrelated triggering
     operation or reporting journal compromise;
-11. root compromise and unavailable generations still fail closed without
+13. a Live session on the elected Live daemon and a different standalone
+    session on the other daemon remain usable concurrently, while standalone
+    routes continue to reject the Live record;
+14. root compromise and unavailable generations still fail closed without
     falling back to the primary workspace.
 
 Live regression coverage verifies that Live discovery still has at most one
@@ -531,11 +640,20 @@ publisher, that the publication path performs the existing validated handoff
 for the stable base as well as custom bases, and that a stale stable-base record
 can be reclaimed after its previous owner exits. Standalone availability
 remains independent of discovery publication failure and of which daemon
-published the record.
+published the record. It also covers a Live-enabled daemon and a second daemon
+serving a different standalone session at the same time.
 
-No test may treat the same-session conflict as proof of general cross-daemon
-safety. Different-session lifecycle and catalog operations remain outside the
-concurrent-use contract.
+Web Shell regression coverage verifies that switching sessions does not emit a
+toast when standalone listing fails, that a transitional
+`conversation_runtime_in_use` response appears once in the Recents section,
+and that `session_writer_conflict` and `session_writer_unavailable` on open are
+attached to the affected session or section with a retry action. It does not
+require an `activeElsewhere` list field.
+
+Tests must prove both sides of the boundary: different session IDs can be used
+concurrently across updated daemons, while the same session remains exclusive
+for its complete loaded lifetime. They must not imply globally fresh live
+state, cross-daemon event routing, or atomic multi-session operations.
 
 ## Rejected alternatives
 
@@ -552,13 +670,14 @@ concurrent-use contract.
 - **Enabling the lease only for `sourceType=standalone`:** misses Live and
   scheduled-task sources hosted by the same Conversations runtime, including
   background rehydration that occurs without a standalone API request.
-- **Bundling new Web Shell ownership UI:** an `activeElsewhere` hint or inline
-  conflict state requires a new product contract but does not strengthen the
-  storage fence. Keep the backend decision independently reviewable and handle
-  that optional presentation change separately.
-- **Cross-process multi-master coordination:** would require durable create,
-  lifecycle, recovery, owner-routing, and cache protocols. That is a different
-  reliability contract and is unnecessary for serialized use.
+- **Adding `activeElsewhere` to listings now:** requires an authoritative shared
+  live-state index or owner-discovery protocol. The minimum Web Shell behavior
+  can use the existing attach-time error contract without adding that backend
+  coordination.
+- **A shared routing or global transaction plane:** daemon-to-daemon event
+  routing, globally fresh live state, and atomic operations spanning sessions
+  are different reliability contracts. They are unnecessary for concurrent
+  use partitioned by the existing session writer lease.
 - **Unqualified stale-writer reclaim:** PID, hostname, age, or inactivity alone
   cannot prove that a managed writer on shared storage is dead. Automatic
   recovery is limited to a matching local identity domain and stable process
