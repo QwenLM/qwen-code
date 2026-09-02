@@ -388,11 +388,6 @@ interface WebShellSidebarProps {
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
-  /**
-   * Starts a projectless (standalone) chat. Offered as an explicit entry point
-   * in the Recents group header; omit when the daemon cannot create one.
-   */
-  onNewStandaloneSession?: () => Promise<boolean> | boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -889,7 +884,6 @@ export function WebShellSidebar({
   onOpenSplitView,
   canOpenSplitView,
   onNewSession,
-  onNewStandaloneSession,
   onLoadSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
@@ -2623,28 +2617,6 @@ export function WebShellSidebar({
       t,
     ],
   );
-
-  // Same re-entrancy guard and busy state, but no workspace catalog to
-  // refresh: a standalone chat belongs to no workspace, and its Recents list
-  // reloads on its own once the session exists.
-  const handleNewStandaloneSession = useCallback(() => {
-    if (!onNewStandaloneSession || creatingSessionRef.current) return;
-
-    creatingSessionRef.current = true;
-    setCreatingSession(true);
-    void (async () => {
-      try {
-        await onNewStandaloneSession();
-      } catch (err) {
-        if (!isAbortError(err)) {
-          onError(err, t('sidebar.newSessionFailed'));
-        }
-      } finally {
-        creatingSessionRef.current = false;
-        setCreatingSession(false);
-      }
-    })();
-  }, [onError, onNewStandaloneSession, t]);
 
   // Same re-entrancy guard, busy state and catalog invalidation as a plain
   // new task; only the creation callback differs.
@@ -5367,10 +5339,6 @@ export function WebShellSidebar({
               onExpand={() => onCollapsedChange(false)}
               currentSessionId={connection.sessionId}
               onLoadSession={onLoadStandaloneSession}
-              onNewSession={
-                onNewStandaloneSession ? handleNewStandaloneSession : undefined
-              }
-              newSessionDisabled={newSessionDisabled}
               onRenameSession={(sessionId, displayName) =>
                 onSessionRenameConfirmed?.(undefined, sessionId, displayName)
               }

@@ -152,6 +152,9 @@ type ChatEditorTestProps = {
   workspaceFeaturesEnabled?: boolean;
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (cwd: string | undefined) => void;
+  standaloneTargetSupported?: boolean;
+  selectedStandaloneTarget?: boolean;
+  onSelectStandaloneTarget?: () => void;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
@@ -1170,7 +1173,6 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
       onNewSession?: (workspaceCwd?: string) => Promise<boolean> | boolean;
-      onNewStandaloneSession?: () => Promise<boolean> | boolean;
       onNewWorktreeSession?: (
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
@@ -1222,19 +1224,6 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           },
           'new session',
         ),
-        ...(props.onNewStandaloneSession
-          ? [
-              React.createElement(
-                'button',
-                {
-                  'data-testid': 'new-standalone-session',
-                  type: 'button',
-                  onClick: () => void props.onNewStandaloneSession?.(),
-                },
-                'new standalone session',
-              ),
-            ]
-          : []),
         React.createElement(
           'button',
           {
@@ -11142,7 +11131,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('creates a standalone session from the sidebar standalone entry point', async () => {
+  it('creates a standalone session from the composer no-workspace target', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.workspaceCwd = '';
     mockConnection.capabilities.features = ['standalone_sessions_v1'];
@@ -11152,15 +11141,19 @@ describe('App session callbacks', () => {
         { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    renderApp();
     await flush();
 
+    expect(testState.latestChatEditorProps?.standaloneTargetSupported).toBe(
+      true,
+    );
     await act(async () => {
-      container
-        .querySelector<HTMLElement>('[data-testid="new-standalone-session"]')
-        ?.click();
+      testState.latestChatEditorProps?.onSelectStandaloneTarget?.();
       await Promise.resolve();
     });
+    expect(testState.latestChatEditorProps?.selectedStandaloneTarget).toBe(
+      true,
+    );
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('standalone prompt');
       await vi.waitFor(() => {
@@ -11173,19 +11166,19 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('omits the sidebar standalone entry point without the capability', async () => {
+  it('hides the composer no-workspace target without the capability', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
       workspaces: [
         { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    renderApp();
     await flush();
 
     expect(
-      container.querySelector('[data-testid="new-standalone-session"]'),
-    ).toBeNull();
+      testState.latestChatEditorProps?.standaloneTargetSupported,
+    ).toBeFalsy();
   });
 
   it('retries failed capabilities before routing a global new session', async () => {

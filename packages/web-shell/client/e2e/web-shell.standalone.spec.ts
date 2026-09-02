@@ -29,7 +29,7 @@ function standaloneCreates(
   );
 }
 
-test('the Recents entry point creates an exact standalone session @smoke', async ({
+test('the composer no-workspace target creates an exact standalone session @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -135,9 +135,9 @@ test('hides the standalone entry point without the capability @smoke', async ({
 
   await page.goto('/');
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'New standalone chat', exact: true }),
-  ).toHaveCount(0);
+  // A single workspace with no creation capabilities and no standalone
+  // support hides the composer picker entirely.
+  await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
 
   await clickNewTask(page);
   await fillComposer(page, 'Start a legacy conversation');
@@ -179,11 +179,10 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   );
 
   await expect(page.locator('[data-web-shell-composer-submit]')).toBeDisabled();
-  // Both new-chat entry points are blocked while the outcome is unknown, so
-  // neither may start a second create.
-  await page
-    .getByRole('button', { name: 'New standalone chat', exact: true })
-    .click();
+  // The composer picker is not offered while the outcome is unknown, and a
+  // plain new task is blocked by the recovery guard, so neither path may
+  // start a second create.
+  await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
   await clickNewTask(page);
   expect(
     daemon.requests.filter(
@@ -298,15 +297,20 @@ async function gotoNewTask(page: Page): Promise<void> {
   await clickNewTask(page);
 }
 
+async function selectNoWorkspaceTarget(page: Page): Promise<void> {
+  await page.locator('button[aria-label="Workspace"]').click();
+  await page
+    .getByRole('menuitemradio', {
+      name: 'No workspace (standalone)',
+      exact: true,
+    })
+    .click();
+}
+
 async function gotoNewStandaloneChat(page: Page): Promise<void> {
   await page.goto('/');
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
-  const newChat = page.getByRole('button', {
-    name: 'New standalone chat',
-    exact: true,
-  });
-  await expect(newChat).toBeEnabled();
-  await newChat.click();
+  await selectNoWorkspaceTarget(page);
 }
 
 async function fillComposer(page: Page, text: string): Promise<void> {
