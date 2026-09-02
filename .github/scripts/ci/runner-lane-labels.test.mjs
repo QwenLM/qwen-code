@@ -28,6 +28,10 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import {
+  routingEnvironments,
+  runStepBody,
+} from './runner-selection-harness.mjs';
 
 const workflowsDir = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -88,6 +92,13 @@ const MAINTENANCE_LABEL = /^ecs-update-[A-Za-z0-9-]+$/i;
 // GitHub-hosted runner images; outside this guard's jurisdiction.
 const HOSTED_LABEL = /^(ubuntu|windows|macos)-[A-Za-z0-9._-]+$/i;
 
+// Seeded into an executed producer's environment for the consumed name. If it
+// comes back out of $GITHUB_OUTPUT, the body published what it INHERITED
+// rather than what it assigned — which is how an earlier step's $GITHUB_ENV
+// write reaches runs-on through a body whose assignment never ran.
+const POISONED_RUNNER_SET =
+  '["self-hosted", "linux", "x64", "ecs-poisoned-by-harness"]';
+
 const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
   .sort();
@@ -103,12 +114,20 @@ const workflowFiles = readdirSync(workflowsDir)
 // if that code path is dead. A tripwire test below pins that the live ci.yml
 // assignments keep matching this shape; if they are ever re-quoted or
 // reshaped, the tripwire — not silence — says so.
+//
+// A line carrying a `${{ }}` is dropped: GitHub substitutes before bash
+// parses, so the value assigned is not the text matched here — not even when
+// the expression only rides a trailing comment, which `(?:#.*)?$` tolerates.
+// The producer path refuses a `${{ }}` body outright; this is the only bar
+// that reaches the job-wide accounting for a body no runs-on consumes.
 function runnerSetAssignments(text) {
   return [
     ...text.matchAll(
       /^\s*([A-Za-z_][A-Za-z0-9_]*)=(['"])(\[[^\n]*?\])\2\s*(?:#.*)?$/gm,
     ),
-  ].map((m) => ({ name: m[1], raw: m[3] }));
+  ]
+    .filter((m) => !m[0].includes('${{'))
+    .map((m) => ({ name: m[1], raw: m[3] }));
 }
 
 // The labels a bracketed literal delivers, judged by the authority being
@@ -769,16 +788,21 @@ function laneTestPlan(file, text) {
   //    shapes), the job runs in no container, and no env scope visible to
   //    it — step, job or workflow — binds the name or a
   //    BASH_ENV/ENV/BASH_FUNC_* startup key;
-  //  - every step of the job is a `run:` step this guard can read, and none
-  //    writes $GITHUB_ENV/$GITHUB_PATH or dereferences a constructed name —
-  //    a sibling plant feeds a later step's environment or command lookup
-  //    without appearing in the producer step at all;
+  //  - every step of the job that runs BEFORE it is a `run:` step this guard
+  //    can read, and none writes $GITHUB_ENV/$GITHUB_PATH or dereferences a
+  //    constructed name — a sibling plant feeds a later step's environment or
+  //    command lookup without appearing in the producer step at all. A job
+  //    runs its steps in order, so a later one cannot reach back;
   //  - every other line of the body matches the closed residual allowlist
   //    (vouchedResidualLine) — shapes that cannot write the name or run
   //    code the guard did not read;
   //  - nothing else in the step mentions the name except pure
   //    `$name`/`${name}` reads — any other mention is a write the scan
-  //    cannot read.
+  //    cannot read;
+  //  - and last, the body is EXECUTED over the whole routing input matrix and
+  //    every value it publishes is judged. Everything above reads the file's
+  //    text; bash quote removal and GitHub's `${{ }}` substitution mean the
+  //    text can vouch a value the step never actually publishes.
   //
   // Returns the scannable assemblies that feed the output, or null after
   // recording why the chain cannot be vouched.
@@ -826,11 +850,22 @@ function laneTestPlan(file, text) {
               `guard can trace to a scannable assembly.`,
       );
     }
-    // Hop 2 — the one step the mapping names.
+    // Hop 2 — the one step the mapping names. Two steps sharing the id leave
+    // the choice to `.find()`, which is this guard's assumption rather than
+    // GitHub's resolution, so a duplicate fails closed instead (R6-1).
     const stepId = forward[1];
-    const step = (Array.isArray(job.steps) ? job.steps : []).find(
+    const jobSteps = Array.isArray(job.steps) ? job.steps : [];
+    const named = jobSteps.filter(
       (s) => s && typeof s === 'object' && s.id === stepId,
     );
+    if (named.length > 1) {
+      return unreadable(
+        `job '${producerJob}' has ${named.length} steps with id '` +
+          `${stepId}' — which one publishes '${outName}' is not readable ` +
+          `here, so the value that reaches runs-on is not either.`,
+      );
+    }
+    const step = named[0];
     if (!step || typeof step.run !== 'string') {
       return noProducer(
         `job '${producerJob}' has no run step with id '${stepId}' — the ` +
@@ -892,20 +927,27 @@ function laneTestPlan(file, text) {
           `'${shell}' — the closed chain vouches bash bodies only.`,
       );
     }
-    // A $GITHUB_ENV write by ANY step of the job plants a binding the
+    // A $GITHUB_ENV write by an EARLIER step of the job plants a binding the
     // publish expands when no scannable assignment ran (a dead branch), and
     // a $GITHUB_PATH append shims command lookup — neither write appears in
     // the producer step itself (R6-1 e/g). A dereference or eval primitive
     // lets a body build the sink's name (`v='GITHUB'; v+=_ENV; … >> "${!v}"`)
     // so that literal spelling never appears.
     //
+    // Only earlier steps can reach it: a job runs its steps in order, so a
+    // later one cannot plant this step's environment or command lookup.
+    // Scoping the scan to them is what keeps ci.yml's classify_pr vouched —
+    // it checks the trusted CI classifier out with actions/checkout AFTER
+    // pick_runner has published, and refusing that action reddened the
+    // repo's own main CI lane over a step that cannot influence the value.
+    //
     // This substring posture is inherently incomplete against deliberate
     // obfuscation. The closures that do not depend on recognizing a spelling
-    // are refusing a `uses:` step below — opaque action code — and refusing
-    // a container above.
+    // are refusing a `uses:` step below — opaque action code — refusing a
+    // container above, and the executed body's own refusals in hop 4.
     const SIBLING_WRITE =
       /GITHUB_ENV|GITHUB_PATH|\$\{!|(^|\s|;)(?:eval|declare)\s/;
-    for (const sibling of Array.isArray(job.steps) ? job.steps : []) {
+    for (const sibling of jobSteps.slice(0, jobSteps.indexOf(step))) {
       if (typeof sibling?.uses === 'string') {
         return unreadable(
           `a step of job '${producerJob}' runs the action ` +
@@ -929,6 +971,20 @@ function laneTestPlan(file, text) {
     // and no vouched shape does — a continuation merges two lines, so
     // neither line alone is what bash parses (R6-1 f).
     const run = step.run;
+    // A `${{ }}` anywhere in the body means what follows is not the text
+    // bash parses: GitHub substitutes the expression into the script first.
+    // Both the assembly scan and the residual allowlist read the FILE, so
+    // neither can vouch what actually runs (R6-1). Scoped to the body and
+    // never to env values — ci.yml keeps all five of pick_runner's
+    // expressions in step `env:`, where substitution is the whole point.
+    if (run.includes('${{')) {
+      return unreadable(
+        `step '${stepId}' of job '${producerJob}' carries a \${{ }} ` +
+          `expression in its body — GitHub substitutes it into the script ` +
+          `before bash parses it, so the text this guard read is not the ` +
+          `text that runs.`,
+      );
+    }
     const lines = run.split('\n');
     const acceptedPublish = new RegExp(
       `^\\s*echo\\s+"${outName}=\\$\\{?${outName}\\}?"\\s*>>\\s*"?\\$\\{?GITHUB_OUTPUT\\}?"?\\s*$`,
@@ -983,6 +1039,70 @@ function laneTestPlan(file, text) {
           `default) — a scannable literal beside it cannot vouch for what ` +
           `actually reached the output.`,
       );
+    }
+    // Hop 4 — execute the body and read what it actually published. The
+    // allowlist above judges the file's TEXT, but bash removes quotes before
+    // the value reaches $GITHUB_OUTPUT, so the text can vouch a value the
+    // step never publishes (R6-1). The two vouches are complementary, not
+    // alternatives: execution cannot see a line that delegates to code this
+    // file cannot read (`source ./evil.sh` is simply absent here), which is
+    // what the allowlist refuses, and the allowlist cannot see what bash
+    // makes of the text it did vouch, which is what execution refuses.
+    //
+    // The consumed name is seeded with a value no runner carries; if that
+    // comes back out, the body published what it INHERITED rather than what
+    // it assigned — how a dead-branch body lets an earlier $GITHUB_ENV plant
+    // reach runs-on.
+    const scannedLiterals = new Set(assemblies.map((a) => a.raw));
+    const published = new Set();
+    for (const env of routingEnvironments()) {
+      const result = runStepBody(run, {
+        ...env,
+        [outName]: POISONED_RUNNER_SET,
+      });
+      if (result.status !== 0) {
+        return unreadable(
+          `step '${stepId}' of job '${producerJob}' exits ` +
+            `${result.status} when executed (` +
+            `${result.stderr.split('\n')[0] || 'no stderr'}) — a body that ` +
+            `does not run publishes nothing this guard can vouch for.`,
+        );
+      }
+      const value = result.outputs.get(outName);
+      if (value === POISONED_RUNNER_SET) {
+        return unreadable(
+          `step '${stepId}' of job '${producerJob}' publishes ` +
+            `'${outName}' from its environment instead of assigning it — ` +
+            `an earlier write, not this body, chooses what reaches runs-on.`,
+        );
+      }
+      if (value === undefined) {
+        return unreadable(
+          `step '${stepId}' of job '${producerJob}' publishes no ` +
+            `'${outName}' to $GITHUB_OUTPUT when executed — every consumer ` +
+            `silently takes its hosted fallback.`,
+        );
+      }
+      published.add(value);
+    }
+    // A published value the assembly scan already read is judged through the
+    // assemblies returned below; only a value bash delivered that the file
+    // text does not show — quote removal, concatenation — is judged here, so
+    // nothing is booked twice and nothing is skipped.
+    for (const value of published) {
+      if (scannedLiterals.has(value)) {
+        continue;
+      }
+      const { tokens, parseOk } = bracketTokens(value);
+      if (!parseOk) {
+        return unreadable(
+          `step '${stepId}' of job '${producerJob}' published '${value}', ` +
+            `which is not a flat JSON array of labels — bash delivered ` +
+            `something fromJSON cannot turn into a runner set, whatever the ` +
+            `file text reads as.`,
+        );
+      }
+      checkSet(tokens, `${origin} → executed publish ${value}`);
     }
     return assemblies;
   }
@@ -1305,8 +1425,13 @@ describe('laneTestPlan fail-closed behavior', () => {
     assert.deepEqual(plan.lanes, ['ecs-qwen']);
   });
 
-  it('reads a double-quoted producer assignment the same way', () => {
-    const plan = laneTestPlan(
+  // (iv) The scan judges a double-quoted assignment as its pre-shell JSON
+  // text, but bash quote removal delivers `[self-hosted, linux, x64,
+  // ecs-qwen]` — one string fromJSON rejects, so the consumer's fromJSON
+  // throws and the job never routes. The executed vouch reads what bash
+  // delivered instead of what the file reads as.
+  it('refuses a double-quoted producer assignment bash delivers unquoted', () => {
+    const { problems } = laneTestPlan(
       'probe.yml',
       wrap(
         consumer,
@@ -1316,8 +1441,9 @@ describe('laneTestPlan fail-closed behavior', () => {
         ]),
       ),
     );
-    assert.deepEqual(plan.problems, []);
-    assert.deepEqual(plan.lanes, ['ecs-qwen']);
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+    assert.match(blob(problems[0]), /not a flat JSON array/);
   });
 
   it('fails closed on the consumer shape with no checkable producer', () => {
@@ -1337,8 +1463,11 @@ describe('laneTestPlan fail-closed behavior', () => {
         ]),
       ),
     );
-    assert.equal(problems.length, 1);
-    assert.match(blob(problems[0]), /not a registered lane/);
+    // The executed vouch refuses the spelling bash cannot deliver as JSON,
+    // and the job-wide assembly accounting still names the invented lane.
+    assert.equal(problems.length, 2);
+    assert.match(blob(problems[0]), /not a flat JSON array/);
+    assert.match(blob(problems[1]), /not a registered lane/);
   });
 
   // R7 pins. The consumer vouch is BY NAME: an assembly under a different
@@ -2090,6 +2219,165 @@ describe('laneTestPlan fail-closed behavior', () => {
     );
     assert.deepEqual(problems, []);
     assert.deepEqual(lanes, ['ecs-qwen']);
+  });
+
+  // R6-1's entrances, one pin per entrance. Every one of these vouched green
+  // at the commit that closed round 13's four seams, and each reds again when
+  // its own clause is removed.
+  const duplicateIdProducer = (secondLiteral) =>
+    `    outputs:\n      ubuntu_runner: '\${{ steps.pick_runner.outputs.ubuntu_runner }}'\n` +
+    `    steps:\n      - id: 'pick_runner'\n        run: |-\n` +
+    `          ${literal}\n          ${publish}\n` +
+    `      - id: 'pick_runner'\n        run: |-\n` +
+    `          ${secondLiteral}\n          ${publish}\n`;
+
+  // (i) An expression interpolated into the body. GitHub substitutes it
+  // before bash parses, so a pull-request title can close the quote and
+  // assign the consumed name itself — while the file text the allowlist read
+  // shows an ordinary `if`.
+  it('fails closed on an expression interpolated into the producer body', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        producerStep([
+          `if [[ '\${{ github.event.pull_request.title }}' == 'a' ]]; then`,
+          `  ${literal}`,
+          'fi',
+          publish,
+        ]),
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+    assert.match(blob(problems[0]), /substitutes it into the script/);
+  });
+
+  // (ii) A body whose only assignment sits in a branch the matrix never takes
+  // publishes whatever its environment held. That is the channel a sibling's
+  // $GITHUB_ENV plant reaches runs-on through, and it needs no sibling to
+  // demonstrate: the poisoned seed is what comes back out.
+  it('fails closed when the producer publishes an inherited value', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    outputs:\n      ubuntu_runner: '\${{ steps.pick_runner.outputs.ubuntu_runner }}'\n` +
+          `    steps:\n      - id: 'pick_runner'\n        run: |-\n` +
+          `          if [[ "\${EVENT_NAME}" == "never" ]]; then\n` +
+          `            ${literal}\n` +
+          `          fi\n` +
+          `          ${publish}\n`,
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+    assert.match(blob(problems[0]), /from its environment/);
+  });
+
+  // (iii) A `${{ }}` riding an assembly line's trailing comment. The assembly
+  // scan tolerates the comment and the residual filter drops the line before
+  // the allowlist ever sees it, so this vouched green — and the trigger is
+  // idiomatic rather than adversarial.
+  it('fails closed on an expression riding an assembly line comment', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        producerStep([`${literal} # \${{ github.event.issue.body }}`, publish]),
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+    assert.match(blob(problems[0]), /substitutes it into the script/);
+  });
+
+  // (v) Two steps sharing the producer id. `.find()` reads the first and
+  // calls it the producer; which one GitHub resolves is not this guard's to
+  // assume. The second step carries a REGISTERED lane so the pin isolates the
+  // duplicate — an invented one would add a second problem from the job-wide
+  // assembly accounting and measure nothing about the id.
+  it('fails closed when two steps share the producer id', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        duplicateIdProducer(
+          `ubuntu_runner='["self-hosted", "linux", "x64", "ecs-light"]'`,
+        ),
+      ),
+    );
+    assert.equal(problems.length, 1);
+    assert.match(blob(problems[0]), /unreadable/);
+    assert.match(blob(problems[0]), /2 steps with id/);
+  });
+
+  // The Required check this round opened with. ci.yml's classify_pr checks the
+  // trusted CI classifier out AFTER pick_runner has published, and a job runs
+  // its steps in order, so a later step cannot plant this one's environment.
+  // Refusing it reddened the repo's own main CI lane over a step that cannot
+  // influence the value.
+  it('vouches a producer whose opaque action step runs after it', () => {
+    const { problems } = laneTestPlan(
+      'probe.yml',
+      wrap(
+        consumer,
+        `    outputs:\n      ubuntu_runner: '\${{ steps.pick_runner.outputs.ubuntu_runner }}'\n` +
+          `    steps:\n      - id: 'pick_runner'\n        run: |-\n` +
+          `          ${literal}\n          ${publish}\n` +
+          `      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'\n`,
+      ),
+    );
+    assert.deepEqual(problems, []);
+  });
+
+  // Hop 4's own refusals. Each fixture passes the whole static chain above —
+  // the allowlist vouches every residual line — so only executing the body
+  // can see that it does not deliver a readable value.
+  const executedRefusals = [
+    [
+      'exits non-zero when executed',
+      [literal, publish, `if [[ "\${EVENT_NAME}" == "never" ]]; then`],
+      /when executed/,
+    ],
+    [
+      'never reaches its publish',
+      [
+        `if [[ "\${EVENT_NAME}" == "never" ]]; then`,
+        `  ${literal}`,
+        `  ${publish}`,
+        'fi',
+      ],
+      /publishes no/,
+    ],
+  ];
+  for (const [name, body, refusal] of executedRefusals) {
+    it(`fails closed when the executed producer ${name}`, () => {
+      const { problems } = laneTestPlan(
+        'probe.yml',
+        wrap(consumer, producerStep(body)),
+      );
+      assert.equal(problems.length, 1);
+      assert.match(blob(problems[0]), /unreadable/);
+      assert.match(blob(problems[0]), refusal);
+    });
+  }
+
+  // The scanner-level filter. An assembly line carrying an expression is not
+  // read at all: bash assigns the SUBSTITUTED text, so the file's literal is
+  // not the value. Dropping it books no lane, where judging it would count a
+  // lane as referenced on text that never runs. The producer path refuses a
+  // `${{ }}` body outright; this is the only bar that reaches the job-wide
+  // assembly accounting for a body no runs-on consumes.
+  it('does not book a lane from an assembly line carrying an expression', () => {
+    const { problems, lanes } = laneTestPlan(
+      'probe.yml',
+      `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n` +
+        `      - run: |-\n` +
+        `          gpu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]' # \${{ github.sha }}\n`,
+    );
+    assert.deepEqual(problems, []);
+    assert.deepEqual(lanes, []);
   });
 
   it('the main loop actually registered enforcement tests', () => {

@@ -15,13 +15,16 @@
 // stays hosted, and only the merge queue, schedule and dispatch reach the
 // persistent pool.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import {
+  ASSOCIATIONS,
+  TRUSTED_ASSOCIATIONS as TRUSTED,
+  runStepBody,
+} from './ci/runner-selection-harness.mjs';
 
 const workflowsDir = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -33,7 +36,6 @@ const serveAbDoc = parse(
   readFileSync(join(workflowsDir, 'serve-ab.yml'), 'utf8'),
 );
 
-const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
 const ECS = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const HOSTED = '["ubuntu-latest"]';
 const WIN_ECS = ['self-hosted', 'Windows', 'X64', 'ecs-win'];
@@ -107,38 +109,24 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
 }
 
 // Executes the real pick_runner shell with the same inputs and returns the
-// selected runner exactly as CI would publish it.
+// runner set it published to $GITHUB_OUTPUT — the hop the consumers actually
+// read, not the stdout line the step happens to echo as well.
 function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
-  const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
-  const outputFile = join(tmp, 'github_output');
-  const result = spawnSync('bash', ['-c', pickRunner.run], {
-    env: {
-      SAME_REPO: sameRepo ? 'true' : 'false',
-      AUTHOR_ASSOCIATION: assoc,
-      ECS_DISABLED: ecsDisabled ? 'true' : '',
-      EVENT_NAME: eventName,
-      DISPATCH_LINUX_RUNNER: dispatch ?? '',
-      GITHUB_OUTPUT: outputFile,
-    },
-    encoding: 'utf8',
+  const result = runStepBody(pickRunner.run, {
+    SAME_REPO: sameRepo ? 'true' : 'false',
+    AUTHOR_ASSOCIATION: assoc,
+    ECS_DISABLED: ecsDisabled ? 'true' : '',
+    EVENT_NAME: eventName,
+    DISPATCH_LINUX_RUNNER: dispatch ?? '',
   });
-  rmSync(tmp, { recursive: true, force: true });
   assert.equal(result.status, 0, `pick_runner failed: ${result.stderr}`);
-  const line = result.stdout
-    .split('\n')
-    .find((l) => l.startsWith('Selected Linux runner: '));
-  assert.ok(line, `no selection in pick_runner output: ${result.stdout}`);
-  return line.slice('Selected Linux runner: '.length);
+  const published = result.outputs.get('ubuntu_runner');
+  assert.ok(
+    published !== undefined,
+    `pick_runner published no ubuntu_runner to $GITHUB_OUTPUT`,
+  );
+  return published;
 }
-
-const ASSOCIATIONS = [
-  ...TRUSTED,
-  'CONTRIBUTOR',
-  'FIRST_TIME_CONTRIBUTOR',
-  'FIRST_TIMER',
-  'NONE',
-  '',
-];
 
 describe('ci.yml classify_pr runner routing', () => {
   it('the expression and the shell step agree on every association', () => {
