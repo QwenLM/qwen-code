@@ -347,7 +347,13 @@ describe('buildSessionTasksStatus workflow graph', () => {
       'session-1',
       configWith([]),
       2_000,
-      [workflowSnapshot()],
+      [
+        workflowSnapshot({
+          meta: null,
+          workflowName: 'review-and-fix',
+          description: 'wf_saved',
+        }),
+      ],
       { includeWorkflows: true },
     );
 

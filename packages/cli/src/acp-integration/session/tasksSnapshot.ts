@@ -182,7 +182,11 @@ function serializeWorkflowSnapshot(
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
     ...optionalField('startMode', snapshot.startMode),
-    label: snapshot.meta?.name ?? snapshot.description ?? snapshot.runId,
+    label:
+      snapshot.meta?.name ??
+      snapshot.workflowName ??
+      snapshot.description ??
+      snapshot.runId,
     description:
       snapshot.meta?.description ?? snapshot.description ?? snapshot.runId,
     status: snapshot.status,
