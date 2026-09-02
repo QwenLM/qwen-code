@@ -270,6 +270,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'agents', key: 'crossSessionMessaging' },
   { section: 'agents', key: 'crossSessionInbound' },
+  { section: 'goals', key: 'modelProposed' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
