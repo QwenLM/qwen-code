@@ -417,6 +417,50 @@ describe('the move out of the mounted directory', () => {
   });
 });
 
+describe('a pre-move lease another session is still holding', () => {
+  it('is read by the gate and left in place by acquisition', () => {
+    // The move changed where the gate READS with no fallback for the population
+    // already on disk, so for the length of a rollout an older build's live lock
+    // was invisible: `reviewLeaseHeldByAnotherSession(null)` answers false, the
+    // newer run proceeds, its acquisition deletes the lock, and `cleanStale`
+    // force-removes the older session's worktree and deletes its branch mid-run.
+    // That is #9205 — the incident this lease exists to prevent — with the older
+    // session's rollback then clearing nothing, so the destruction goes
+    // unannounced. Unread is not inert when the file IS another session's lock.
+    const root = createRepository();
+    const legacy = join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json');
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      legacy,
+      `${JSON.stringify({
+        sessionId: 'older-build-session',
+        promptId: 'older-prompt',
+        target: 'pr-1',
+        repositoryRoot: root,
+        worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+        branch: 'qwen-review/pr-1',
+      })}\n`,
+    );
+
+    const read = readReviewWorktreeLease(root, 'pr-1');
+    expect(read?.sessionId).toBe('older-build-session');
+    expect(reviewLeaseHeldByAnotherSession(read)).toBe(true);
+    // Acquisition refuses rather than leaving two leases for one target, which
+    // is what deleting this one and writing a new one would have done.
+    expect(() =>
+      createReviewWorktreeLease({
+        sessionId: 'newer-build-session',
+        promptId: 'newer-prompt',
+        target: 'pr-1',
+        repositoryRoot: root,
+        worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+        branch: 'qwen-review/pr-1',
+      }),
+    ).toThrow(/held by another/);
+    expect(existsSync(legacy)).toBe(true);
+  });
+});
+
 describe('readReviewWorktreeLease', () => {
   it('returns the lease createReviewWorktreeLease wrote', () => {
     const root = createRepository();

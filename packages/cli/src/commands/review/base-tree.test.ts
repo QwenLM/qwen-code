@@ -23,14 +23,13 @@ import {
   mkdirSync,
   rmSync,
   writeFileSync,
-  cpSync,
   existsSync,
-  readFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
+import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
 import type { BuildTestReport } from './build-test.js';
 
 const okBuild = {
@@ -106,23 +105,55 @@ describe('runBaseTree', () => {
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
   itWhereContainmentExists(
+    'does not REUSE a base tree whose tracked files were rewritten in the mount',
+    () => {
+      // `rev-parse HEAD` does not move when working files change, and this tree
+      // is a direct child of the directory the sandbox mounts read-write — so
+      // the reviewed PR's own build, which runs before the verifier shards get
+      // here, can overwrite the base checkout's tracked sources with a plain
+      // copy while every pointer and ref condition still passes. Reused, the
+      // A/B compares the PR against a copy of itself: a test the PR breaks
+      // fails identically on both sides, `test-delta` files the regression as
+      // pre-existing, and a real finding against the PR is suppressed.
+      const tree = baseWorktreePath(worktree);
+      const firstBuilds: string[] = [];
+      expect(
+        run({}, (w) => {
+          firstBuilds.push(w);
+          return okBuild;
+        }).available,
+      ).toBe(true);
+      writeFileSync(join(tree, 'a.txt'), 'after\n');
+
+      // Untracked output is what the pipeline's own build leaves here, and it
+      // must not disable reuse: that reintroduces the concurrent-shard clobber
+      // the fast path exists to prevent.
+      mkdirSync(join(tree, 'dist'), { recursive: true });
+      writeFileSync(join(tree, 'dist', 'cli.js'), 'built');
+
+      const rebuilds: string[] = [];
+      const second = run({}, (w) => {
+        rebuilds.push(w);
+        return okBuild;
+      });
+      expect(rebuilds).toEqual([tree]);
+      expect(second.note).not.toContain('reusing it');
+    },
+  );
+
+  itWhereContainmentExists(
     'refuses to build through a rewritten review-worktree gitfile',
     () => {
       // `worktree add` resolves the repository through the REVIEW worktree's own
       // gitfile, which lives in the directory the sandbox mounts read-write and
       // which the build/test phase already ran the PR's code against. It checks
       // files out, so it runs whatever that pointer leads to, on the host.
-      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-      const real = readFileSync(join(worktree, '.git'), 'utf8')
-        .trim()
-        .replace('gitdir: ', '');
-      cpSync(real, planted, { recursive: true });
-      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(
-        join(planted, 'gitdir'),
-        `gitdir: ${join(worktree, '.git')}\n`,
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(worktree),
+        worktree,
+        join(repo, '.git'),
       );
-      writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
 
       const r = run();
       expect(r.available).toBe(false);

@@ -25,6 +25,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -714,6 +715,53 @@ describe('runRevertHunk', () => {
     expect(r.harnessFailure).toBe(true);
     expect(r.note).toContain('no destination line');
     expect(readFileSync(join(dir, 'y'), 'utf8')).toBe(before); // decoy untouched
+  });
+
+  it('refuses a --tree that IS a symlink, and leaves its target untouched (R15-5)', () => {
+    // `resolve(args.tree)` is lexical, `gitTreeState` realpaths BOTH sides on
+    // purpose so a linked tree answers 'root', and `untrustedGitfile`'s
+    // existsSync/lstatSync pair dereferences every component except the last —
+    // so a link AT the path is invisible to all three while the `.git` they
+    // inspect is the TARGET's genuine gitfile, whose admin entry sits outside
+    // the mount and is admitted. `gitApply` then spawns with `cwd: tree` and
+    // reverse-applies into whichever tree the link names — in the pipeline, the
+    // shared review worktree other agents are reading, or the A/B's base side —
+    // while the report certifies the scratch path. None of the suite's other
+    // `runRevertHunk` call sites can reach this: their fixtures are outside any
+    // `.qwen/tmp`, so the location gate never speaks there.
+    const dir = tempDir('rh-tree-target-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'a.ts'), 'export const x = 2;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'head');
+    const diffPath = join(dir, 'p.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/a.ts b/a.ts',
+        'index 1111111..2222222 100644',
+        '--- a/a.ts',
+        '+++ b/a.ts',
+        '@@ -1 +1 @@',
+        '-export const x = 1;',
+        '+export const x = 2;',
+        '',
+      ].join('\n'),
+    );
+    const link = join(tempDir('rh-tree-link-'), 'scratch');
+    symlinkSync(dir, link);
+
+    const r = runRevertHunk({ diff: diffPath, tree: link, hunk: 'a.ts:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('is a symlink');
+    // The tree the link names is byte-identical, which is the part the report
+    // would otherwise have lied about.
+    expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toBe(
+      'export const x = 2;\n',
+    );
   });
 
   it('refuses a symlink type-change section — git apply -R restores content, not TYPE (R16-6)', () => {

@@ -26,7 +26,6 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -38,11 +37,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import {
-  sanitizedGitEnv,
-  untrustedGitfile,
-  untrustedRepositoryFrom,
-} from './lib/worktree.js';
+import { untrustedGitfile, untrustedRepositoryFrom } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -643,17 +638,11 @@ function cleanStale(prNumber: string): void {
     );
   }
   const ref = reviewBranch(prNumber);
-  if (refExists(ref)) {
-    tryRemove(() =>
-      execFileSync('git', ['branch', '-D', ref], {
-        stdio: 'pipe',
-        // Same reason as every other git spawn in this pipeline: a delete must
-        // land in the repository the caller named, not the one the shell's
-        // `GIT_DIR` points at.
-        env: sanitizedGitEnv(),
-      }),
-    );
-  }
+  // Through `lib/git`'s wrapper, not a direct spawn: `branch -D` finds its
+  // repository from `process.cwd()` and is a reference-transaction hook
+  // channel, so an ungated one runs whatever hooks a planted pointer
+  // configures. `gitOpt` never throws, which is what `tryRemove` was for.
+  if (refExists(ref)) gitOpt('branch', '-D', ref);
 }
 
 /** sha256 of a file's raw bytes, or null when it cannot be read. */
@@ -1046,16 +1035,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     } catch (err) {
-      // Roll back the fetched ref so the next run starts clean.
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      // Roll back the fetched ref so the next run starts clean — through the
+      // gated wrapper, for the reason `cleanStale` gives.
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
       );
@@ -1065,39 +1047,41 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
+    //
+    // Asked a SECOND time, immediately before the write. The hoisted gate at
+    // the top of this function is what keeps the fetch and the sweep from
+    // running through a poisoned pointer; this one narrows the window between
+    // that answer and the checkout `worktree add` performs, which is the step
+    // that executes a planted filter. Neither closes the TOCTOU window a
+    // same-user writer has — `scratch-tree` documents the same residual — and
+    // one spawn is a cheap price for making the window one function long
+    // instead of one command long.
+    //
+    // The pointer it judges is the LAUNCH directory's, not the new tree's:
+    // `git()` sets no cwd, so `worktree add` finds the repository from
+    // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
+    // removed whatever stood there, and a tree that does not exist has no
+    // pointer to distrust.
+    //
+    // OUTSIDE the try, because the catch below is a rollback. Thrown from
+    // inside, the refusal was caught by the path that deletes the fetched ref,
+    // and `branch -D` is a reference-transaction hook channel: the gate said
+    // "do not resolve through this pointer" and its own refusal immediately
+    // did, running the plant's hooks and then reporting the run as `Failed to
+    // create worktree at …` — indistinguishable from an infrastructure
+    // failure. Outside, it propagates to the lease rollback, which spawns no
+    // git at all, and reaches the user unmangled.
+    const freshUntrusted = untrustedRepositoryFrom(process.cwd());
+    if (freshUntrusted !== null) {
+      throw new Error(
+        `refusing to create a review worktree: ${freshUntrusted}`,
+      );
+    }
     try {
       mkdirSync(dirname(wt), { recursive: true });
-      // Asked a SECOND time, immediately before the write. The hoisted gate at
-      // the top of this function is what keeps the fetch and the sweep from
-      // running through a poisoned pointer; this one narrows the window
-      // between that answer and the checkout `worktree add` performs, which
-      // is the step that executes a planted filter. Neither closes the TOCTOU
-      // window a same-user writer has — `scratch-tree` documents the same
-      // residual — and one spawn is a cheap price for making the window one
-      // function long instead of one command long.
-      //
-      // The pointer it judges is the LAUNCH directory's, not the new tree's:
-      // `git()` sets no cwd, so `worktree add` finds the repository from
-      // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
-      // removed whatever stood there, and a tree that does not exist has no
-      // pointer to distrust.
-      const freshUntrusted = untrustedRepositoryFrom(process.cwd());
-      if (freshUntrusted !== null) {
-        throw new Error(
-          `refusing to create a review worktree: ${freshUntrusted}`,
-        );
-      }
       git('worktree', 'add', wt, ref);
     } catch (err) {
-      tryRemove(() =>
-        execFileSync('git', ['branch', '-D', ref], {
-          stdio: 'pipe',
-          // Same reason as every other git spawn in this pipeline: a delete must
-          // land in the repository the caller named, not the one the shell's
-          // `GIT_DIR` points at.
-          env: sanitizedGitEnv(),
-        }),
-      );
+      gitOpt('branch', '-D', ref);
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );

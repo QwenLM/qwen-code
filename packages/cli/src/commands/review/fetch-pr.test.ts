@@ -1173,7 +1173,7 @@ describe('fetch-pr report assembly', () => {
         producerMocks.git.mock.invocationCallOrder[0]!,
       );
       expect(leaseOrder).toBeLessThan(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
+        producerMocks.gitOpt.mock.invocationCallOrder[0]!,
       );
     });
 
@@ -1260,13 +1260,17 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to fetch PR #42 metadata',
       );
-      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
-        'git',
-        ['branch', '-D', 'qwen-review/pr-42'],
-        // Sanitized env: a delete must land in the repository the caller
-        // named, not the one an exported `GIT_DIR` points at.
-        expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+      // Through `lib/git`'s gated wrapper, not a direct `execFileSync`: the
+      // rollback runs from the launch directory, `branch -D` is a
+      // reference-transaction hook channel, and an ungated spawn there executes
+      // whatever hooks a planted pointer configures. The wrapper also carries
+      // the sanitized env and the timeout the direct spawn lacked.
+      expect(producerMocks.gitOpt).toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
       );
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
@@ -1277,11 +1281,34 @@ describe('fetch-pr report assembly', () => {
       // `branch -D` lets another session through the emptied gate while the
       // deletion is still pending. Compare the FIRST clear: the outer catch's
       // second clear fires after the branch leg anyway.
-      expect(
-        producerMocks.execFileSync.mock.invocationCallOrder[0]!,
-      ).toBeLessThan(
+      expect(producerMocks.gitOpt.mock.invocationCallOrder[0]!).toBeLessThan(
         vi.mocked(clearReviewWorktreeLeaseIfOwned).mock.invocationCallOrder[0]!,
       );
+    });
+
+    it('lets the step-4 launch-dir refusal propagate unwrapped, with no rollback', async () => {
+      // The second ask sits OUTSIDE the try whose catch rolls the fetched ref
+      // back. Thrown inside, the refusal was caught by that rollback, which
+      // deleted the ref through the very pointer the refusal had just declared
+      // untrusted — `branch -D` is a reference-transaction hook channel — and
+      // then re-wrapped the refusal as `Failed to create worktree at …`,
+      // indistinguishable from an infrastructure failure. Outside, it reaches
+      // the lease rollback, which spawns no git at all, and the user unmangled.
+      producerMocks.untrustedRepositoryFrom
+        .mockReturnValueOnce(null) // the hoisted gate at the top of the run
+        .mockReturnValueOnce(
+          '/repo/.qwen/tmp/review-pr-42 resolves to an admin entry inside the review temp dir',
+        );
+
+      await expect(reportFor({})).rejects.toThrow(
+        /^refusing to create a review worktree: /,
+      );
+      expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+        'branch',
+        '-D',
+        'qwen-review/pr-42',
+      );
+      expect(vi.mocked(clearReviewWorktreeLeaseIfOwned)).toHaveBeenCalled();
     });
 
     it('clears the lease when the worktree add fails', async () => {
@@ -2218,10 +2245,10 @@ describe('fetch-pr report assembly', () => {
       .spyOn(mod, 'gitProbe')
       .mockImplementation((...args: string[]) =>
         args[0] === 'merge-base'
-          ? { out: null, status: 128 }
+          ? { out: null, status: 128, refusal: null }
           : args[0] === 'rev-parse'
-            ? { out: ANCHOR, status: 0 }
-            : { out: '', status: 0 },
+            ? { out: ANCHOR, status: 0, refusal: null }
+            : { out: '', status: 0, refusal: null },
       );
     try {
       const report = await reportFor({ since: ANCHOR });
@@ -2308,10 +2335,13 @@ describe('fetch-pr report assembly', () => {
         .spyOn(mod, 'gitProbe')
         .mockImplementation((...args: string[]) =>
           args[0] === probe
-            ? (answer as { out: string | null; status: number })
+            ? {
+                ...(answer as { out: string | null; status: number }),
+                refusal: null,
+              }
             : args[0] === 'rev-parse'
-              ? { out: ANCHOR, status: 0 }
-              : { out: '', status: 0 },
+              ? { out: ANCHOR, status: 0, refusal: null }
+              : { out: '', status: 0, refusal: null },
         );
       try {
         const report = await reportFor({ since: ANCHOR });

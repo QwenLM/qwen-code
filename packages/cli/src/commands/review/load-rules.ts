@@ -25,15 +25,11 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { gitOpt } from './lib/git.js';
+import { gitProbe } from './lib/git.js';
 
 interface LoadRulesArgs {
   base_ref: string;
   out: string;
-}
-
-function showFile(baseRef: string, path: string): string | null {
-  return gitOpt('show', `${baseRef}:${path}`);
 }
 
 export function extractCodeReviewSection(content: string): string | null {
@@ -56,15 +52,31 @@ export function extractCodeReviewSection(content: string): string | null {
   return lines.slice(start, end).join('\n').trim();
 }
 
-function loadCombined(baseRef: string): {
+export function loadCombined(baseRef: string): {
   combined: string;
   loaded: string[];
+  unread: string[];
 } {
   const sections: string[] = [];
   const loaded: string[] = [];
+  // A source git could not be ASKED about is not an absent source. `status ===
+  // null` is `gitProbe`'s "the command could not be run at all" — a launch
+  // directory this process must not resolve through, a spawn failure, a timeout
+  // — while git answers a path absent at the ref with 128. Collapsing the two
+  // wrote an empty rules file and printed "No review rules found", which
+  // `agent-prompt --roster` stapled into every agent brief: the whole fan-out
+  // ran with none of the project's `## Code Review` rules and nothing in the
+  // run said why. `comment-status` gives its own untrusted-worktree degradation
+  // a distinct warning for exactly this reason.
+  const unread: string[] = [];
+  const showFile = (path: string): string | null => {
+    const { out, status } = gitProbe('show', `${baseRef}:${path}`);
+    if (status === null) unread.push(path);
+    return out;
+  };
 
   // 1. Qwen-native rules.
-  const qwenRules = showFile(baseRef, '.qwen/review-rules.md');
+  const qwenRules = showFile('.qwen/review-rules.md');
   if (qwenRules) {
     sections.push(`### From .qwen/review-rules.md\n\n${qwenRules.trim()}`);
     loaded.push('.qwen/review-rules.md');
@@ -73,14 +85,14 @@ function loadCombined(baseRef: string): {
   // 2. Copilot-compatible rules: prefer .github/copilot-instructions.md;
   //    only fall back to root-level copilot-instructions.md if the
   //    preferred one doesn't exist on the base branch.
-  const copilotPreferred = showFile(baseRef, '.github/copilot-instructions.md');
+  const copilotPreferred = showFile('.github/copilot-instructions.md');
   if (copilotPreferred) {
     sections.push(
       `### From .github/copilot-instructions.md\n\n${copilotPreferred.trim()}`,
     );
     loaded.push('.github/copilot-instructions.md');
   } else {
-    const copilotFallback = showFile(baseRef, 'copilot-instructions.md');
+    const copilotFallback = showFile('copilot-instructions.md');
     if (copilotFallback) {
       sections.push(
         `### From copilot-instructions.md\n\n${copilotFallback.trim()}`,
@@ -90,7 +102,7 @@ function loadCombined(baseRef: string): {
   }
 
   // 3. AGENTS.md — extract Code Review section only.
-  const agentsMd = showFile(baseRef, 'AGENTS.md');
+  const agentsMd = showFile('AGENTS.md');
   if (agentsMd) {
     const section = extractCodeReviewSection(agentsMd);
     if (section) {
@@ -100,7 +112,7 @@ function loadCombined(baseRef: string): {
   }
 
   // 4. QWEN.md — extract Code Review section only.
-  const qwenMd = showFile(baseRef, 'QWEN.md');
+  const qwenMd = showFile('QWEN.md');
   if (qwenMd) {
     const section = extractCodeReviewSection(qwenMd);
     if (section) {
@@ -112,19 +124,30 @@ function loadCombined(baseRef: string): {
   return {
     combined: sections.join('\n\n---\n\n'),
     loaded,
+    unread,
   };
 }
 
 async function runLoadRules(args: LoadRulesArgs): Promise<void> {
   const { base_ref: baseRef, out } = args;
-  const { combined, loaded } = loadCombined(baseRef);
+  const { combined, loaded, unread } = loadCombined(baseRef);
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, combined, 'utf8');
 
+  if (unread.length > 0) {
+    writeStdoutLine(
+      `warning: could not read ${unread.length} rule source(s) from ${baseRef} — ` +
+        `${unread.join(', ')}. ${out} is INCOMPLETE rather than empty by ` +
+        `choice, so every agent brief built from it is missing them. Run the ` +
+        `review from a checkout outside the review temp dir.`,
+    );
+  }
   if (loaded.length === 0) {
     writeStdoutLine(
-      `No review rules found on ${baseRef}; wrote empty file to ${out}`,
+      unread.length === 0
+        ? `No review rules found on ${baseRef}; wrote empty file to ${out}`
+        : `No review rules could be read on ${baseRef}; wrote an incomplete file to ${out}`,
     );
   } else {
     writeStdoutLine(

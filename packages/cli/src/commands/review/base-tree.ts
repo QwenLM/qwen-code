@@ -194,7 +194,24 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // gate before `worktree add` checks. Same shape as `scratch-tree`'s
       // reuse path, for the same reason.
       untrustedGitfile(tree) === null &&
-      gitOut(tree, 'rev-parse', 'HEAD') === baseSha
+      gitOut(tree, 'rev-parse', 'HEAD') === baseSha &&
+      // ...and its CONTENTS must still be the base's. `rev-parse HEAD` does not
+      // move when working files change, and this tree is a direct child of the
+      // directory the sandbox mounts read-write — which is why the pointer gate
+      // above speaks at all. So the reviewed PR's own build, which runs before
+      // the verifier shards get here, can overwrite the base checkout's tracked
+      // sources with a plain copy: every condition above still passes, and the
+      // A/B then compares the PR against a copy of itself. A test the PR breaks
+      // fails identically on both sides, `test-delta` classifies the regression
+      // as pre-existing, and a real finding against the PR is suppressed.
+      //
+      // `--untracked-files=no`: the pipeline's own build leaves `node_modules/`
+      // and `dist/` here, so an untracked-inclusive check would call every
+      // correctly-built tree dirty and disable reuse outright — reintroducing
+      // the concurrent-shard clobber this fast path exists to prevent. Tracked
+      // dirt is what a rewrite leaves, and `npm run build` in this repository
+      // modifies no tracked file, so a legitimate build still reuses.
+      gitOut(tree, 'status', '--porcelain', '--untracked-files=no') === ''
     ) {
       return {
         available: true,

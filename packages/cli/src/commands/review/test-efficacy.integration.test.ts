@@ -15,7 +15,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
-  appendFileSync,
   cpSync,
   mkdirSync,
   writeFileSync,
@@ -36,8 +35,11 @@ import {
   testEfficacyCommand,
 } from './test-efficacy.js';
 import {
+  adminEntryOf,
   isolateHostGitConfig,
   isolateOperatorReviewSettings,
+  plantAdminEntry,
+  plantRepository,
 } from './lib/test-utils.js';
 
 type Handler = (args: {
@@ -332,14 +334,12 @@ describe('the review worktree is the first pointer a probe run trusts', () => {
       // HEAD` with the real sha, so every read before the write agrees and the
       // run reaches the checkout. An empty directory would fail earlier for a
       // reason that has nothing to do with the gate.
-      const realEntry = readFileSync(join(wt, '.git'), 'utf8')
-        .trim()
-        .replace('gitdir: ', '');
-      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-      cpSync(realEntry, planted, { recursive: true });
-      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `${join(wt, '.git')}\n`);
-      writeFileSync(join(wt, '.git'), `gitdir: ${planted}\n`);
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(wt),
+        wt,
+        join(repo, '.git'),
+      );
       // Coherence check, so a fixture that breaks silently fails HERE and not as
       // a green assertion below.
       expect(git(wt, 'rev-parse', 'HEAD').trim()).toBe(
@@ -391,21 +391,16 @@ describe('the revert phase is reached after the gates refuse', () => {
       // checkout ran through this pointer — rather than the refusal message,
       // which reads the same whichever side of the write the gate fires on.
       const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-      const fakeCommon = join(repo, '.qwen', 'tmp', '.evil-common');
       const canary = join(repo, 'PWNED');
-      cpSync(join(repo, '.git'), fakeCommon, { recursive: true });
-      rmSync(join(fakeCommon, 'worktrees'), { recursive: true, force: true });
-      appendFileSync(
-        join(fakeCommon, 'config'),
-        `\n[filter "evil"]\n\tsmudge = sh -c "echo PWNED > ${canary}; cat"\n`,
+      const fakeCommon = plantRepository(
+        join(repo, '.qwen', 'tmp', '.evil-common'),
+        join(repo, '.git'),
+        canary,
+        'smudge',
       );
-      mkdirSync(join(fakeCommon, 'info'), { recursive: true });
-      writeFileSync(join(fakeCommon, 'info', 'attributes'), '* filter=evil\n');
-      cpSync(
-        readFileSync(join(wt, '.git'), 'utf8').trim().replace('gitdir: ', ''),
-        planted,
-        { recursive: true },
-      );
+      // Staged but not pointed at yet: the runner script below rewrites
+      // `<wt>/.git` itself, the first time it is asked to run anything.
+      cpSync(adminEntryOf(wt), planted, { recursive: true });
       writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
       writeFileSync(join(planted, 'gitdir'), `${join(wt, '.git')}\n`);
       writeFileSync(

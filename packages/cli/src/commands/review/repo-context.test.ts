@@ -6,7 +6,6 @@
 
 import {
   chmodSync,
-  cpSync,
   linkSync,
   readdirSync,
   mkdirSync,
@@ -34,7 +33,7 @@ import {
   runRepoContext,
 } from './repo-context.js';
 import { stringifyPlanReport } from './lib/report.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import { isolateHostGitConfig, plantAdminEntry } from './lib/test-utils.js';
 import {
   appendRunSession,
   priorSessionIds,
@@ -781,16 +780,12 @@ describe('repo-context providers and trust boundary', () => {
       // The plant: an admin entry copied beside the tree, inside the same
       // temp dir, with git's own BARE backpointer so the round-trip gates
       // this command inherits all agree with it.
-      const realEntry = join(repository, '.git', 'worktrees', 'review-pr-1');
-      const planted = join(repository, '.qwen', 'tmp', '.evil-git');
-      cpSync(realEntry, planted, { recursive: true });
-      writeFileSync(
-        join(planted, 'commondir'),
-        `${join(repository, '.git')}\n`,
+      plantAdminEntry(
+        join(repository, '.qwen', 'tmp', '.evil-git'),
+        join(repository, '.git', 'worktrees', 'review-pr-1'),
+        worktree,
+        join(repository, '.git'),
       );
-      writeFileSync(join(planted, 'gitdir'), `${join(worktree, '.git')}\n`);
-      rmSync(join(worktree, '.git'), { force: true });
-      writeFileSync(join(worktree, '.git'), `gitdir: ${planted}\n`);
 
       expect(() =>
         run(root, worktree, {

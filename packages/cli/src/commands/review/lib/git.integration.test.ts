@@ -362,6 +362,7 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
         expect(gitProbe('-C', repo, 'rev-parse', 'HEAD')).toEqual({
           out: null,
           status: null,
+          refusal: null,
         });
       } finally {
         process.env['PATH'] = savedPath;

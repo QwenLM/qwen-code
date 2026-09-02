@@ -368,14 +368,10 @@ export function captureLocalDiff(opts: {
   includeUntracked?: boolean;
 }): LocalDiffCapture {
   const { file, includeUntracked = true } = opts;
-  // The launch directory this resolves from is judged by `lib/git`'s wrappers
-  // (see `assertTrustedLaunchDir`), so the `rev-parse` below refuses before it
-  // can answer through a rewritten pointer — which matters here because
-  // `git diff` is not a safe read through a planted repository: it refreshes
-  // the index (running any configured clean filter) and honours
-  // `diff.<driver>.command`. No second gate at this call site: a duplicate
-  // whose only contribution is a nicer message is one more thing to keep in
-  // step with the real one.
+  // The launch directory is judged by `lib/git`'s wrappers, so the `rev-parse`
+  // below refuses before `git diff` can refresh the index through a planted
+  // pointer. No second gate here: a duplicate whose only contribution is a
+  // nicer message is one more thing to keep in step with the real one.
   //
   // Everything below runs against the repo *root*, not the process's cwd. A
   // capture started from a subdirectory must still see the whole working tree —

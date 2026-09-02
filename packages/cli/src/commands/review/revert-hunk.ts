@@ -790,6 +790,52 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   }
 
   const tree = resolve(args.tree);
+  // ...and `--tree` must still BE the tree every check below judges. `resolve`
+  // is lexical, `gitTreeState` realpaths BOTH sides on purpose, and
+  // `untrustedGitfile`'s `existsSync`/`lstatSync(join(tree,'.git'))` pair
+  // dereferences every component except the last — so a link AT the scratch
+  // path is invisible to all three, and the `.git` they inspect is the TARGET's
+  // genuine gitfile, whose admin entry sits outside the mount and is admitted.
+  // `gitApply` then spawns with `cwd: tree` and reverse-applies into whichever
+  // tree the link names: the shared worktree other agents are reading, or the
+  // A/B's base side. `resetScratchTree` refuses this leaf for the same reason,
+  // and re-reads it immediately before its own mutation because a link swapped
+  // in during a gate that is many spawns long aims the write at whatever it
+  // names.
+  //
+  // The LEAF only. `resetScratchTree` also walks the ancestors, bounded at the
+  // repository its common dir belongs to — above that is the user's own layout,
+  // and `/var` is a symlink on every macOS box. This command has no common dir
+  // to bound at: `--tree` is whatever the caller passed, so an unbounded walk
+  // would refuse every tree under a linked `/tmp` and a guessed bound would
+  // under-cover. The paths that CREATE and SWEEP these trees already refuse an
+  // ancestor redirect (`mountRootFor`, `releaseWorktree`, `runCleanup`).
+  const treeRedirected = (): string | null => {
+    try {
+      if (lstatSync(tree).isSymbolicLink()) {
+        return `${JSON.stringify(args.tree)} is a symlink`;
+      }
+    } catch {
+      // Unreadable: the apply path's own spawn-error classification answers it.
+    }
+    return null;
+  };
+  const redirectReport = (swapped?: true): RevertHunkReport | null => {
+    const redirected = treeRedirected();
+    if (redirected === null) return null;
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `--tree ${redirected}, so the apply would reverse into whichever tree it points at while the report certified ${JSON.stringify(args.tree)}${
+        swapped
+          ? ' — no link was there when the gates above ran, and the write is what it would aim'
+          : ''
+      }. Reset the scratch tree (\`qwen review scratch-tree\`) and retry; nothing was changed.`,
+    };
+  };
+  const redirectedTree = redirectReport();
+  if (redirectedTree !== null) return redirectedTree;
   // git apply needs no repository, so a --tree that is a plain (non-repo)
   // directory would either fabricate a coupling fact on a content mismatch or
   // silently mutate the wrong directory on a match — and a bare clone or a
@@ -1041,6 +1087,11 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       }
     };
     const before = snapshot();
+    // Re-read the leaf immediately before the write, the second half of the
+    // shape `resetScratchTree` refuses twice: the gate above is many spawns
+    // long, and this is the call that mutates a tree.
+    const swapped = redirectReport(true);
+    if (swapped !== null) return swapped;
     const apply = exec(tree, [
       ...gitEol,
       'apply',

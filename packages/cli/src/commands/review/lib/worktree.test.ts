@@ -31,7 +31,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { isolateHostGitConfig } from './test-utils.js';
+import {
+  adminEntryOf,
+  isolateHostGitConfig,
+  plantAdminEntry,
+} from './test-utils.js';
 import {
   adminEntryInsideReviewTmp,
   untrustedGitfile,
@@ -1960,14 +1964,12 @@ describe('untrustedGitfile', () => {
       // planted one inside it. The gate asks git now, so the spelling stops
       // mattering: whatever git answers is what gets located.
       const { repo, tree, mount } = pipelineTree();
-      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-      const real = readFileSync(join(tree, '.git'), 'utf8')
-        .trim()
-        .replace('gitdir: ', '');
-      cpSync(real, planted, { recursive: true });
-      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
-      writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(tree),
+        tree,
+        join(repo, '.git'),
+      );
       expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
     },
   );
@@ -2020,17 +2022,15 @@ describe('untrustedGitfile', () => {
       // that name minus the character, symlinked outside the mount, is what
       // the judgment then lands on. Only the terminator may be stripped.
       const { repo, tree, mount } = pipelineTree();
-      const real = readFileSync(join(tree, '.git'), 'utf8')
-        .trim()
-        .replace('gitdir: ', '');
-      const planted = join(repo, '.qwen', 'tmp', 'entry\u00a0');
       const twin = join(repo, '.qwen', 'tmp', 'entry');
-      cpSync(real, planted, { recursive: true });
-      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-      writeFileSync(join(planted, 'gitdir'), `${join(tree, '.git')}\n`);
       // The twin points OUTSIDE the mount; trimming the NBSP lands here.
       symlinkSync(repo, twin);
-      writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', 'entry\u00a0'),
+        adminEntryOf(tree),
+        tree,
+        join(repo, '.git'),
+      );
 
       expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
     },

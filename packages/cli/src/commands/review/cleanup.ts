@@ -13,7 +13,6 @@
 // The command is idempotent — missing files / branches are silent OK.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -31,12 +30,12 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { redirectedAncestor, sanitizedGitEnv } from './lib/worktree.js';
+import { redirectedAncestor } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { a1Json, aoneWhoamiAccount } from './lib/platform/aone-client.js';
-import { refExists, releaseWorktree } from './lib/git.js';
+import { git, gitOpt, refExists, releaseWorktree } from './lib/git.js';
 import { readBudgetStopUnfenced } from './lib/deadline.js';
 import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
 import {
@@ -692,14 +691,17 @@ function scratchWorktreesOf(worktree: string): {
  * path — a prune that fails must not mask the error that got us here.
  */
 function pruneWorktrees(): void {
-  try {
-    execFileSync('git', ['worktree', 'prune'], {
-      stdio: 'pipe',
-      env: sanitizedGitEnv(),
-    });
-  } catch {
-    // Reported by the next `worktree add` if it mattered.
-  }
+  // Through `lib/git`'s wrapper, not a direct spawn: `worktree prune` finds its
+  // repository from `process.cwd()`, and a launch directory inside a review
+  // temp dir is one the reviewed code can point elsewhere — a `core.hooksPath`
+  // in the plant's config then runs on the host. The sweep this exists to
+  // provide is not what the gate costs: measured from a poisoned launch
+  // directory, an ungated prune clears the PLANT's registrations and leaves the
+  // real stale one standing, so it was never sweeping the repository the
+  // registration belongs to. `rmSync` — the half that does clear the path — is
+  // not a git call and still runs. `gitOpt` answers null for "refused" and for
+  // "nothing to prune", which is what the caught throw answered before.
+  gitOpt('worktree', 'prune');
 }
 
 export function runCleanup(target: string): void {
@@ -916,13 +918,13 @@ export function runCleanup(target: string): void {
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {
       try {
-        execFileSync('git', ['branch', '-D', branch], {
-          stdio: 'pipe',
-          // The CHECK that gates this delete resolves the real repository
-          // (`refExists` goes through the sanitized helpers); an exported
-          // `GIT_DIR` here would verify one repo and delete in another.
-          env: sanitizedGitEnv(),
-        });
+        // The throwing wrapper, not a direct spawn: `branch -D` is a
+        // reference-transaction hook channel and finds its repository from
+        // `process.cwd()`, so an ungated delete from a poisoned launch
+        // directory executes the plant's hooks. Refused, it lands in the catch
+        // below as a failed destruction — the branch survives and the lease
+        // stays held, which is the honest report.
+        git('branch', '-D', branch);
         writeStdoutLine(`Deleted ref: ${branch}`);
         removedAny = true;
       } catch (err) {

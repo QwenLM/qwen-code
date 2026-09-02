@@ -33,6 +33,11 @@ const mocks = vi.hoisted(() => ({
   readReviewWorktreeLease: vi.fn((): unknown => null),
   reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
   refExists: vi.fn(() => true),
+  // cleanup's two remaining git spawns go through `lib/git`'s gated wrappers:
+  // both resolve their repository from `process.cwd()`, and a launch directory
+  // inside a review temp dir is one the reviewed code can point elsewhere.
+  git: vi.fn((..._args: string[]): string => ''),
+  gitOpt: vi.fn((..._args: string[]): string | null => null),
   // The parameter is declared so `mock.calls` is typed `[string][]` rather than
   // `[][]` — the paths it was asked to free are the assertion in the sweep test.
   releaseWorktree: vi.fn((_path: string) => ({
@@ -111,6 +116,8 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
 vi.mock('./lib/git.js', () => ({
   refExists: mocks.refExists,
   releaseWorktree: mocks.releaseWorktree,
+  git: mocks.git,
+  gitOpt: mocks.gitOpt,
 }));
 
 vi.mock('./lib/gh.js', () => ({
@@ -255,19 +262,21 @@ describe('runCleanup', () => {
   });
 
   it('keeps the lease when branch deletion fails', () => {
-    mocks.execFileSync.mockImplementation(() => {
+    // Once, because this suite's mocks keep their implementations across tests
+    // and each one sets what it needs: a standing throw here would fail every
+    // later branch delete and hold the lease for the wrong reason.
+    mocks.git.mockImplementationOnce(() => {
       throw new Error('branch is locked');
     });
 
     runCleanup('pr-123');
 
-    expect(mocks.execFileSync).toHaveBeenCalledWith(
-      'git',
-      ['branch', '-D', 'qwen-review/pr-123'],
-      // The env is sanitized: the check that gates this delete resolves the
-      // real repository, so the delete must not follow an exported `GIT_DIR`
-      // into another one.
-      expect.objectContaining({ stdio: 'pipe', env: expect.any(Object) }),
+    // The throwing wrapper, which carries the sanitized env and the launch-dir
+    // gate the direct spawn had neither of.
+    expect(mocks.git).toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
@@ -564,11 +573,7 @@ describe('runCleanup', () => {
     // prune lives — so without one here the family paths were reported swept
     // while their admin entries stayed behind and wedged the next
     // `worktree add` with `already exists`.
-    expect(mocks.execFileSync).toHaveBeenCalledWith(
-      'git',
-      ['worktree', 'prune'],
-      expect.anything(),
-    );
+    expect(mocks.gitOpt).toHaveBeenCalledWith('worktree', 'prune');
   });
 
   it('does not announce a clean sweep when it could not list the family', () => {

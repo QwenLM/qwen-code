@@ -20,17 +20,11 @@
 // that quietly stops being an attack fails here rather than certifying the
 // gates that walked around it.
 //
-// The backpointer is written the way git writes one — a BARE path in
-// `<admin entry>/gitdir`, no `gitdir: ` prefix (that prefix belongs to the
-// tree's own `.git` file, and git never writes it in the admin entry). A
-// prefixed one fails the round-trip check every route runs first, which turns
-// every assertion below into a green statement about the wrong refusal.
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
-  cpSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -41,18 +35,24 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  isolateHostGitConfig,
+  plantAdminEntry,
+  plantRepository,
+} from './lib/test-utils.js';
 import {
   adminEntryInsideReviewTmp,
   mountRootFor,
+  sanitizedGitEnv,
   untrustedGitfile,
   untrustedRepositoryFrom,
   worktreeResidue,
 } from './lib/worktree.js';
 import { makeGitProbe } from './comment-status.js';
 import { captureLocalDiff } from './lib/local-diff.js';
-import { git, gitOpt } from './lib/git.js';
+import { git, gitOpt, gitProbe, releaseWorktree } from './lib/git.js';
 import { runBaseTree } from './base-tree.js';
+import { loadCombined } from './load-rules.js';
 import { runRevertHunk } from './revert-hunk.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
@@ -97,46 +97,15 @@ describe('a planted repository reaches no host-side execution', () => {
   };
 
   /**
-   * A repository the reviewed code planted, carrying a filter git runs.
+   * The single-layer geometry: a review worktree under `<repo>/.qwen/tmp`, with
+   * `plant()` to rewrite its gitfile the way the reviewed code would.
    *
-   * `clean`, not `smudge`: the entrances this file is about are READS —
-   * `git status` refreshing the index re-hashes a file whose stat no longer
-   * matches, and re-hashing runs the clean filter. A checkout-only canary would
-   * stay silent on exactly the routes that need a witness.
+   * Split in two because one arm needs the pointer poisoned AFTER a first call
+   * has answered clean — the shape a verdict memoized for the whole process
+   * gets wrong, and the one a fixture that plants before it chdirs can never
+   * reach.
    */
-  const plantedRepositoryAt = (dir: string, from: string, canary: string) => {
-    cpSync(from, dir, { recursive: true });
-    rmSync(join(dir, 'worktrees'), { recursive: true, force: true });
-    appendFileSync(
-      join(dir, 'config'),
-      `\n[filter "evil"]\n\tclean = sh -c "echo PWNED > ${canary}; cat"\n\tsmudge = cat\n`,
-    );
-    mkdirSync(join(dir, 'info'), { recursive: true });
-    writeFileSync(join(dir, 'info', 'attributes'), '* filter=evil\n');
-    return dir;
-  };
-
-  /** The admin entry `<tree>/.git` is rewritten to point at. */
-  const plantedAdminEntryAt = (
-    entry: string,
-    realEntry: string,
-    tree: string,
-    commonDir: string,
-  ) => {
-    cpSync(realEntry, entry, { recursive: true });
-    writeFileSync(join(entry, 'commondir'), `${commonDir}\n`);
-    // BARE, the way git writes a backpointer.
-    writeFileSync(join(entry, 'gitdir'), `${join(tree, '.git')}\n`);
-    rmSync(join(tree, '.git'), { force: true });
-    writeFileSync(join(tree, '.git'), `gitdir: ${entry}\n`);
-    return entry;
-  };
-
-  /**
-   * The single-layer geometry: a review worktree under `<repo>/.qwen/tmp`
-   * whose gitfile the reviewed code rewrote, with the plant beside it.
-   */
-  const poisoned = () => {
+  const mountedTree = () => {
     const repo = repository();
     const canaryDir = tmp('qwen-canary-out-');
     const canary = join(canaryDir, 'PWNED');
@@ -144,22 +113,31 @@ describe('a planted repository reaches no host-side execution', () => {
     g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
     const headSha = g(tree, 'rev-parse', 'HEAD');
     const realEntry = join(repo, '.git', 'worktrees', 'review-pr-1');
-    const common = plantedRepositoryAt(
-      join(repo, '.qwen', 'tmp', '.evil-common'),
-      join(repo, '.git'),
-      canary,
-    );
-    const entry = plantedAdminEntryAt(
-      join(repo, '.qwen', 'tmp', '.evil-git'),
-      realEntry,
-      tree,
-      common,
-    );
-    // The index refresh only re-hashes a file whose stat changed, and only a
-    // re-hash runs the clean filter. This is what a review's own build leaves
-    // behind, so it is the ordinary state, not a contrivance.
-    writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
-    return { repo, tree, entry, canary, headSha };
+    const plant = () => {
+      const common = plantRepository(
+        join(repo, '.qwen', 'tmp', '.evil-common'),
+        join(repo, '.git'),
+        canary,
+      );
+      const entry = plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        realEntry,
+        tree,
+        common,
+      );
+      // The index refresh only re-hashes a file whose stat changed, and only a
+      // re-hash runs the clean filter. This is what a review's own build leaves
+      // behind, so it is the ordinary state, not a contrivance.
+      writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
+      return { entry, common };
+    };
+    return { repo, tree, canary, headSha, plant };
+  };
+
+  const poisoned = () => {
+    const layout = mountedTree();
+    const { entry, common } = layout.plant();
+    return { ...layout, entry, common };
   };
 
   itWhereContainmentExists(
@@ -310,12 +288,12 @@ describe('a planted repository reaches no host-side execution', () => {
       const tree = baseWorktreePath(worktree);
       g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
       writeFileSync(join(tree, '.qwen-review-base-ok'), `${baseSha}\n`);
-      const common = plantedRepositoryAt(
+      const common = plantRepository(
         join(repo, '.qwen', 'tmp', '.evil-common'),
         join(repo, '.git'),
         canary,
       );
-      plantedAdminEntryAt(
+      plantAdminEntry(
         join(repo, '.qwen', 'tmp', '.evil-git'),
         join(repo, '.git', 'worktrees', basename(tree)),
         tree,
@@ -406,14 +384,14 @@ describe('a planted repository reaches no host-side execution', () => {
       const innerRoot = mountRootFor(inner);
       expect(innerRoot).toBe(realpathSync(join(outer, '.qwen', 'tmp')));
 
-      const common = plantedRepositoryAt(
+      const common = plantRepository(
         join(repo, '.qwen', 'tmp', '.evil-common'),
         join(repo, '.git'),
         canary,
       );
       // Planted in the OUTER temp dir: outside the inner root, inside the
       // outer review's read-write mount.
-      const entry = plantedAdminEntryAt(
+      const entry = plantAdminEntry(
         join(repo, '.qwen', 'tmp', '.evil-git'),
         realEntry,
         inner,
@@ -461,6 +439,155 @@ describe('a planted repository reaches no host-side execution', () => {
       expect(residue.unmeasured).toBeUndefined();
       expect(residue.paths).toEqual(['__probe__.test.ts']);
       expect(makeGitProbe(inner)('a.ts', headSha).changed).not.toBe('unknown');
+    },
+  );
+
+  itWhereContainmentExists(
+    'a pointer planted AFTER the first clean answer is refused too (lib/git)',
+    () => {
+      // The window is one CLI command rather than the whole review — each
+      // `qwen review <cmd>` is its own process — but it is the whole command,
+      // and in the nested geometry the OUTER review's containerized build/test
+      // phase holds this directory read-write for that long. A verdict memoized
+      // for the process lifetime served the first clean answer to every later
+      // wrapper, so the run's own `status` refreshed the plant's index and ran
+      // its clean filter on the host. Re-asked inside a review temp dir; still
+      // memoized outside one, where the answer costs no syscall.
+      const { tree, canary, plant } = mountedTree();
+      const saved = process.cwd();
+      try {
+        process.chdir(tree);
+        // Clean, and the answer a process-lifetime memo would keep serving.
+        expect(gitOpt('rev-parse', 'HEAD')).not.toBeNull();
+        plant();
+        // `status`, not `rev-parse`: this is the command that refreshes the
+        // index, so the canary below is a witness and not a decoration.
+        expect(() => git('status', '--porcelain')).toThrow(/review temp dir/);
+        expect(gitOpt('remote', 'get-url', 'origin')).toBeNull();
+        // ...and the refusal is still distinguishable from git's own answer.
+        expect(gitProbe('remote', 'get-url', 'origin')).toEqual({
+          out: null,
+          status: null,
+          refusal: expect.stringContaining('review temp dir'),
+        });
+      } finally {
+        process.chdir(saved);
+      }
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'releaseWorktree reports the release it could not make (cleanup)',
+    () => {
+      // The remedy the other refusals tell a user to run. Its git calls are
+      // refused while its `rmSync` still clears the DIRECTORY, and reporting
+      // `freed: true` over that certified a release whose registration under
+      // `<repo>/.git/worktrees/` and whose branch both survived — so the next
+      // `worktree add` fails with "missing but already registered": the exact
+      // wedge this function's docstring exists to prevent, reported as fixed,
+      // with the lease released over an unswept review.
+      const { repo, tree, canary } = poisoned();
+      const registration = join(repo, '.git', 'worktrees', 'review-pr-1');
+      const saved = process.cwd();
+      let released: ReturnType<typeof releaseWorktree>;
+      try {
+        process.chdir(tree);
+        released = releaseWorktree(tree);
+      } finally {
+        process.chdir(saved);
+      }
+      expect(released.existed).toBe(true);
+      expect(released.freed).toBe(false);
+      // A reason, because `reason` is what cleanup prints — unset, it reports
+      // `Failed to remove worktree <path>: undefined`.
+      expect(released.reason).toContain('review temp dir');
+      // The path IS gone, which is what made the false `freed` plausible, and
+      // what survives is the half that wedges the next run.
+      expect(existsSync(tree)).toBe(false);
+      expect(existsSync(registration)).toBe(true);
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'load-rules says a source could not be READ, not that there are none',
+    () => {
+      // `show <base>:<path>` is how this review gets its OWN rules. Refused,
+      // every source came back null, `loadCombined` read each as absent, and
+      // `runLoadRules` wrote an empty file and exited 0 — which
+      // `agent-prompt --roster` stapled into every agent brief, so the whole
+      // fan-out ran with none of the project's `## Code Review` rules and
+      // nothing in the run said why. Git answers a path absent at the ref with
+      // 128, so `status === null` is the only key that separates the two.
+      const { repo, tree, canary } = poisoned();
+      const saved = process.cwd();
+      try {
+        process.chdir(tree);
+        const refused = loadCombined('HEAD');
+        expect(refused.loaded).toEqual([]);
+        expect(refused.unread).toContain('AGENTS.md');
+        // The honest arm, one directory up and outside the mount: nothing was
+        // found either, but nothing was refused, and the two must not print the
+        // same sentence.
+        process.chdir(repo);
+        expect(loadCombined('HEAD').unread).toEqual([]);
+      } finally {
+        process.chdir(saved);
+      }
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'the rollback delete a refusal used to trigger runs nothing (fetch-pr)',
+    () => {
+      // `branch -D` is a reference-transaction hook channel, and fetch-pr's
+      // step-4 refusal was thrown INSIDE the try whose catch rolled the fetched
+      // ref back with an ungated `execFileSync('git', ['branch','-D', ref])`
+      // from the launch directory that refusal had just declared untrusted — so
+      // the gate's own answer executed the plant's hooks, `tryRemove` swallowed
+      // it, and the run died with `Failed to create worktree at …`,
+      // indistinguishable from an infrastructure failure.
+      const { tree, common, canary } = poisoned();
+      const hookCanary = join(tmp('qwen-canary-hook-'), 'HOOKED');
+      const hooks = join(dirname(tree), '.evil-hooks');
+      mkdirSync(hooks, { recursive: true });
+      const hook = join(hooks, 'reference-transaction');
+      writeFileSync(hook, `#!/bin/sh\necho PWNED >> ${hookCanary}\nexit 0\n`);
+      chmodSync(hook, 0o755);
+      // The ref the rollback deletes, created BEFORE the hook is armed so
+      // arming it is not what writes the canary.
+      execFileSync(
+        'git',
+        [`--git-dir=${common}`, 'branch', 'qwen-review/pr-1', 'HEAD'],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+      // Into the plant's OWN config: `sanitizedGitEnv` strips `GIT_*`
+      // redirects, but `core.hooksPath` is read from the resolved repository.
+      appendFileSync(
+        join(common, 'config'),
+        `\n[core]\n\thooksPath = ${hooks}\n`,
+      );
+
+      const saved = process.cwd();
+      try {
+        process.chdir(tree);
+        // The routed rollback: refused before it spawns, so the hook never runs.
+        expect(gitOpt('branch', '-D', 'qwen-review/pr-1')).toBeNull();
+        expect(existsSync(hookCanary)).toBe(false);
+        // The ungated spawn the refusal path used instead — the negative
+        // control, so a fixture that stops being an attack fails HERE rather
+        // than certifying the gate that walks around it.
+        execFileSync('git', ['branch', '-D', 'qwen-review/pr-1'], {
+          stdio: 'pipe',
+          env: sanitizedGitEnv(),
+        });
+        expect(existsSync(hookCanary)).toBe(true);
+      } finally {
+        process.chdir(saved);
+      }
+      expect(existsSync(canary)).toBe(false);
     },
   );
 
