@@ -335,6 +335,18 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
+const grammarSchemaValidationCache = new WeakMap<object, boolean>();
+
+function isStrictlyValidSchema(schema: object): boolean {
+  const cached = grammarSchemaValidationCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const valid = SchemaValidator.compileStrict(schema) === null;
+  grammarSchemaValidationCache.set(schema, valid);
+  return valid;
+}
+
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -380,7 +392,7 @@ export async function convertLlmToolsToOpenAI(
               sourceSchema !== null &&
               !Array.isArray(sourceSchema) &&
               !('$id' in sourceSchema) &&
-              SchemaValidator.compileStrict(sourceSchema) === null;
+              isStrictlyValidSchema(sourceSchema);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has

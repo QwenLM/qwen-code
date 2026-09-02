@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -24,6 +24,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -6035,6 +6036,31 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    it('compiles a stable tool schema only once', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          value: { type: 'string', maxLength: 1999 },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'stable', parametersJsonSchema },
+          ],
+        },
+      ] as Tool[];
+      const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
+
+      try {
+        await converter.convertLlmToolsToOpenAI(tools);
+        await converter.convertLlmToolsToOpenAI(tools);
+        expect(compileStrict).toHaveBeenCalledTimes(1);
+      } finally {
+        compileStrict.mockRestore();
+      }
+    });
+
     it('removes uniqueItems from function-calling wire schemas', async () => {
       const parametersJsonSchema = {
         type: 'object',
