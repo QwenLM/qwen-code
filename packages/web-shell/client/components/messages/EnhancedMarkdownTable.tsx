@@ -1526,6 +1526,7 @@ export function EnhancedTable({
   } | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogValueRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
@@ -1563,6 +1564,32 @@ export function EnhancedTable({
     }
     setCopiedSelection(false);
   }, []);
+
+  // The dialog opens with focus on its own non-editable container, so a
+  // select-all keystroke falls through to the document and highlights the whole
+  // page instead of the one value the dialog exists to show. Scope it to the
+  // value box, which is what a read-only input would do.
+  const handleCellDialogKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        !(event.metaKey || event.ctrlKey) ||
+        event.key.toLowerCase() !== 'a'
+      ) {
+        return;
+      }
+      const valueNode = cellDialogValueRef.current;
+      const selection = document.getSelection();
+      if (!valueNode || !selection) {
+        return;
+      }
+      event.preventDefault();
+      const range = document.createRange();
+      range.selectNodeContents(valueNode);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    },
+    [],
+  );
 
   const resetCopiedCellDialog = useCallback(() => {
     copiedCellDialogGenRef.current += 1;
@@ -3041,6 +3068,7 @@ export function EnhancedTable({
               event.preventDefault();
               cellDialogRef.current?.focus();
             }}
+            onKeyDown={handleCellDialogKeyDown}
             tabIndex={-1}
           >
             <DialogClose asChild>
@@ -3057,7 +3085,10 @@ export function EnhancedTable({
             <DialogHeader>
               <DialogTitle>{t('markdownTable.cellDialogTitle')}</DialogTitle>
             </DialogHeader>
-            <div className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text">
+            <div
+              ref={cellDialogValueRef}
+              className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text"
+            >
               {currentCellDialogCell.content}
             </div>
             <DialogFooter>

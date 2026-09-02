@@ -839,6 +839,56 @@ describe('EnhancedMarkdownTable', () => {
     expect(dialog?.textContent).toContain('Alpha');
   });
 
+  it('scopes select-all in the cell value dialog to the value box', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    expect(dialog).not.toBeNull();
+    const valueBox = [...dialog!.querySelectorAll('div')].find(
+      (element) => element.textContent === 'Alpha',
+    );
+    expect(valueBox).not.toBeUndefined();
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    // Without scoping, the keystroke reaches the document and the browser
+    // selects the whole page instead of the value the dialog is showing.
+    expect(event.defaultPrevented).toBe(true);
+    const selection = document.getSelection();
+    expect(selection?.rangeCount).toBe(1);
+    const range = selection!.getRangeAt(0);
+    expect(range.commonAncestorContainer === valueBox).toBe(true);
+    expect(selection?.toString()).toBe('Alpha');
+  });
+
+  it('leaves other dialog keystrokes to the dialog', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it('mounts the cell value dialog in the Web Shell portal root', () => {
     const container = renderTable();
 
