@@ -61,7 +61,6 @@ import {
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
-import { mountRootFor } from './lib/sandboxed-exec.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
 
 export interface BaseTreeReport {
@@ -194,7 +193,7 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // creates a fresh one through the review worktree's pointer, which the
       // gate before `worktree add` checks. Same shape as `scratch-tree`'s
       // reuse path, for the same reason.
-      untrustedGitfile(tree, mountRootFor) === null &&
+      untrustedGitfile(tree) === null &&
       gitOut(tree, 'rev-parse', 'HEAD') === baseSha
     ) {
       return {
@@ -287,7 +286,7 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // which the build/test phase already gave the reviewed code a chance to
       // rewrite. `worktree add` checks files out, so it runs whatever that
       // pointer leads to, on the host. See `untrustedGitfile`.
-      const untrusted = untrustedGitfile(worktree, mountRootFor);
+      const untrusted = untrustedGitfile(worktree);
       if (untrusted !== null) {
         throw new Error(`refusing to create a base tree: ${untrusted}`);
       }

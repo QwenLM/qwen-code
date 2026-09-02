@@ -51,7 +51,7 @@ import {
 } from './lib/worktree.js';
 import { makeGitProbe } from './comment-status.js';
 import { captureLocalDiff } from './lib/local-diff.js';
-import { git, gitOpt, resetLaunchDirVerdictForTest } from './lib/git.js';
+import { git, gitOpt } from './lib/git.js';
 import { runBaseTree } from './base-tree.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
@@ -72,10 +72,8 @@ describe('a planted repository reaches no host-side execution', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    resetLaunchDirVerdictForTest();
   });
   afterEach(() => {
-    resetLaunchDirVerdictForTest();
     for (const dir of made.splice(0))
       rmSync(dir, { recursive: true, force: true });
     gitIsolation.dispose();

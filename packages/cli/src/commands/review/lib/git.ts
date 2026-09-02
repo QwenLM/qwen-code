@@ -10,7 +10,6 @@
 
 import { execFileSync } from 'node:child_process';
 import {
-  mountRootFor,
   redirectedAncestor,
   sanitizedGitEnv,
   untrustedRepositoryFrom,
@@ -70,7 +69,10 @@ function gitOpts() {
  * `untrustedGitfile`, which its callers ask separately. This one is only ever
  * about where the process stands.
  *
- * Memoized per directory. The cache is not a weakening: a pointer rewritten
+ * Memoized per DIRECTORY, which is also why it needs no test seam: every
+ * fixture stands its plant up in a fresh temp dir, so a cached verdict can
+ * never be served for a different one. The cache is not a weakening: a pointer
+ * rewritten
  * after any gate answers is the TOCTOU residual this whole design documents and
  * does not close (`scratch-tree` states it, and `fetch-pr` asks twice to narrow
  * rather than to close it). Outside a review temp dir the answer costs no
@@ -84,7 +86,7 @@ function assertTrustedLaunchDir(): void {
   if (launchDirVerdict === null || launchDirVerdict.cwd !== cwd) {
     launchDirVerdict = {
       cwd,
-      refusal: untrustedRepositoryFrom(cwd, mountRootFor),
+      refusal: untrustedRepositoryFrom(cwd),
     };
   }
   if (launchDirVerdict.refusal !== null) {
@@ -95,11 +97,6 @@ function assertTrustedLaunchDir(): void {
         `review temp dir.`,
     );
   }
-}
-
-/** Test seam: forget the memoized verdict, for a fixture that re-plants. */
-export function resetLaunchDirVerdictForTest(): void {
-  launchDirVerdict = null;
 }
 
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */

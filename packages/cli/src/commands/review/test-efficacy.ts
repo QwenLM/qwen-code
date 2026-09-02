@@ -1619,7 +1619,7 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
     // worktree that creates it are held to the same rule. Before the
     // `isFile()` branch below, because every gate inside that branch is
     // skipped by the very shape this refuses.
-    const untrusted = untrustedGitfile(probeTree, mountRootFor);
+    const untrusted = untrustedGitfile(probeTree);
     if (untrusted !== null) return untrusted;
     if (lstatSync(join(probeTree, '.git')).isFile()) {
       const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
@@ -2676,7 +2676,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // distinction is the whole reason this gate can sit here rather than
       // above them, and a maintainer adding a checkout above it on the
       // strength of a looser sentence would reopen the route.
-      const untrusted = untrustedGitfile(worktree, mountRootFor);
+      const untrusted = untrustedGitfile(worktree);
       if (untrusted !== null) {
         throw new Error(`refusing to create a probe tree: ${untrusted}`);
       }
@@ -3007,7 +3007,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // phase's catch continues on purpose "so the revert probe below still
         // runs". Guarding the first two writes and not this one leaves the
         // route open exactly where the other two closed it.
-        const untrusted = untrustedGitfile(probeTree, mountRootFor);
+        const untrusted = untrustedGitfile(probeTree);
         if (untrusted !== null) {
           throw new Error(`refusing to revert: ${untrusted}`);
         }

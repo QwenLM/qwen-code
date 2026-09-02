@@ -67,7 +67,6 @@ import {
   type DependencyFarm,
   type SweepResult,
 } from './lib/worktree.js';
-import { mountRootFor } from './lib/sandboxed-exec.js';
 
 export interface ScratchTreeReport {
   /** True when a tree stands at `path`, checked out at the commit under review. */
@@ -559,7 +558,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   // one checks.
   if (
     existsSync(tree) &&
-    untrustedGitfile(tree, mountRootFor) === null &&
+    untrustedGitfile(tree) === null &&
     resetScratchTree(tree, headSha, worktree)
   ) {
     // The reset clears the ignored state too, so the farm went with it: this
@@ -606,7 +605,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // which the build/test phase already gave the reviewed code a chance to
     // rewrite. `worktree add` checks files out, so it runs whatever that
     // pointer leads to, on the host. See `untrustedGitfile`.
-    const untrusted = untrustedGitfile(worktree, mountRootFor);
+    const untrusted = untrustedGitfile(worktree);
     if (untrusted !== null) {
       throw new Error(`refusing to create a scratch tree: ${untrusted}`);
     }

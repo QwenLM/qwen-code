@@ -991,7 +991,6 @@ describe('fetch-pr report assembly', () => {
 
       expect(producerMocks.untrustedRepositoryFrom).toHaveBeenCalledWith(
         process.cwd(),
-        expect.any(Function),
       );
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();

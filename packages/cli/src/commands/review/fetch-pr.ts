@@ -43,7 +43,6 @@ import {
   untrustedGitfile,
   untrustedRepositoryFrom,
 } from './lib/worktree.js';
-import { mountRootFor } from './lib/sandboxed-exec.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -701,7 +700,7 @@ function tryResume(
   // docs all promise: the flag never fails a run that could start over. So
   // this returns a refusal like every other one, the fresh path runs, and the
   // planted tree is swept on the way.
-  if (untrustedGitfile(wt, mountRootFor) !== null) {
+  if (untrustedGitfile(wt) !== null) {
     return {
       resumed: false,
       reason: 'worktree-untrusted',
@@ -858,7 +857,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   //
   // Says nothing outside a mount (`mountRootFor` answers null), so an ordinary
   // `qwen review` from a normal checkout never reaches the question.
-  const launchUntrusted = untrustedRepositoryFrom(process.cwd(), mountRootFor);
+  const launchUntrusted = untrustedRepositoryFrom(process.cwd());
   if (launchUntrusted !== null) {
     throw new Error(
       `refusing to review PR #${prNumber} from this directory: ` +
@@ -1056,10 +1055,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // `process.cwd()`. Gating `wt` was a no-op — `cleanStale` above has just
       // removed whatever stood there, and a tree that does not exist has no
       // pointer to distrust.
-      const freshUntrusted = untrustedRepositoryFrom(
-        process.cwd(),
-        mountRootFor,
-      );
+      const freshUntrusted = untrustedRepositoryFrom(process.cwd());
       if (freshUntrusted !== null) {
         throw new Error(
           `refusing to create a review worktree: ${freshUntrusted}`,
