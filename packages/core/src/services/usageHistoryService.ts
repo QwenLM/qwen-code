@@ -419,20 +419,29 @@ async function rebuildFromSessionJsonl(
       try {
         const filePath = path.join(chatsDir, file);
 
+        let stats: fs.Stats;
+        try {
+          stats = fs.statSync(filePath);
+        } catch (e) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
+          );
+          continue;
+        }
+        // Only regular files are readable transcripts: a FIFO (or any other
+        // special file) passing the name filter would block open() forever
+        // and wedge the whole rebuild — the daemon's usage dashboard serves
+        // from this path.
+        if (!stats.isFile()) {
+          debugLogger.debug(
+            `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
+          );
+          continue;
+        }
+
         // Bound the scan when merging live sessions into a persisted history:
         // skip transcripts untouched before `sinceMs`.
-        if (sinceMs !== undefined) {
-          let mtimeMs: number;
-          try {
-            mtimeMs = fs.statSync(filePath).mtimeMs;
-          } catch (e) {
-            debugLogger.debug(
-              `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
-            );
-            continue;
-          }
-          if (mtimeMs < sinceMs) continue;
-        }
+        if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
 
         // Skip sessions the persisted history already records, before any file
         // read: the transcript filename is `{sessionId}.jsonl`

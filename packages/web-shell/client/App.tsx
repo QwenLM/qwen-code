@@ -151,6 +151,7 @@ import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
@@ -5769,6 +5770,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'workspaces'
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
@@ -5850,7 +5852,8 @@ export function App({
         | 'skills'
         | 'plugins'
         | 'agents'
-        | 'channels',
+        | 'channels'
+        | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
       showChat();
@@ -6240,7 +6243,14 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
-      if (activePanel === 'extensions' || activePanel === 'channels') {
+      if (
+        activePanel === 'extensions' ||
+        activePanel === 'channels' ||
+        // The Workspaces panel renders its own header; the generic Back
+        // button (panelBackRef) is excluded for it, so the fallback below
+        // would focus nothing.
+        activePanel === 'workspaces'
+      ) {
         panelHeadingRef.current?.focus();
         return;
       }
@@ -9581,6 +9591,14 @@ export function App({
    * Serializes workspace intent. An active session keeps its owner and is
    * replaced by a fresh chat; a draft only changes its next-session target.
    */
+  // The Workspaces panel's rows always name a workspace; a stable identity
+  // matters because the panel keys its column definitions on this handler.
+  const handlePanelNewSession = useCallback(
+    (workspaceCwd: string) =>
+      createNewSession({ kind: 'workspace', cwd: workspaceCwd }),
+    [createNewSession],
+  );
+
   const switchWorkspace = useCallback(
     async (
       workspaceCwd: string | undefined,
@@ -14185,6 +14203,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel(target);
                   }}
+                  onOpenWorkspacesOverview={() => {
+                    closeMobileDrawer();
+                    openPanel('workspaces');
+                  }}
                   onNewWorktreeSession={(workspaceCwd) => {
                     // The intent travels with the draft it belongs to: set
                     // inside createNewSession's synchronous step, it is what
@@ -14427,6 +14449,8 @@ export function App({
                               ? t('plugins.title')
                             : activePanel === 'channels'
                               ? t('channels.title')
+                            : activePanel === 'workspaces'
+                              ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -14435,7 +14459,8 @@ export function App({
                     activePanel !== 'skills' &&
                     activePanel !== 'agents' &&
                     activePanel !== 'plugins' &&
-                    activePanel !== 'channels' && (
+                    activePanel !== 'channels' &&
+                    activePanel !== 'workspaces' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -14534,7 +14559,8 @@ export function App({
                         activePanel === 'plugins'
                           ? pluginTabRef
                           : activePanel === 'extensions' ||
-                              activePanel === 'channels'
+                              activePanel === 'channels' ||
+                              activePanel === 'workspaces'
                             ? panelHeadingRef
                             : undefined
                       }
@@ -14627,6 +14653,20 @@ export function App({
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
                         onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'workspaces' ? (
+                      <WorkspacesOverviewPanel
+                        onClose={closePanel}
+                        // A new draft replaces the panel with the chat view;
+                        // createNewSession's default (no keepPanel) does that.
+                        onNewSession={handlePanelNewSession}
+                        onAddWorkspace={
+                          dynamicWorkspaceRegistrationSupported
+                            ? () => setShowAddWorkspaceDialog(true)
+                            : undefined
+                        }
+                        onError={reportError}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : (
