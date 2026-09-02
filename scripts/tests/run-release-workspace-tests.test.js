@@ -10,6 +10,7 @@ import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   classifyRunOutput,
+  createRunClassifier,
   describeSilentFailure,
   escapeAnnotation,
   runAndReport,
@@ -107,6 +108,54 @@ describe('classifyRunOutput', () => {
     const [block] = classifyRunOutput(runaway).unhandledBlocks;
     expect(block).toContain('truncated at');
     expect(block.split('\n').length).toBeLessThan(70);
+  });
+});
+
+describe('createRunClassifier', () => {
+  // The run is classified as it streams, so the wrapper never holds a
+  // multi-megabyte log in memory outside a process that already runs under a
+  // heap cap. Chunk boundaries fall wherever the pipe puts them, so the
+  // streamed reading has to match the whole-text one exactly.
+  const feed = (text, chunkSize) => {
+    const classifier = createRunClassifier();
+    let pending = '';
+    for (let at = 0; at < text.length; at += chunkSize) {
+      pending = classifier.write(text.slice(at, at + chunkSize), pending);
+    }
+    return classifier.finish(pending);
+  };
+
+  it.each([1, 3, 7, 64, 4096])(
+    'reads a chunked stream the same way at chunk size %i',
+    (chunkSize) => {
+      expect(feed(GREEN_WITH_UNHANDLED_ERROR, chunkSize)).toEqual(
+        classifyRunOutput(GREEN_WITH_UNHANDLED_ERROR),
+      );
+      expect(feed(ORDINARY_TEST_FAILURE, chunkSize)).toEqual(
+        classifyRunOutput(ORDINARY_TEST_FAILURE),
+      );
+    },
+  );
+
+  it('does not split a FAIL line that straddles two chunks', () => {
+    const classifier = createRunClassifier();
+    let pending = classifier.write(' FA', '');
+    pending = classifier.write('IL  some.test.ts > a case\n', pending);
+    expect(classifier.finish(pending).hasFailingTests).toBe(true);
+  });
+
+  it('keeps only the last few summary lines however many workspaces ran', () => {
+    const classifier = createRunClassifier();
+    let pending = '';
+    for (let workspace = 0; workspace < 200; workspace += 1) {
+      pending = classifier.write(
+        `      Tests  ${workspace} passed (${workspace})\n`,
+        pending,
+      );
+    }
+    const { summaryLines } = classifier.finish(pending);
+    expect(summaryLines.length).toBeLessThanOrEqual(4);
+    expect(summaryLines.at(-1)).toContain('199 passed');
   });
 });
 

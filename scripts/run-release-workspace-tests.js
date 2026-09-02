@@ -39,6 +39,7 @@ const SUMMARY_RE = /^\s*(Test Files|Tests)\s+\S/;
 // the whole log; the head of an unhandled error is where the cause lives.
 const MAX_BLOCK_LINES = 60;
 const MAX_TAIL_LINES = 40;
+const MAX_SUMMARY_LINES = 4;
 
 /**
  * Reduces a run's output to the three things that decide how the failure is
@@ -53,19 +54,16 @@ const MAX_TAIL_LINES = 40;
  *   tailLines: string[],
  * }}
  */
-export function classifyRunOutput(text) {
-  const lines = String(text ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.replace(ANSI_RE, ''));
-
+export function createRunClassifier() {
   let hasFailingTests = false;
   const unhandledBlocks = [];
   const summaryLines = [];
   const tailLines = [];
-
   let capturing = null;
 
-  for (const line of lines) {
+  const pushLine = (raw) => {
+    const line = raw.replace(ANSI_RE, '');
+
     if (line.trim()) {
       tailLines.push(line);
       if (tailLines.length > MAX_TAIL_LINES) tailLines.shift();
@@ -77,6 +75,11 @@ export function classifyRunOutput(text) {
 
     if (SUMMARY_RE.test(line)) {
       summaryLines.push(line.trim());
+      // Only the tail of the summary matters: the release suite runs one
+      // vitest per workspace, so an early workspace's totals say nothing
+      // about the exit. Trim as we go so a long run cannot accumulate one
+      // entry per workspace and beyond.
+      if (summaryLines.length > MAX_SUMMARY_LINES) summaryLines.shift();
     }
 
     if (capturing) {
@@ -85,36 +88,69 @@ export function classifyRunOutput(text) {
       if (RULE_RE.test(line) && capturing.some((entry) => entry.trim())) {
         unhandledBlocks.push(capturing.join('\n').trim());
         capturing = null;
-        continue;
+        return;
       }
       if (capturing.length >= MAX_BLOCK_LINES) {
         unhandledBlocks.push(
           `${capturing.join('\n').trim()}\n… truncated at ${MAX_BLOCK_LINES} lines`,
         );
         capturing = null;
-        continue;
+        return;
       }
       capturing.push(line);
-      continue;
+      return;
     }
 
     if (UNHANDLED_START_RE.test(line)) {
       capturing = [line.replace(RULE_RE, '').trim()];
     }
-  }
-
-  if (capturing?.some((entry) => entry.trim())) {
-    unhandledBlocks.push(capturing.join('\n').trim());
-  }
-
-  // Only the tail of the summary matters: the release suite runs one vitest
-  // per workspace, so an early workspace's totals say nothing about the exit.
-  return {
-    hasFailingTests,
-    unhandledBlocks,
-    summaryLines: summaryLines.slice(-4),
-    tailLines,
   };
+
+  return {
+    /** Feeds one already-split line. */
+    push: pushLine,
+    /**
+     * Feeds a raw chunk, holding back the trailing partial line until the
+     * next chunk completes it.
+     */
+    write(chunk, pending = '') {
+      const text = pending + chunk;
+      const parts = text.split(/\r?\n/);
+      const remainder = parts.pop() ?? '';
+      for (const part of parts) pushLine(part);
+      return remainder;
+    },
+    finish(pending = '') {
+      if (pending) pushLine(pending);
+      if (capturing?.some((entry) => entry.trim())) {
+        unhandledBlocks.push(capturing.join('\n').trim());
+        capturing = null;
+      }
+      return {
+        hasFailingTests,
+        unhandledBlocks,
+        summaryLines: summaryLines.slice(-MAX_SUMMARY_LINES),
+        tailLines,
+      };
+    },
+  };
+}
+
+/**
+ * Convenience wrapper for a run whose output is already in hand.
+ *
+ * @param {string} text
+ * @returns {{
+ *   hasFailingTests: boolean,
+ *   unhandledBlocks: string[],
+ *   summaryLines: string[],
+ *   tailLines: string[],
+ * }}
+ */
+export function classifyRunOutput(text) {
+  const classifier = createRunClassifier();
+  for (const line of String(text ?? '').split(/\r?\n/)) classifier.push(line);
+  return classifier.finish();
 }
 
 /** Escapes a value for a GitHub Actions annotation payload. */
@@ -185,20 +221,26 @@ export async function runAndReport({
   stderr = process.stderr,
   summaryPath = process.env['GITHUB_STEP_SUMMARY'],
 } = {}) {
-  const chunks = [];
+  // The suite prints tens of thousands of lines, and this wrapper sits
+  // outside the very process already running under a heap cap. Classify as
+  // the output streams past and keep only the bounded state the report needs,
+  // rather than holding the whole run in memory to scan it once at the end.
+  const classifier = createRunClassifier();
+  // One remainder per stream: a chunk can end mid-line, and splicing a half
+  // line of stdout onto the next stderr chunk would invent a line neither
+  // stream printed.
+  const pending = { out: '', err: '' };
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env,
       stdio: ['inherit', 'pipe', 'pipe'],
     });
-    child.stdout.on('data', (chunk) => {
-      chunks.push(chunk);
-      stdout.write(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      chunks.push(chunk);
-      stderr.write(chunk);
-    });
+    const consume = (chunk, sink, key) => {
+      pending[key] = classifier.write(chunk.toString('utf8'), pending[key]);
+      sink.write(chunk);
+    };
+    child.stdout.on('data', (chunk) => consume(chunk, stdout, 'out'));
+    child.stderr.on('data', (chunk) => consume(chunk, stderr, 'err'));
     child.on('error', reject);
     child.on('close', (code, signal) => {
       // A signal death has no exit code; report it as a failure rather than
@@ -207,9 +249,8 @@ export async function runAndReport({
     });
   });
 
-  const classification = classifyRunOutput(
-    Buffer.concat(chunks).toString('utf8'),
-  );
+  if (pending.err) classifier.push(pending.err);
+  const classification = classifier.finish(pending.out);
   const report = describeSilentFailure(classification, exitCode);
   if (!report) return exitCode;
 
