@@ -105,6 +105,14 @@ import {
   clearRoundStamps,
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
+import {
+  PREBUILD_BUDGET_S,
+  PREBUILD_ENV,
+  prebuildCovered,
+  prebuildRequested,
+  prebuildWorktree,
+  type WorktreeDependencies,
+} from './lib/prebuild.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -193,6 +201,24 @@ type FetchPrResult = PlanReport & {
    * says so instead of fanning out agents over zero hunks.
    */
   emptyDiff?: boolean;
+  /**
+   * What the prebuild did to the worktree, when this run asked for one
+   * (`QWEN_REVIEW_PREBUILD`, set by CI's review workflow — issue #10108):
+   * Agent 7's own `build-test --install --build-only`, run here before any
+   * agent starts and outside every agent's budget. `installed: true` means
+   * the tree holds a complete `node_modules` (npm's own marker, the gate
+   * Agent 7 reads), `built: true` that the scoped build closure compiled too,
+   * so a probe can run a test before Agent 7 finishes — but never against a
+   * workspace in that closure while Agent 7's own build is running: the
+   * per-package build script pre-cleans `dist` before each recompile, so an
+   * import of a rebuilding sibling resolves against a missing or partial
+   * `dist` in that window. Agent 7's install is a no-op on such a tree (its
+   * build recompiles). Anything else carries a `note` and the review behaves
+   * exactly as it did before the prebuild existed. Absent entirely when no
+   * prebuild was asked for or its session-shell cover is absent (every local
+   * run) and on an empty diff, where the skill stops before any agent runs.
+   */
+  dependencies?: WorktreeDependencies;
   /**
    * The recomputed merge-base diff is far smaller than the PR's advertised
    * GitHub stat — overlapping PRs merged since the author's last rebase have
@@ -1681,6 +1707,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
+    // Ruled once, up front: the report's `emptyDiff` flag below and the
+    // prebuild gate after the write read the same answer (the rationale for
+    // its two guards sits with the flag).
+    const emptyDiff = isEmptyDiff({
+      diffPath: fullText === null ? null : diffRel,
+      baseFetchFailed,
+      diffText: fullText ?? '',
+    });
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1714,13 +1748,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // emptied PR went unflagged because its own delta was not empty. Both
       // are full-range facts, so both read `fullText` on EVERY round, delta
       // -scoped or not.
-      ...(isEmptyDiff({
-        diffPath: fullText === null ? null : diffRel,
-        baseFetchFailed,
-        diffText: fullText ?? '',
-      })
-        ? { emptyDiff: true }
-        : {}),
+      ...(emptyDiff ? { emptyDiff: true } : {}),
       // Collapse detection compares recomputed reality against GitHub's
       // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
       // signature, not rounding. Both thresholds are deliberately coarse — this
@@ -1781,6 +1809,60 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     };
 
     writeFileSync(out, stringifyPlanReport(result), 'utf8');
+
+    // 6. Prebuild the worktree — install and compile it through Agent 7's
+    //    own `build-test` — when this run asked for it (CI does; issue
+    //    #10108). After the plan write, because `build-test` reads the plan
+    //    for its file list; before the session ledger below, because the
+    //    plan is rewritten with the outcome and the ledger keys on the plan's
+    //    mtime — the run epoch every downstream fence reads through must be
+    //    the FINAL write's. Not on an empty diff: the skill stops there
+    //    before any agent runs, and an install nobody will use is pure cost.
+    //    Best-effort by contract — the prebuild records a reason instead of
+    //    throwing — and absent from the report entirely when not asked for,
+    //    so every local review reads the plan it always did.
+    if (prebuildRequested() && !emptyDiff) {
+      if (!prebuildCovered()) {
+        // CI welds the opt-in together with a session-shell default that
+        // carries the budget; a local opt-in has only the built-in 120s
+        // default, and a prebuild started under it dies mid-install with
+        // the whole fetch-pr call — the fail-open path never gets to
+        // record anything. Warn and skip instead: the pre-prebuild flow is
+        // exactly the status quo this module exists to improve on.
+        writeStderrLine(
+          `Prebuild skipped: ${PREBUILD_ENV} is set, but the session shell ` +
+            `default cannot carry the ${PREBUILD_BUDGET_S}s budget — the ` +
+            `covering default is welded only by CI's review workflow. ` +
+            `build-test installs and builds on its own path as before.`,
+        );
+      } else {
+        // The call below is a blocking prefix of up to PREBUILD_BUDGET_S
+        // that emits nothing until it returns (runBuildTest captures its
+        // stdio), so a run killed mid-prebuild must leave a line naming
+        // where it died.
+        writeStderrLine(
+          `Prebuilding the worktree via build-test (${PREBUILD_ENV}=1, ` +
+            `budget ${PREBUILD_BUDGET_S}s)...`,
+        );
+        result.dependencies = prebuildWorktree({
+          plan: out,
+          worktree: wt,
+          report: tmpFile(`pr-${prNumber}`, 'prebuild.json'),
+        });
+        writeFileSync(out, stringifyPlanReport(result), 'utf8');
+        const deps = result.dependencies;
+        const took = `${Math.round(deps.durationMs / 1000)}s`;
+        writeStderrLine(
+          deps.installed && deps.built
+            ? `Prebuilt the worktree in ${took}: dependencies installed and ` +
+                `the scoped build closure compiled; build-test's install is ` +
+                `a no-op on this tree.`
+            : `Prebuild did not complete in ${took} (installed: ${deps.installed}, ` +
+                `built: ${deps.built}${deps.note ? `; ${deps.note}` : ''}); ` +
+                `build-test installs and builds on its own path as before.`,
+        );
+      }
+    }
     // Record this session against the plan just written: a later `--resume`
     // reads the ledger to find this attempt's transcripts. After the plan
     // write, so the entry sits inside the run-epoch fence it is read through.

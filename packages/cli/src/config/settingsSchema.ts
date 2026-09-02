@@ -26,6 +26,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   OutputFormat,
+  REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -432,6 +433,20 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description: 'The preferred editor to open files in.',
         showInDialog: true,
+      },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        // Generic settings edits do not rebuild the running system instruction;
+        // `/output-style` owns the separate live-update path.
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',
+        // The style list will grow user/project-defined entries; the dedicated
+        // /output-style picker owns selection rather than a static enum here.
+        showInDialog: false,
       },
       vimMode: {
         type: 'boolean',
@@ -1574,6 +1589,11 @@ const SETTINGS_SCHEMA = {
           { value: 'xhigh', label: 'Extra High' },
           { value: 'max', label: 'Max' },
         ],
+        // WebShell persists none; the TUI keeps its existing tier-only control.
+        jsonSchemaOverride: {
+          type: 'string',
+          enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
       },
       maxSessionTurns: {
         type: 'integer',
@@ -2823,7 +2843,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {
@@ -3167,7 +3187,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.',
         showInDialog: false,
         items: {
           type: 'string',
@@ -3266,6 +3286,31 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  goals: {
+    type: 'object',
+    label: 'Goals',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for session Goals (/goal).',
+    showInDialog: false,
+    properties: {
+      modelProposed: {
+        type: 'enum',
+        label: 'Model-Proposed Goals',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 'alwaysAsk',
+        description:
+          'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. "alwaysAsk" (default) shows every proposal in an approval dialog and nothing is set until you accept it; "disabled" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored.',
+        showInDialog: true,
+        options: [
+          { value: 'alwaysAsk', label: 'Always ask' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+    },
+  },
   agents: {
     type: 'object',
     label: 'Agents',
@@ -4075,9 +4120,13 @@ type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
     : T[K]['type'] extends 'enum'
-      ? T[K]['options'] extends readonly SettingEnumOption[]
-        ? T[K]['options'][number]['value']
-        : T[K]['default']
+      ? T[K] extends {
+          jsonSchemaOverride: { enum: ReadonlyArray<string | number> };
+        }
+        ? T[K]['jsonSchemaOverride']['enum'][number]
+        : T[K]['options'] extends readonly SettingEnumOption[]
+          ? T[K]['options'][number]['value']
+          : T[K]['default']
       : T[K]['default'] extends boolean
         ? boolean
         : T[K]['default'];

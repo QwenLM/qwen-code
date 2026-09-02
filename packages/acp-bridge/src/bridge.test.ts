@@ -115,6 +115,9 @@ import {
   ToolNames,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
+  upsertSessionPr,
+  writeSessionPrs,
+  type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
@@ -1548,6 +1551,48 @@ describe('createAcpSessionBridge', () => {
     expect(channelFactory).toHaveBeenCalledTimes(1);
 
     await bridge.shutdown();
+  });
+
+  describe('setUserLanguage', () => {
+    it('rejects with SessionNotFoundError when no channel is live', async () => {
+      const channelFactory = vi.fn();
+      const bridge = makeBridge({ channelFactory });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: false }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      // Never spins up a channel just for the sync — a runtime without one
+      // has no sessions to refresh and re-reads the files at next spawn.
+      expect(channelFactory).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+    });
+
+    it('forwards the sync over the live channel without a session id', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.userLanguage
+            ? {
+                language: (params as { language: string }).language,
+                sessions: 2,
+                failed: 0,
+              }
+            : {},
+      });
+      const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+      const bridge = makeBridge({ channelFactory });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.setUserLanguage({ language: 'zh', syncOutputLanguage: true }),
+      ).resolves.toEqual({ language: 'zh', sessions: 2, failed: 0 });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.userLanguage,
+        params: { language: 'zh', syncOutputLanguage: true },
+      });
+
+      await bridge.shutdown();
+    });
   });
 
   it('wraps a Goal control request in the envelope the agent reads', async () => {
@@ -14896,6 +14941,86 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reads attachments from the fallback root when the primary misses', async () => {
+      const mainRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-main-'),
+      );
+      const fallbackRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-fallback-'),
+      );
+      const bridge = makeBridge({
+        sessionAttachmentsRoot: mainRoot,
+        sessionAttachmentsFallbackRoot: fallbackRoot,
+        channelFactory: async () => makeChannel({}).channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const sessionDir = `session-${encodeURIComponent(session.sessionId)}`;
+        await fsp.mkdir(path.join(fallbackRoot, sessionDir), {
+          recursive: true,
+        });
+        await fsp.writeFile(
+          path.join(fallbackRoot, sessionDir, 'notes.txt'),
+          'legacy attachment',
+        );
+
+        const read = await bridge.readSessionAttachment(
+          session.sessionId,
+          'notes.txt',
+          { clientId: session.clientId },
+        );
+        expect(read?.data.toString()).toBe('legacy attachment');
+        expect(read?.mimeType).toBe('text/plain');
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(mainRoot, { recursive: true, force: true });
+        await fsp.rm(fallbackRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('deleteSessionAttachments clears both roots for a non-live session', async () => {
+      const mainRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-main-'),
+      );
+      const fallbackRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-fallback-'),
+      );
+      const bridge = makeBridge({
+        sessionAttachmentsRoot: mainRoot,
+        sessionAttachmentsFallbackRoot: fallbackRoot,
+        channelFactory: async () => makeChannel({}).channel,
+      });
+      try {
+        const sessionId = 'sess:unknown';
+        const sessionDir = `session-${encodeURIComponent(sessionId)}`;
+        await fsp.mkdir(path.join(mainRoot, sessionDir), { recursive: true });
+        await fsp.writeFile(
+          path.join(mainRoot, sessionDir, 'current.txt'),
+          'current',
+        );
+        await fsp.mkdir(path.join(fallbackRoot, sessionDir), {
+          recursive: true,
+        });
+        await fsp.writeFile(
+          path.join(fallbackRoot, sessionDir, 'notes.txt'),
+          'legacy',
+        );
+
+        await bridge.deleteSessionAttachments(sessionId);
+
+        await expect(
+          fsp.readdir(path.join(mainRoot, sessionDir)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fsp.readdir(path.join(fallbackRoot, sessionDir)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(mainRoot, { recursive: true, force: true });
+        await fsp.rm(fallbackRoot, { recursive: true, force: true });
+      }
+    });
+
     it('resolves text and binary file attachment references for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const bridge = makeBridge({
@@ -27148,6 +27273,111 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('extNotification — session pr binding', () => {
+    const prBindingFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('marks the session catalog when a child reports a shell PR binding', async () => {
+      // The child persists the sidecar itself; the notification's only job
+      // is the catalog-clock mark that makes live-state clients refetch the
+      // binding instead of waiting for unrelated catalog churn.
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: prBindingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: 'https://github.com/o/r/pull/77' },
+      });
+
+      const deadline = Date.now() + 2000;
+      while (
+        bridge.getSessionCatalogVersion().revision <= before.revision &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        before.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('drops malformed pr-binding payloads without marking the catalog', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: prBindingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      const url = 'https://github.com/o/r/pull/77';
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        // missing pr
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 0, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 1.5, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: 'javascript:alert(1)' },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: {
+          number: 77,
+          url: `https://github.com/o/r/pull/${'7'.repeat(2048)}`,
+        },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: `${url}\nforged` },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        // missing sessionId
+        pr: { number: 77, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 2,
+        sessionId: session.sessionId,
+        pr: { number: 77, url },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(bridge.getSessionCatalogVersion()).toEqual(before);
+      await bridge.shutdown();
+    });
+  });
+
   describe('extNotification — recording degradation', () => {
     const recordingFactory =
       (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
@@ -28867,12 +29097,18 @@ describe('createAcpSessionBridge', () => {
           number: 3,
           url: 'https://github.com/o/r/pull/3',
           state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/o/r/issues/7' }],
         },
         { number: 4, url: 'https://github.com/o/r/pull/4' },
       ]);
 
       expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
-        { number: 3, url: 'https://github.com/o/r/pull/3', state: 'merged' },
+        {
+          number: 3,
+          url: 'https://github.com/o/r/pull/3',
+          state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/o/r/issues/7' }],
+        },
         { number: 4, url: 'https://github.com/o/r/pull/4' },
       ]);
 
@@ -29087,6 +29323,15 @@ describe('createAcpSessionBridge', () => {
           state: 'merged',
         },
       });
+      // The daemon-derived issue snapshot is repository-specific too.
+      bridge.setSessionPrs?.(session.sessionId, [
+        {
+          number: 9517,
+          url: 'https://github.com/repo-a/o/pull/9517',
+          state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/repo-a/o/issues/7' }],
+        },
+      ]);
       const effective = bridge.updateSessionMetadata(session.sessionId, {
         pr: {
           number: 9517,
@@ -29121,7 +29366,7 @@ describe('createAcpSessionBridge', () => {
             state: 'draft',
           } as { number: number; url: string },
         }),
-      ).toThrow(/`state` of `open`, `merged`, or `closed`/);
+      ).toThrow(/`state` that is one of `open`, `merged`, or `closed`/);
 
       await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
@@ -29133,11 +29378,19 @@ describe('createAcpSessionBridge', () => {
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
+      const issues = [
+        {
+          number: 7,
+          url: 'https://github.com/o/r/issues/7',
+          state: 'completed' as const,
+        },
+      ];
       bridge.seedSessionPrs?.(session.sessionId, [
         {
           number: 9500,
           url: 'https://github.com/o/r/pull/9500',
           state: 'merged',
+          issues,
         },
       ]);
 
@@ -29146,7 +29399,88 @@ describe('createAcpSessionBridge', () => {
           number: 9500,
           url: 'https://github.com/o/r/pull/9500',
           state: 'merged',
+          issues,
         },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('keeps the seeded issue snapshot on a re-bind of the same pr', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const issues = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      bridge.seedSessionPrs?.(session.sessionId, [
+        { number: 9500, url: 'https://github.com/o/r/pull/9500', issues },
+      ]);
+
+      // The client never binds issues; the daemon-derived snapshot survives
+      // a re-bind that only carries a new state.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      });
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+          issues,
+        },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('drops client-supplied issues from a bind', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const seeded = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      bridge.seedSessionPrs?.(session.sessionId, [
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          issues: seeded,
+        },
+      ]);
+      const fabricated = { number: 1, url: 'https://github.com/o/r/issues/1' };
+
+      // The input type omits issues; a raw ACP/REST payload can still
+      // carry them, and only the daemon sweep may write the snapshot.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+          issues: [fabricated],
+        } as { number: number; url: string },
+      });
+      const fresh = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9501,
+          url: 'https://github.com/o/r/pull/9501',
+          issues: [fabricated],
+        } as { number: number; url: string },
+      });
+
+      expect(fresh.prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+          issues: seeded,
+        },
+        { number: 9501, url: 'https://github.com/o/r/pull/9501' },
       ]);
 
       await bridge.closeSession(session.sessionId);
@@ -29170,6 +29504,128 @@ describe('createAcpSessionBridge', () => {
         pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
       });
       expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('republishes and bumps the catalog when only the latest state changes', async () => {
+      // Live-state clients refetch only on catalog revision change; a
+      // state-only re-bind short-circuited as "no change" strands the
+      // stale badge state until unrelated catalog churn or a restart.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const before = bridge.getSessionCatalogVersion().revision;
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'open',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 2);
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(prEvents).toHaveLength(2);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('does not inherit the prior state when re-binding a number to another URL', async () => {
+      // The same number in another repository is another PR: inheriting
+      // the old repo's terminal 'merged' would render the new repo's open
+      // PR as merged permanently.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 5,
+          url: 'https://github.com/repo-a/r/pull/5',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('re-bind of the same PR moves it to latest with the new state', async () => {
+      // A re-bind is a fresh binding event: the number moves to latest and
+      // an omitted-then-supplied state applies; state-only refreshes go
+      // through the sweep, which preserves order.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+        },
+      });
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
 
       await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
@@ -29231,6 +29687,121 @@ describe('createAcpSessionBridge', () => {
 
       await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
+    });
+
+    it('reconciles the live list to the authoritative persisted list', async () => {
+      // The sidecar cap evicts by provenance authority (the created
+      // binding at the head survives, the oldest REVIEW goes) while the
+      // bridge merge above caps positionally (the head goes); once 11
+      // numbers accumulate the two stores evict DIFFERENT entries. The
+      // metadata routes reconcile the live entry to the persisted list
+      // after upsert — without that, every later event and rename
+      // response serves the diverged list until daemon restart.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const dir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'bridge-pr-reconcile-'),
+      );
+      // Not `${session.sessionId}.pr.json`: the bridge id is `sess:<cwd>`,
+      // so on Windows the filename carries a drive colon and separators and
+      // the sidecar's `mkdir(dirname)` fails with ENOENT. Production paths
+      // come from sessionService and key off the persisted UUID instead.
+      const sidecarPath = path.join(dir, 'session.pr.json');
+      try {
+        // The finding's shape: the created PR at position 0, nine reviews.
+        const seeded: SessionPr[] = [
+          {
+            number: 1,
+            url: 'https://github.com/o/r/pull/1',
+            createdAt: '2026-08-20T00:00:00.000Z',
+            source: 'create',
+          },
+          ...Array.from({ length: 9 }, (_, i) => ({
+            number: i + 2,
+            url: `https://github.com/o/r/pull/${i + 2}`,
+            createdAt: `2026-08-20T00:00:0${i + 1}.000Z`,
+            source: 'review' as const,
+          })),
+        ];
+        await writeSessionPrs(sidecarPath, seeded);
+        const persisted = await upsertSessionPr(sidecarPath, {
+          number: 11,
+          url: 'https://github.com/o/r/pull/11',
+          source: 'create',
+        });
+        // The authority-ranked cap keeps the created #1 and evicts the
+        // oldest review (#2).
+        expect(persisted.map((p) => p.number)).toEqual([
+          1, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        ]);
+
+        bridge.seedSessionPrs?.(session.sessionId, seeded);
+        const events: BridgeEvent[] = [];
+        const sub = bridge.subscribeEvents(session.sessionId);
+        const drain = (async () => {
+          for await (const ev of sub) events.push(ev);
+        })();
+        await new Promise((r) => setImmediate(r));
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: 11, url: 'https://github.com/o/r/pull/11' },
+        });
+        // The positional bridge merge evicted #1 — the stores diverged…
+        expect(
+          bridge.getSessionSummary(session.sessionId).prs?.map((p) => p.number),
+        ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        // …until the route reconciles the entry to the persisted list.
+        const reconciled = persisted.map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }));
+        expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
+          reconciled,
+        );
+        const revisionBeforeSet = bridge.getSessionCatalogVersion().revision;
+        bridge.setSessionPrs?.(session.sessionId, persisted);
+        expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+          reconciled,
+        );
+        // The mutation's own event went out with the diverged list; the
+        // reconcile must publish a corrective event carrying the
+        // authoritative list and advance the catalog so revision-gated
+        // refetchers re-trigger — silence here left event consumers on
+        // the wrong list until unrelated churn.
+        await new Promise((r) => setImmediate(r));
+        const prEvents = events.filter(
+          (e) =>
+            e.type === 'session_metadata_updated' &&
+            (e.data as { prs?: unknown }).prs !== undefined,
+        );
+        expect(
+          (
+            prEvents[prEvents.length - 1]?.data as {
+              prs?: Array<{ number: number }>;
+            }
+          ).prs?.map((p) => p.number),
+        ).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
+        // Reconciling to a list the live entry already matches is a no-op:
+        // no event, no revision bump.
+        const eventCount = events.length;
+        bridge.setSessionPrs?.(session.sessionId, persisted);
+        await new Promise((r) => setImmediate(r));
+        expect(events.length).toBe(eventCount);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
+
+        await bridge.closeSession(session.sessionId);
+        await drain;
+        await bridge.shutdown();
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('does not apply displayName when the combined pr is invalid', async () => {

@@ -30,6 +30,7 @@ import {
   writeWorktreeSession,
   readWorktreeSession,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
@@ -105,6 +106,7 @@ import {
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
+  searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -136,6 +138,10 @@ import {
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  PERSIST_REASONING_SELECTION_META_KEY,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+} from '../../acp-integration/model-configuration.js';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
@@ -2445,7 +2451,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -3377,7 +3383,15 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
-      sendBridgeError(res, err, { route: 'POST /session' });
+      // Only the plain creation path can promise that the initialize
+      // handshake preceded every durable mutation: `branch`/`worktree`
+      // bodies mutate git BEFORE spawn, and their rollback above is
+      // best-effort (a failed checkout rollback leaves the workspace on
+      // the new branch while the error response goes out).
+      sendBridgeError(res, err, {
+        route: 'POST /session',
+        ...(branchMeta || worktreeMeta ? {} : { initPrecedesMutations: true }),
+      });
     } finally {
       sessionIdReservation?.release();
     }
@@ -5918,13 +5932,15 @@ export function registerSessionRoutes(
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
+                { ...pr, source: 'create' },
               )
-            ).map(({ number, url, state }) => ({
-              number,
-              url,
-              ...(state ? { state } : {}),
-            }));
+            ).map(toSessionPrInfo);
+            // Reconcile the live entry to the authoritative persisted
+            // list: the bridge merge capped positionally while the
+            // sidecar caps by provenance authority — past the cap the
+            // two stores evict different entries, and every later event
+            // or rename response would serve the diverged list.
+            runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6085,14 +6101,13 @@ export function registerSessionRoutes(
                       sessionId,
                       'active',
                     ),
-                    pr,
+                    { ...pr, source: 'create' },
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
+                // Reconcile the live entry to the authoritative persisted
+                // list (see the primary metadata route).
+                runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
@@ -6114,14 +6129,10 @@ export function registerSessionRoutes(
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
+                  { ...pr, source: 'create' },
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                effective.prs = persisted.map(toSessionPrInfo);
               }
               if (displayName !== undefined) {
                 const renamed = await service.renameSession(
@@ -6744,6 +6755,137 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  const SESSION_SEARCH_QUERY_MAX_LENGTH = 200;
+  const SESSION_SEARCH_MAX_RESULTS_LIMIT = 50;
+
+  // Content search over persisted session transcripts. Workspace-scoped like
+  // the sessions list route above: resolved-runtime only, read-only
+  // secondaries search their persisted store, never falls back to primary.
+  const searchWorkspaceSessionsHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions/search'
+          : 'GET /workspace/:id/sessions/search';
+      const liveRuntime = await resolveLiveCatalogRuntime(req, res, paramName);
+      if (liveRuntime === null) return;
+      const runtime =
+        liveRuntime ??
+        resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        const rawQuery = req.query['q'];
+        // Cap the trimmed query, consistent with the emptiness check and
+        // the matcher — whitespace padding the scan would discard must not
+        // count against the limit.
+        const trimmedQuery =
+          typeof rawQuery === 'string' ? rawQuery.trim() : '';
+        if (
+          trimmedQuery.length === 0 ||
+          trimmedQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`q\` must be a non-empty string of at most ${SESSION_SEARCH_QUERY_MAX_LENGTH} characters`,
+            code: 'invalid_search_query',
+          });
+          return;
+        }
+        let maxResults: number | undefined;
+        const rawMaxResults = req.query['maxResults'];
+        if (rawMaxResults !== undefined) {
+          const parsed =
+            typeof rawMaxResults === 'string' && /^\d+$/.test(rawMaxResults)
+              ? Number.parseInt(rawMaxResults, 10)
+              : Number.NaN;
+          if (
+            !Number.isSafeInteger(parsed) ||
+            parsed < 1 ||
+            parsed > SESSION_SEARCH_MAX_RESULTS_LIMIT
+          ) {
+            res.status(400).json({
+              error: `\`maxResults\` must be an integer between 1 and ${SESSION_SEARCH_MAX_RESULTS_LIMIT}`,
+              code: 'invalid_search_max_results',
+            });
+            return;
+          }
+          maxResults = parsed;
+        }
+        const controller = new AbortController();
+        const onRequestAborted = () => {
+          controller.abort(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onResponseClosed = () => {
+          if (!res.writableEnded) {
+            controller.abort(new DOMException('Response closed', 'AbortError'));
+          }
+        };
+        req.once('aborted', onRequestAborted);
+        res.once('close', onResponseClosed);
+        if (req.aborted || res.destroyed) onRequestAborted();
+        try {
+          const search = () =>
+            runWorkspaceInspectionWithLogPolicy(runtime, () =>
+              searchWorkspaceSessionsForResponse(
+                key,
+                trimmedQuery,
+                { ...(maxResults !== undefined ? { maxResults } : {}) },
+                {
+                  runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  signal: controller.signal,
+                },
+              ),
+            );
+          const result =
+            liveRuntime && deps.conversationRuntimeActivity
+              ? await deps.conversationRuntimeActivity.run(search)
+              : await search();
+          controller.signal.throwIfAborted();
+          if (res.destroyed) return;
+          res.status(200).json({ results: result.results });
+        } catch (err) {
+          if (controller.signal.aborted || res.destroyed) {
+            return;
+          }
+          throw err;
+        } finally {
+          req.off('aborted', onRequestAborted);
+          res.off('close', onResponseClosed);
+        }
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { code?: unknown }).code === 'daemon_draining'
+        ) {
+          res.status(503).json({
+            error: 'The daemon is draining and no longer accepts work.',
+            code: 'daemon_draining',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: failed to search sessions for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to search sessions',
+          code: 'session_search_failed',
+        });
+      }
+    };
+
+  app.get(
+    '/workspace/:id/sessions/search',
+    searchWorkspaceSessionsHandler('id'),
+  );
+  app.get(
+    '/workspaces/:workspace/sessions/search',
+    searchWorkspaceSessionsHandler('workspace'),
+  );
+
   // Last catalog version successfully exposed per bridge by the live-state
   // route. A newly observed version synchronously invalidates the persisted
   // catalog cache scopes before the version is answered, so a client that
@@ -6874,6 +7016,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const configId = body['configId'];
         const value = body['value'];
+        const persist = body['persist'];
         if (configId !== 'reasoning_effort') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort',
@@ -6886,11 +7029,32 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+          });
+          return;
+        }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
+          },
         );
-        res.status(200).json(response);
+        res.status(200).json({
+          configOptions: response.configOptions,
+          persisted:
+            response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
+        });
       },
     ),
   );

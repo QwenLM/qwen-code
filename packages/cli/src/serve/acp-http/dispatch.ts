@@ -23,6 +23,7 @@ import {
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
@@ -3094,6 +3095,7 @@ export class AcpDispatcher {
                     {
                       number: boundPr['number'],
                       url: boundPr['url'],
+                      source: 'create',
                       ...(boundState === 'open' ||
                       boundState === 'merged' ||
                       boundState === 'closed'
@@ -3101,11 +3103,13 @@ export class AcpDispatcher {
                         : {}),
                     },
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
+                // Reconcile the live entry to the authoritative persisted
+                // list: the bridge merge capped positionally while the
+                // sidecar caps by provenance authority — past the cap the
+                // two stores evict different entries, and every later
+                // event would serve the diverged list.
+                this.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 // Reply with the authoritative persisted list, mirroring the
                 // REST metadata routes.
                 result = { ...result, prs: persistedPrs };
