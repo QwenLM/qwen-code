@@ -69,6 +69,7 @@ import {
   makeFakeConfig,
   MCPDiscoveryState,
   SendMessageType,
+  ToolNames,
   type LlmClient,
   type GoalTurnHost,
   describeDeliveryStatus,
@@ -278,6 +279,11 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  // One test below runs the real config.initialize(), which warms the tool
+  // registry; under heavy parallel CI load that can exceed the default
+  // timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockInitResult: InitializationResult;
@@ -524,7 +530,10 @@ describe('AppContainer State Management', () => {
       mockLlmClient as LlmClient,
     );
 
-    // Mock SubagentManager to prevent errors during AgentTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization.
+    // getAvailableModelGrades must be present: the mount effect runs the real
+    // config.initialize() in an un-awaited IIFE, which constructs AgentTool
+    // against this mock, and refreshSubagents reads the grades there.
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
@@ -559,19 +568,23 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
-  // AgentTool's constructor fires refreshSubagents() as a floating promise;
-  // a SubagentManager mock missing any method it touches rejects unhandled
-  // and fails the whole vitest run, not just this file.
-  it('keeps the SubagentManager mock complete for AgentTool init', async () => {
-    const rejections: unknown[] = [];
-    const onRejection = (reason: unknown) => rejections.push(reason);
-    process.on('unhandledRejection', onRejection);
+  it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
+    // AppContainer's mount effect runs config.initialize() in an un-awaited
+    // IIFE; the real initialize warms the tool registry, constructing
+    // AgentTool against this mock. A SubagentManager mock missing a method
+    // AgentTool reads rejects refreshSubagents there and surfaces as an
+    // unhandled rejection that fails the whole run, so pin the surface here,
+    // where a missing method fails this test instead of leaking.
+    await mockConfig.initialize();
     try {
-      await mockConfig.initialize();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(rejections).toEqual([]);
+      const agentTool = mockConfig
+        .getToolRegistry()
+        ?.getTool(ToolNames.AGENT) as unknown as
+        | { refreshSubagents: () => Promise<void> }
+        | undefined;
+      expect(agentTool).toBeDefined();
+      await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
     } finally {
-      process.off('unhandledRejection', onRejection);
       await mockConfig.shutdown();
     }
   });
@@ -6759,6 +6772,11 @@ describe('AppContainer State Management', () => {
     });
 
     it('surfaces unexpected outer errors through history', async () => {
+      // Scoped stub: the throwing getGeminiClient spy below would otherwise
+      // also be hit by the mount init effect's un-awaited initialize() IIFE
+      // (AgentTool.refreshSubagents calls getGeminiClient in its finally),
+      // surfacing as an unhandled rejection.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       const harness = renderRewindHarness();
       vi.spyOn(mockConfig, 'getLlmClient').mockImplementation(() => {
         throw new Error('client exploded');
@@ -7616,6 +7634,24 @@ describe('AppContainer State Management', () => {
         peer.emitHeld([heldMessage('a'), heldMessage('c')]);
       });
       expect(noticeCount()).toBe(2);
+    });
+
+    it("identifies a held message from the session's own process", () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([{ ...heldMessage('a'), selfSent: true }]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a process this session started',
+      );
+      expect(notice).not.toContain('another session');
     });
 
     it('does not announce arrivals that only replace an evicted entry', () => {

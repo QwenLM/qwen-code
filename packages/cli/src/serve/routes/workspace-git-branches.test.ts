@@ -107,6 +107,18 @@ describe('workspace Git branch routes', () => {
     expect(response.body.error).toBe('invalid_stash_force');
   });
 
+  it.each([{ stash: true }, { force: true }])(
+    'rejects combining fetchOnly with %o with 400',
+    async (extra) => {
+      const response = await request(app())
+        .post('/workspace/git/pull')
+        .send({ fetchOnly: true, ...extra });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('invalid_fetch_only_combination');
+    },
+  );
+
   it('rejects a checkout with a missing ref with 400', async () => {
     const response = await request(app())
       .post('/workspace/git/checkout')

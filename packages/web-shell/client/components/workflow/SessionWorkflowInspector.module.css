@@ -1,0 +1,545 @@
+.inspector {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--foreground);
+}
+
+.inspector button:focus-visible,
+.inspector summary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.summary,
+.detail,
+.attention,
+.steps,
+.collapsible {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 15px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+}
+
+.summaryHeading,
+.sectionHeading,
+.compactHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.summaryHeading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.summaryHeading > div span,
+.sectionHeading > div > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.summaryHeading strong {
+  font-size: 16px;
+}
+
+.summaryCount {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+  font-size: 12px;
+}
+
+.summaryCount[data-status='attention'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.summaryCount[data-status='completed'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+.progress {
+  height: 5px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-done-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progress span {
+    transition: width 160ms ease;
+  }
+}
+
+.summaryMeta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.expandButton {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.expandButton:hover {
+  background: var(--accent);
+}
+
+.expandButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.expandButton svg:last-child {
+  margin-left: auto;
+}
+
+.attention,
+.steps,
+.detail {
+  padding: 13px;
+}
+
+.compactHeading {
+  align-items: center;
+  margin-bottom: 9px;
+}
+
+/* preflight.css resets headings to `font: inherit`, so weight has to be
+   restated or every section title renders at body weight. */
+.compactHeading h2,
+.sectionHeading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.compactHeading span {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
+  font-size: 11px;
+}
+
+.attention > button,
+.stepList > button,
+.linkedAgents button,
+.deliverables button,
+.activityList > button,
+.activityList > div {
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.attention > button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention > button:hover {
+  background: var(--status-attention-bg);
+}
+
+/* Hover and selection used to paint the same background, so moving the mouse
+   across the list erased any sign of which row was actually selected. The rail
+   is what marks selection; the tint is only feedback. */
+.attention > button[aria-pressed='true'] {
+  background: var(--status-attention-bg);
+  box-shadow: inset 2px 0 0 var(--status-attention-fg);
+}
+
+.attention svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Two-class selector so this wins over the row's generic icon size above. */
+.attention .attentionGlyph {
+  width: 18px;
+  height: 18px;
+  justify-self: center;
+  color: var(--status-attention-fg);
+}
+
+.sectionHeading h2 {
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+.status {
+  flex: none;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status[data-status='running'],
+.status[data-status='in_progress'] {
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+}
+
+.status[data-status='completed'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+.status[data-status='paused'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.stepId {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.dependencies {
+  display: grid;
+  gap: 8px;
+  margin: 13px 0 0;
+}
+
+.dependencies div {
+  display: grid;
+  grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.dependencies dt,
+.dependencies dd {
+  margin: 0;
+  font-size: 11px;
+}
+
+.dependencies dt {
+  color: var(--muted-foreground);
+}
+
+.dependencies dd {
+  overflow-wrap: anywhere;
+}
+
+.linkedAgents {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.linkedAgents h3 {
+  margin: 0 0 7px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.linkedAgents button,
+.deliverables button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemText {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.linkedAgents .itemText {
+  flex: 1;
+}
+
+.linkedAgents button strong,
+.linkedAgents button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkedAgents button strong {
+  font-size: 12px;
+}
+
+.linkedAgents button small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.linkedAgents button:hover,
+.deliverables button:not(:disabled):hover {
+  background: var(--accent);
+}
+
+.deliverables button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.linkedAgents svg,
+.deliverables svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.linkedAgents p,
+.activityList p,
+.deliverables p {
+  margin: 7px 0 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stepList {
+  display: grid;
+  gap: 3px;
+}
+
+.stepList > button {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.stepList > button:hover {
+  background: var(--accent);
+}
+
+.stepList > button[aria-pressed='true'] {
+  background: var(--accent);
+  box-shadow: inset 2px 0 0 var(--agent-blue-500);
+}
+
+.stepIndex {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stepIndex[data-status='completed'] {
+  color: var(--status-done-fg);
+  border-color: color-mix(in srgb, var(--status-done-fg) 45%, var(--border));
+}
+
+.stepIndex[data-status='running'],
+.stepIndex[data-status='in_progress'] {
+  color: var(--status-running-fg);
+  border-color: color-mix(in srgb, var(--status-running-fg) 45%, var(--border));
+}
+
+.stepIndex[data-status='paused'] {
+  color: var(--status-attention-fg);
+  border-color: color-mix(
+    in srgb,
+    var(--status-attention-fg) 45%,
+    var(--border)
+  );
+}
+
+.stepList strong,
+.stepList small,
+.deliverables strong,
+.deliverables small,
+.activityList strong,
+.activityList small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepList strong,
+.deliverables strong,
+.activityList strong {
+  font-size: 12px;
+}
+
+.stepList small,
+.deliverables small,
+.activityList small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stateLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.collapsible {
+  padding: 0 13px;
+}
+
+.collapsible summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.collapsible summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible summary small {
+  color: var(--muted-foreground);
+}
+
+.activityList,
+.deliverables {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 12px;
+}
+
+.activityList > button,
+.activityList > div {
+  display: grid;
+  grid-template-columns: 52px 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 4px;
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.activityList > button {
+  cursor: pointer;
+}
+
+.activityList > button:hover {
+  background: var(--accent);
+}
+
+.activityList time {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.activityAvatar {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--radius-md);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.canvasHint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}
+
+.canvasHint svg {
+  width: 14px;
+  height: 14px;
+}
+
+.empty {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.empty svg {
+  width: 28px;
+  height: 28px;
+}
+
+.empty strong {
+  color: var(--foreground);
+}
+
+.empty p {
+  max-width: 280px;
+  margin: 0;
+  font-size: 12px;
+}
