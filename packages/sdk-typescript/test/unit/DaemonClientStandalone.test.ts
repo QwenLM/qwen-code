@@ -11,6 +11,7 @@ import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
   isStandaloneCreationOutcomeUnknown,
+  parseStandaloneSession,
 } from '../../src/daemon/standalone-sessions.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -303,6 +304,39 @@ describe('DaemonClient standalone sessions', () => {
     expect(body).not.toHaveProperty('cwd');
     expect(body).not.toHaveProperty('workspaceCwd');
     expect(created.sessionId).toBe(body['sessionId']);
+  });
+
+  it('exposes modelApplied from the create response', async () => {
+    const { fetch } = recordingFetch((request) => {
+      if (request.url.endsWith('/capabilities')) return capabilityResponse();
+      const body = JSON.parse(request.body ?? '{}') as { sessionId: string };
+      return jsonResponse(200, {
+        ...standaloneSession(body.sessionId),
+        modelApplied: false,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const created = await client.createStandaloneSession({
+      modelServiceId: 'qwen-prod',
+    });
+
+    expect(created.modelApplied).toBe(false);
+  });
+
+  it('rejects a create response with a non-boolean modelApplied', () => {
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(DaemonStandaloneProtocolError);
+    expect(() =>
+      parseStandaloneSession(
+        { ...standaloneSession(), modelApplied: 'yes' },
+        'POST /standalone/sessions',
+      ),
+    ).toThrow(/expected modelApplied boolean/);
   });
 
   it('canonicalizes a caller UUID and exercises the complete route family', async () => {

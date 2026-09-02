@@ -521,6 +521,26 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalledOnce();
   });
 
+  it('surfaces a failed spawn-time model apply as modelApplied false', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      modelApplied: false,
+    });
+
+    const created = await harness.service.create({
+      sessionId,
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+    });
+
+    expect(created.session).toMatchObject({ modelApplied: false });
+  });
+
   it('detaches a create response client from its origin runtime after rollover', async () => {
     mockDurableStandalone();
     const harness = createHarness();

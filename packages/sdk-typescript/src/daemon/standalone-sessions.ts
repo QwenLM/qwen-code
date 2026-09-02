@@ -414,6 +414,15 @@ export function parseStandaloneSession(
   if (typeof session['attached'] !== 'boolean') {
     throw new DaemonStandaloneProtocolError(route, 'expected attached boolean');
   }
+  if (
+    session['modelApplied'] !== undefined &&
+    typeof session['modelApplied'] !== 'boolean'
+  ) {
+    throw new DaemonStandaloneProtocolError(
+      route,
+      'expected modelApplied boolean',
+    );
+  }
   validateStandaloneFields(session, route);
   return session as unknown as DaemonStandaloneSession;
 }

@@ -21,6 +21,7 @@ type PromptSessionActions = {
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
     branch?: { name: string; baseBranch: string };
+    modelApplied?: boolean;
   }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -86,6 +87,7 @@ export async function createAndAttachSessionForPrompt({
     sessionId,
     worktree: worktreeInfo,
     branch: branchInfo,
+    modelApplied,
   } = await sessionActions.createSession(
     sessionContext?.kind === 'standalone'
       ? {
@@ -148,10 +150,27 @@ export async function createAndAttachSessionForPrompt({
     // The model is normally best-effort because the composer may already match
     // the daemon. An explicit model-bound reasoning choice is different: it
     // must never be applied after a failed switch to an unknown model.
-    // Standalone sessions skip this switch entirely: create already carries
-    // modelServiceId, which the daemon applies best-effort at spawn — a
-    // failed apply leaves the session on the agent default model (surfaced
-    // via model_switch_failed) instead of failing creation.
+    // Standalone sessions skip the post-attach switch because create already
+    // carries modelServiceId. The daemon applies it best-effort at spawn and
+    // reports the outcome as modelApplied on the create response — a failed
+    // apply must not proceed to the model-bound reasoning switch on the wrong
+    // model (the outer catch releases the session); without one we warn and
+    // keep the session on the agent default model.
+    if (
+      modelId &&
+      sessionContext?.kind === 'standalone' &&
+      modelApplied === false
+    ) {
+      if (reasoningEffort) {
+        preparationStep = 'confirm the requested model was applied';
+        throw new Error(
+          `The requested model ${modelId} was not applied to the standalone session; it is running on the agent default model.`,
+        );
+      }
+      warn(
+        `[WebShell] standalone session is running on the agent default model: failed to apply ${modelId} at spawn.`,
+      );
+    }
     if (modelId && sessionContext?.kind !== 'standalone') {
       preparationStep = 'set model for new session';
       try {

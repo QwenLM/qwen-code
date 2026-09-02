@@ -92,6 +92,53 @@ describe('createAndAttachSessionForPrompt', () => {
     });
   });
 
+  it('releases the standalone session when the create landed on the wrong model with a reasoning effort bound', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max(USE_OPENAI)',
+        reasoningEffort: 'high',
+        sessionContext: { kind: 'standalone' },
+        warn,
+      }),
+    ).rejects.toThrow(/was not applied to the standalone session/);
+
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  it('warns and keeps a standalone session that landed on the default model', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      sessionContext: { kind: 'standalone' },
+      warn,
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('agent default model'),
+    );
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+  });
+
   it('applies an explicit reasoning effort after the model and before resolving', async () => {
     const order: string[] = [];
     const actions = createActions({
