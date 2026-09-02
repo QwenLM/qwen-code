@@ -7,7 +7,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Content } from '@google/genai';
+import type { Content, GenerateContentResponse } from '@google/genai';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import type {
@@ -23,7 +23,7 @@ import { getErrorStatus } from '../../utils/errors.js';
  * text fine but 400s any request carrying an inline media part (the
  * idealab preset family rejecting `image_url` data URLs with
  * "用户没有正确设置模型参数"). A real local HTTP server plays the gateway:
- * bodies containing an `image_url` part get a 400, everything else gets
+ * bodies containing an inline media part get a 400, everything else gets
  * a valid chat completion. Drives the real OpenAI SDK + pipeline path.
  *
  * Pre-fix behaviour (the bug): the image-bearing request throws the 400
@@ -44,6 +44,42 @@ const GATEWAY_REJECTION = JSON.stringify({
 // JPEG that image-view.ts puts on the wire in the report.
 const TINY_JPEG_BASE64 =
   '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==';
+
+type WireMediaType = 'image_url' | 'input_audio' | 'video_url' | 'file';
+
+type MediaCase = {
+  name: string;
+  mimeType: string;
+  modalities: InputModalities;
+  wireType: WireMediaType;
+};
+
+const MEDIA_CASES: MediaCase[] = [
+  {
+    name: 'image',
+    mimeType: 'image/jpeg',
+    modalities: { image: true },
+    wireType: 'image_url',
+  },
+  {
+    name: 'audio',
+    mimeType: 'audio/wav',
+    modalities: { audio: true },
+    wireType: 'input_audio',
+  },
+  {
+    name: 'video',
+    mimeType: 'video/mp4',
+    modalities: { video: true },
+    wireType: 'video_url',
+  },
+  {
+    name: 'pdf',
+    mimeType: 'application/pdf',
+    modalities: { pdf: true },
+    wireType: 'file',
+  },
+];
 
 let server: Server;
 let baseUrl: string;
@@ -81,12 +117,37 @@ beforeAll(async () => {
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       receivedBodies.push(body as Record<string, unknown>);
-      if (
-        requestHasInlineMedia(body as Record<string, unknown>) ||
-        JSON.stringify(body).includes('REJECT_ALWAYS_MARKER')
-      ) {
+      const serializedBody = JSON.stringify(body);
+      const hasInlineMedia = requestHasInlineMedia(
+        body as Record<string, unknown>,
+      );
+      if (hasInlineMedia || serializedBody.includes('REJECT_ALWAYS_MARKER')) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(GATEWAY_REJECTION);
+        return;
+      }
+      if (serializedBody.includes('RETRY_429_MARKER')) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(GATEWAY_REJECTION);
+        return;
+      }
+      if (body['stream'] === true) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-test',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'qwen3.8-max-dogfooding',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: 'ok' },
+                finish_reason: 'stop',
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`,
+        );
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -131,6 +192,7 @@ function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
     apiKey: 'test-key',
     baseUrl,
     authType: AuthType.USE_OPENAI,
+    maxRetries: 0,
     ...(modalities ? { modalities } : {}),
   };
   const cliConfig = {
@@ -149,17 +211,20 @@ function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
   );
 }
 
-function imageBearingContents(): Content[] {
+function mediaBearingContents(
+  media: MediaCase = MEDIA_CASES[0]!,
+  text = 'what is in this file?',
+): Content[] {
   return [
     {
       role: 'user',
       parts: [
-        { text: 'what is in this image?' },
+        { text },
         {
           inlineData: {
-            mimeType: 'image/jpeg',
-            data: TINY_JPEG_BASE64,
-            displayName: 'screenshot.png',
+            mimeType: media.mimeType,
+            data: media.name === 'image' ? TINY_JPEG_BASE64 : 'base64data',
+            displayName: `${media.name}.bin`,
           },
         },
       ],
@@ -167,32 +232,104 @@ function imageBearingContents(): Content[] {
   ];
 }
 
-function bodyHasPlaceholder(body: Record<string, unknown>): boolean {
-  return JSON.stringify(body).includes('Unsupported image file');
+function bodyHasPlaceholder(
+  body: Record<string, unknown>,
+  placeholder = 'Unsupported image file',
+): boolean {
+  return JSON.stringify(body).includes(placeholder);
 }
 
-describe('issue #10693: gateway 400 on image-bearing OpenAI-compatible requests', () => {
-  it('recovers by retrying once with the media degraded to the placeholder', async () => {
+function bodyHasPartType(
+  body: Record<string, unknown>,
+  type: WireMediaType,
+): boolean {
+  return JSON.stringify(body).includes(`"type":"${type}"`);
+}
+
+describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests', () => {
+  it.each(MEDIA_CASES)(
+    'recovers $name by retrying once with the media degraded to a placeholder',
+    async (media) => {
+      receivedBodies.length = 0;
+      const generator = createGenerator(media.modalities);
+
+      const response = await generator.generateContent(
+        {
+          model: 'qwen3.8-max-dogfooding',
+          contents: mediaBearingContents(media),
+        },
+        `prompt-10693-${media.name}`,
+      );
+
+      expect(
+        response.candidates?.[0]?.content?.parts?.some(
+          (part) => part.text === 'ok',
+        ),
+      ).toBe(true);
+      expect(receivedBodies).toHaveLength(2);
+      expect(bodyHasPartType(receivedBodies[0]!, media.wireType)).toBe(true);
+      expect(requestHasInlineMedia(receivedBodies[1]!)).toBe(false);
+      expect(
+        bodyHasPlaceholder(
+          receivedBodies[1]!,
+          `Unsupported ${media.name} file`,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('recovers the streaming path after the media-bearing request is rejected', async () => {
     receivedBodies.length = 0;
     const generator = createGenerator({ image: true });
 
-    const response = await generator.generateContent(
-      { model: 'qwen3.8-max-dogfooding', contents: imageBearingContents() },
-      'prompt-10693-wedge',
+    const stream = await generator.generateContentStream(
+      { model: 'qwen3.8-max-dogfooding', contents: mediaBearingContents() },
+      'prompt-10693-stream',
     );
+    const responses: GenerateContentResponse[] = [];
+    for await (const response of stream) responses.push(response);
 
-    // The turn is no longer lost: the degraded retry gets a real response.
     expect(
-      response.candidates?.[0]?.content?.parts?.some(
-        (part) => part.text === 'ok',
+      responses.some((response) =>
+        response.candidates?.[0]?.content?.parts?.some(
+          (part) => part.text === 'ok',
+        ),
       ),
     ).toBe(true);
-    // Exactly one degradation retry; the first attempt carried the image.
     expect(receivedBodies).toHaveLength(2);
     expect(requestHasInlineMedia(receivedBodies[0]!)).toBe(true);
     expect(requestHasInlineMedia(receivedBodies[1]!)).toBe(false);
     expect(bodyHasPlaceholder(receivedBodies[1]!)).toBe(true);
   });
+
+  it.each([
+    ['the same 400', 'REJECT_ALWAYS_MARKER', 400],
+    ['a different 429', 'RETRY_429_MARKER', 429],
+  ] as const)(
+    'surfaces %s when the degraded retry fails',
+    async (_, marker, status) => {
+      receivedBodies.length = 0;
+      const generator = createGenerator({ image: true });
+
+      let caught: unknown;
+      try {
+        await generator.generateContent(
+          {
+            model: 'qwen3.8-max-dogfooding',
+            contents: mediaBearingContents(MEDIA_CASES[0]!, marker),
+          },
+          'prompt-10693-retry-failure',
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(getErrorStatus(caught)).toBe(status);
+      expect(receivedBodies).toHaveLength(2);
+      expect(requestHasInlineMedia(receivedBodies[1]!)).toBe(false);
+      expect(bodyHasPlaceholder(receivedBodies[1]!)).toBe(true);
+    },
+  );
 
   it('keeps text-only requests on the single-attempt path', async () => {
     receivedBodies.length = 0;
@@ -221,7 +358,7 @@ describe('issue #10693: gateway 400 on image-bearing OpenAI-compatible requests'
     const generator = createGenerator();
 
     const response = await generator.generateContent(
-      { model: 'qwen3.8-max-dogfooding', contents: imageBearingContents() },
+      { model: 'qwen3.8-max-dogfooding', contents: mediaBearingContents() },
       'prompt-10693-off',
     );
 
