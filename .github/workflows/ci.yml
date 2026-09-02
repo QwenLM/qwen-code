@@ -653,7 +653,13 @@ jobs:
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    # 45, not the 13–15 the warm-cache step timings predict: the first run on a
+    # cold-cache pool runner measured 30 minutes exactly (install 892s where
+    # the sibling Test job paid 347s, ESLint and Prettier both ~2x their
+    # historical timings) and was beheaded by a 30-minute timeout at the
+    # bundle-closure step. 60 would also hide a wedged runner for longer than
+    # the signal is worth; 45 matches desktop_shell.
+    timeout-minutes: 45
     permissions:
       contents: 'read'
     steps:
