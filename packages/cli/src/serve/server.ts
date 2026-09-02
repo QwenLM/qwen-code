@@ -311,7 +311,7 @@ import {
   type parseChannelWebhookConfig,
 } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
@@ -1607,6 +1607,23 @@ export function createServeApp(
     liveBindingPromise = pending;
     return pending;
   };
+  const describeConversationBootError = (error: unknown): string => {
+    // Boot errors wrap the real failure in generic ownership messages; walk
+    // the cause chain so the log names the innermost root cause.
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (
+      current instanceof Error &&
+      !seen.has(current) &&
+      messages.length < 8
+    ) {
+      seen.add(current);
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.length > 0 ? messages.join(' <- ') : String(error);
+  };
   const startConversationRuntimeBoot = (): Promise<void> => {
     if (liveRuntimeBootPromise) return liveRuntimeBootPromise;
     const pending = ensureLiveConversationRuntime()
@@ -1619,10 +1636,10 @@ export function createServeApp(
         // root cause once per failure episode so stalls are diagnosable.
         if (!liveRuntimeBootWarned) {
           liveRuntimeBootWarned = true;
-          writeStderrLine(
-            `qwen serve: Conversations runtime boot failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          // writeStderrLineSafe must not throw even on a dead stderr; the
+          // latch stays set so a lost line cannot spin per retry either.
+          writeStderrLineSafe(
+            `qwen serve: Conversations runtime boot failed: ${describeConversationBootError(error)}`,
           );
         }
         throw error;

@@ -714,6 +714,55 @@ describe('POST /workspaces', () => {
     }
   });
 
+  it('does not count an in-flight owned publication against the user workspace limit', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    for (let index = 1; index <= 23; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const ownedRuntime = makeRuntime('/owned-live-inflight', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    let releaseCreation: ((runtime: WorkspaceRuntime) => void) | undefined;
+    const createWorkspaceRuntime = vi.fn().mockImplementation((cwd: string) =>
+      cwd === ownedRuntime.workspaceCwd
+        ? new Promise<WorkspaceRuntime>((resolve) => {
+            releaseCreation = resolve;
+          })
+        : Promise.resolve(makeRuntime(cwd)),
+    );
+    const added = await mkdtemp(join(REAL_DIR, 'qws-limit-inflight-'));
+    const { app, handle } = createApp({
+      workspaceRegistry: createMockRegistry(runtimes),
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+    try {
+      const publication = handle.publishOwnedRuntime(
+        ownedRuntime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      );
+      await vi.waitFor(() => {
+        expect(createWorkspaceRuntime).toHaveBeenCalledWith(
+          ownedRuntime.workspaceCwd,
+          { provenance: 'live-conversation' },
+        );
+      });
+
+      const response = await request(app)
+        .post('/workspaces')
+        .send({ cwd: added, persist: false });
+
+      expect(response.status).toBe(201);
+      releaseCreation?.(ownedRuntime);
+      await expect(publication).resolves.toBe(ownedRuntime);
+    } finally {
+      releaseCreation?.(ownedRuntime);
+      await rm(added, { recursive: true, force: true });
+    }
+  });
+
   it('returns 501 when createWorkspaceRuntime is not provided', async () => {
     const { app } = createApp({ createWorkspaceRuntime: undefined });
     const res = await request(app)

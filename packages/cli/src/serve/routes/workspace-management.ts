@@ -166,6 +166,11 @@ export function registerWorkspaceManagementRoutes(
     string,
     'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
+  // Owned Conversations publications ride the same in-flight serialization
+  // map (they must keep colliding on cwd and nesting), but they are daemon
+  // infrastructure: the capacity projection skips them just like it skips
+  // the published internal runtime.
+  const internalAdditionsInFlight = new Set<string>();
   let sealed = false;
   let activeOperations = 0;
   let pendingScratchCreations = 0;
@@ -232,7 +237,9 @@ export function registerWorkspaceManagementRoutes(
         .map((runtime) => runtime.workspaceCwd),
     );
     for (const [cwd, operation] of inFlight) {
-      if (operation === 'addition') cwdSet.add(cwd);
+      if (operation === 'addition' && !internalAdditionsInFlight.has(cwd)) {
+        cwdSet.add(cwd);
+      }
     }
     return cwdSet.size + pendingScratchCreations;
   };
@@ -296,6 +303,9 @@ export function registerWorkspaceManagementRoutes(
     }
     assertOwnedRuntimeAdmission(canonicalCwd, provenance);
     inFlight.set(canonicalCwd, 'addition');
+    if (provenance === 'live-conversation') {
+      internalAdditionsInFlight.add(canonicalCwd);
+    }
     operationStarted();
     let runtime: WorkspaceRuntime | undefined;
     let registered = false;
@@ -364,6 +374,7 @@ export function registerWorkspaceManagementRoutes(
           });
       }
       inFlight.delete(canonicalCwd);
+      internalAdditionsInFlight.delete(canonicalCwd);
       operationFinished();
     }
   };
