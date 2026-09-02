@@ -1526,6 +1526,7 @@ export function createServeApp(
   let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
   let liveRuntimeBootPromise: Promise<void> | undefined;
   let liveRuntimeBootResult: WorkspaceRuntime | undefined;
+  let liveRuntimeBootWarned = false;
   let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
   const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
@@ -1611,6 +1612,20 @@ export function createServeApp(
     const pending = ensureLiveConversationRuntime()
       .then((runtime) => {
         liveRuntimeBootResult = runtime;
+        liveRuntimeBootWarned = false;
+      })
+      .catch((error) => {
+        // Boot failures surface to clients only as a generic 503; log the
+        // root cause once per failure episode so stalls are diagnosable.
+        if (!liveRuntimeBootWarned) {
+          liveRuntimeBootWarned = true;
+          writeStderrLine(
+            `qwen serve: Conversations runtime boot failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        throw error;
       })
       .finally(() => {
         if (liveRuntimeBootPromise === pending) {
