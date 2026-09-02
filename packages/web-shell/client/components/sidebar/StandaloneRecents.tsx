@@ -418,13 +418,13 @@ export function StandaloneRecents({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
-                title={t('sidebar.newStandaloneSession')}
+                size="xs"
                 aria-label={t('sidebar.newStandaloneSession')}
                 disabled={newSessionDisabled}
                 onClick={onNewSession}
               >
                 <SquarePenIcon />
+                {t('sidebar.newStandaloneSession')}
               </Button>
             )}
           </span>
