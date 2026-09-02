@@ -1126,7 +1126,7 @@ describe('DaemonSessionProvider', () => {
     ).not.toHaveBeenCalled();
   });
 
-  it('hydrates models for a deferred standalone session without creating it', async () => {
+  it('rehydrates models after repeatedly clearing a deferred standalone session', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/primary',
       features: ['standalone_sessions_v1', 'standalone_session_options_v1'],
@@ -1155,9 +1155,11 @@ describe('DaemonSessionProvider', () => {
         },
       ],
     });
+    let actions: DaemonSessionActions | undefined;
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
+      actions = useDaemonActions();
       connection = useDaemonConnection();
       return null;
     }
@@ -1192,6 +1194,29 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.workspaceProviders).not.toHaveBeenCalled();
     expect(sdkMocks.workspaceSkills).not.toHaveBeenCalled();
     expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(sdkMocks.getStandaloneSessionOptions).toHaveBeenCalledTimes(2);
+        expect(connection?.currentModel).toBe('qwen3.8-max(USE_OPENAI)');
+        expect(connection?.models).toHaveLength(1);
+      });
+    });
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(sdkMocks.getStandaloneSessionOptions).toHaveBeenCalledTimes(3);
+        expect(connection?.currentModel).toBe('qwen3.8-max(USE_OPENAI)');
+        expect(connection?.models).toHaveLength(1);
+      });
+    });
+
     expect(
       sdkMocks.MockDaemonSessionClient.createStandalone,
     ).not.toHaveBeenCalled();
