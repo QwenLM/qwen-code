@@ -32,6 +32,7 @@ const ANSI_RE = /(?:\x1b|\^\[)\[[0-9;]*m/g;
 // Vitest frames its unhandled-error report with a run of these; the same
 // character opens the per-error sections inside the block.
 const RULE_RE = /^[⎯\s]+$/;
+const RULE_EDGE_RE = /^[⎯\s]+|[⎯\s]+$/g;
 const UNHANDLED_START_RE = /Unhandled Errors?/;
 // Anchored: vitest prints its failure header at the start of the line. A
 // whitespace-bounded match anywhere would let a passing test whose NAME
@@ -107,7 +108,9 @@ export function createRunClassifier() {
     }
 
     if (UNHANDLED_START_RE.test(line)) {
-      capturing = [line.replace(RULE_RE, '').trim()];
+      // Keep the words, drop the rule runs vitest draws on either side of
+      // them: `⎯⎯⎯ Unhandled Errors ⎯⎯⎯` becomes `Unhandled Errors`.
+      capturing = [line.replace(RULE_EDGE_RE, '')];
     }
   };
 
@@ -157,14 +160,6 @@ export function classifyRunOutput(text) {
   for (const line of String(text ?? '').split(/\r?\n/)) classifier.push(line);
   return classifier.finish();
 }
-
-/**
- * Escapes a value for a GitHub Actions annotation payload.
- *
- * The escape contract lives once, in release-script-utils; two copies under
- * two names drift the moment one of them is corrected.
- */
-export const escapeAnnotation = escapeWorkflowCommand;
 
 /**
  * Builds what to say about a finished run. Returns null when the run needs no
@@ -264,7 +259,7 @@ export async function runAndReport({
   if (!report) return exitCode;
 
   stdout.write(
-    `::error title=${escapeAnnotation(report.title)}::${escapeAnnotation(report.body)}\n`,
+    `::error title=${escapeWorkflowCommand(report.title)}::${escapeWorkflowCommand(report.body)}\n`,
   );
   stderr.write(`\n${report.title}\n\n${report.body}\n`);
 

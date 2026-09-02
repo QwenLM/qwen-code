@@ -18,11 +18,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { escapeWorkflowCommand } from '../release-script-utils.js';
 import {
   classifyRunOutput,
   createRunClassifier,
   describeSilentFailure,
-  escapeAnnotation,
   runAndReport,
 } from '../run-release-workspace-tests.js';
 
@@ -68,6 +68,7 @@ describe('classifyRunOutput', () => {
 
     expect(result.hasFailingTests).toBe(false);
     expect(result.unhandledBlocks).toHaveLength(1);
+    expect(result.unhandledBlocks[0]).toMatch(/^Unhandled Errors\n/);
     expect(result.unhandledBlocks[0]).toContain('Error: write after end');
     expect(result.unhandledBlocks[0]).toContain('archive-safety.test.ts');
     expect(result.summaryLines.join('\n')).toContain('9480 passed');
@@ -223,9 +224,11 @@ describe('describeSilentFailure', () => {
   });
 });
 
-describe('escapeAnnotation', () => {
+describe('annotation escaping', () => {
+  // The wrapper writes its annotation through the shared workflow-command
+  // escaper; this pins that the contract it relies on is the shared one.
   it('encodes the characters that would truncate a workflow command', () => {
-    expect(escapeAnnotation('a\nb\rc%d')).toBe('a%0Ab%0Dc%25d');
+    expect(escapeWorkflowCommand('a\nb\rc%d')).toBe('a%0Ab%0Dc%25d');
   });
 });
 
