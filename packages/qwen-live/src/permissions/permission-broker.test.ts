@@ -41,7 +41,7 @@ function createBroker(options?: { ruleTtlMs?: number }): Rig {
   const clock = { now: 1_000_000 };
   const logEvents: Rig['logEvents'] = [];
   const broker = new PermissionBroker({
-    adaptor: adaptor as unknown as BackendAdaptor,
+    adaptorFor: () => adaptor as unknown as BackendAdaptor,
     now: () => clock.now,
     ...(options?.ruleTtlMs !== undefined
       ? { ruleTtlMs: options.ruleTtlMs }
@@ -55,12 +55,18 @@ function createBroker(options?: { ruleTtlMs?: number }): Rig {
 
 function request(
   broker: PermissionBroker,
-  fields?: { requestId?: string; sessionHandle?: string; title?: string },
+  fields?: {
+    requestId?: string;
+    sessionHandle?: string;
+    jobRef?: string;
+    title?: string;
+  },
 ) {
   return broker.onRequest({
     requestId: fields?.requestId ?? 'r1',
     backend: BACKEND,
     sessionHandle: fields?.sessionHandle ?? 'session_1',
+    ...(fields?.jobRef !== undefined ? { jobRef: fields.jobRef } : {}),
     title: fields?.title ?? 'Bash: rm -rf /a',
     options: OPTIONS,
   });
@@ -82,6 +88,40 @@ describe('PermissionBroker', () => {
 
     expect(broker.pendingCount).toBe(2);
     expect(adaptor.respondPermission).not.toHaveBeenCalled();
+    expect(
+      broker.pendingRequests.map((pending) => pending.requestHandle),
+    ).toEqual(['req_1', 'req_2']);
+    expect(
+      broker.pendingUserRequests.map((pending) => pending.requestHandle),
+    ).toEqual(['req_1', 'req_2']);
+    expect(broker.pendingForSession('session_1')?.requestHandle).toBe('req_2');
+    expect(broker.pendingForSession('session_99')).toBeUndefined();
+  });
+
+  it('keeps a replayed backend request idempotent', async () => {
+    const { broker } = createBroker();
+    const first = await request(broker, { requestId: 'r1' });
+    const replay = await request(broker, { requestId: 'r1' });
+
+    expect(replay.pending).toBe(first.pending);
+    expect(replay.alreadyPending).toBe(true);
+    expect(first.alreadyPending).toBe(false);
+    expect(broker.pendingCount).toBe(1);
+    expect(broker.pendingRequests[0]?.requestHandle).toBe('req_1');
+  });
+
+  it('finds pending permissions only for their exact backend job', async () => {
+    const { broker } = createBroker();
+    await request(broker, { requestId: 'r1', jobRef: 'job-ref-1' });
+    await request(broker, { requestId: 'r2', jobRef: 'job-ref-2' });
+
+    expect(broker.pendingForJob(BACKEND, 'job-ref-1')?.requestHandle).toBe(
+      'req_1',
+    );
+    expect(broker.pendingForJob(BACKEND, 'job-ref-2')?.requestHandle).toBe(
+      'req_2',
+    );
+    expect(broker.pendingForJob(BACKEND, 'job-ref-3')).toBeUndefined();
   });
 
   it('delivers an allow vote and clears the pending ask', async () => {
@@ -98,6 +138,17 @@ describe('PermissionBroker', () => {
     );
     expect(broker.pendingCount).toBe(0);
     expect(broker.resolveHandle('req_1')).toBeUndefined();
+  });
+
+  it('clears pending requests when a session closes', async () => {
+    const { broker } = createBroker();
+    await request(broker, { requestId: 'r1', sessionHandle: 'session_1' });
+    await request(broker, { requestId: 'r2', sessionHandle: 'session_2' });
+
+    broker.clearSession('session_1');
+
+    expect(broker.resolveHandle('req_1')).toBeUndefined();
+    expect(broker.resolveHandle('req_2')).toBeDefined();
   });
 
   it('translates allow_always to a one-shot allow and auto-answers identical repeats', async () => {
@@ -218,11 +269,39 @@ describe('PermissionBroker', () => {
     const { broker } = createBroker();
     await request(broker, { requestId: 'r1' });
 
-    const pending = broker.onResolved('r1');
+    const pending = broker.onResolved(BACKEND, 'r1');
     expect(pending?.requestHandle).toBe('req_1');
     expect(broker.pendingCount).toBe(0);
 
-    expect(broker.onResolved('r1')).toBeUndefined();
+    expect(broker.onResolved(BACKEND, 'r1')).toBeUndefined();
+  });
+
+  it('scopes requestIds by owning adaptor — one backend never retracts another', async () => {
+    // Request ids are adaptor-local (serve UUIDs vs an ACP counter), so two
+    // backends can mint the same id; a resolution from one must leave the
+    // other's pending ask intact.
+    const { broker } = createBroker();
+    const otherBackend: BackendHandle = { id: 's1', adaptor: 'acp' };
+    await request(broker, { requestId: 'perm-1' });
+    await broker.onRequest({
+      requestId: 'perm-1',
+      backend: otherBackend,
+      sessionHandle: 'session_2',
+      title: 'write_file: other.txt',
+      options: OPTIONS,
+    });
+    expect(broker.pendingCount).toBe(2);
+
+    const resolved = broker.onResolved(BACKEND, 'perm-1');
+    expect(resolved?.requestHandle).toBe('req_1');
+
+    // The acp backend's identical id is untouched…
+    expect(broker.pendingCount).toBe(1);
+    // …and resolves only against its own backend.
+    expect(broker.onResolved(otherBackend, 'perm-1')?.requestHandle).toBe(
+      'req_2',
+    );
+    expect(broker.pendingCount).toBe(0);
   });
 
   it('logs requests and decisions with the auto flag', async () => {

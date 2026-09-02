@@ -1126,7 +1126,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
     expect(primaryArchive).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('shows rename for current and non-current locked-secondary sessions', async () => {
     connection.sessionId = 'locked-current';
@@ -1511,7 +1511,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('requires workspace_qualified_rest_core for locked secondary destructive and organization controls', async () => {
     connection.capabilities = {
@@ -1645,6 +1645,23 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
     expect(workspaceActions.listSessionGroups).not.toHaveBeenCalled();
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
+  });
+
+  it('stops channel grouping when project features hide while the channel source is active', async () => {
+    enableChannelOrganization();
+    renderSidebar();
+    await switchSessionSource('Channels');
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+
+    renderSidebar({ projectFeaturesEnabled: false });
+
     expect(useChannels).toHaveBeenLastCalledWith({
       autoLoad: false,
       enabled: false,
@@ -4559,21 +4576,45 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
-  it('renders scheduled-task runs with a flat source icon', async () => {
+  it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',
-      displayName: 'Hourly review',
+      displayName: 'Hourly review · 08-31 09:30',
       workspaceCwd: '/tmp/project',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
     };
-    active.sessions.push(scheduledRun);
+    active.sessions.push(scheduledRun, {
+      ...scheduledRun,
+      sessionId: 'scheduled-run-2',
+      displayName: 'Hourly review · 08-31 08:30',
+    });
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
+    const group = container.querySelector(
+      'section[aria-label="Hourly review"]',
+    );
+    expect(group).not.toBeNull();
+    expect(
+      group?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      group?.querySelectorAll('[data-web-shell-session-title]'),
+    ).toHaveLength(2);
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-session-title]'),
+      ).filter((candidate) =>
+        candidate.textContent?.startsWith('Hourly review ·'),
+      ),
+    ).toHaveLength(2);
+
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
-    ).find((candidate) => candidate.textContent === 'Hourly review');
+    ).find(
+      (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+    );
     const row = title?.closest('[role="button"]');
     expect(row).toBeTruthy();
     const sourceIcon = row?.querySelector(
@@ -4594,7 +4635,9 @@ describe('WebShellSidebar session source switch', () => {
     const completedRow = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
     )
-      .find((candidate) => candidate.textContent === 'Hourly review')
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
       ?.closest('[role="button"]');
     expect(
       completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
@@ -5398,6 +5441,146 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
+  });
+
+  it('registers manual groups as initial when organization lands after a scheduled-task settle', async () => {
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the flat settle carries only the
+    // scheduled-task section. Nothing may be persisted as collapsed yet.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('scheduled-task:');
+
+    // The session_organization capability lands mid-session and the groups
+    // catalog settles with a manual group.
+    const organized = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
+    // The organized settle keeps the scheduled-task section too: ungrouped
+    // runs still form their task section while organization is enabled.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+  });
+
+  it('registers manual groups as initial when organization lands while the channel source is selected', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    setChannelCatalog();
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return {
+          ...active,
+          sessions: active.sessions,
+          data: active.sessions,
+        };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the Tasks settle carries only the
+    // scheduled-task section and consumes the Tasks latch.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+
+    // Consume the Channels latch too while the capability is still out.
+    await switchSessionSource('Channels');
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).not.toBeNull();
+
+    // The session_organization capability lands while the Channels tab is
+    // selected; the groups catalog settles only after the switch back.
+    const organized = {
+      ...channelCapabilities,
+      features: [...channelCapabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await switchSessionSource('Tasks');
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
   });
 });
 

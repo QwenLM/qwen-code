@@ -528,27 +528,6 @@ export function settleOpenTools(
   return changed ? items : prev;
 }
 
-export type LivePhase =
-  | 'idle'
-  | 'thinking'
-  | 'tool'
-  | 'approving'
-  | 'responding';
-
-/** Streaming phase exposed to the status bar / spinner / border. */
-export function livePhase(
-  items: readonly LiveHistoryItem[],
-  streaming: boolean,
-): LivePhase {
-  if (!streaming) return 'idle';
-  const last = items[items.length - 1];
-  if (last?.kind === 'thinking' && !last.done) return 'thinking';
-  if (last?.kind === 'tool' && !last.done)
-    return last.confirm === 'pending' ? 'approving' : 'tool';
-  if (last?.kind === 'task' && !last.done) return 'tool';
-  return 'responding';
-}
-
 /** Semantic palette slot of a goal card; the backend maps it to theme colors. */
 export type GoalCardColor =
   | 'secondary'
