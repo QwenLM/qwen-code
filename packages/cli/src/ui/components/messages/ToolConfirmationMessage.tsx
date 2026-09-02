@@ -68,12 +68,18 @@ export const ToolConfirmationMessage: React.FC<
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const hideModify =
+    confirmationDetails.type === 'edit'
+      ? confirmationDetails.hideModify
+      : false;
   const editorAvailable = useMemo(
     () =>
+      !compactMode &&
       confirmationDetails.type === 'edit' &&
+      !hideModify &&
       preferredEditor !== undefined &&
       isEditorAvailable(preferredEditor),
-    [confirmationDetails.type, preferredEditor],
+    [compactMode, confirmationDetails.type, hideModify, preferredEditor],
   );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
