@@ -294,6 +294,15 @@ jobs:
                 done || true
           fi
 
+      - name: 'Verify trusted classifier checkout is clean'
+        if: "${{ github.event_name == 'pull_request' }}"
+        run: |-
+          if [ -e "$GITHUB_WORKSPACE/trusted-ci-classifier" ] ||
+             [ -L "$GITHUB_WORKSPACE/trusted-ci-classifier" ]; then
+            echo "::error::trusted-ci-classifier survived cleanup; refusing to reuse it"
+            exit 1
+          fi
+
       - name: 'Checkout trusted CI classifier'
         if: "${{ github.event_name == 'pull_request' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
