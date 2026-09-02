@@ -104,6 +104,7 @@ Commands for managing AI tools and models.
 | `/model --compaction` | Set the model used for chat compression                                               | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
 | `/model --image`      | Set an image-generation-capable model for the built-in image generation tool          | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
+| `/output-style`       | Choose the output style that shapes how responses are written                         | `/output-style` (opens picker), `/output-style Concise`, `/output-style default` (no style)               |
 | `/extensions`         | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
 | → `list`              | List installed extensions                                                             | `/extensions list`                                                                                        |
 | → `manage`            | Manage installed extensions (interactive)                                             | `/extensions manage`                                                                                      |
@@ -836,3 +837,39 @@ agents again) — or released after a hold — a notice appears in the
 sending session's transcript (`Message to <name>: …`). The model that
 sent it is not told; if the other session replies, the reply arrives as a
 cross-session message.
+
+### Inbox authentication and scripted injection
+
+Each session's inbox requires a per-session token: a connection must
+present it on its first line before any message is read, and sessions
+exchange tokens automatically through the same registry records they
+discover each other by. Sessions from a build without token support can
+receive from a newer one, but their sends to it are dropped.
+
+A session exports its own inbox address and a token to child processes as
+`QWEN_CODE_MESSAGING_SOCKET` and `QWEN_CODE_MESSAGING_TOKEN`, so a script
+or hook the session runs can send a message back into it. This is a
+second, _child_ token that is never published anywhere: only processes
+the session started can hold it, so a message that arrives with it is
+recognized as the session's own rather than as another session's.
+
+```bash
+{ printf '%s\n' \
+    '{"msgV":1,"type":"auth","token":"'"$QWEN_CODE_MESSAGING_TOKEN"'"}' \
+    '{"msgV":1,"msgId":"'"$(uuidgen)"'","type":"user","priority":"next","message":{"role":"user","content":"build finished"}}'; \
+} | socat - UNIX-CONNECT:"$QWEN_CODE_MESSAGING_SOCKET"
+```
+
+Give every injection a fresh `msgId`. The receiving gate remembers the
+ids it has already settled, so a hook that reuses one is delivered the
+first time and silently deduplicated on every run after that.
+
+An injected message still goes through the inbound gate and is marked as
+not coming from the user, but the gate knows it came from the session's
+own process: under the mode-parity default it is delivered without review
+(a peer in the same position would be held), while an explicit
+`agents.crossSessionInbound` of `hold` or `refuse` applies to it as to
+anything else. The model sees it as
+`<cross_session_message from="own process" origin="own-process">` with a
+notice that it came from a script or hook the session ran, not from the
+user.
