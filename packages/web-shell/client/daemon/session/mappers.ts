@@ -14,6 +14,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
   GoalSnapshotV2,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -23,8 +24,29 @@ import type {
   DaemonTokenUsage,
 } from './types.js';
 
+const REASONING_SELECTIONS: readonly ReasoningSelection[] = [
+  'none',
+  'default',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+function parseReasoningSelection(
+  value: string | undefined,
+): ReasoningSelection | undefined {
+  return REASONING_SELECTIONS.find((selection) => selection === value);
+}
+
 export function mapProviderStatus(
-  status: DaemonWorkspaceProvidersStatus | undefined,
+  status:
+    | Pick<
+        DaemonWorkspaceProvidersStatus,
+        'current' | 'approvalMode' | 'providers'
+      >
+    | undefined,
   preferredCurrentModel?: string,
 ): {
   models: DaemonModelInfo[];
@@ -137,7 +159,6 @@ export function mapSessionContextModels(
 
 export function mapReasoningControls(
   configOptions: unknown,
-  fallbackEffort?: string,
 ): DaemonReasoningControls | undefined {
   if (!Array.isArray(configOptions)) return undefined;
   const option = configOptions
@@ -146,46 +167,51 @@ export function mapReasoningControls(
   const rawOptions = option?.['options'];
   if (!option || !Array.isArray(rawOptions)) return undefined;
   const values = rawOptions.flatMap((item) => {
-    const value = getString(getRecord(item), 'value');
+    const value = parseReasoningSelection(getString(getRecord(item), 'value'));
     return value ? [value] : [];
   });
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
   const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
   if (!thinkingMandatory && !values.includes('none')) return undefined;
-  const currentValue = getString(option, 'currentValue');
+  const currentValue = parseReasoningSelection(
+    getString(option, 'currentValue'),
+  );
   if (!currentValue || !values.includes(currentValue)) return undefined;
   if (thinkingMandatory && currentValue === 'none') return undefined;
-  const selectableValues = values.filter((value) => value !== 'none');
-  if (selectableValues.length === 0) return undefined;
+  const effortValues = values.filter(
+    (value) => value !== 'none' && value !== 'default',
+  );
   if (reasoningMeta?.['toggleOnly'] === true) {
+    if (!values.includes('default')) return undefined;
     return {
       enabled: currentValue !== 'none',
-      effort: selectableValues[0]!,
+      effort: 'default',
       efforts: [],
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
-  const efforts = selectableValues;
-  const defaultEffort = getString(reasoningMeta, 'defaultEffort');
+  if (effortValues.length === 0) return undefined;
+  const defaultEffort = effortValues.find(
+    (value) => value === getString(reasoningMeta, 'defaultEffort'),
+  );
   const effort =
-    [currentValue, fallbackEffort, defaultEffort].find(
-      (value): value is string =>
-        typeof value === 'string' && efforts.includes(value),
-    ) ?? efforts[0]!;
+    effortValues.find((value) => value === currentValue) ??
+    defaultEffort ??
+    'default';
   return {
     enabled: currentValue !== 'none',
     effort,
-    efforts,
+    efforts: effortValues,
+    ...(defaultEffort ? { defaultEffort } : {}),
     ...(thinkingMandatory ? { canDisable: false } : {}),
   };
 }
 
 export function mapSessionContextReasoning(
   status: DaemonSessionContextStatus | undefined,
-  fallbackEffort?: string,
 ): DaemonReasoningControls | undefined {
-  return mapReasoningControls(status?.state?.configOptions, fallbackEffort);
+  return mapReasoningControls(status?.state?.configOptions);
 }
 
 export function mapSupportedCommands(
@@ -354,9 +380,22 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        const displayName = getString(data, 'displayName');
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : // A metadata event that echoes the unchanged name without an
+                // explicit provenance (the bridge's pr-only publish) does not
+                // change the title, so it must not strip the provenance the
+                // `/clear` carry reads. Only a changed name of unknown
+                // provenance resets it.
+                displayName && displayName === current.displayName
+                ? current.titleSource
+                : undefined,
         }));
       }
       break;

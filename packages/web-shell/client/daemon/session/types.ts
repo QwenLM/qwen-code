@@ -51,6 +51,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  ReasoningSelection,
   SessionMetadataResult,
   SetModelResult,
 } from '@qwen-code/sdk/daemon';
@@ -113,6 +114,7 @@ export interface DaemonConnectionState {
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
@@ -137,8 +139,10 @@ export interface DaemonConnectionState {
 
 export interface DaemonReasoningControls {
   enabled: boolean;
-  effort: string;
-  efforts: string[];
+  effort: ReasoningSelection;
+  efforts: Array<Exclude<ReasoningSelection, 'none' | 'default'>>;
+  /** The model default when the daemon advertises one. */
+  defaultEffort?: Exclude<ReasoningSelection, 'none' | 'default'>;
   /** Defaults to true. False means effort is mutable but thinking is required. */
   canDisable?: boolean;
 }
@@ -414,7 +418,10 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
-  setReasoningEffort(value: string): Promise<void>;
+  setReasoningEffort(
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
+  ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean },
@@ -468,12 +475,14 @@ export interface DaemonSessionActions {
    * `options.approvalMode` seeds the session's approval mode in the create
    * request itself, so the daemon applies it atomically at spawn instead of
    * requiring a follow-up `setApprovalMode` call.
+   * `options.modelServiceId` is a standalone-only atomic create override.
    *
    * `options.sourceType` records immutable creator attribution.
    */
   createSession(options?: {
     workspaceCwd?: string;
     sessionContext?: DaemonProductSessionContext;
+    modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };

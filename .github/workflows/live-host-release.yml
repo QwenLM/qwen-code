@@ -346,6 +346,45 @@ jobs:
             gh release create "$FEED_TAG" "${stable_assets[@]}" --title 'Qwen Live Host latest' --notes 'Stable Qwen Live Host installer feed.' --latest=false
           fi
 
+      - name: 'Checkout source for qwen-live npm publish'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@49933f5360751b6f8e5e4b6c6f3a8c3c5c5c5c5c'
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 'Install dependencies'
+        run: 'npm install --ignore-scripts'
+
+      - name: 'Build qwen-live'
+        run: 'npm run build --workspace @qwen-code/qwen-live'
+
+      - name: 'Publish @qwen-code/qwen-live'
+        working-directory: 'packages/qwen-live'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+          NPM_TAG: "${{ inputs.prerelease == true && 'preview' || 'latest' }}"
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          # Align the package version with the Host release version.
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+          if npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          # Check if the package exists at all — provenance requires an
+          # existing package, so the first publish omits it.
+          if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
+            npm publish --access public --provenance --tag "$NPM_TAG"
+          else
+            echo "::notice::First publish of ${PACKAGE_NAME}; omitting --provenance"
+            npm publish --access public --tag "$NPM_TAG"
+          fi
+
       - name: 'Publish release summary'
         env:
           RELEASE_URL: '${{ steps.release.outputs.url }}'

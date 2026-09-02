@@ -194,7 +194,7 @@ export interface CreateDaemonSessionActionsArgs {
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
-    overrides?: Pick<CreateSessionRequest, 'approvalMode'>,
+    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getConnection: () => DaemonConnectionState;
@@ -229,6 +229,49 @@ export function getWorkspaceModelsAfterSessionClear(
     : current.models;
 }
 
+function withPersistedReasoningPreview(
+  providers: DaemonConnectionState['providers'],
+  modelId: string | undefined,
+  configOptions: unknown[],
+): DaemonConnectionState['providers'] {
+  const targetModelId = modelId ?? providers?.current?.modelId;
+  const isReasoningOption = (option: unknown) =>
+    typeof option === 'object' &&
+    option !== null &&
+    'id' in option &&
+    option.id === 'reasoning_effort';
+  const reasoningConfigOptions = configOptions.filter(isReasoningOption);
+  if (!providers || !targetModelId || reasoningConfigOptions.length === 0) {
+    return providers;
+  }
+
+  let changed = false;
+  const nextProviders = providers.providers.map((provider) => {
+    let providerChanged = false;
+    const models = provider.models.map((model) => {
+      if (
+        model.modelId !== targetModelId ||
+        !model.configOptions?.some(isReasoningOption)
+      ) {
+        return model;
+      }
+      changed = true;
+      providerChanged = true;
+      return {
+        ...model,
+        configOptions: [
+          ...(model.configOptions ?? []).filter(
+            (option) => !isReasoningOption(option),
+          ),
+          ...reasoningConfigOptions,
+        ],
+      };
+    });
+    return providerChanged ? { ...provider, models } : provider;
+  });
+  return changed ? { ...providers, providers: nextProviders } : providers;
+}
+
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
   clearedSessionId: string | undefined,
@@ -240,6 +283,7 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
+    delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
@@ -319,10 +363,36 @@ export function createDaemonSessionActions({
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
   let modelMutationGeneration = 0;
+  let pendingPersistedReasoningAction: Promise<void> | undefined;
   let branchInFlight = false;
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
+
+  function publishStandaloneWorkingDirectoryError(
+    sessionId: string,
+    error: unknown,
+  ): void {
+    const errorCode = getDaemonErrorCode(error);
+    if (
+      errorCode !== 'working_directory_missing' &&
+      errorCode !== 'working_directory_compromised'
+    ) {
+      return;
+    }
+    setConnection((current) =>
+      current.sessionId === sessionId &&
+      current.sessionContext?.kind === 'standalone'
+        ? {
+            ...current,
+            standaloneSession: {
+              ...current.standaloneSession,
+              errorCode,
+            },
+          }
+        : current,
+    );
+  }
 
   function trackSessionConfigMutation<T>(
     session: DaemonSessionClient,
@@ -707,6 +777,7 @@ export function createDaemonSessionActions({
           standaloneSession: undefined,
           clientId: undefined,
           displayName: undefined,
+          titleSource: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -858,6 +929,7 @@ export function createDaemonSessionActions({
             ctrl.signal,
           );
         } catch (error) {
+          publishStandaloneWorkingDirectoryError(sessionId, error);
           const definiteRejection = isDefinitePromptAdmissionRejection(error);
           if (definiteRejection) {
             await removeUploadedAttachments(session, uploaded.references);
@@ -1006,6 +1078,7 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
         );
       } catch (error) {
+        publishStandaloneWorkingDirectoryError(session.sessionId, error);
         const definiteRejection = isDefinitePromptAdmissionRejection(error);
         if (definiteRejection) {
           await removeUploadedAttachments(session, uploaded.references);
@@ -1173,33 +1246,41 @@ export function createDaemonSessionActions({
       }
     },
 
-    async setReasoningEffort(value) {
-      const actionToken = ++reasoningActionToken;
-      const sourceModel = getConnection().currentModel;
-      const sourceModelGeneration = modelMutationGeneration;
+    async setReasoningEffort(value, opts) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Set reasoning effort failed',
         'set_reasoning_effort',
       );
+      let completePersistedAction: (() => void) | undefined;
+      const persistedAction = opts?.persist
+        ? new Promise<void>((resolve) => {
+            completePersistedAction = resolve;
+          })
+        : undefined;
+      if (persistedAction) pendingPersistedReasoningAction = persistedAction;
+
+      const actionToken = ++reasoningActionToken;
+      const sourceModel = getConnection().currentModel;
+      const sourceModelGeneration = modelMutationGeneration;
       try {
         const result = await withActionTimeout(
           trackSessionConfigMutation(
             session,
-            session.setConfigOption('reasoning_effort', value),
+            session.setConfigOption('reasoning_effort', value, opts),
           ),
           'Set reasoning effort timed out',
         );
-        const nextReasoning = mapReasoningControls(
-          result.configOptions,
-          getConnection().reasoning?.effort,
-        );
+        const nextReasoning = mapReasoningControls(result.configOptions);
         const confirmed =
           value === 'none'
             ? nextReasoning?.enabled === false
-            : nextReasoning?.enabled === true && nextReasoning.effort === value;
-        if (!confirmed) {
+            : value === 'default'
+              ? nextReasoning !== undefined
+              : nextReasoning?.enabled === true &&
+                nextReasoning.effort === value;
+        if (!confirmed || (opts?.persist && result.persisted !== true)) {
           throw new Error(
             `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
           );
@@ -1224,6 +1305,14 @@ export function createDaemonSessionActions({
             return {
               ...current,
               reasoning: nextReasoning,
+              providers:
+                opts?.persist && result.persisted
+                  ? withPersistedReasoningPreview(
+                      current.providers,
+                      sourceModel,
+                      configOptions,
+                    )
+                  : current.providers,
               context: current.context
                 ? {
                     ...current.context,
@@ -1240,6 +1329,11 @@ export function createDaemonSessionActions({
           error,
           'set_reasoning_effort',
         );
+      } finally {
+        completePersistedAction?.();
+        if (pendingPersistedReasoningAction === persistedAction) {
+          pendingPersistedReasoningAction = undefined;
+        }
       }
     },
 
@@ -1390,6 +1484,7 @@ export function createDaemonSessionActions({
     async createSession(options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      modelServiceId?: string;
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
       worktree?: { slug?: string };
@@ -1446,6 +1541,14 @@ export function createDaemonSessionActions({
             'Standalone session creation does not support sourceType, worktree, or branch options',
           );
         }
+        if (
+          targetSessionContext?.kind !== 'standalone' &&
+          options?.modelServiceId !== undefined
+        ) {
+          throw new Error(
+            'Per-call modelServiceId is only supported for standalone session creation',
+          );
+        }
         // Fold the initial approval mode into the create request so the daemon
         // applies it atomically at spawn (`POST /session` →
         // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
@@ -1473,6 +1576,9 @@ export function createDaemonSessionActions({
           if (targetSessionContext?.kind === 'standalone') {
             const nextClient = await trackCreate(
               createDetachedStandaloneSession({
+                ...(options?.modelServiceId !== undefined
+                  ? { modelServiceId: options.modelServiceId }
+                  : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
@@ -1507,6 +1613,9 @@ export function createDaemonSessionActions({
         const trackedCreate = trackCreate(
           targetSessionContext?.kind === 'standalone'
             ? createDetachedStandaloneSession({
+                ...(options?.modelServiceId !== undefined
+                  ? { modelServiceId: options.modelServiceId }
+                  : {}),
                 ...(options?.approvalMode !== undefined
                   ? { approvalMode: options.approvalMode }
                   : {}),
@@ -1642,11 +1751,16 @@ export function createDaemonSessionActions({
     async clearSession() {
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
-      clearActiveSessionState();
-      sessionRef.current = undefined;
-      setConnection((current) =>
-        getConnectionAfterSessionClear(current, session?.sessionId),
-      );
+      if (pendingPersistedReasoningAction) {
+        await pendingPersistedReasoningAction.catch(() => undefined);
+      }
+      if (sessionRef.current === session) {
+        clearActiveSessionState();
+        sessionRef.current = undefined;
+        setConnection((current) =>
+          getConnectionAfterSessionClear(current, session?.sessionId),
+        );
+      }
       if (session) {
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');
@@ -1777,10 +1891,7 @@ export function createDaemonSessionActions({
               getModeFromSessionContext(context) ?? current.currentMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
-            reasoning: mapSessionContextReasoning(
-              context,
-              current.reasoning?.effort,
-            ),
+            reasoning: mapSessionContextReasoning(context),
           };
         });
         return context;
@@ -2144,6 +2255,7 @@ export function createDaemonSessionActions({
       try {
         return await session.shellCommand(command, ctrl.signal);
       } catch (error) {
+        publishStandaloneWorkingDirectoryError(session.sessionId, error);
         throw dispatchActionError(
           addNotice,
           'Shell command failed',

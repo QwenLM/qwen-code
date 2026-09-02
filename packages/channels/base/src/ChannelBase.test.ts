@@ -1197,8 +1197,8 @@ describe('ChannelBase', () => {
           kind: 'allow_always',
           name: 'Always Allow in project',
         },
-        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
-        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
       ],
     ): void {
       (bridge as unknown as EventEmitter).emit('permissionRequest', {
@@ -1210,6 +1210,7 @@ describe('ChannelBase', () => {
             kind: 'shell',
             title: `Run ${requestId}`,
             rawInput: { command: 'echo secret-token' },
+            _meta: { toolName: 'run_shell_command' },
           },
           options,
         },
@@ -1224,7 +1225,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: `tool-${requestId}`,
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 1 question',
+            title: 'Ask user 1 question',
             rawInput: {
               questions: [
                 {
@@ -1456,7 +1457,7 @@ describe('ChannelBase', () => {
           toolCall: {
             toolCallId: 'tool-question',
             kind: 'other',
-            title: 'AskUserQuestion: Ask user 2 questions',
+            title: 'Ask user 2 questions',
             rawInput: { questions: [{ question: 'stale legacy question' }] },
             _meta: {
               toolName: 'ask_user_question',
@@ -1828,6 +1829,9 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.userInputPresentations).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(ch.sent[0]!.text).toContain('Tool: ask_user_question');
+      expect(ch.sent[0]!.text).toContain('Action: Ask user 1 question');
+      expect(ch.sent[0]!.text).toContain('Parameters: questions (1 item)');
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
 
       await active.finish();
@@ -2126,11 +2130,14 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Permission required to run a tool',
       );
-      expect(ch.sent.at(-1)?.text).toContain('Command:');
-      expect(ch.sent.at(-1)?.text).toContain('Run req-1');
-      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
-      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
-      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+      expect(ch.sent.at(-1)?.text).toContain('Tool: run_shell_command');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Run req-1');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        Allow');
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always Always Allow in project',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('/deny           Reject');
       expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
       expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
       expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
@@ -2141,6 +2148,88 @@ describe('ChannelBase', () => {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       });
       expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('uses stable fallbacks when permission labels sanitize to empty', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-empty-labels',
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-empty-labels',
+            kind: 'shell',
+            title: 42,
+            rawInput: { '\u0000\n[]': true },
+            _meta: { toolName: '\u0000\n' },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: { trim: true },
+            },
+            {
+              optionId: 'cancel',
+              kind: 'reject_once',
+              name: '\u0000\n',
+            },
+          ],
+        },
+      });
+
+      expect(ch.sent.at(-1)?.text).toContain('Tool: shell');
+      expect(ch.sent.at(-1)?.text).toContain('Action: Tool use');
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: unknown');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
+
+      emitPermission(sessionId, 'req-other');
+      await ch.handleInbound(envelope({ text: '/approve' }));
+      expect(ch.sent.at(-1)?.text).toContain('- req-empty-labels: Tool use');
+    });
+
+    it('summarizes permission parameters with shape markers and overflow', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      const emitParams = (requestId: string, rawInput: unknown): void => {
+        (bridge as unknown as EventEmitter).emit('permissionRequest', {
+          requestId,
+          sessionId,
+          request: {
+            toolCall: {
+              toolCallId: `tool-${requestId}`,
+              kind: 'shell',
+              title: `Run ${requestId}`,
+              rawInput,
+              _meta: { toolName: 'run_shell_command' },
+            },
+            options: [
+              { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+              { optionId: 'cancel', kind: 'reject_once', name: 'Reject' },
+            ],
+          },
+        });
+      };
+
+      emitParams('req-params-mixed', {
+        config: { strict: true },
+        tags: ['alpha', 'beta'],
+        first: 1,
+        second: 2,
+        third: 3,
+      });
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Parameters: config (object), tags (2 items), first, second, +1 more',
+      );
+
+      emitParams('req-params-short', { command: 'ls', timeout: 30 });
+      expect(ch.sent.at(-1)?.text).toContain('Parameters: command, timeout');
+      expect(ch.sent.at(-1)?.text).not.toContain('more');
+
+      emitParams('req-params-empty', {});
+      expect(ch.sent.at(-1)?.text).not.toContain('Parameters:');
     });
 
     it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
@@ -2565,7 +2654,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this project',
+        '/approve-always Always Allow in project',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2589,7 +2678,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -2617,7 +2706,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always always allow for this user',
+        '/approve-always Always Allow for user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -3748,7 +3837,7 @@ describe('ChannelBase', () => {
           },
         });
         expect(ch.sent[0]!.text).toBe(
-          '[review] Permission required to run a tool\nRequest: req-123\n\nCommand:\nRun tests\n\nReply with:\n/approve req-123          allow once\n/approve-always req-123   always allow for this project\n/deny req-123             deny',
+          '[review] Permission required to run a tool\nRequest: req-123\n\nTool: unknown\nAction: Run tests\n\nReply with:\n/approve req-123          Allow once\n/approve-always req-123   Always\n/deny req-123             Deny',
         );
 
         ch.sent = [];
@@ -3983,7 +4072,7 @@ describe('ChannelBase', () => {
       ).toBe('\\[review\\]\n```ts\nconst x = 1;\n```');
     });
 
-    it('rejects switching while ChannelBase still owns an unfinished turn', async () => {
+    it('creates and selects a task while the prior task is still running', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishPrompt!: (response: string) => void;
       vi.mocked(bridge.prompt).mockImplementationOnce(
@@ -3999,12 +4088,61 @@ describe('ChannelBase', () => {
 
         await ch.handleInbound(envelope({ text: '/session new feature' }));
         expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
+          'Created and selected task "feature"',
         );
-        expect(bridge.newSession).toHaveBeenCalledTimes(1);
+        expect(bridge.newSession).toHaveBeenCalledTimes(2);
 
         finishPrompt('done');
         await running;
+        expect(ch.sent.at(-1)!.text).toBe('[default] done');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('runs three selected tasks concurrently without retargeting their results', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const finishPrompts = new Map<string, (response: string) => void>();
+      vi.mocked(bridge.prompt).mockImplementation(
+        (sessionId: string) =>
+          new Promise<string>((resolve) => {
+            finishPrompts.set(sessionId, resolve);
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        const review = ch.handleInbound(envelope({ text: 'review it' }));
+        await vi.waitFor(() => expect(finishPrompts.has('s-1')).toBe(true));
+
+        await ch.handleInbound(envelope({ text: '/session new feature-a' }));
+        const featureA = ch.handleInbound(envelope({ text: 'build A' }));
+        await vi.waitFor(() => expect(finishPrompts.has('s-2')).toBe(true));
+
+        await ch.handleInbound(envelope({ text: '/session new feature-b' }));
+        const featureB = ch.handleInbound(envelope({ text: 'build B' }));
+        await vi.waitFor(() => expect(finishPrompts.has('s-3')).toBe(true));
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(3);
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)!.text).toContain('Current task: review');
+
+        finishPrompts.get('s-3')?.('B done');
+        await featureB;
+        finishPrompts.get('s-2')?.('A done');
+        await featureA;
+        finishPrompts.get('s-1')?.('review done');
+        await review;
+
+        expect(ch.sent.map((message) => message.text)).toEqual(
+          expect.arrayContaining([
+            '[feature-b] B done',
+            '[feature-a] A done',
+            '[review] review done',
+          ]),
+        );
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
@@ -4048,9 +4186,7 @@ describe('ChannelBase', () => {
 
         finishLoad('s-2');
         await switching;
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
         await vi.waitFor(() =>
           expect(recoveredBridge.prompt).toHaveBeenCalledTimes(1),
         );
@@ -4106,9 +4242,7 @@ describe('ChannelBase', () => {
 
         finishLoad('s-2');
         await switching;
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
         await vi.waitFor(() =>
           expect(recoveredBridge.prompt).toHaveBeenCalledTimes(1),
         );
@@ -4148,9 +4282,7 @@ describe('ChannelBase', () => {
         const turn = ch.handleInbound(envelope({ text: 'continue feature' }));
         await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
         await ch.handleInbound(envelope({ text: '/session use review' }));
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
 
         finishObservation();
         await turn;
@@ -4187,9 +4319,7 @@ describe('ChannelBase', () => {
 
         finishPreparation();
         await switching;
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
 
         await turn;
         expect(bridge.prompt).toHaveBeenCalledWith(
@@ -4233,9 +4363,7 @@ describe('ChannelBase', () => {
 
         finishPreparation();
         await switching;
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
         expect(bridge.prompt).toHaveBeenCalledWith(
           's-2',
@@ -4328,9 +4456,9 @@ describe('ChannelBase', () => {
 
         await ch.handleInbound(envelope({ text: '/session new feature' }));
         expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
+          'Created and selected task "feature"',
         );
-        expect(bridge.newSession).toHaveBeenCalledTimes(1);
+        expect(bridge.newSession).toHaveBeenCalledTimes(2);
 
         finishObservation();
         await first;
@@ -4410,9 +4538,7 @@ describe('ChannelBase', () => {
         const running = ch.handleInbound(envelope({ text: '!npm test' }));
         await vi.waitFor(() => expect(shellCommand).toHaveBeenCalledTimes(1));
         await ch.handleInbound(envelope({ text: '/session use review' }));
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
         await ch.handleInbound(envelope({ text: '/session close feature' }));
         expect(ch.sent.at(-1)!.text).toContain(
           'still running or waiting for permission',
@@ -4420,6 +4546,7 @@ describe('ChannelBase', () => {
 
         finishShell({ exitCode: 0, output: 'ok', aborted: false });
         await running;
+        expect(ch.sent.at(-1)!.text).toBe('[feature] $ npm test\n```\nok\n```');
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
@@ -4450,9 +4577,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).not.toHaveBeenCalled();
 
         await ch.handleInbound(envelope({ text: '/session use review' }));
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
         await ch.handleInbound(envelope({ text: '/session close feature' }));
         expect(ch.sent.at(-1)!.text).toContain(
           'still running or waiting for permission',
@@ -4472,7 +4597,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('keeps a collected named turn bound and drops it after reset', async () => {
+    it('keeps a collected named turn bound across a selected-task reset', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishFirst!: (response: string) => void;
       let finishClassification!: (result: {
@@ -4519,12 +4644,10 @@ describe('ChannelBase', () => {
         );
 
         await ch.handleInbound(envelope({ text: '/session use review' }));
-        expect(ch.sent.at(-1)!.text).toContain(
-          'still running or waiting for permission',
-        );
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
 
         await ch.handleInbound(envelope({ text: '/clear' }));
-        expect(ch.sent.at(-1)!.text).toContain('Task "feature" reset');
+        expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
         finishClassification({ intent: 'none', confidence: 0.9 });
         await vi.waitFor(() =>
           expect(
@@ -4533,10 +4656,15 @@ describe('ChannelBase', () => {
           ).toBe(0),
         );
 
-        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
         expect(bridge.prompt).toHaveBeenCalledWith(
           's-2',
           expect.stringContaining('build feature'),
+          expect.anything(),
+        );
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-2',
+          expect.stringContaining('update feature'),
           expect.anything(),
         );
       } finally {
@@ -4618,15 +4746,230 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('reports the Part 2 cancellation boundary without promising /cancel on every adapter', async () => {
+    it('cancels the selected or an explicitly named active task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const finishPrompts = new Map<string, (response: string) => void>();
+      vi.mocked(bridge.prompt).mockImplementation(
+        (sessionId: string) =>
+          new Promise<string>((resolve) => {
+            finishPrompts.set(sessionId, resolve);
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        const review = ch.handleInbound(envelope({ text: 'review it' }));
+        await vi.waitFor(() => expect(finishPrompts.has('s-1')).toBe(true));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        const feature = ch.handleInbound(envelope({ text: 'build it' }));
+        await vi.waitFor(() => expect(finishPrompts.has('s-2')).toBe(true));
+
+        await ch.handleInbound(envelope({ text: '/session cancel review' }));
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.cancelSession).not.toHaveBeenCalledWith('s-2');
+        expect(ch.sent.at(-1)!.text).toBe('Cancelled task "review".');
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)!.text).toContain('Current task: feature');
+
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-2');
+        expect(ch.sent.at(-1)!.text).toBe('Cancelled task "feature".');
+
+        finishPrompts.get('s-1')?.('cancelled');
+        finishPrompts.get('s-2')?.('cancelled');
+        await Promise.all([review, feature]);
+        expect(
+          ch.taskEvents.filter((event) => event.type === 'cancelled'),
+        ).toHaveLength(2);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not call the bridge when a named task has no active prompt', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel({ multiSession: true }, { stateDir });
       try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        vi.mocked(bridge.cancelSession).mockClear();
+
         await ch.handleInbound(envelope({ text: '/session cancel' }));
 
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
         expect(ch.sent.at(-1)!.text).toBe(
-          'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+          'No request is currently running for task "review".',
         );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports when cancellation has no selected task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        vi.mocked(bridge.cancelSession).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe('No task is currently selected.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not cancel a closed named task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        vi.mocked(bridge.cancelSession).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/session cancel review' }));
+
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe('Task "review" is closed.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports when cancelling an active named task fails', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      vi.mocked(bridge.cancelSession).mockRejectedValueOnce(
+        new Error('cancel failed'),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        const prompt = ch.handleInbound(envelope({ text: 'review it' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(ch.sent.at(-1)!.text).toBe('Failed to cancel task "review".');
+        finishPrompt('done');
+        await prompt;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('sanitizes an unknown task name before reporting cancellation failure', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session cancel bad"task\u0007' }),
+        );
+
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe('Task "bad task " was not found.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('binds bare permission commands to the selected named task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-review',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Review changes' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        vi.mocked(bridge.respondToPermission!).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/approve' }));
+        expect(bridge.respondToPermission).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe(
+          'No pending permission request for selected task "feature". Use an explicit request ID to answer another task.',
+        );
+
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-feature',
+          sessionId: 's-2',
+          request: {
+            toolCall: { title: 'Build feature' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        await ch.handleInbound(envelope({ text: '/approve' }));
+        expect(bridge.respondToPermission).toHaveBeenLastCalledWith(
+          'req-feature',
+          { outcome: { outcome: 'selected', optionId: 'once' } },
+        );
+        expect(ch.sent.at(-1)!.text).toBe('[feature] Permission approved.');
+
+        await ch.handleInbound(envelope({ text: '/approve req-review' }));
+        expect(bridge.respondToPermission).toHaveBeenLastCalledWith(
+          'req-review',
+          { outcome: { outcome: 'selected', optionId: 'once' } },
+        );
+        expect(ch.sent.at(-1)!.text).toBe('[review] Permission approved.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects bare permission commands when no named task is selected', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-review',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Review changes' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        const namedSessions = (
+          ch as unknown as {
+            namedSessions: {
+              current: () => Promise<undefined>;
+            };
+          }
+        ).namedSessions;
+        vi.spyOn(namedSessions, 'current').mockResolvedValueOnce(undefined);
+        vi.mocked(bridge.respondToPermission!).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/approve' }));
+
+        expect(bridge.respondToPermission).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toBe(
+          'No task is currently selected. Use an explicit request ID to answer a named task.',
+        );
+
+        await ch.handleInbound(envelope({ text: '/approve req-review' }));
+        expect(bridge.respondToPermission).toHaveBeenCalledWith('req-review', {
+          outcome: { outcome: 'selected', optionId: 'once' },
+        });
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }
@@ -4635,10 +4978,19 @@ describe('ChannelBase', () => {
     it('leaves /sessions available to the agent when named sessions are disabled', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: '/sessions' }));
+      await ch.handleInbound(envelope({ text: '/session cancel review' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith(
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        1,
         's-1',
         expect.stringContaining('/sessions'),
+        expect.anything(),
+      );
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        2,
+        's-1',
+        expect.stringContaining('/session cancel review'),
         expect.anything(),
       );
     });

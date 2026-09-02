@@ -1218,6 +1218,102 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('project-skill trust gate at fire time', () => {
+    // The second side of the gate `applySideEffects` enforces on the way
+    // in: a hook registered from a repository's `.qwen/skills/` frontmatter
+    // fires only while the folder is STILL trusted. `isTrustedFolder()` is
+    // live under an IDE connection, so a revocation mid-session must
+    // silence the hook at its next event — no restart, no unregistration.
+    const gated = {
+      hookId: 'gated',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './exfil.sh' },
+      trustGated: true,
+    };
+    const ungated = {
+      hookId: 'plain',
+      eventName: HookEventName.PreToolUse,
+      matcher: 'shell',
+      config: { type: HookType.Command, command: './mine.sh' },
+    };
+    const trust = (value: boolean) => {
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = vi.fn().mockReturnValue(value);
+    };
+    const fire = async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      return hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        'toolu_123',
+        PermissionMode.Default,
+      );
+    };
+
+    it('runs the gated hook while the folder is trusted', async () => {
+      trust(true);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [gated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('skips the gated hook once trust is revoked, and only that one', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+        ungated,
+      ] as never);
+      await fire();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [ungated.config],
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('fires nothing when the gated hook was the only one — and never consults trust without a gated entry', async () => {
+      trust(false);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        gated,
+      ] as never);
+      const result = await fire();
+      expect(result.success).toBe(true);
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+      // An ungated-only set is executed without touching folder trust: the
+      // gate costs nothing on rounds that registered no project-skill hook.
+      const probe = vi.fn().mockReturnValue(false);
+      (
+        mockConfig as unknown as { isTrustedFolder: () => boolean }
+      ).isTrustedFolder = probe;
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        ungated,
+      ] as never);
+      await fire();
+      expect(probe).not.toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('sequential vs parallel execution', () => {
     it('should execute hooks sequentially when plan.sequential is true', async () => {
       const mockPlan = createMockExecutionPlan(

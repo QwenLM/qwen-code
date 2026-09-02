@@ -31,6 +31,7 @@ describe('getConnectionAfterSessionClear', () => {
         sessionId: 'session-a',
         clientId: 'client-a',
         displayName: 'Session A',
+        titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
@@ -58,6 +59,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
+    expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -529,12 +531,16 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
-    await expect(actions.createSession({ approvalMode: 'yolo' })).resolves.toBe(
-      nextSession,
-    );
+    await expect(
+      actions.createSession({
+        approvalMode: 'yolo',
+        modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      }),
+    ).resolves.toBe(nextSession);
 
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
     });
     expect(createDetachedSession).not.toHaveBeenCalled();
     expect(getConnection()).toMatchObject({
@@ -858,6 +864,27 @@ describe('createDaemonSessionActions', () => {
       expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects a per-call model for workspace creation', async () => {
+    const createDetachedSession = vi.fn();
+    const createDetachedStandaloneSession = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+      createDetachedSession,
+      createDetachedStandaloneSession,
+    });
+
+    await expect(
+      actions.createSession({ modelServiceId: 'qwen3.8-max(USE_OPENAI)' }),
+    ).rejects.toThrow(
+      'Per-call modelServiceId is only supported for standalone session creation',
+    );
+    expect(createDetachedSession).not.toHaveBeenCalled();
+    expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+  });
 
   it('does not apply the generic create timeout to standalone create', async () => {
     vi.useFakeTimers();
@@ -2733,6 +2760,90 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('publishes standalone working-directory admission failures', async () => {
+    const session = createMockSession('standalone-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_missing' },
+        'working directory missing',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'standalone-a',
+        sessionContext: { kind: 'standalone' },
+        standaloneSession: { workingDirectory: { state: 'ready' } },
+      },
+    });
+
+    await expect(actions.sendPrompt('look')).rejects.toThrow(
+      'working directory missing',
+    );
+
+    expect(getConnection().standaloneSession).toEqual({
+      workingDirectory: { state: 'ready' },
+      errorCode: 'working_directory_missing',
+    });
+  });
+
+  it('publishes standalone working-directory shell failures', async () => {
+    const session = createMockSession('standalone-shell');
+    session.shellCommand.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_compromised' },
+        'working directory compromised',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'standalone-shell',
+        sessionContext: { kind: 'standalone' },
+        standaloneSession: { workingDirectory: { state: 'ready' } },
+      },
+    });
+
+    await expect(actions.sendShellCommand('pwd')).rejects.toThrow(
+      'working directory compromised',
+    );
+
+    expect(getConnection().standaloneSession).toEqual({
+      workingDirectory: { state: 'ready' },
+      errorCode: 'working_directory_compromised',
+    });
+  });
+
+  it('does not publish workspace prompt admission failures as standalone state', async () => {
+    const session = createMockSession('workspace-a');
+    session.submitPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { code: 'working_directory_compromised' },
+        'working directory compromised',
+      ),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'workspace-a',
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+    });
+
+    await expect(actions.submitPrompt('look')).rejects.toThrow(
+      'working directory compromised',
+    );
+
+    expect(getConnection().standaloneSession).toBeUndefined();
+  });
+
   it('keeps uploaded attachments when prompt admission is uncertain', async () => {
     const session = createMockSession('session-a');
     session.submitPrompt.mockRejectedValueOnce(new TypeError('fetch failed'));
@@ -3281,36 +3392,153 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
-  it('applies a reasoning effort only when the daemon confirms it', async () => {
+  it.each([false, true])(
+    'applies confirmed reasoning with a provider preview=%s',
+    async (withProviders) => {
+      const session = createMockSession('session-a');
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      });
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          currentModel: 'qwen3.8-max',
+          ...(withProviders
+            ? { providers: workspaceProvidersStatus('low') }
+            : {}),
+        },
+        session,
+      });
+      await expect(
+        actions.setReasoningEffort('medium', { persist: true }),
+      ).resolves.toBeUndefined();
+      expect(session.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'medium',
+        { persist: true },
+      );
+      expect(getConnection().reasoning).toEqual({
+        enabled: true,
+        effort: 'medium',
+        efforts: ['low', 'medium', 'xhigh'],
+      });
+      if (withProviders) {
+        await actions.clearSession();
+        expect(getConnection().sessionId).toBeUndefined();
+        expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+          enabled: true,
+          effort: 'medium',
+          efforts: ['low', 'medium', 'xhigh'],
+        });
+      }
+    },
+  );
+
+  it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('medium'),
-    });
-    const { actions, getConnection } = createActionsHarness({
+    const replacement = createMockSession('session-b');
+    const manualSessionClearRef = { current: false };
+    const persisted = createDeferred<{
+      configOptions: ReturnType<typeof reasoningConfigOptions>;
+      persisted: boolean;
+    }>();
+    session.setConfigOption.mockReturnValueOnce(persisted.promise);
+    const {
+      actions,
+      activePromptsRef,
+      getConnection,
+      replaceConnection,
+      sessionRef,
+      store,
+    } = createActionsHarness({
       connection: {
         status: 'connected',
         sessionId: 'session-a',
         currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('low'),
       },
       session,
+      manualSessionClearRef,
     });
 
-    await expect(actions.setReasoningEffort('medium')).resolves.toBeUndefined();
+    const update = actions.setReasoningEffort('medium', { persist: true });
+    const clear = actions.clearSession();
+    await Promise.resolve();
 
-    expect(session.setConfigOption).toHaveBeenCalledWith(
-      'reasoning_effort',
-      'medium',
-    );
-    expect(getConnection().reasoning).toEqual({
-      enabled: true,
-      effort: 'medium',
-      efforts: ['low', 'medium', 'xhigh'],
+    expect(manualSessionClearRef.current).toBe(true);
+    expect(session.detach).not.toHaveBeenCalled();
+    sessionRef.current = replacement as unknown as DaemonSessionClient;
+    const replacementConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: replacement.sessionId,
+      clientId: replacement.clientId,
+      currentModel: 'qwen3.8-max',
+    };
+    replaceConnection(replacementConnection);
+    const controller = new AbortController();
+    activePromptsRef.current.set('replacement-prompt', { controller });
+    persisted.resolve({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: true,
     });
+    await update;
+    await clear;
+
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(replacement.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(replacement);
+    expect(getConnection()).toBe(replacementConnection);
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(controller.signal.aborted).toBe(false);
+    expect(activePromptsRef.current.size).toBe(1);
   });
+
+  it.each(['xhigh', 'none'])(
+    'accepts a confirmed default reset to %s without inventing a Default option',
+    async (defaultValue) => {
+      const session = createMockSession('session-a');
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions(defaultValue),
+        persisted: true,
+      });
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          currentModel: 'qwen3.8-max',
+          providers: workspaceProvidersStatus('none'),
+        },
+        session,
+      });
+
+      await expect(
+        actions.setReasoningEffort('default', { persist: true }),
+      ).resolves.toBeUndefined();
+
+      expect(session.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'default',
+        { persist: true },
+      );
+      expect(getConnection().reasoning).toMatchObject({
+        enabled: defaultValue !== 'none',
+        effort: defaultValue === 'none' ? 'default' : defaultValue,
+      });
+      await actions.clearSession();
+      expect(getConnection().models?.[0]?.reasoningPreview?.enabled).toBe(
+        defaultValue !== 'none',
+      );
+    },
+  );
 
   it('rejects a reasoning effort when live config options do not confirm it', async () => {
     const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({ configOptions: [] });
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: [],
+      persisted: false,
+    });
     const { actions, getConnection } = createActionsHarness({
       connection: {
         status: 'connected',
@@ -3325,6 +3553,39 @@ describe('createDaemonSessionActions', () => {
     );
 
     expect(getConnection().reasoning).toBeUndefined();
+  });
+
+  it('does not update reasoning when persistence is not confirmed', async () => {
+    const session = createMockSession('session-a');
+    const rejectedPersistence = createDeferred<{
+      configOptions: ReturnType<typeof reasoningConfigOptions>;
+      persisted: boolean;
+    }>();
+    session.setConfigOption.mockReturnValueOnce(rejectedPersistence.promise);
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('low'),
+      },
+      session,
+    });
+
+    const update = actions.setReasoningEffort('medium', { persist: true });
+    const clear = actions.clearSession();
+    rejectedPersistence.resolve({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: false,
+    });
+
+    await expect(update).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+    await expect(clear).resolves.toBeUndefined();
+
+    expect(getConnection().reasoning).toBeUndefined();
+    expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('low');
   });
 
   it('does not apply a late approval mode to a replacement attachment', async () => {
@@ -3563,6 +3824,7 @@ function createMockSession(
     setModel: vi.fn(async () => ({})),
     setConfigOption: vi.fn(async (_configId: string, value: string) => ({
       configOptions: reasoningConfigOptions(value),
+      persisted: false,
     })),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({
@@ -3580,6 +3842,7 @@ function createMockSession(
     })),
     removeAttachment: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    shellCommand: vi.fn(async () => ({ promptId: 'shell-prompt-1' })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
@@ -3608,6 +3871,35 @@ function reasoningConfigOptions(currentValue: string) {
       ],
     },
   ];
+}
+
+function workspaceProvidersStatus(
+  currentValue: string,
+): NonNullable<DaemonConnectionState['providers']> {
+  return {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: reasoningConfigOptions(currentValue),
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function createDeferred<T>() {
