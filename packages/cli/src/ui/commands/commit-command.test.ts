@@ -69,19 +69,37 @@ describe('commitCommand', () => {
     expect(text).toMatch(/never use `--amend`/i);
     // Never bypass git hooks.
     expect(text).toMatch(/never pass `--no-verify`/i);
-    // Refuse obvious secret files.
+    // Refuse obvious secret files — anchored on the prohibition so an
+    // inverted rule fails rather than surviving on the bare keywords.
+    expect(text).toMatch(
+      /never stage or commit files that look like they contain secrets/i,
+    );
     expect(text.toLowerCase()).toContain('.env');
-    expect(text.toLowerCase()).toContain('secrets');
     // Skip empty commits.
     expect(text).toMatch(/nothing to commit/i);
-    expect(text).toContain('--allow-empty');
+    expect(text).toMatch(/never pass `--allow-empty`/i);
   });
 
-  it('keeps co-author attribution explicit in the commit message text', async () => {
+  it('describes co-author attribution the way the platform applies it', async () => {
     const ctx = createMockCommandContext();
     const result = await commitCommand.action!(ctx, '');
     const text = promptText(result);
     expect(text).toContain('Co-authored-by');
+    expect(text).toMatch(/general\.gitCoAuthor\.commit/);
+    expect(text).toMatch(/already appends the configured/i);
+    expect(text).toMatch(/do not add your own ai-assistance trailer/i);
+    // Not automatic without an inline -m/-am, and must not claim to be.
+    expect(text).toMatch(/no-op when the commit carries no inline/i);
+    // The #3935 misconception this replaces must never come back.
+    expect(text).not.toMatch(/nothing injects it automatically/i);
+  });
+
+  it('gives the model a fallback for a repository with no commits yet', async () => {
+    const ctx = createMockCommandContext();
+    const result = await commitCommand.action!(ctx, '');
+    const text = promptText(result);
+    expect(text).toMatch(/no commits yet/i);
+    expect(text).toMatch(/skip them/i);
   });
 
   it('passes user-provided instructions through to the model', async () => {

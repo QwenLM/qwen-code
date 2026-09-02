@@ -2854,4 +2854,6 @@ export default {
   'Kept model as {{model}}': 'Kept model as {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny)':
     'Review messages held from other Qwen Code sessions (accept | deny)',
+  'Create a git commit with an AI-drafted message':
+    'Create a git commit with an AI-drafted message',
 };

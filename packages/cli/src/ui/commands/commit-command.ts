@@ -27,6 +27,7 @@ export const COMMIT_PROMPT = `You are executing the /commit slash command: creat
 - Run \`git diff HEAD\` to read the actual changes (also check anything already staged).
 - Run \`git log --oneline -n 20\` to learn the repository's existing commit message style.
 - Note the current branch name; it often hints at the purpose of the change.
+- If the repository has no commits yet, \`git diff HEAD\` and \`git log\` fail — skip them and work from \`git status\` plus reading the new files directly.
 
 ## 2. Stage selectively
 - Review the \`git status\` output and deliberately choose which files belong in this commit.
@@ -49,7 +50,9 @@ export const COMMIT_PROMPT = `You are executing the /commit slash command: creat
 - If the user's instructions conflict with these rules, follow the rules and explain why.
 
 ## Attribution
-- Co-author attribution lives in the commit message text itself; nothing injects it automatically. If the user asks to credit co-authors (including AI assistance), add \`Co-authored-by: Name <email>\` trailer lines at the end of the message.
+- When \`general.gitCoAuthor.commit\` is enabled — which is the default — Qwen Code already appends the configured \`Co-authored-by\` trailer to a commit made with an inline \`-m\`/\`-am\` message. Do not add your own AI-assistance trailer on top of it, or the commit ends up with two.
+- Add \`Co-authored-by: Name <email>\` trailer lines only for additional co-authors the user explicitly names.
+- This auto-append is a no-op when the commit carries no inline \`-m\`/\`-am\` message (a heredoc body, or an editor session), so never assume the trailer landed. If the user asked for credit and your message was not inline, tell them the configured co-author trailer was not applied.
 
 When done, report what was staged and committed — or why nothing was committed.`;
 

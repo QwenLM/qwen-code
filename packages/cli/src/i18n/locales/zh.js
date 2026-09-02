@@ -2635,4 +2635,6 @@ export default {
   'Kept model as {{model}}': '模型保持为 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny)':
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交信息创建 git 提交',
 };

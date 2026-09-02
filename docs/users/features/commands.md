@@ -33,6 +33,7 @@ These commands help you save, restore, and summarize work progress.
 | `/rewind`        | Rewind conversation to a previous turn                                   | `/rewind` or `/rollback`                                      |
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
+| `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
 
 > [!note]
 >
