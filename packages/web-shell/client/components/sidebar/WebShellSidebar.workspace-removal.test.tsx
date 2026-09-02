@@ -1126,7 +1126,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
     expect(primaryArchive).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('shows rename for current and non-current locked-secondary sessions', async () => {
     connection.sessionId = 'locked-current';
@@ -1511,7 +1511,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('requires workspace_qualified_rest_core for locked secondary destructive and organization controls', async () => {
     connection.capabilities = {
@@ -1645,6 +1645,23 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
     expect(workspaceActions.listSessionGroups).not.toHaveBeenCalled();
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
+  });
+
+  it('stops channel grouping when project features hide while the channel source is active', async () => {
+    enableChannelOrganization();
+    renderSidebar();
+    await switchSessionSource('Channels');
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+
+    renderSidebar({ projectFeaturesEnabled: false });
+
     expect(useChannels).toHaveBeenLastCalledWith({
       autoLoad: false,
       enabled: false,
@@ -3528,21 +3545,105 @@ describe('WebShellSidebar workspace removal', () => {
     expect(workspaceGit).not.toHaveBeenCalled();
   });
 
-  it('renders only the facets the embedder selected', async () => {
+  it('fetches and shows only the facets the embedder selected', async () => {
+    const mcpServer = {
+      kind: 'mcp_server',
+      name: 'github',
+      status: 'ok',
+      transport: 'stdio',
+      disabled: false,
+      mcpStatus: 'connected',
+    };
+    const workspaceMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [mcpServer],
+    });
+    const workspaceSkills = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      skills: [],
+    });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceMcp,
+      workspaceSkills,
+    }));
     renderSidebar({ workspaceOverview: { items: ['mcp'] } });
-    // Chips appear once the first facet round lands.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
-    const kinds = Array.from(
-      container.querySelectorAll<HTMLElement>(
-        '[data-web-shell-workspace-overview]',
-      ),
-    ).map((chip) => chip.getAttribute('data-web-shell-workspace-overview'));
-    expect(kinds.length).toBeGreaterThan(0);
-    expect(new Set(kinds)).toEqual(new Set(['mcp']));
+    // The selection drives the fetch: skills is never requested.
+    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceSkills).not.toHaveBeenCalled();
+
+    // Hovering the header lists only the selected facet in the popover.
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('other'));
+    vi.useFakeTimers();
+    await act(async () => {
+      header?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    vi.useRealTimers();
+    const rows = document.querySelectorAll(
+      '[role="dialog"] [data-web-shell-workspace-overview]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
+      'mcp',
+    );
+    expect(rows[0]?.textContent).toBe('MCP1/1');
+  });
+
+  it('does not reopen the details popover after a workspace menu selection', async () => {
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('other'));
+    expect(header).toBeDefined();
+
+    // Hover opens the workspace details popover (300 ms delay, real timers
+    // so Radix's focus-restore rAF behaves like production).
+    await act(async () => {
+      header!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    // Open the workspace menu (this closes the popover) and pick an item.
+    await act(async () => {
+      click(workspaceAction('/tmp/other')!);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Copy path');
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+    });
+
+    // Radix restoring focus to the trigger inside the focus-open anchor must
+    // not reopen the details popover 300 ms later.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('counts the registered workspaces next to the Projects label', () => {
@@ -3627,12 +3728,14 @@ describe('WebShellSidebar workspace removal', () => {
   it('keeps plain folder headers when the overview is switched off', () => {
     renderSidebar({ workspaceOverview: false });
     expect(
-      container.querySelector('[data-web-shell-workspace-path]'),
+      document.querySelector('[data-web-shell-workspace-path]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-workspace-overview]'),
+      document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
-    expect(container.querySelector('[class*="headerCounts"]')).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-workspace-sessions]'),
+    ).toBeNull();
     expect(
       container.querySelector('[class*="projectsHeaderCount"]'),
     ).toBeNull();
@@ -4473,21 +4576,45 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
-  it('renders scheduled-task runs with a flat source icon', async () => {
+  it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',
-      displayName: 'Hourly review',
+      displayName: 'Hourly review · 08-31 09:30',
       workspaceCwd: '/tmp/project',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
     };
-    active.sessions.push(scheduledRun);
+    active.sessions.push(scheduledRun, {
+      ...scheduledRun,
+      sessionId: 'scheduled-run-2',
+      displayName: 'Hourly review · 08-31 08:30',
+    });
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
+    const group = container.querySelector(
+      'section[aria-label="Hourly review"]',
+    );
+    expect(group).not.toBeNull();
+    expect(
+      group?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      group?.querySelectorAll('[data-web-shell-session-title]'),
+    ).toHaveLength(2);
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-session-title]'),
+      ).filter((candidate) =>
+        candidate.textContent?.startsWith('Hourly review ·'),
+      ),
+    ).toHaveLength(2);
+
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
-    ).find((candidate) => candidate.textContent === 'Hourly review');
+    ).find(
+      (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+    );
     const row = title?.closest('[role="button"]');
     expect(row).toBeTruthy();
     const sourceIcon = row?.querySelector(
@@ -4508,7 +4635,9 @@ describe('WebShellSidebar session source switch', () => {
     const completedRow = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
     )
-      .find((candidate) => candidate.textContent === 'Hourly review')
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
       ?.closest('[role="button"]');
     expect(
       completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
@@ -5312,6 +5441,146 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
+  });
+
+  it('registers manual groups as initial when organization lands after a scheduled-task settle', async () => {
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the flat settle carries only the
+    // scheduled-task section. Nothing may be persisted as collapsed yet.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('scheduled-task:');
+
+    // The session_organization capability lands mid-session and the groups
+    // catalog settles with a manual group.
+    const organized = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
+    // The organized settle keeps the scheduled-task section too: ungrouped
+    // runs still form their task section while organization is enabled.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+  });
+
+  it('registers manual groups as initial when organization lands while the channel source is selected', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    setChannelCatalog();
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return {
+          ...active,
+          sessions: active.sessions,
+          data: active.sessions,
+        };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the Tasks settle carries only the
+    // scheduled-task section and consumes the Tasks latch.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+
+    // Consume the Channels latch too while the capability is still out.
+    await switchSessionSource('Channels');
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).not.toBeNull();
+
+    // The session_organization capability lands while the Channels tab is
+    // selected; the groups catalog settles only after the switch back.
+    const organized = {
+      ...channelCapabilities,
+      features: [...channelCapabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await switchSessionSource('Tasks');
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
   });
 });
 

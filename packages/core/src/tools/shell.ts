@@ -36,6 +36,19 @@ import {
   type StagedFileInfo,
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
+import {
+  commandRunsGhPrCreate,
+  ghPrCreateInlineEnv,
+  upsertSessionPrs,
+} from '../services/session-pr-service.js';
+import {
+  fetchAttributionRepoKeys,
+  fetchCurrentBranchName,
+  fetchCurrentBranchPullRequest,
+  repoKeyFromWebUrl,
+  type AttributionRepoKeys,
+  type BranchPullRequestSnapshot,
+} from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -2328,6 +2341,36 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ? this.getGitHeadSync(cwd)
       : null;
 
+    // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
+    // tell a run that CREATED a PR from one that merely RESOLVED the
+    // branch's existing PR: the retry shape `gh pr create --fill || gh pr
+    // view` exits 0 through the view segment and prints the existing URL,
+    // and post-run gh resolution alone cannot distinguish the two. The
+    // branch name and repo identity pin what may legitimately differ
+    // post-run — a mid-command branch switch or origin retarget resolves a
+    // PR this run did not create. Awaited before spawn so every snapshot
+    // strictly precedes the command.
+    let preRunPrSnapshot: BranchPullRequestSnapshot | undefined;
+    let preRunBranch: string | undefined;
+    let preRunRepoKeys: AttributionRepoKeys | undefined;
+    let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
+    if (commandRunsGhPrCreate(commandToExecute)) {
+      // The verification legs must authenticate the way the create itself
+      // does (inline GH_TOKEN with no ambient gh auth), or the gate's
+      // advertised token shape binds nothing. The inline record is an
+      // OVERLAY onto the full process env — the gh legs receive it as the
+      // child's ENTIRE environment, so passed alone it would drop PATH and
+      // HOME and fail every leg — and EVERY leg needs it, not just the
+      // snapshot fetch.
+      const inlineEnv = ghPrCreateInlineEnv(commandToExecute);
+      preRunGhEnv = inlineEnv ? { ...process.env, ...inlineEnv } : undefined;
+      [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
+        fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
+        fetchCurrentBranchName(cwd),
+        fetchAttributionRepoKeys(cwd, preRunGhEnv),
+      ]);
+    }
+
     let cumulativeOutput: string | AnsiOutput = '';
     let lastUpdateTime = Number.NEGATIVE_INFINITY;
     let isBinaryStream = false;
@@ -2717,14 +2760,29 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
+    // A promote refused because the command already settled still carries
+    // its full output and exit code — it runs the same binding gate as an
+    // uninterrupted foreground run.
+    const wasPromoteRefused =
+      result.aborted &&
+      getShellAbortReasonKind(combinedSignal.reason) === 'background';
+    if ((!result.aborted || wasPromoteRefused) && result.exitCode === 0) {
+      this.bindGhPrCreate(
+        commandToExecute,
+        result.output,
+        cwd,
+        preRunPrSnapshot,
+        preRunBranch,
+        preRunRepoKeys,
+        preRunGhEnv,
+      );
+    }
+
     const abortReasonName = getAbortReasonName(combinedSignal);
     const wasTimeout =
       result.aborted &&
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
-    const wasPromoteRefused =
-      result.aborted &&
-      getShellAbortReasonKind(combinedSignal.reason) === 'background';
     const timeoutSummary = wasTimeout
       ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
       : undefined;
@@ -3051,6 +3109,140 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * Best-effort PR binding for agents that create PRs via `gh pr create` in
+   * the shell (the GitDialog binds at creation; this covers the shell path).
+   * Writes the session's PR sidecar directly, mirroring the worktree sidecar
+   * pattern; a failure must never shadow the tool result. gh itself is the
+   * attribution authority: the binding is the PR gh resolves for the working
+   * branch, accepted only when it is OPEN, this command's output carries
+   * gh's URL, the pre-run fetch proved the branch's prior state, and the
+   * number differs from the pre-run snapshot — command/output text alone
+   * cannot attribute a printed URL to gh's own execution, and a retry that
+   * passes the execution gate (`gh pr create || gh pr view`) resolves the
+   * branch's EXISTING PR, which the pre-run snapshot declines. The
+   * pre-state proof is per-session: two sessions sharing one checkout can
+   * still race inside the snapshot→bind window, which this gate does not
+   * serialize.
+   *
+   * Scope (by design): only a FOREGROUND run that settled in this call —
+   * an uninterrupted one, or one whose promote was refused because the
+   * child had already exited — reaches this gate. A run promoted to the
+   * background mid-flight and an `is_background: true` run settle through
+   * the background registry, whose output streams to a file and whose
+   * pre-run snapshot was never taken; they are not bound live, and the
+   * transcript is deliberately not a recovery source (no gh-side
+   * attribution). Such a PR binds through `/review <N>` or the worktree
+   * `pr-<N>` convention.
+   */
+  private bindGhPrCreate(
+    command: string,
+    output: string,
+    cwd: string,
+    preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
+    preRunBranch: string | undefined,
+    preRunRepoKeys: AttributionRepoKeys | undefined,
+    ghCreateEnv?: Readonly<Record<string, string | undefined>>,
+  ): void {
+    void (async () => {
+      try {
+        if (!commandRunsGhPrCreate(command)) return;
+        // An ERRORED pre-run fetch proved nothing about the branch's prior
+        // PRs — decline instead of failing open, or a branch whose snapshot
+        // flaked would bind its existing PR as this session's creation.
+        if (preRunPrSnapshot?.status === 'error') return;
+        // The launch directory (`directory` param, else target dir), not a
+        // repo the command may have `cd`'d into: gh resolves THIS repo's
+        // branch, so an internal-`cd` create binds only when this branch's
+        // PR URL is what the output carries — backfill recovers the rest.
+        const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
+        if (created.status !== 'pr' || created.state !== 'open') return;
+        // The run resolved the branch's EXISTING PR — nothing was created
+        // (a retry's view segment exits 0 and prints the existing URL).
+        // Binding would stamp this session as creator of a PR it did not
+        // create, at a fresh createdAt that falsifies the badge's
+        // binding-time order.
+        if (
+          preRunPrSnapshot?.status === 'pr' &&
+          created.number === preRunPrSnapshot.number
+        ) {
+          return;
+        }
+        // Repo identity lives in on-disk state an in-command
+        // `git remote set-url origin` / `gh repo set-default` retargets, so
+        // the resolved PR must belong to a repo gh already attributed to
+        // this checkout BEFORE the run (itself, or its fork parent — from
+        // a fork checkout gh resolves the parent for PR operations). An
+        // unresolvable pre-run identity fails closed like the errored
+        // snapshot arm.
+        const createdRepoKey = repoKeyFromWebUrl(created.url);
+        if (
+          createdRepoKey === undefined ||
+          preRunRepoKeys === undefined ||
+          (createdRepoKey !== preRunRepoKeys.resolved &&
+            createdRepoKey !== preRunRepoKeys.parent)
+        ) {
+          return;
+        }
+        // Branch identity: a command that switched branches mid-run
+        // resolves the NEW branch's existing PR post-run (its `|| gh pr
+        // view` segment prints the URL and exits 0); only a PR whose head
+        // branch is the pre-run branch was created by this run. An
+        // uncaptured pre-run branch (detached HEAD, git failure) cannot
+        // prove stability — decline.
+        if (
+          preRunBranch === undefined ||
+          created.headRefName !== preRunBranch
+        ) {
+          return;
+        }
+        if (!output.includes(created.url)) return;
+        const sessionService = this.config.getSessionService();
+        // Re-resolve the session's archive location immediately before the
+        // locked mutation: an archive transition landing during the gh
+        // round-trip above must not strand the binding on a resurrected
+        // active sidecar.
+        let archiveState: 'active' | 'archived' = 'active';
+        try {
+          if (
+            (await sessionService.getSessionLocation(
+              this.config.getSessionId(),
+            )) === 'archived'
+          ) {
+            archiveState = 'archived';
+          }
+        } catch {
+          // Best-effort binding — keep the default active location.
+        }
+        const prPath = sessionService.getPrSessionPathForArchiveState(
+          this.config.getSessionId(),
+          archiveState,
+        );
+        // The same PR already bound stays untouched (position and
+        // createdAt): only a genuinely new binding persists and notifies.
+        // A same-number entry pointing at ANOTHER repo is another PR and
+        // is re-bound here (the created one must win that slot).
+        const createdPr = {
+          number: created.number,
+          url: created.url,
+          state: created.state,
+        };
+        const applied = await upsertSessionPrs(prPath, [
+          { ...createdPr, source: 'create' },
+        ]);
+        if (!applied.added.includes(created.number)) return;
+        // The daemon never sees this write; the notification carries the
+        // catalog mark so live-state clients refetch it (~2s) instead of
+        // waiting for unrelated catalog churn.
+        this.config
+          .getSessionService()
+          .emitSessionPrBound(this.config.getSessionId(), createdPr);
+      } catch {
+        /* best-effort binding */
+      }
+    })();
   }
 
   /**

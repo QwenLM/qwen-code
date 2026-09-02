@@ -142,6 +142,9 @@ describe('Session.pendingWorktreeNotice', () => {
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
       }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
