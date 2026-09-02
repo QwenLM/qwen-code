@@ -45,7 +45,7 @@ import {
   afterAll,
   type Mock,
 } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
@@ -291,7 +291,10 @@ describe('AppContainer State Management', () => {
   // That same initialize() creates a real ExtensionStore under ~/.qwen; some
   // runners — including the review-address verification gate's clean child —
   // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite.
+  // overrides HOME, so point it at a scratch directory for this suite, and
+  // leave that directory alone: the mount effect's initialize() is un-awaited,
+  // so store work can still be in flight at afterAll, and deleting the tree
+  // there fails it with ENOENT — an unhandled rejection that fails the run.
   const savedHome = process.env['HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
   process.env['HOME'] = suiteHome;
@@ -302,7 +305,6 @@ describe('AppContainer State Management', () => {
     } else {
       process.env['HOME'] = savedHome;
     }
-    rmSync(suiteHome, { recursive: true, force: true });
   });
 
   let mockConfig: Config;
