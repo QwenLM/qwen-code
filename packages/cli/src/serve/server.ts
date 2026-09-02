@@ -2619,11 +2619,35 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    primaryBridge.publishWorkspaceEvent({
+    const event = {
       type: 'settings_changed',
       data: { key, value, scope },
-      ...(clientId ? { originatorClientId: clientId } : {}),
-    });
+    } as const;
+    const publish = (
+      bridge: AcpSessionBridge,
+      workspace: string,
+      originatorClientId?: string,
+    ) => {
+      try {
+        bridge.publishWorkspaceEvent({
+          ...event,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: settings_changed broadcast to workspace ${workspace} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    };
+
+    publish(primaryBridge, primaryBoundWorkspace, clientId);
+    if (scope !== 'user') return;
+    for (const runtime of workspaceRegistry.listAll()) {
+      if (runtime.primary) continue;
+      publish(runtime.bridge, runtime.workspaceCwd);
+    }
   };
 
   if (deps.persistSetting) {
