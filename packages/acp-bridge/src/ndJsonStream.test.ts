@@ -11,11 +11,16 @@ import {
   type AnyMessage,
 } from '@agentclientprotocol/sdk';
 import {
+  NDJSON_QUEUE_SATURATION_GRACE_MS,
   NdJsonIncompleteFrameError,
   NdJsonQueueLimitError,
   ndJsonStream,
   type NdJsonStreamLimits,
 } from './ndJsonStream.js';
+import {
+  CHANNEL_LIVENESS_INTERVAL_MS,
+  CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+} from './channel-liveness.js';
 
 const encoder = new TextEncoder();
 
@@ -684,6 +689,20 @@ describe('ndJsonStream', () => {
     );
     expect(onQueueSaturated).not.toHaveBeenCalled();
     await stream.readable.cancel();
+  });
+
+  it('keeps the default grace window under the liveness probe timeout', () => {
+    // The channel liveness probe's response travels over this same stream, so
+    // a pump parked on backpressure cannot answer it. At or above parity a
+    // saturation episode burns a probe, and two episodes inside two probe
+    // intervals tear the channel down as a liveness timeout — the outage the
+    // grace window exists to prevent, reported as the wrong cause.
+    expect(NDJSON_QUEUE_SATURATION_GRACE_MS).toBeLessThan(
+      CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+    );
+    expect(NDJSON_QUEUE_SATURATION_GRACE_MS).toBeLessThan(
+      CHANNEL_LIVENESS_INTERVAL_MS,
+    );
   });
 
   it('rejects a non-positive queueSaturationGraceMs', () => {

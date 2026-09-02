@@ -4933,18 +4933,16 @@ async function runQwenServeImpl(
     // window instead of tearing the channel down immediately (#10162).
     // Warn at episode start so field diagnosis doesn't begin at the
     // `channel exited` breadcrumb.
+    // `callHook` in ndJsonStream already isolates hook throws from the
+    // transport, so this needs no guard of its own.
     const warnAcpQueueSaturated = (info: NdJsonQueueSaturationInfo): void => {
-      try {
-        daemonLog.warn('ACP NDJSON decoded queue saturated', {
-          requiredBytes: info.requiredBytes,
-          availableBytes: info.availableBytes,
-          maxQueuedMessages: info.maxQueuedMessages,
-          maxQueuedBytes: info.maxQueuedBytes,
-          queueSaturationGraceMs: info.graceMs,
-        });
-      } catch {
-        // Observability must not affect transport behavior.
-      }
+      daemonLog.warn('ACP NDJSON decoded queue saturated', {
+        requiredBytes: info.requiredBytes,
+        availableBytes: info.availableBytes,
+        maxQueuedMessages: info.maxQueuedMessages,
+        maxQueuedBytes: info.maxQueuedBytes,
+        queueSaturationGraceMs: info.graceMs,
+      });
     };
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;

@@ -45,8 +45,15 @@ export interface NdJsonStreamHooks {
  * SSE) resolve within this window and keep the channel alive; a genuinely
  * stalled consumer still tears the transport down afterwards so the memory
  * bound remains effective.
+ *
+ * Must stay below `CHANNEL_LIVENESS_PROBE_TIMEOUT_MS`: the liveness probe's
+ * response travels over this same stream, so a parked pump cannot answer it.
+ * At parity the grace window burns a probe every episode, and two episodes
+ * inside `CHANNEL_LIVENESS_INTERVAL_MS * 2` would tear the channel down as a
+ * liveness timeout — the outage this backpressure exists to prevent, with a
+ * misleading cause. `ndJsonStream.test.ts` pins the relation.
  */
-export const NDJSON_QUEUE_SATURATION_GRACE_MS = 10_000;
+export const NDJSON_QUEUE_SATURATION_GRACE_MS = 5_000;
 
 export interface NdJsonStreamLimits {
   maxFrameBytes: number;
@@ -249,15 +256,17 @@ function createBoundedReadable(
   let nextQueueCharge = minimumQueueCharge;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let canceled = false;
-  // Dedup state for onQueueSaturated: one warning per uninterrupted
-  // saturation episode, reset once the queue fully drains.
-  const saturationEpisode = { warned: false };
+  // One onQueueSaturated warning per uninterrupted saturation episode; reset
+  // once the queue fully drains.
+  let saturationWarned = false;
   // Single waiter: only the pump loop ever waits for queue space.
   let wakeQueueWaiter: (() => void) | undefined;
   const waitForQueueSpace = (timeoutMs: number): Promise<void> =>
     new Promise<void>((resolve) => {
       const timer = setTimeout(
         finish,
+        // Node clamps delays above 2^31-1 ms to 1 ms (and warns), which would
+        // spin the wait loop; cap so a long grace waits instead.
         Math.min(Math.max(0, timeoutMs), 2_147_483_647),
       );
       function finish() {
@@ -267,6 +276,61 @@ function createBoundedReadable(
       }
       wakeQueueWaiter = finish;
     });
+
+  /**
+   * Waits (bounded) for room in the decoded queue instead of failing the
+   * transport immediately (issue #10162). Saturating the queue means the
+   * consumer is slow; pausing the producer backpressures the agent's stdout
+   * pipe and keeps the memory bound intact. Only if the consumer stays slow
+   * for the whole grace window does the original fail-closed guard fire.
+   */
+  const ensureQueueSpace = async (
+    controller: ReadableStreamDefaultController<AnyMessage>,
+    queueCharge: number,
+  ): Promise<void> => {
+    const queueLimitError = (available: number) =>
+      new NdJsonQueueLimitError(
+        limits.maxQueuedMessages,
+        limits.maxQueuedBytes,
+        queueCharge,
+        Math.max(0, available),
+      );
+    let availableBytes = controller.desiredSize;
+    if (availableBytes === null) throw queueLimitError(0);
+    // The queue fully drained: the previous saturation episode is over and a
+    // new one may warn again.
+    if (availableBytes === limits.maxQueuedBytes) saturationWarned = false;
+    if (queueCharge <= availableBytes) return;
+    // A frame that would not fit even in a fully drained queue can never be
+    // rescued by waiting.
+    if (queueCharge > limits.maxQueuedBytes) {
+      throw queueLimitError(availableBytes);
+    }
+
+    if (!saturationWarned) {
+      saturationWarned = true;
+      callHook(hooks?.onQueueSaturated, {
+        requiredBytes: queueCharge,
+        availableBytes: Math.max(0, availableBytes),
+        maxQueuedMessages: limits.maxQueuedMessages,
+        maxQueuedBytes: limits.maxQueuedBytes,
+        graceMs,
+      });
+    }
+
+    // Monotonic: wall-clock steps must not extend or shorten the grace window.
+    const deadline = performance.now() + graceMs;
+    while (queueCharge > availableBytes) {
+      if (canceled) return;
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) throw queueLimitError(availableBytes);
+      await waitForQueueSpace(remainingMs);
+      if (canceled) return;
+      const nextAvailableBytes = controller.desiredSize;
+      if (nextAvailableBytes === null) throw queueLimitError(0);
+      availableBytes = nextAvailableBytes;
+    }
+  };
 
   return new ReadableStream<AnyMessage>(
     {
@@ -284,9 +348,7 @@ function createBoundedReadable(
           validateInboundMessage,
           fatalCleanEof,
           minimumQueueCharge,
-          graceMs,
-          waitForQueueSpace,
-          saturationEpisode,
+          ensureQueueSpace,
           (charge) => {
             nextQueueCharge = charge;
           },
@@ -324,9 +386,10 @@ async function pumpBoundedInput(
   validateInboundMessage: NdJsonInboundMessageValidator | undefined,
   fatalCleanEof: boolean,
   minimumQueueCharge: number,
-  queueSaturationGraceMs: number,
-  waitForQueueSpace: (timeoutMs: number) => Promise<void>,
-  saturationEpisode: SaturationEpisodeState,
+  ensureQueueSpace: (
+    controller: ReadableStreamDefaultController<AnyMessage>,
+    queueCharge: number,
+  ) => Promise<void>,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
@@ -354,9 +417,7 @@ async function pumpBoundedInput(
         inboundRequests,
         validateInboundMessage,
         minimumQueueCharge,
-        queueSaturationGraceMs,
-        waitForQueueSpace,
-        saturationEpisode,
+        ensureQueueSpace,
         setNextQueueCharge,
         isCanceled,
       );
@@ -413,9 +474,10 @@ async function readBoundedChunk(
   inboundRequests: BoundedInboundRequestLedger,
   validateInboundMessage: NdJsonInboundMessageValidator | undefined,
   minimumQueueCharge: number,
-  queueSaturationGraceMs: number,
-  waitForQueueSpace: (timeoutMs: number) => Promise<void>,
-  saturationEpisode: SaturationEpisodeState,
+  ensureQueueSpace: (
+    controller: ReadableStreamDefaultController<AnyMessage>,
+    queueCharge: number,
+  ) => Promise<void>,
   setNextQueueCharge: (charge: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
@@ -432,16 +494,7 @@ async function readBoundedChunk(
       continue;
     }
     const queueCharge = Math.max(frameBytes, minimumQueueCharge);
-    await waitForDecodedQueueSpace({
-      controller,
-      limits,
-      queueCharge,
-      queueSaturationGraceMs,
-      waitForQueueSpace,
-      saturationEpisode,
-      hooks,
-      isCanceled,
-    });
+    await ensureQueueSpace(controller, queueCharge);
     if (isCanceled()) return;
     setNextQueueCharge(queueCharge);
     handleBoundedLine(
@@ -457,103 +510,6 @@ async function readBoundedChunk(
     newline = chunk.indexOf(0x0a, start);
   }
   if (start < chunk.length) pending.append(chunk.subarray(start));
-}
-
-interface SaturationEpisodeState {
-  warned: boolean;
-}
-
-interface DecodedQueueSpaceOptions {
-  controller: ReadableStreamDefaultController<AnyMessage>;
-  limits: NdJsonStreamLimits;
-  queueCharge: number;
-  queueSaturationGraceMs: number;
-  waitForQueueSpace: (timeoutMs: number) => Promise<void>;
-  saturationEpisode: SaturationEpisodeState;
-  hooks: NdJsonStreamHooks | undefined;
-  isCanceled: () => boolean;
-}
-
-/**
- * Waits (bounded) for room in the decoded queue instead of failing the
- * transport immediately (issue #10162). Saturating the queue means the
- * consumer is slow; pausing the producer backpressures the agent's stdout
- * pipe and keeps the memory bound intact. Only if the consumer stays slow
- * for the whole grace window does the original fail-closed guard fire.
- */
-async function waitForDecodedQueueSpace({
-  controller,
-  limits,
-  queueCharge,
-  queueSaturationGraceMs,
-  waitForQueueSpace,
-  saturationEpisode,
-  hooks,
-  isCanceled,
-}: DecodedQueueSpaceOptions): Promise<void> {
-  let availableBytes = controller.desiredSize;
-  if (availableBytes === null) {
-    throw new NdJsonQueueLimitError(
-      limits.maxQueuedMessages,
-      limits.maxQueuedBytes,
-      queueCharge,
-      0,
-    );
-  }
-  // The queue fully drained: the previous saturation episode is over and a
-  // new one may warn again.
-  if (availableBytes === limits.maxQueuedBytes) {
-    saturationEpisode.warned = false;
-  }
-  if (queueCharge <= availableBytes) return;
-  // A frame that would not fit even in a fully drained queue can never be
-  // rescued by waiting.
-  if (queueCharge > limits.maxQueuedBytes) {
-    throw new NdJsonQueueLimitError(
-      limits.maxQueuedMessages,
-      limits.maxQueuedBytes,
-      queueCharge,
-      Math.max(0, availableBytes),
-    );
-  }
-
-  if (!saturationEpisode.warned) {
-    saturationEpisode.warned = true;
-    callHook(hooks?.onQueueSaturated, {
-      requiredBytes: queueCharge,
-      availableBytes: Math.max(0, availableBytes),
-      maxQueuedMessages: limits.maxQueuedMessages,
-      maxQueuedBytes: limits.maxQueuedBytes,
-      graceMs: queueSaturationGraceMs,
-    });
-  }
-
-  // Monotonic: wall-clock steps must not extend or shorten the grace window.
-  const deadline = performance.now() + queueSaturationGraceMs;
-  while (queueCharge > availableBytes) {
-    if (isCanceled()) return;
-    const remainingMs = deadline - performance.now();
-    if (remainingMs <= 0) {
-      throw new NdJsonQueueLimitError(
-        limits.maxQueuedMessages,
-        limits.maxQueuedBytes,
-        queueCharge,
-        Math.max(0, availableBytes),
-      );
-    }
-    await waitForQueueSpace(remainingMs);
-    if (isCanceled()) return;
-    const nextAvailableBytes = controller.desiredSize;
-    if (nextAvailableBytes === null) {
-      throw new NdJsonQueueLimitError(
-        limits.maxQueuedMessages,
-        limits.maxQueuedBytes,
-        queueCharge,
-        0,
-      );
-    }
-    availableBytes = nextAvailableBytes;
-  }
 }
 
 function takeLegacyLineBytes(
