@@ -123,11 +123,13 @@ type TranslateFn = ReturnType<typeof useI18n>['t'];
  *
  * Disabling is reserved for what git itself refuses: `git pull` during a
  * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
- * without a usable upstream; `git push --set-upstream` only on a detached
- * HEAD (a push does not consult the index, so conflicts and in-progress
- * operations are shown as warnings on an enabled row). Soft states (up to
- * date, nothing to push, clean tree) only dim the row since the action is
- * still harmless.
+ * without a usable upstream; `git push` on a detached HEAD or from a branch
+ * that is behind its upstream — pushing an older or diverged tip is a
+ * non-fast-forward the remote rejects unconditionally. A push does not
+ * consult the index, and mid-operation the outcome depends on where the
+ * operation ends, so conflicts and in-progress operations are shown as
+ * warnings on an enabled row. Soft states (up to date, nothing to push,
+ * clean tree) only dim the row since the action is still harmless.
  *
  * The branch listing (fetched on open) provides ahead/behind/upstream; the
  * status provides the tree counters and the in-progress operation. When the
@@ -191,9 +193,13 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
-  // Only a detached HEAD makes the daemon's `git push --set-upstream` fail;
-  // an in-progress operation or conflicts are surfaced but left clickable.
-  const pushDisabled = detached;
+  // A detached HEAD makes the daemon's `git push --set-upstream` fail, and a
+  // branch behind its upstream cannot push: moving the remote ref to an older
+  // (behind-only) or diverged tip is a non-fast-forward rejection regardless
+  // of config. Mid-operation the picture can change by the time the operation
+  // ends, so the row only warns then; conflicts alone don't stop a push.
+  const pushDisabled =
+    detached || (!s.operation && hasUpstream === true && behind > 0);
   if (blocker) {
     push = blocker;
   } else if (hasUpstream === false) {

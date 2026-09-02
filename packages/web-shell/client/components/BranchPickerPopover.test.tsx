@@ -187,8 +187,8 @@ afterEach(() => {
 });
 workspaceGit.mockRejectedValue(new Error('no status'));
 
-function mountWithBranches(): void {
-  workspaceGitBranches.mockResolvedValue(BRANCHES);
+function mountWithBranches(branchesResult: typeof BRANCHES = BRANCHES): void {
+  workspaceGitBranches.mockResolvedValue(branchesResult);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -430,7 +430,12 @@ describe('BranchPickerPopover actions', () => {
       success: true,
       output: 'pushed to origin',
     });
-    mountWithBranches();
+    // Ahead-only: the push row must be enabled for this scenario (a branch
+    // behind its upstream now has push disabled as a non-fast-forward).
+    mountWithBranches({
+      ...BRANCHES,
+      local: [{ ...BRANCHES.local[0], ahead: 1, behind: 0 }],
+    });
     await flush();
 
     clickButton('Update Project');
@@ -766,7 +771,7 @@ describe('deriveActionHints', () => {
     });
   });
 
-  it('shows behind count with upstream for a clean tree', () => {
+  it('shows behind count with upstream for a clean tree and blocks push', () => {
     const h = deriveActionHints(
       tKey,
       branches({ upstream: 'origin/main', behind: 3 }),
@@ -774,6 +779,12 @@ describe('deriveActionHints', () => {
     );
     expect(h.pull).toEqual({ text: '↓3 · origin/main', tone: 'info' });
     expect(h.pullDisabled).toBe(false);
+    // Pushing an older tip is a non-fast-forward the remote refuses.
+    expect(h.push).toEqual({
+      text: 'branchPicker.hint.nothingToPush',
+      tone: 'muted',
+    });
+    expect(h.pushDisabled).toBe(true);
   });
 
   it('warns on pull when behind with uncommitted changes', () => {
@@ -839,6 +850,21 @@ describe('deriveActionHints', () => {
       text: 'branchPicker.hint.aheadBehind:{"ahead":2,"behind":1}',
       tone: 'warning',
     });
+    // Diverged tips are a non-fast-forward too: the warning row is disabled.
+    expect(
+      deriveActionHints(
+        tKey,
+        branches({ upstream: 'origin/main', ahead: 2, behind: 1 }),
+        status(),
+      ).pushDisabled,
+    ).toBe(true);
+    expect(
+      deriveActionHints(
+        tKey,
+        branches({ upstream: 'origin/main', ahead: 2 }),
+        status(),
+      ).pushDisabled,
+    ).toBe(false);
   });
 
   it('counts changes (entries, not files) for commit and calls out untracked ones', () => {
@@ -884,6 +910,8 @@ describe('deriveActionHints', () => {
     expect(op.pull).toEqual({ text: 'git.operation.merge', tone: 'warning' });
     expect(op.pullDisabled).toBe(true);
     expect(op.push).toEqual({ text: 'git.operation.merge', tone: 'warning' });
+    // behind > 0, but mid-operation the behind count is in flux (the merge
+    // being concluded is what resolves it), so the row only warns.
     expect(op.pushDisabled).toBe(false);
 
     const conflict = deriveActionHints(
@@ -1077,6 +1105,44 @@ describe('BranchPickerPopover action hints', () => {
       expect(btn?.disabled).toBe(true);
       expect(btn?.textContent).toContain('Rebasing');
     }
+  });
+
+  it('disables push while the branch is behind or diverged from its upstream', async () => {
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main', ahead: 1, behind: 2 }),
+    );
+    setup();
+    mount({ status: status() });
+    await flush();
+
+    const push = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-push"]',
+    );
+    expect(push?.disabled).toBe(true);
+    expect(
+      push
+        ?.querySelector('[data-testid="branch-picker-action-hint"]')
+        ?.getAttribute('data-tone'),
+    ).toBe('warning');
+    expect(push?.textContent).toContain('update first');
+  });
+
+  it("breaks a computedAt tie in favor of the popover's own fetch", async () => {
+    // The caller's snapshot and the on-open fetch can carry the same stamp
+    // (the daemon dedupes concurrent computations); the fresher fetch wins.
+    workspaceGitBranches.mockResolvedValue(
+      branches({ upstream: 'origin/main' }),
+    );
+    workspaceGit.mockResolvedValue(status({ unstaged: 3, computedAt: 100 }));
+    setup();
+    mount({ onOpenCommit: vi.fn(), status: status({ computedAt: 100 }) });
+    await flush();
+
+    const commit = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-commit"]',
+    );
+    expect(commit?.textContent).toContain('3 changes');
+    expect(commit?.textContent).not.toContain('No changes');
   });
 
   it('keeps push clickable during a conflicted merge on a branch', async () => {
