@@ -200,3 +200,24 @@ describe('autofix gate load clamps', () => {
     }
   });
 });
+
+describe('bundle-guard timeout ceiling', () => {
+  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+    // The config reads RUNNER_NAME at import time, so re-import it under
+    // each stub to pin both branches, not only the ambient one.
+    for (const [runnerName, expected] of [
+      ['ecs-qwen-parity', 60_000],
+      ['ubuntu-latest-runner', 15_000],
+    ] as const) {
+      vi.stubEnv('RUNNER_NAME', runnerName);
+      vi.resetModules();
+      const mod = await import(
+        '../../packages/vscode-ide-companion/vitest.config.js'
+      );
+      expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
+        expected,
+      );
+      vi.unstubAllEnvs();
+    }
+  });
+});
