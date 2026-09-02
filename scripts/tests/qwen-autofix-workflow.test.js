@@ -2055,7 +2055,7 @@ describe('qwen-autofix workflow', () => {
         head: H,
       }).stale,
     ).toBe(false);
-  }, 30000);
+  });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
     // Extract the recheck VERBATIM (drift fails the test) and run it with a
@@ -12500,7 +12500,7 @@ exit 1
       /then\n\s+echo "📊 milestone digest posted/,
     );
     expect(pushAndReportStep).toContain('milestone digest failed to post');
-  }, 30000);
+  });
 
   it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
     // A one-shot push dies `fetch first` whenever anything pushes to the PR
@@ -13531,7 +13531,7 @@ exit 1
     const fuzz = run(crossWorkspace, { enforce: 'terminate' });
     expect(fuzz.out).toContain('SURVIVED');
     expect(fuzz.advisory).toContain('outside the PR footprint');
-  }, 30000);
+  });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
     // Wiring: the upsert runs after both shared resolve/reply call sites
@@ -14753,7 +14753,7 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  }, 30000);
+  });
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -17314,7 +17314,7 @@ exit 1
     expect(ciWorkflow).toContain(
       '.github/scripts/autofix-status-heartbeat.test.mjs',
     );
-  }, 30000);
+  });
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -21078,7 +21078,7 @@ exit 0
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
-  }, 30000);
+  });
 
   it('classifies permanent API failures terminal and records the cause class', () => {
     // A permanent 400 whose text happens to carry a 3-digit number in 500-599
@@ -23761,10 +23761,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(neutralized.stdout).toContain(';;error;;forged');
     expect(neutralized.stdout).not.toContain('::error::forged');
     // Eight runGate arms, each a fixture repo plus a full gate-script
-    // replay under bash — this outgrows the 5s default on slow runners
-    // (it timed out at ~6.4s on the PR head); the suite's convention is
-    // an explicit per-test budget for tests that spawn subprocesses.
-  }, 30000);
+    // replay under bash — this outgrows vitest's 5s default on slow
+    // runners (it timed out at ~6.4s on the PR head), so it runs on the
+    // suite ceiling in scripts/tests/vitest.config.ts like every other
+    // subprocess-spawning test here.
+  });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {
     // A handoff claims the round deliberately changed NOTHING; dirt beside

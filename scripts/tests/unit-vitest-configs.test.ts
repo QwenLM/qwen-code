@@ -221,3 +221,24 @@ describe('bundle-guard timeout ceiling', () => {
     }
   });
 });
+
+describe('scripts suite timeout ceiling', () => {
+  it('keeps the shared-ECS ceiling in scripts/tests', async () => {
+    // The bash-spawning workflow suites are the leg that kept a flat ceiling
+    // on the shared pool. Re-imported under each stub: the config reads
+    // RUNNER_NAME at import time and the static import above already
+    // resolved the ambient branch.
+    for (const [runnerName, expected] of [
+      ['ecs-qwen-parity', 60_000],
+      ['ubuntu-latest-runner', 30_000],
+    ] as const) {
+      vi.stubEnv('RUNNER_NAME', runnerName);
+      vi.resetModules();
+      const mod = await import('./vitest.config.js');
+      expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
+        expected,
+      );
+      vi.unstubAllEnvs();
+    }
+  });
+});

@@ -33,7 +33,16 @@ export default defineConfig({
     // Windows CI: 4780ms / 1666ms / 1079ms — the 4.8s one is right at
     // vitest's 5s default and flakes. Bump the suite timeout so a single
     // slow subprocess startup doesn't fail an otherwise-healthy test run.
-    testTimeout: 30_000,
+    //
+    // Shared-ECS ceiling, same as packages/cli and packages/web-shell: these
+    // suites spawn a bash subprocess per case (one qwen-autofix-workflow test
+    // spawns 60 and needs 22.9s on an idle host), so pool contention rather
+    // than a hang pushed it past a flat 30s and failed the release
+    // quality_scripts lane (#10853). Only the ceiling grows; assertions still
+    // fail instantly.
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 30_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
