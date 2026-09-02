@@ -5059,6 +5059,40 @@ describe('ChannelBase', () => {
       expect(help).not.toContain('/btw — Ask a side question');
     });
 
+    it('/help lists locally handled agent commands only once per session', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'start session' }));
+      const sid = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][0] as string;
+      // The per-session getter is the branch the de-duplication has to cover
+      // too; without it `getAgentCommandsForSession` falls back to
+      // `availableCommands` and this re-tests the branch above.
+      (
+        bridge as unknown as {
+          getAvailableCommands: (
+            sessionId: string,
+          ) => Array<{ name: string; description: string }>;
+        }
+      ).getAvailableCommands = vi.fn((sessionId: string) =>
+        sessionId === sid
+          ? [
+              { name: 'btw', description: 'Ask a side question' },
+              { name: 'compress', description: 'Compress context' },
+            ]
+          : [],
+      );
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/help' }));
+
+      const help = ch.sent[0]!.text;
+      expect(help.match(/^\/btw\b/gmu)).toHaveLength(1);
+      expect(help).toContain(
+        'Agent commands (forwarded to Qwen Code):\n/compress — Compress context',
+      );
+      expect(help).not.toContain('/btw — Ask a side question');
+    });
+
     it("/help shows this session's agent commands when available", async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: 'start session' }));
@@ -16239,19 +16273,39 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('fails closed when the active bridge lacks BTW support', async () => {
+    it('falls through to the agent when the active bridge lacks BTW support', async () => {
       const btw = bridge.btw as ReturnType<typeof vi.fn>;
       delete bridge.btw;
       const ch = createChannel();
 
       await ch.handleInbound(envelope({ text: '/btw question' }));
 
-      expect(ch.sent.at(-1)?.text).toBe(
+      // No bridge in this tree implements `btw` yet, and before the side-question
+      // path existed `/btw` reached the agent, which answers it as its own slash
+      // command. Refusing here instead would take that answer away.
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect((bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(
+        '/btw question',
+      );
+      expect(btw).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).not.toBe(
         '/btw is not supported by the current agent connection.',
       );
-      expect(bridge.newSession).not.toHaveBeenCalled();
-      expect(btw).not.toHaveBeenCalled();
-      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('keeps the agent /btw listed in /help when no bridge implements it', async () => {
+      delete bridge.btw;
+      bridge.availableCommands = [
+        { name: 'btw', description: 'Agent side question' },
+      ];
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ text: '/help' }));
+
+      const help = ch.sent.at(-1)?.text ?? '';
+      // The local entry is gone with the capability, so the de-duplication must
+      // not also hide the agent's — otherwise the only working /btw is invisible.
+      expect(help).toContain('/btw — Agent side question');
     });
 
     it('rejects unauthorized callers before resolving a shared session', async () => {

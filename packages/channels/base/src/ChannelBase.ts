@@ -3980,7 +3980,14 @@ export abstract class ChannelBase {
         sessionId
           ? this.getAgentCommandsForSession(sessionId)
           : this.bridge.availableCommands
-      ).filter((command) => !this.commands.has(command.name));
+      ).filter(
+        (command) =>
+          !this.commands.has(command.name) ||
+          // `btw` is registered unconditionally but only handled locally when
+          // the bridge supports it. Without that capability the agent's entry
+          // is the working one, so it must stay listed.
+          (command.name === 'btw' && !this.bridge.btw),
+      );
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
@@ -6126,7 +6133,11 @@ export abstract class ChannelBase {
         if (handled) return;
       }
       // Unrecognized commands fall through to the agent
-      if (parsed.command === 'btw') {
+      // Intercept /btw only where the bridge can answer it out of band. With no
+      // btw capability this is not a locally handled command at all: it falls
+      // through to the agent, which serves /btw as its own slash command, the
+      // same path it took before this interception existed.
+      if (parsed.command === 'btw' && this.bridge.btw) {
         if (!this.isAuthorizedForSharedSession(envelope)) {
           await this.sendThreadMessage(
             envelope.chatId,
@@ -6157,16 +6168,6 @@ export abstract class ChannelBase {
             envelope.chatId,
             envelope.threadId,
             '/btw supports text-only questions.',
-          );
-          return;
-        }
-        // Refuse before session resolution so an unsupported /btw never
-        // creates or persists a session — same invariant as the ! gate below.
-        if (!this.bridge.btw) {
-          await this.sendThreadMessage(
-            envelope.chatId,
-            envelope.threadId,
-            '/btw is not supported by the current agent connection.',
           );
           return;
         }
