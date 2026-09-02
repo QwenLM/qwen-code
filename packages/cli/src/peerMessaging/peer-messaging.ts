@@ -128,6 +128,14 @@ export interface PeerMessagingOptions {
    * and the generated token is not observable until after.
    */
   ipcToken?: string;
+  /** Overrides the generated child token. Same seam, same reason. */
+  childToken?: string;
+}
+
+/** An accepted message waiting for the TUI's submit function. */
+interface BufferedDelivery {
+  frame: PeerUserFrame;
+  selfSent: boolean;
 }
 
 export class PeerMessaging {
@@ -145,7 +153,7 @@ export class PeerMessaging {
   private reassertSessionRecord: (() => Promise<void>) | null = null;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private submitFn: PeerSubmitFn | null = null;
-  private readonly buffered: PeerUserFrame[] = [];
+  private readonly buffered: BufferedDelivery[] = [];
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
    * still buffered here or still queued in the session's input queue.
@@ -179,7 +187,7 @@ export class PeerMessaging {
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
       getSessionId: options.getSessionId,
-      deliver: (frame) => messaging.deliver(frame),
+      deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
         return sendDeliveryStatus(
@@ -216,13 +224,18 @@ export class PeerMessaging {
     // session's own pair once the socket is accepting.
     clearInheritedPeerMessagingEnv();
 
+    // Two tokens for two audiences. The first is published in the registry
+    // record for peers; the second exists only in this process's
+    // environment, so presenting it proves descent from this session.
     const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
+    const childToken = options.childToken ?? randomBytes(32).toString('hex');
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
       requiredToken: ipcToken,
-      onFrame: (frame) => messaging.onFrame(frame),
+      childToken,
+      onFrame: (frame, auth) => messaging.onFrame(frame, auth === 'child'),
     });
     if (!inbox) return null;
 
@@ -239,9 +252,11 @@ export class PeerMessaging {
 
     // Exported even if the registry publish above failed: children inherit
     // the environment, not the record, and the inbox is accepting either
-    // way.
+    // way. Children get the child token, never the published one: what
+    // makes a child's message recognizable as the session's own is that
+    // nothing else ever holds this value.
     process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
-    process.env[MESSAGING_TOKEN_ENV] = ipcToken;
+    process.env[MESSAGING_TOKEN_ENV] = childToken;
 
     return messaging;
   }
@@ -261,7 +276,7 @@ export class PeerMessaging {
     // buffered — `deliver` retries them, in order, on the next arrival.
     while (this.buffered.length > 0) {
       const head = this.buffered[0];
-      if (!head || !this.submit(head)) break;
+      if (!head || !this.submit(head.frame, head.selfSent)) break;
       this.buffered.shift();
     }
   }
@@ -409,7 +424,11 @@ export class PeerMessaging {
     await Promise.allSettled(receipts);
   }
 
-  private onFrame(frame: PeerFrame): void {
+  /**
+   * `selfSent` is the transport's finding that the connection presented
+   * the child token; it is never read off the frame.
+   */
+  private onFrame(frame: PeerFrame, selfSent: boolean): void {
     if (frame.type === 'control') {
       // A receipt for a message this session sent. Any process that can
       // reach the socket can write one for any id, so only ids the
@@ -470,26 +489,26 @@ export class PeerMessaging {
       });
       return;
     }
-    this.gate?.admit(frame);
+    this.gate?.admit(frame, { selfSent });
   }
 
-  private deliver(frame: PeerUserFrame): void {
+  private deliver(frame: PeerUserFrame, selfSent: boolean): void {
     if (!this.submitFn) {
       if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
         throw new Error('accepted-message backlog is full');
       }
-      this.buffered.push(frame);
+      this.buffered.push({ frame, selfSent });
       this.trackOutstanding(frame);
       return;
     }
     while (this.buffered.length > 0) {
       const head = this.buffered[0];
-      if (!head || !this.submit(head)) {
+      if (!head || !this.submit(head.frame, head.selfSent)) {
         throw new Error('accepted-message backlog is full');
       }
       this.buffered.shift();
     }
-    if (!this.submit(frame)) {
+    if (!this.submit(frame, selfSent)) {
       throw new Error('accepted-message backlog is full');
     }
     this.trackOutstanding(frame);
@@ -506,19 +525,23 @@ export class PeerMessaging {
     }
   }
 
-  private submit(frame: PeerUserFrame): boolean {
-    const from = frame.from ?? 'unknown session';
+  private submit(frame: PeerUserFrame, selfSent: boolean): boolean {
+    // A script injecting into its own session rarely listens for a reply,
+    // so it usually has no address to give; say what it is instead.
+    const from = frame.from ?? (selfSent ? 'own process' : 'unknown session');
     return (
       this.submitFn?.(
         formatPeerEnvelope({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          selfSent,
         }),
         formatPeerDisplay({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          selfSent,
         }),
         {
           msgId: frame.msgId,
