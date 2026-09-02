@@ -46,6 +46,9 @@ describe('bundled goal-draft skill', () => {
     expect(config.allowedTools).not.toContain('write_file');
     expect(config.allowedTools).not.toContain('edit');
     expect(config.allowedTools).not.toContain('update_goal');
+    // propose_goal shows its approval dialog through the tool's own 'ask'
+    // default; a grant here would only mislead (see ask_user_question).
+    expect(config.allowedTools).not.toContain('propose_goal');
     // ask_user_question must stay ungranted: a session-wide allow rule
     // overrides its 'ask' default and the scheduler then runs it without
     // showing the dialog, fabricating a declined-answer result (see the
@@ -171,6 +174,23 @@ describe('bundled goal-draft skill', () => {
     // escaped backticks, and copying it then pastes backslashes into the
     // objective — the line must go out as plain text.
     expect(body).toContain('Print it as plain text with no code markers');
+  });
+
+  it('hands off through propose_goal when it is available, and prints the /goal line otherwise', () => {
+    const { body } = loadGoalDraftSkill();
+
+    expect(body).toContain(
+      'If the `propose_goal` tool is available and no Goal is active',
+    );
+    expect(body).toContain('only their approval sets the Goal');
+    expect(body).toContain(
+      'do not propose the same or a reworded objective again',
+    );
+    expect(body).toContain('acknowledge it in one sentence and end the turn');
+    // The text hand-off survives for headless runs and disabled tools.
+    expect(body).toContain(
+      '**Otherwise** (headless, the tool is disabled, or a Goal is active)',
+    );
   });
 
   it('ends with the self-check list and an explicit stop', () => {

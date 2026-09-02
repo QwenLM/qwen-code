@@ -39,6 +39,7 @@ import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
+  buildEnabledSkillNamesProvider,
   loadCliConfig,
   parseArguments,
 } from './config/config.js';
@@ -52,7 +53,10 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import { registerMcpHotReload } from './config/hot-reload.js';
+import {
+  registerMcpHotReload,
+  registerModelProvidersHotReload,
+} from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -94,6 +98,7 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
+import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
@@ -352,6 +357,13 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // First thing, before any child can be spawned: an inherited messaging
+  // address/token names the ANCESTOR's inbox, and handing that pair on
+  // would let this session's hooks inject into the wrong session. Modes
+  // that never bind an inbox — feature off, headless `-p`, a registration
+  // that never completes — reach no other scrub, so it happens here for
+  // all of them. A session that does bind one re-exports its own pair.
+  clearInheritedPeerMessagingEnv();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -576,6 +588,11 @@ export async function main() {
           projectHooks: settings.getProjectHooks(),
         },
         buildDisabledSkillNamesProvider(settings),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildEnabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -874,6 +891,9 @@ export async function main() {
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
+      undefined,
+      undefined,
+      buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
@@ -899,6 +919,16 @@ export async function main() {
         config.getTopTierMcpServers(),
       );
       registerCleanup(disposeMcpHotReload);
+
+      // Same plumbing for modelProviders edits (#10568): reload the model
+      // registry in place so `/model` picks up new providers without a
+      // session restart.
+      const disposeModelProvidersHotReload = registerModelProvidersHotReload(
+        settingsWatcher,
+        settings,
+        config,
+      );
+      registerCleanup(disposeModelProvidersHotReload);
     }
 
     registerLspHotReload(config, registerCleanup);
@@ -1176,6 +1206,46 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
+      // selects the experimental backend only on a runtime that can drive it;
+      // every other case — including a failed load or boot of the entry —
+      // falls through to ink, which stays the default renderer. The try/catch
+      // is load-bearing: importing the entry evaluates opentui modules whose
+      // module scope touches the native FFI, which can still throw on a
+      // runtime that passed the version gate.
+      const { selectTuiRenderer } = await import(
+        './ui/opentui/renderer-selection.js'
+      );
+      const selection = selectTuiRenderer();
+      if (selection.renderer === 'opentui') {
+        try {
+          const { startOpenTuiUI } = await import(
+            './ui/opentui/start-opentui-ui.js'
+          );
+          const started = await startOpenTuiUI(
+            config,
+            settings,
+            startupWarnings,
+            process.cwd(),
+            initializationResult!,
+            {
+              postRenderConnectIde: deferIdeConnection,
+              extensionRefreshState,
+            },
+          );
+          if (started) {
+            clearCorruptionEnvVars();
+            return;
+          }
+        } catch (err) {
+          debugLogger.error('OpenTUI boot failed; falling back to ink:', err);
+          writeStderrLine(
+            `Warning: OpenTUI failed to start — ${err instanceof Error ? err.message : String(err)} (falling back to ink)`,
+          );
+        }
+      } else {
+        debugLogger.debug(`TUI renderer: ${selection.reason}`);
+      }
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,

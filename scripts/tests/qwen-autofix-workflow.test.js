@@ -8944,6 +8944,57 @@ exit 1
     expect(reviewVerificationRunner).toContain(
       'strip_runner_channels npm run test',
     );
+    // The load clamps must actually reach every vitest the gate launches.
+    // Dropping the expansion from any of the three legs is silent —
+    // `set -eo pipefail` without `-u` swallows an empty array — and the
+    // gate reverts to 15s timeouts, unbounded workers and coverage on,
+    // which is the incident this script's clamps exist to prevent.
+    // Pinned on reviewVerificationRunner only: the inline issue-fix gate
+    // keeps unclamped copies by design — RUNNER_NAME is present there, so
+    // its package legs keep the config-level clamps, and its contracts leg
+    // accepts the web-shell 5s default.
+    expect(reviewVerificationRunner).toContain(
+      '--changed origin/main --passWithNoTests "${VITEST_LOAD_CLAMPS[@]}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'strip_runner_channels npm run test --workspace "${ws}" --if-present -- "${VITEST_LOAD_CLAMPS[@]}" "$@"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+    );
+    expect(reviewVerificationRunner).toContain('export AUTOFIX_VITEST_FLAGS');
+    // ...and the array definition sits above its consumers: `set -eo
+    // pipefail` without `-u` expands a not-yet-set array to zero words, so
+    // a definition moved below them silently empties every clamp while the
+    // position-blind toContains above stay green.
+    expect(
+      reviewVerificationRunner.indexOf('VITEST_LOAD_CLAMPS=('),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'AUTOFIX_VITEST_FLAGS="${VITEST_LOAD_CLAMPS[*]}"',
+      ),
+    );
+    // ...and above the contracts call: run_check_no_ab spawns a child bash
+    // that inherits exported variables only, so an export missing or moved
+    // below the call leaves the drift leg at vitest's 5s default.
+    expect(
+      reviewVerificationRunner.indexOf('export AUTOFIX_VITEST_FLAGS'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    );
+    // ...and the unset stays below the contracts call: the child inherits
+    // the export at spawn time, so an unset moved above the call (or
+    // deleted) strips the clamps from the drift leg while every
+    // establish-side pin above stays green.
+    expect(
+      reviewVerificationRunner.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('unset AUTOFIX_VITEST_FLAGS'),
+    );
     // The check sits BEFORE the no-commit/no-op exits: a no-op audit round
     // whose verdict is sound with nothing left to fix still needs the artifact.
     const verdictGateAt = reviewVerificationRunner.indexOf(
@@ -9905,25 +9956,21 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
@@ -9967,6 +10014,8 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -9992,10 +10041,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -10003,6 +10051,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
@@ -11953,7 +12004,10 @@ exit 1
         join(dir, 'npm'),
         [
           '#!/usr/bin/env bash',
-          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          // One bracketed line per argv word: $*-joined logging renders a
+          // joined-blob flag identically to separate words, so a [*]-for-
+          // [@] regression in the contracts script would survive it.
+          'printf \'[%s]\\n\' "$@" >> "${NPM_LOG}"',
           'if [[ "$*" == "run check-i18n" ]]; then',
           '  exit "${I18N_EXIT:-0}"',
           'fi',
@@ -11977,14 +12031,45 @@ exit 1
 
       expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
+        '[run]',
+        '[check-i18n]',
       ]);
 
       writeFileSync(npmLog, '');
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
-        'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
+      ]);
+
+      // web-shell's config sets no timeouts and has no RUNNER_NAME branch,
+      // so without caller flags the drift test runs at vitest's 5s default;
+      // the review gate launches it on a saturating shared host and hands
+      // its clamps down through this variable. The issue-fix gate leaves
+      // it unset (the case above) and accepts the 5s default there.
+      writeFileSync(npmLog, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          AUTOFIX_VITEST_FLAGS: '--maxWorkers=25% --testTimeout=60000',
+        }).status,
+      ).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        '[run]',
+        '[check-i18n]',
+        '[run]',
+        '[test]',
+        '[--workspace]',
+        '[packages/web-shell]',
+        '[--]',
+        '[--maxWorkers=25%]',
+        '[--testTimeout=60000]',
+        '[client/components/messages/toolFormatting.drift.test.ts]',
       ]);
 
       writeFileSync(npmLog, '');
@@ -11995,7 +12080,7 @@ exit 1
           I18N_EXIT: '1',
         }).status,
       ).toBe(1);
-      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('[run]\n[check-i18n]');
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
 
       writeFileSync(npmLog, '');

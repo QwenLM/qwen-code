@@ -1821,6 +1821,9 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/model')) {
         return jsonResponse(200, { modelId: 'qwen3-coder' });
       }
+      if (req.url.endsWith('/session/s-1/config-option')) {
+        return jsonResponse(200, { configOptions: [], persisted: true });
+      }
       if (req.url.endsWith('/session/s-1/context')) {
         return jsonResponse(200, {
           v: 1,
@@ -1843,7 +1846,10 @@ describe('DaemonSessionClient', () => {
           availableSkills: ['review'],
         });
       }
-      if (req.url.endsWith('/session/s-1/tasks')) {
+      if (
+        req.url.endsWith('/session/s-1/tasks') ||
+        req.url.endsWith('/session/s-1/tasks?includeWorkflows=true')
+      ) {
         return jsonResponse(200, {
           v: 1,
           sessionId: 's-1',
@@ -1906,6 +1912,9 @@ describe('DaemonSessionClient', () => {
     await expect(session.setModel('qwen3-coder')).resolves.toEqual({
       modelId: 'qwen3-coder',
     });
+    await expect(
+      session.setConfigOption('reasoning_effort', 'medium', { persist: true }),
+    ).resolves.toEqual({ configOptions: [], persisted: true });
     await expect(session.context()).resolves.toEqual({
       v: 1,
       sessionId: 's-1',
@@ -1925,6 +1934,12 @@ describe('DaemonSessionClient', () => {
       availableSkills: ['review'],
     });
     await expect(session.tasks()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      now: 1_700_000_000_000,
+      tasks: [],
+    });
+    await expect(session.workflowTasks()).resolves.toEqual({
       v: 1,
       sessionId: 's-1',
       now: 1_700_000_000_000,
@@ -1961,9 +1976,11 @@ describe('DaemonSessionClient', () => {
     expect(calls.map((c) => c.url)).toEqual([
       'http://daemon/session/s-1/prompt',
       'http://daemon/session/s-1/model',
+      'http://daemon/session/s-1/config-option',
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/tasks',
+      'http://daemon/session/s-1/tasks?includeWorkflows=true',
       'http://daemon/session/s-1/lsp',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
@@ -1972,7 +1989,14 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
+    expect(JSON.parse(calls[2]!.body!)).toEqual({
+      configId: 'reasoning_effort',
+      value: 'medium',
+      persist: true,
+    });
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

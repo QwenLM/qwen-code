@@ -73,6 +73,23 @@ describe('<AssistantMessage />', () => {
 
     expect(lastFrame()).toContain('MockTerminalImage:image/png:height=6');
   });
+
+  it('gives image-only assistant messages the full image height budget', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+        isPending={false}
+        availableTerminalHeight={20}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=10');
+  });
 });
 
 describe('<AssistantMessageContent />', () => {
