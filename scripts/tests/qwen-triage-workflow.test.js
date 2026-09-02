@@ -7301,6 +7301,18 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('every production line this PR deletes');
   });
 
+  it('reads large default-branch files through the raw contents response', () => {
+    expect(section).toContain(
+      'gh api -H "Accept: application/vnd.github.raw+json"',
+    );
+    expect(section).toContain("'$value | @uri'");
+    expect(section).toContain('--method GET');
+    expect(section).toContain('-f ref="$DEFAULT_BRANCH"');
+    expect(section).toContain('A 404 from this encoded-path request');
+    expect(section).toContain('unverified: never close');
+    expect(section).not.toContain('gh pr diff');
+  });
+
   it('never closes a diff with no production changes', () => {
     // Stage 0 exclusions empty the comparison set for tests-only PRs; such a
     // diff must be a remaining delta, never "Fully subsumed".
