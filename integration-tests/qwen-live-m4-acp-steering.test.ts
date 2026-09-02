@@ -139,6 +139,11 @@ describeE2E('qwen-live M4 — ACP steering', () => {
     // queued for the next one — both are honest receipts on ACP.
     expect(['accepted', 'queued']).toContain(second['status']);
 
+    // Capture the baseline BEFORE releasing the gate: the slow turn's
+    // completion fires immediately on release and would already be below
+    // a later-captured index (R1-9).
+    const inboxIndex = stack.fakeDash.inbox.length;
+
     // Release the turn; the steered text must reach the agent in some
     // subsequent model request (drained mid-turn or delivered after).
     slowGate.resolve();
@@ -154,7 +159,6 @@ describeE2E('qwen-live M4 — ACP steering', () => {
     );
 
     // And the slow turn's conclusion flows back.
-    const inboxIndex = stack.fakeDash.inbox.length;
     const complete = await stack.fakeDash.waitForMessage(
       (message) => {
         const text = contextTextOf(message);

@@ -422,7 +422,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         state.clientId,
       );
     }
-    return { id: session.sessionId, adaptor: ADAPTOR_NAME };
+    return { id: session.sessionId, adaptor: this.name };
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -446,7 +446,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         const label = raw['displayName'];
         const hasActivePrompt = raw['hasActivePrompt'];
         summaries.set(sessionId, {
-          handle: { id: sessionId, adaptor: ADAPTOR_NAME },
+          handle: { id: sessionId, adaptor: this.name },
           ...(typeof label === 'string' ? { label } : {}),
           cwd,
           state: tracked
