@@ -1,5 +1,12 @@
 # Standalone Daemon Sessions
 
+> **Proposed cross-daemon update (2026-09-02):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) would
+> supersede this document's process-global ownership requirement and related
+> `conversation_runtime_in_use` behavior. Other isolation, persistence, and
+> lifecycle requirements remain in force.
+
 ## Status
 
 This document is the versioned architecture companion to
