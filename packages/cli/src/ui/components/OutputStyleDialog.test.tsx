@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { OutputStyleDialog } from './OutputStyleDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 
@@ -70,5 +71,28 @@ describe('OutputStyleDialog', () => {
     );
 
     expect(lastFrame()).toContain('› 2. Concise');
+  });
+
+  it('lists custom styles with their source, and pre-selects one', () => {
+    const { lastFrame } = renderWithProviders(
+      <OutputStyleDialog
+        onSelect={vi.fn()}
+        currentStyleName="Reviewer"
+        styles={[
+          ...BUILT_IN_OUTPUT_STYLES,
+          {
+            name: 'Reviewer',
+            source: 'project',
+            description: 'Reviews without editing',
+            keepCodingInstructions: false,
+            prompt: 'Review only.',
+          },
+        ]}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('› 6. Reviewer');
+    expect(frame).toContain('Reviews without editing (project)');
   });
 });

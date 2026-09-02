@@ -231,6 +231,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       .mockImplementation(() => createNativeLspServiceInstance()),
     SessionService: mockSessionServiceCtor,
     SkillManager: SkillManagerMock,
+    // Reset to `undefined` per test, which resolveOutputStyle treats as
+    // "built-ins only"; the output-style tests below install a catalog.
+    loadOutputStyleCatalog: vi.fn(),
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
         getConnectionStatus: vi.fn(),
@@ -1544,6 +1547,55 @@ describe('loadCliConfig', () => {
       );
       expect(config.getOutputStyle()?.name).toBe('Explanatory');
     });
+
+    it('selects a custom style from the loaded catalog', async () => {
+      const custom: ServerConfig.OutputStyleDefinition = {
+        name: 'Reviewer',
+        source: 'user',
+        description: 'Reviews without editing',
+        keepCodingInstructions: false,
+        prompt: 'Review only.',
+      };
+      vi.mocked(ServerConfig.loadOutputStyleCatalog).mockResolvedValue([
+        ...ServerConfig.BUILT_IN_OUTPUT_STYLES,
+        custom,
+      ]);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'reviewer' } },
+        argv,
+        '/repo',
+      );
+      expect(config.getOutputStyle()).toBe(custom);
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+      });
+    });
+
+    it('does not read project styles from an untrusted workspace', async () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, '/repo');
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: undefined,
+      });
+    });
+
+    it.each(['--safe-mode', '--bare'])(
+      'keeps built-ins only under %s',
+      async (flag) => {
+        process.argv = ['node', 'script.js', flag, '--output-style', 'Concise'];
+        const argv = await parseArguments();
+        const config = await loadCliConfig({}, argv);
+        expect(ServerConfig.loadOutputStyleCatalog).not.toHaveBeenCalled();
+        expect(config.getOutputStyle()?.name).toBe('Concise');
+      },
+    );
 
     it('treats "default" as no style, even when the setting names one', async () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

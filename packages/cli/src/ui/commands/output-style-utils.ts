@@ -8,8 +8,9 @@ import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import {
   BUILT_IN_OUTPUT_STYLES,
   createDebugLogger,
-  getBuiltInOutputStyle,
+  findOutputStyle,
   isSystemMdActive,
+  loadOutputStyleCatalog,
   resolveMainSessionOutputStyle,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -18,10 +19,30 @@ import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('OUTPUT_STYLE_COMMAND');
 
-/** Comma-separated list of the selectable style names, for messages. */
+/** Comma-separated list of the built-in style names, for the command description. */
 export const OUTPUT_STYLE_LIST = BUILT_IN_OUTPUT_STYLES.map(
   (style) => style.name,
 ).join(', ');
+
+/** Comma-separated names of a catalog, for messages. */
+export function formatOutputStyleNames(
+  styles: readonly OutputStyleDefinition[],
+): string {
+  return styles.map((style) => style.name).join(', ');
+}
+
+/**
+ * The styles this session can select: built-ins plus the user's and (in a
+ * trusted workspace) the project's style files, re-read on every call so a
+ * file added mid-session is picked up without a restart.
+ */
+export async function loadSessionOutputStyles(
+  config: Config,
+): Promise<readonly OutputStyleDefinition[]> {
+  return loadOutputStyleCatalog({
+    projectRoot: config.isTrustedFolder() ? config.getProjectRoot() : undefined,
+  });
+}
 
 /**
  * Maps a user-supplied name to a style, where the literal `default`
@@ -30,11 +51,12 @@ export const OUTPUT_STYLE_LIST = BUILT_IN_OUTPUT_STYLES.map(
  */
 export function resolveOutputStyleChoice(
   name: string,
+  available: readonly OutputStyleDefinition[],
 ): OutputStyleDefinition | undefined | null {
   if (name.trim().toLowerCase() === 'default') {
     return undefined;
   }
-  return getBuiltInOutputStyle(name) ?? null;
+  return findOutputStyle(available, name) ?? null;
 }
 
 /**

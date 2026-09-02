@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
+import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -21,11 +22,23 @@ interface OutputStyleDialogProps {
 
   /** Name of the currently active style, used to pre-select the list. */
   currentStyleName?: string;
+
+  /** Selectable styles, built-ins first. Defaults to the built-ins alone. */
+  styles?: readonly OutputStyleDefinition[];
+}
+
+function describe(style: OutputStyleDefinition): string {
+  // Built-in descriptions are translatable; a custom file's is the author's.
+  if (style.source === 'built-in') {
+    return t(style.description);
+  }
+  return `${style.description} (${style.source})`;
 }
 
 export function OutputStyleDialog({
   onSelect,
   currentStyleName,
+  styles = BUILT_IN_OUTPUT_STYLES,
 }: OutputStyleDialogProps): React.JSX.Element {
   const items = [
     {
@@ -33,8 +46,8 @@ export function OutputStyleDialog({
       value: 'default',
       key: 'default',
     },
-    ...BUILT_IN_OUTPUT_STYLES.map((style) => ({
-      label: `${style.name} — ${t(style.description)}`,
+    ...styles.map((style) => ({
+      label: `${style.name} — ${describe(style)}`,
       value: style.name,
       key: style.name,
     })),

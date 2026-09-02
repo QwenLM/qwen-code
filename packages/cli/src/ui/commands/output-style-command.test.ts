@@ -6,7 +6,11 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
-import { getBuiltInOutputStyle } from '@qwen-code/qwen-code-core';
+import {
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+  loadOutputStyleCatalog,
+} from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { outputStyleCommand } from './output-style-command.js';
 import { SettingScope } from '../../config/settings.js';
@@ -17,6 +21,23 @@ vi.mock('../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
 
+// The catalog is read from disk; substitute a fixed one so the test never
+// depends on the developer's own ~/.qwen/output-styles.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, loadOutputStyleCatalog: vi.fn() };
+});
+const mockedLoadCatalog = vi.mocked(loadOutputStyleCatalog);
+
+const CUSTOM_STYLE: OutputStyleDefinition = {
+  name: 'Reviewer',
+  source: 'user',
+  description: 'Reviews without editing',
+  keepCodingInstructions: false,
+  prompt: 'Review only.',
+};
+
 describe('outputStyleCommand', () => {
   let setOutputStyle: ReturnType<typeof vi.fn>;
   let getOutputStyle: ReturnType<typeof vi.fn>;
@@ -25,6 +46,11 @@ describe('outputStyleCommand', () => {
   let context: CommandContext;
 
   beforeEach(() => {
+    mockedLoadCatalog.mockReset();
+    mockedLoadCatalog.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      CUSTOM_STYLE,
+    ]);
     // Stateful so the resolveMainSessionOutputStyle read-back after
     // setOutputStyle mirrors the real Config.
     let currentStyle: OutputStyleDefinition | undefined;
@@ -46,6 +72,8 @@ describe('outputStyleCommand', () => {
           isInteractive: vi.fn().mockReturnValue(true),
           getBareMode: vi.fn().mockReturnValue(false),
           isSafeMode: vi.fn().mockReturnValue(false),
+          isTrustedFolder: vi.fn().mockReturnValue(true),
+          getProjectRoot: vi.fn().mockReturnValue('/repo'),
         } as unknown as Config,
         settings: {
           setValue,
@@ -61,9 +89,11 @@ describe('outputStyleCommand', () => {
     const res = await outputStyleCommand.action!(context, '');
     expect(res).toMatchObject({ type: 'dialog', dialog: 'output-style' });
     expect(setOutputStyle).not.toHaveBeenCalled();
+    // The dialog loads the catalog itself when it opens.
+    expect(mockedLoadCatalog).not.toHaveBeenCalled();
   });
 
-  it('lists styles when called with no args non-interactively', async () => {
+  it('lists styles, custom ones included, when called with no args non-interactively', async () => {
     const nonInteractive = { ...context, executionMode: 'non_interactive' };
     const res = await outputStyleCommand.action!(
       nonInteractive as typeof context,
@@ -72,6 +102,22 @@ describe('outputStyleCommand', () => {
     expect(res).toMatchObject({ type: 'message', messageType: 'info' });
     expect(getOutputStyle).toHaveBeenCalled();
     expect(setOutputStyle).not.toHaveBeenCalled();
+    expect(mockedLoadCatalog).toHaveBeenCalledWith({ projectRoot: '/repo' });
+    expect((res as { content: string }).content).toContain(
+      'Available: {{styles}}',
+    );
+  });
+
+  it('reads project styles only from a trusted folder', async () => {
+    (
+      context.services.config as unknown as {
+        isTrustedFolder: ReturnType<typeof vi.fn>;
+      }
+    ).isTrustedFolder = vi.fn().mockReturnValue(false);
+
+    await outputStyleCommand.action!(context, 'Concise');
+
+    expect(mockedLoadCatalog).toHaveBeenCalledWith({ projectRoot: undefined });
   });
 
   it('sets, refreshes, and persists a style, case-insensitively', async () => {
@@ -94,6 +140,19 @@ describe('outputStyleCommand', () => {
     expect((res as { content: string }).content).toContain(
       'Output style set to {{name}}.',
     );
+  });
+
+  it('applies a custom style from the catalog by name', async () => {
+    const res = await outputStyleCommand.action!(context, 'reviewer');
+    expect(setOutputStyle).toHaveBeenCalledWith(CUSTOM_STYLE);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Reviewer',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(res).toMatchObject({ messageType: 'info' });
   });
 
   it('clears the style with "default" and persists the literal', async () => {
@@ -157,7 +216,7 @@ describe('outputStyleCommand', () => {
     // auto-picking the first style.
     expect(outputStyleCommand.completion).toBeUndefined();
     expect(outputStyleCommand.argumentHint).toBe(
-      '[Concise|Proactive|Explanatory|Learning|default]',
+      '[Concise|Proactive|Explanatory|Learning|<custom>|default]',
     );
   });
 
@@ -309,6 +368,7 @@ describe('outputStyleCommand', () => {
       expect(res).toMatchObject({ type: 'message', messageType: 'error' });
       expect(setOutputStyle).not.toHaveBeenCalled();
       expect(setValue).not.toHaveBeenCalled();
+      expect(mockedLoadCatalog).not.toHaveBeenCalled();
     },
   );
 });

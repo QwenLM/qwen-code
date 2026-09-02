@@ -443,8 +443,8 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string | undefined,
         description:
-          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',
-        // The style list will grow user/project-defined entries; the dedicated
+          'Name of the output style that shapes how responses are written: a built-in such as "Concise" or "Explanatory", or a custom style file in ~/.qwen/output-styles or .qwen/output-styles. Leave unset for the default style. Change it with /output-style.',
+        // The style list includes user/project-defined entries; the dedicated
         // /output-style picker owns selection rather than a static enum here.
         showInDialog: false,
       },

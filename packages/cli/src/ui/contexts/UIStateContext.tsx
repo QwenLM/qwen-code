@@ -26,6 +26,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  OutputStyleDefinition,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
@@ -82,6 +83,7 @@ export interface UIState {
   isApprovalModeDialogOpen: boolean;
   isEffortDialogOpen: boolean;
   isOutputStyleDialogOpen: boolean;
+  outputStyleChoices: readonly OutputStyleDefinition[];
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
