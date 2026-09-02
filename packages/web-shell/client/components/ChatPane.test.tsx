@@ -63,6 +63,7 @@ const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const setReasoningEffort = vi.fn(async () => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const getGoal = vi.fn();
@@ -75,6 +76,7 @@ const daemonActions = {
   cancel,
   setApprovalMode,
   setModel,
+  setReasoningEffort,
   loadArtifacts,
   getTasks,
   getGoal,
@@ -95,7 +97,7 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
   useConnection: () => connectionState,
@@ -449,6 +451,7 @@ beforeEach(() => {
   cancel.mockClear();
   setApprovalMode.mockClear();
   setModel.mockClear();
+  setReasoningEffort.mockClear();
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -2482,6 +2485,22 @@ describe('ChatPane', () => {
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'keeps reasoning persistence scoped with standalone=%s',
+    async (standalone) => {
+      connectionState.sessionContext = standalone
+        ? { kind: 'standalone' }
+        : undefined;
+      render();
+      await act(async () => {
+        await latestChatEditorProps.onSelectReasoningEffort('medium');
+      });
+      expect(setReasoningEffort).toHaveBeenCalledWith('medium', {
+        persist: !standalone,
+      });
+    },
+  );
 
   it('renders no maximize toggle without onToggleMaximize', () => {
     render({ onClose: () => {} });

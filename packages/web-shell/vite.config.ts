@@ -51,14 +51,13 @@ export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
       '@': resolve(__dirname, './client'),
       ...(command === 'serve'
         ? {
-            '@qwen-code/webui/daemon-react-sdk': resolve(
-              __dirname,
-              '../webui/src/daemon-react-sdk.ts',
-            ),
-            '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
             '@qwen-code/sdk/daemon': resolve(
               __dirname,
               '../sdk-typescript/src/daemon/index.ts',
@@ -70,7 +69,7 @@ export default defineConfig(({ command }) => ({
           }
         : {}),
     },
-    dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
+    dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
     outDir: '../dist',
@@ -91,6 +90,7 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },

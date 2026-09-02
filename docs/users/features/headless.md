@@ -131,6 +131,20 @@ The same file can be supplied through the `QWEN_APPEND_SYSTEM_MD` environment va
 QWEN_APPEND_SYSTEM_MD=./review-rules.md qwen -p "Review this patch"
 ```
 
+### Choose an Output Style
+
+Use `--output-style` to pick one of the built-in output styles for this run. A style is a named block of instructions layered onto the built-in prompt that changes how the answer is written — `Concise` leads with the result and drops preamble and narration, `Proactive` starts working instead of proposing, `Explanatory` adds short notes about the codebase along the way. It overrides the `general.outputStyle` setting; `default` selects no style.
+
+```bash
+qwen -p "Why does the build fail on Windows?" --output-style Concise
+```
+
+> [!note]
+>
+> - `Learning` asks you to write part of the code and waits for a reply, so it is skipped in headless runs.
+> - An unknown style name prints a warning and the run continues with the default style.
+> - `--output-style` has no effect when `--system-prompt` or `QWEN_SYSTEM_MD` replaces the built-in prompt — a style is only layered onto the built-in prompt.
+
 > [!note]
 >
 > - `--system-prompt` applies only to the current run's main session.
@@ -288,6 +302,7 @@ Key command-line options for headless usage:
 | `--system-prompt`             | Override the main session system prompt for this run                                                                                                                                                                                                                                                                                                                                                                           | `qwen -p "query" --system-prompt "You are a terse reviewer."`            |
 | `--append-system-prompt`      | Append extra instructions to the main session system prompt for this run                                                                                                                                                                                                                                                                                                                                                       | `qwen -p "query" --append-system-prompt "Focus on concrete findings."`   |
 | `--append-system-prompt-file` | Append the contents of a file to the main session system prompt for this run. Also settable via `QWEN_APPEND_SYSTEM_MD`.                                                                                                                                                                                                                                                                                                       | `qwen -p "query" --append-system-prompt-file ./rules.md`                 |
+| `--output-style`              | Output style for this run (`Concise`, `Proactive`, `Explanatory`, `Learning`, or `default` for none); overrides `general.outputStyle`                                                                                                                                                                                                                                                                                          | `qwen -p "query" --output-style Concise`                                 |
 | `--debug`, `-d`               | Enable debug mode                                                                                                                                                                                                                                                                                                                                                                                                              | `qwen -p "query" --debug`                                                |
 | `--safe-mode`                 | Disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, and sandbox settings — to isolate problems; the CLI flags `--yolo` and `--approval-mode` still take effect. See [Troubleshooting](../support/troubleshooting). Also settable via `QWEN_CODE_SAFE_MODE=true`. | `qwen -p "query" --safe-mode`                                            |
 | `--model`, `-m`               | Model to use for this run                                                                                                                                                                                                                                                                                                                                                                                                      | `qwen -p "query" --model qwen3-coder-plus`                               |

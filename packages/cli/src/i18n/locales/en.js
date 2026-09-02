@@ -188,6 +188,7 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.Goal': 'toolDisplayName.Goal',
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
+  'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
@@ -1621,6 +1622,12 @@ export default {
     'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
   'Could not compress chat history due to a token counting error.':
     'Could not compress chat history due to a token counting error.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Could not compress chat history because the compression summary was empty.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Could not compress chat history because the compression summary was truncated.',
+  'Could not compress chat history due to an API error.':
+    'Could not compress chat history due to an API error.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

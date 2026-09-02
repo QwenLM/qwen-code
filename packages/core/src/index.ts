@@ -147,10 +147,17 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
 export { isWsl } from './utils/terminal-env.js';
+export {
+  isUnverifiableIdentityError,
+  openNoFollow,
+  openSyncNoFollow,
+  UNVERIFIABLE_IDENTITY_CODE,
+} from './utils/no-follow-open.js';
 export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -349,8 +356,11 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-directory.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
+export * from './ipc/peer-routing.js';
+export * from './ipc/peer-send.js';
 export * from './ipc/socket-path.js';
 export * from './ipc/uds-client.js';
 export * from './ipc/uds-inbox.js';
@@ -625,6 +635,7 @@ export * from './utils/git-ignore.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/github-prs.js';
+export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
 export {

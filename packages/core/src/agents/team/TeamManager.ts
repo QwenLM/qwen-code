@@ -208,6 +208,44 @@ export class TeamManager {
   private readonly teamEventEmitter = new TeamEventEmitter();
 
   /**
+   * Per-TeamManager write queue serializing every roster write
+   * (the success-path write and the failed-spawn compensating
+   * write in `spawnTeammate`). Each queued task snapshots
+   * `teamFile` when it RUNS, not when it is enqueued, so
+   * commits land in call order and a compensating write queued
+   * after a stale snapshot always lands last. Without this, two
+   * unsynchronized writers can reorder — a slow atomic rename
+   * for the stale snapshot landing after the compensating write
+   * — and re-persist exactly the ghost member #10208 removes.
+   */
+  private teamFileWriteQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Sequence number of roster writes in `persistTeamFile`'s queue:
+   * each queued write increments it synchronously at its snapshot point
+   * when it RUNS. A member's push captures the current value, and only
+   * writes with a higher sequence number snapshot the roster while the
+   * member is in it, so only those can persist the member. The
+   * failed-spawn compensating-write gate compares
+   * `teamFileWritesCommitted` against the captured value (see
+   * `persistTeamFile`). Deliberately monotonic — a rejected write keeps
+   * its number so a later write cannot reuse the value and hide at or
+   * below an earlier member's push watermark (#10297).
+   */
+  private teamFileWritesStarted = 0;
+
+  /**
+   * Sequence number of the most recently committed roster write
+   * (`writeTeamFile` resolved). The queue is serial, so writes commit
+   * in sequence order and this watermark is monotonic. A member pushed
+   * when `teamFileWritesStarted` read N can be on disk only if a write
+   * with a sequence number above N committed, i.e. this watermark
+   * advanced past N — a write that started but rejected persisted
+   * nothing (#10297).
+   */
+  private teamFileWritesCommitted = 0;
+
+  /**
    * Cap on per-agent pending messages. Each message can be up to the
    * `send_message` schema's `maxLength`, and a queue only drains when its
    * recipient goes IDLE — so without a cap a single looping or
@@ -310,6 +348,57 @@ export class TeamManager {
   // ─── Teammate lifecycle ─────────────────────────────────
 
   /**
+   * Queue a team-file write behind any in-flight roster write and
+   * return its promise. The snapshot is taken when the queued task
+   * runs (see `teamFileWriteQueue`), so the last queued write always
+   * commits the newest in-memory state. A rejected write does not
+   * poison the queue — the chain survives for subsequent writes.
+   *
+   * With `onlyIfCommittedAfter`, the queued task writes only if a
+   * roster write with a sequence number above that value committed.
+   * The queue is serial, so by the time the task runs every earlier
+   * write — including any still in flight when the task was queued —
+   * has settled and `teamFileWritesCommitted` is final for the window.
+   * The failed-spawn compensating write uses this: a write that
+   * started inside the failed member's window but rejected persisted
+   * nothing, so there is nothing to repair and the redundant write
+   * (with its misleading ghost-member notice if it failed too) is
+   * skipped (#10297).
+   */
+  private persistTeamFile(options?: {
+    onlyIfCommittedAfter?: number;
+  }): Promise<void> {
+    const write = this.teamFileWriteQueue.then(() => {
+      if (
+        options?.onlyIfCommittedAfter !== undefined &&
+        this.teamFileWritesCommitted <= options.onlyIfCommittedAfter
+      ) {
+        // No write that started inside the failed member's window
+        // committed, so nothing on disk can contain the rolled-back
+        // member — skip the compensating write.
+        return;
+      }
+      // Snapshot point: assign the sequence number and snapshot the
+      // roster synchronously, before any await. `writeTeamFile` awaits
+      // `fs.mkdir` before stringifying its argument, so handing it the
+      // live roster would let a member pushed during that fs hop land
+      // on disk through a write the gate counts as pre-push — the
+      // failed member's compensating write would then be skipped and
+      // the ghost persisted (#10208).
+      const writeSeq = ++this.teamFileWritesStarted;
+      const snapshot = structuredClone(this.teamFile);
+      return writeTeamFile(this.teamFile.name, snapshot).then(() => {
+        // Commit point: advance the watermark only after the write
+        // actually landed. Commits happen in sequence order (the queue
+        // is serial), so the watermark stays monotonic.
+        this.teamFileWritesCommitted = writeSeq;
+      });
+    });
+    this.teamFileWriteQueue = write.catch(() => {});
+    return write;
+  }
+
+  /**
    * Spawn a new teammate. Adds the member to the team file,
    * spawns via backend, and sets up the event bridge.
    */
@@ -367,6 +456,12 @@ export class TeamManager {
     this.pendingMessages.set(agentId, []);
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
+
+    // Roster writes with a sequence number at or below this value
+    // snapshot the roster before this push and cannot persist the
+    // member. The compensating write after a failed spawn skips unless
+    // a write above this watermark committed (see `persistTeamFile`).
+    const writesStartedAtPush = this.teamFileWritesStarted;
 
     let agentSpawned = false;
     let eventBridgeAttached = false;
@@ -616,9 +711,51 @@ export class TeamManager {
       // EACCES, ...), `rollback` tears down the just-spawned agent
       // and event bridge so we don't leave a running teammate that
       // no team file knows about.
-      await writeTeamFile(this.teamFile.name, this.teamFile);
+      await this.persistTeamFile();
     } catch (err) {
       rollback();
+      // Compensating write: if another concurrent spawn already
+      // persisted this member in config.json, rewrite the file so
+      // persisted membership matches the post-rollback in-memory
+      // state. Best-effort — the original error is more important.
+      // Commit-aware gate (#10297): the queued task runs after every
+      // earlier write has settled and writes only if one with a
+      // sequence number above `writesStartedAtPush` actually committed.
+      // A write that started in the window but rejected persisted
+      // nothing, so compensating it would only add a redundant
+      // best-effort write — and if the disk is still full, a
+      // misleading ghost-member notice on top of the spawn error.
+      try {
+        await this.persistTeamFile({
+          onlyIfCommittedAfter: writesStartedAtPush,
+        });
+      } catch (writeErr) {
+        // Best-effort — the original error takes precedence, but
+        // leave a trail so a resurfaced ghost member can be told
+        // apart from a compensating write that itself failed.
+        debug.warn(
+          `Compensating team-file write after failed spawn of ` +
+            `${agentId} failed: ${getErrorMessage(writeErr)}`,
+        );
+        // Beyond the debug log (which is off in production), surface
+        // the failure to the leader as well, mirroring `fireAndForget`:
+        // the persisted roster may now keep a ghost member (#10208),
+        // and the leader is the only production-visible observer.
+        try {
+          this.leaderMessageCallback?.(
+            `<team_error>Compensating team-file write after failed ` +
+              `spawn of ${agentId} failed: ` +
+              `${getErrorMessage(writeErr)}</team_error>`,
+            `Team roster write after failed spawn of "${name}" failed`,
+          );
+        } catch (cbErr) {
+          const cbMsg = getErrorMessage(cbErr);
+          debug.warn(
+            `Compensating-write failure notice: leader message ` +
+              `callback threw: ${cbMsg}`,
+          );
+        }
+      }
       throw err;
     }
 

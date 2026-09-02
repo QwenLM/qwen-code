@@ -66,6 +66,25 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
   });
 
+  it('creates standalone sessions without workspace-only fields', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      modeId: 'yolo',
+      workspaceCwd: '/must-not-leak',
+      sessionContext: { kind: 'standalone' },
+      worktree: { slug: 'must-not-leak' },
+      branch: { name: 'must-not-leak' },
+      sessionSourceType: 'must-not-leak',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      approvalMode: 'yolo',
+    });
+  });
+
   it('applies an explicit reasoning effort after the model and before resolving', async () => {
     const order: string[] = [];
     const actions = createActions({
@@ -92,7 +111,9 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     expect(order).toEqual(['create', 'attach', 'model', 'reasoning']);
-    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium');
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium', {
+      persist: true,
+    });
   });
 
   it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {
@@ -337,6 +358,18 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+    });
+  });
+
+  it('records the host source type so embedded channels stay attributable', async () => {
+    const actions = createActions();
+    await prepareSession({
+      sessionActions: actions,
+      sessionSourceType: 'vscode',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'vscode',
     });
   });
 

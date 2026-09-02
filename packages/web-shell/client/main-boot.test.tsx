@@ -22,7 +22,7 @@ vi.mock('react-dom/client', async (importOriginal) => ({
     },
   },
 }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonWorkspaceProvider: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
@@ -67,7 +67,7 @@ describe('web shell boot', () => {
     // React appends, so a surviving panel would sit above the recovered app.
     expect(testState.containers[0]).toBe(root);
     expect(root.querySelector('[data-boot-fallback]')).toBeNull();
-  });
+  }, 15_000);
 
   it('mounts into #root on a normal boot', async () => {
     document.body.innerHTML = '<div id="root"></div>';

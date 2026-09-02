@@ -60,7 +60,9 @@ import {
   invisibleTrackedPaths,
   movedSince,
   hashWorktreeFiles,
-  readLocalCache,
+  isPathProvablyAbsent,
+  type readLocalCache,
+  readLocalCacheFromBytes,
   revisionIdentities,
   stateIdOf,
   UNHASHABLE,
@@ -184,21 +186,18 @@ function vanishedStillOnDisk(
   currentHashes: Record<string, string>,
 ): string[] {
   const onDisk: string[] = [];
+  // One memo for this one enumeration (R2-1): a subtree dropped between
+  // rounds sends every vanished path down the same missing ancestor chain,
+  // and sharing the probe results keeps the walk to one probe per ancestor
+  // instead of one per path times depth — the same discipline
+  // `invisibleTrackedPaths` applies (R1-6; see the walk in
+  // isPathProvablyAbsent).
+  const ancestorProbes = new Map<string, boolean>();
   for (const p of Object.keys(cachedFiles)) {
     if (Object.hasOwn(currentHashes, p)) continue;
-    try {
-      lstatSync(join(repoRoot, p));
-    } catch (err) {
-      // Only ENOENT proves deletion. Any other failure — EACCES under an
-      // unreadable ancestor, ELOOP, EIO — is a path that may well still
-      // hold the cached bytes, and folding it into "gone" let the round end
-      // at a DECIDED scope-emptied stop over bytes no round captured
-      // (R19-3). Unmeasurable is uncertifiable: it stays in the on-disk
-      // set, whose downstream is a refusal at the cost of a full round.
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue; // genuinely gone — the symmetric difference owns it
-      }
-    }
+    // Only ENOENT-proven absence may skip the re-check (R19-3): every
+    // unmeasurable shape the helper refuses stays on the on-disk list.
+    if (isPathProvablyAbsent(repoRoot, p, ancestorProbes)) continue;
     onDisk.push(p);
   }
   if (onDisk.length === 0) return [];
@@ -738,8 +737,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     args.cache !== undefined
       ? resolveCachePath(args.cache, target, sourcePath)
       : null;
+  // ONE read of the ledger's bytes: the stop DECISION below parses this
+  // buffer and the stop stamp hashes the SAME buffer — a second disk read
+  // at stamp time let a concurrent round's ledger rewrite land in the
+  // decision→stamp window and be baked into the stamp, invisible to the
+  // compose fence (which then verified a baseline the decision never
+  // consulted). Raw bytes are kept beside the parse because the stamp is
+  // sha256 of the FILE's bytes, malformed JSON included — the parse
+  // fail-quiets, the hash must not.
+  let cacheEarlyBytes: Buffer | null = null;
+  if (cachePathEarly !== null) {
+    try {
+      cacheEarlyBytes = readFileSync(cachePathEarly);
+    } catch {
+      // No cache file — the decision sees no anchor and the stamp is null.
+    }
+  }
   const cacheEarly =
-    cachePathEarly === null ? null : readLocalCache(cachePathEarly);
+    cacheEarlyBytes === null ? null : readLocalCacheFromBytes(cacheEarlyBytes);
   const vanishedPresent: readonly string[] =
     cacheEarly === null
       ? []
@@ -1148,7 +1163,43 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // so a parent polling `qwen-review-<target>-plan.json` found nothing for
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
+  // ONE resolved value for every consumer: the stop DECISION above read the
+  // `--cache`-resolved ledger (`cachePathEarly` — a file-form `--cache` is
+  // returned unchanged, directory form resolves the canonical basename), so
+  // the stamp below and the plan's published `cachePath` must name that
+  // same file. Stamping the canonical `.qwen/review-cache/…` path while the
+  // decision consulted a caller-named file had the fence faithfully verify
+  // a baseline the stop never saw — an ENOENT hash over a nonexistent
+  // canonical file, an empty grant baseline, and an exit 0 over the open
+  // Critical the stop had just consumed.
+  const cachePath = cachePathEarly ?? cachePathFor(target, sourcePath);
   if (nothingToReview) {
+    // The baseline's content bound into the stamp: the compose grant
+    // re-hashes the cache the plan names and refuses on any departure, so
+    // a ledger edited between capture and compose fails closed like a
+    // foreign stamp. Null is a stampable value — no cache existed at this
+    // stop, so no findings were seen, and the fence fails closed on a file
+    // appearing since. The hash is of the DECISION-time bytes when a
+    // `--cache` scoped this round — stamp and decision are projections of
+    // the one read above, so an edit landing in the decision→stamp window
+    // cannot be baked into the stamp. Only the no-`--cache` canonical
+    // path still reads the disk here: that decision consulted no ledger,
+    // so there is no decision-time buffer to prefer.
+    let findingsHash: string | null = null;
+    if (cachePathEarly !== null) {
+      findingsHash =
+        cacheEarlyBytes === null
+          ? null
+          : createHash('sha256').update(cacheEarlyBytes).digest('hex');
+    } else {
+      try {
+        findingsHash = createHash('sha256')
+          .update(readFileSync(cachePath))
+          .digest('hex');
+      } catch {
+        // No cache file at this stop.
+      }
+    }
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
@@ -1163,12 +1214,37 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           ...(process.env['QWEN_REVIEW_RUN_ID']
             ? { runId: process.env['QWEN_REVIEW_RUN_ID'] }
             : {}),
+          // The compose fence's binding fields: the cache the grant must
+          // read, and the hash its content must still carry.
+          cachePath,
+          findingsHash,
+          // The scope-emptied split, capture-certified: the `superseded`
+          // deduction's input must be THIS list, and the plan it also
+          // rides in is model-editable after this write — a split edited
+          // between capture and compose could blanket-supersede a live
+          // blocker past a fence that binds only reason/cache/hash.
+          // Stamped in the interactive (no-run-id) shape too.
+          ...(nothingToReview.reason === 'scope-emptied'
+            ? { supersededPaths: incremental?.scope?.supersededPaths ?? [] }
+            : {}),
         },
         null,
         2,
       )}\n`,
       'utf8',
     );
+  } else {
+    // This capture proves the tree MOVED past whatever an earlier stop
+    // certified, so an earlier round's sidecar at this stable name is now
+    // a stale stamp: left in place, it stays fence-valid (same reason,
+    // same cache path, same hash if the ledger did not change) and a
+    // later hand-written stop plan could ride it. Absent IS the truthful
+    // state — this round decided no stop.
+    try {
+      unlinkSync(tmpFile(target, 'stop.json'));
+    } catch {
+      // nothing to remove
+    }
   }
 
   const diffPath = tmpFile(target, 'diff.txt');
@@ -1204,7 +1280,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // diverges from any hand recipe). A round-2 medium review of
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
-    cachePath: cachePathFor(target, sourcePath),
+    cachePath,
     cacheCandidatePath,
     ...(candidateWritten ? { cacheCandidateStateId: candidate.stateId } : {}),
     ...planEffortField(args.effort),

@@ -30,6 +30,7 @@ import {
   writeWorktreeSession,
   readWorktreeSession,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
@@ -44,6 +45,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -104,6 +106,7 @@ import {
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
+  searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -136,6 +139,10 @@ import {
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
+  PERSIST_REASONING_SELECTION_META_KEY,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+} from '../../acp-integration/model-configuration.js';
+import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
   writeGenerationSseChunk,
@@ -163,6 +170,11 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import {
+  redactWorkflowsFromAvailableCommandsEvent,
+  redactWorkflowsFromReplayArrays,
+  redactWorkflowsFromSupportedCommands,
+} from '../workflow-session-gate.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -191,6 +203,26 @@ import {
 // `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
 // storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
+
+function redactSdkSurfaceEvent<T extends { type: string; data: unknown }>(
+  event: T,
+  workspaceTrusted: boolean,
+): T {
+  const shaped = omitSkillDetailsForSdkSurface(event);
+  return workspaceTrusted
+    ? shaped
+    : redactWorkflowsFromAvailableCommandsEvent(shaped);
+}
+
+function redactSdkSurfaceReplay<
+  T extends {
+    compactedReplay?: BridgeEvent[];
+    liveJournal?: BridgeEvent[];
+  },
+>(session: T, workspaceTrusted: boolean): T {
+  const shaped = omitSkillDetailsFromReplayArrays(session);
+  return workspaceTrusted ? shaped : redactWorkflowsFromReplayArrays(shaped);
+}
 
 // Byte-length caps for branch names. git creates loose refs as files under
 // `.git/refs/heads/`, so each `/`-separated component is bounded by the
@@ -593,6 +625,42 @@ function parseOptionalApprovalMode(
     return null;
   }
   return rawApprovalMode as ApprovalMode;
+}
+
+function parseRequestedSessionSource(
+  body: Record<string, unknown>,
+  res: Response,
+): { sourceType?: string; sourceId?: string } | null {
+  if (
+    isReservedStandaloneSessionSource({
+      sourceType:
+        typeof body['sourceType'] === 'string' ? body['sourceType'] : undefined,
+    })
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned standalone sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  const source = parseSessionSource(body['sourceType'], body['sourceId']);
+  if ('error' in source) {
+    res.status(400).json({
+      error: source.error,
+      code: 'invalid_session_source',
+    });
+    return null;
+  }
+  if (isReservedLiveSessionSource(source)) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned Live Voice sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  return source;
 }
 
 export function registerSessionRoutes(
@@ -2383,7 +2451,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -2669,37 +2737,8 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    if (
-      isReservedStandaloneSessionSource({
-        sourceType:
-          typeof body['sourceType'] === 'string'
-            ? body['sourceType']
-            : undefined,
-      })
-    ) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned standalone sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
-    const source = parseSessionSource(body['sourceType'], body['sourceId']);
-    if ('error' in source) {
-      res.status(400).json({
-        error: source.error,
-        code: 'invalid_session_source',
-      });
-      return;
-    }
-    if (isReservedLiveSessionSource(source)) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned Live Voice sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
+    const source = parseRequestedSessionSource(body, res);
+    if (source === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
@@ -3344,7 +3383,15 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
-      sendBridgeError(res, err, { route: 'POST /session' });
+      // Only the plain creation path can promise that the initialize
+      // handshake preceded every durable mutation: `branch`/`worktree`
+      // bodies mutate git BEFORE spawn, and their rollback above is
+      // best-effort (a failed checkout rollback leaves the workspace on
+      // the new branch while the error response goes out).
+      sendBridgeError(res, err, {
+        route: 'POST /session',
+        ...(branchMeta || worktreeMeta ? {} : { initPrecedesMutations: true }),
+      });
     } finally {
       sessionIdReservation?.release();
     }
@@ -3397,7 +3444,9 @@ export function registerSessionRoutes(
           }
           // Same replay-array shape as the load response; redact skill
           // bodies for the browser surface (#9234).
-          res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+          res
+            .status(200)
+            .json(redactSdkSurfaceReplay(session, runtime.trusted));
         } catch (err) {
           sendBridgeError(res, err, { route, sessionId });
         }
@@ -3431,6 +3480,8 @@ export function registerSessionRoutes(
       if (historyPageSize === null) return;
       const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
       if (liveReplayMode === null) return;
+      const restoreSource = parseRequestedSessionSource(body, res);
+      if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
@@ -3513,7 +3564,9 @@ export function registerSessionRoutes(
               }
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+            res
+              .status(200)
+              .json(redactSdkSurfaceReplay(session, runtime.trusted));
             return;
           }
         } catch (error) {
@@ -3610,6 +3663,15 @@ export function registerSessionRoutes(
               isReservedStandaloneSessionSource(metadata)
                 ? metadataWithoutSource
                 : metadata;
+            const hasPersistedSource =
+              'sourceType' in restoreMetadata &&
+              restoreMetadata.sourceType !== undefined;
+            const restoreRequestMetadata = {
+              ...restoreMetadata,
+              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+                ? {}
+                : restoreSource),
+            };
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3647,14 +3709,14 @@ export function registerSessionRoutes(
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block
@@ -3894,7 +3956,7 @@ export function registerSessionRoutes(
         }
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        res.status(200).json(omitSkillDetailsFromReplayArrays(session));
+        res.status(200).json(redactSdkSurfaceReplay(session, runtime.trusted));
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -4093,7 +4155,10 @@ export function registerSessionRoutes(
         res
           .status(201)
           .json(
-            omitSkillDetailsFromReplayArrays(result as BridgeBranchedSession),
+            redactSdkSurfaceReplay(
+              result as BridgeBranchedSession,
+              runtime.trusted,
+            ),
           );
       },
       { rejectStandalone: true },
@@ -4163,7 +4228,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
+        res.status(201).json(redactSdkSurfaceReplay(result, runtime.trusted));
       },
       { rejectStandalone: true },
     ),
@@ -4316,6 +4381,7 @@ export function registerSessionRoutes(
       return;
     }
 
+    let workspaceTrusted = false;
     try {
       const result = await archiveCoordinator.runSharedMany(
         [sessionId],
@@ -4327,6 +4393,7 @@ export function registerSessionRoutes(
             cursor !== undefined,
           );
           if (!runtime) return undefined;
+          workspaceTrusted = runtime.trusted;
           captureRuntimeGenerationAssertion(runtime)?.();
           return runtime.bridge.getSessionTranscriptPage({
             sessionId,
@@ -4342,7 +4409,9 @@ export function registerSessionRoutes(
         .set('Cache-Control', 'no-store')
         .json({
           ...result,
-          events: (result.events ?? []).map(omitSkillDetailsForSdkSurface),
+          events: (result.events ?? []).map((event) =>
+            redactSdkSurfaceEvent(event, workspaceTrusted),
+          ),
         });
     } catch (err) {
       sendBridgeError(res, err, {
@@ -4471,11 +4540,14 @@ export function registerSessionRoutes(
               v: 1 as const,
               sessionId,
               events: replay.updates.map((update) =>
-                omitSkillDetailsForSdkSurface({
-                  v: 1 as const,
-                  type: 'session_update' as const,
-                  data: update,
-                }),
+                redactSdkSurfaceEvent(
+                  {
+                    v: 1 as const,
+                    type: 'session_update' as const,
+                    data: update,
+                  },
+                  runtime.trusted,
+                ),
               ),
               ...(replay.nextCursor && !cursorTooLarge
                 ? { nextCursor: replay.nextCursor }
@@ -4620,10 +4692,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
+        const status =
+          await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
           .json(
-            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+            runtime.trusted
+              ? status
+              : redactWorkflowsFromSupportedCommands(status),
           );
       },
     ),
@@ -4633,10 +4709,16 @@ export function registerSessionRoutes(
     '/session/:id/tasks',
     withOwnerReadSession(
       'GET /session/:id/tasks',
-      async (_req, res, sessionId, runtime) => {
-        res
-          .status(200)
-          .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      async (req, res, sessionId, runtime) => {
+        res.status(200).json(
+          await runtime.bridge.getSessionTasksStatus(sessionId, {
+            // Same fail-closed shape as the workflow control surfaces:
+            // opting in here leaks strictly more than the redacted
+            // supported-commands surface on an untrusted workspace.
+            includeWorkflows:
+              runtime.trusted && req.query['includeWorkflows'] === 'true',
+          }),
+        );
       },
     ),
   );
@@ -4789,16 +4871,80 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
-        if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-          res
-            .status(400)
-            .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        if (
+          kind !== 'agent' &&
+          kind !== 'shell' &&
+          kind !== 'monitor' &&
+          kind !== 'workflow'
+        ) {
+          res.status(400).json({
+            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+          });
           return;
         }
+        if (kind === 'workflow' && !runtime.trusted) {
+          res.status(200).json({ cancelled: false, reason: 'disabled' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
           .json(
-            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              taskId,
+              kind,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/tasks/:taskId/workflow-action',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/tasks/:taskId/workflow-action',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        const action = safeBody(req)['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          res.status(400).json({
+            error:
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          });
+          return;
+        }
+        if (!runtime.trusted) {
+          res.status(200).json({ changed: false });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionWorkflowTask(
+              sessionId,
+              taskId,
+              action,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
           );
       },
     ),
@@ -5786,13 +5932,15 @@ export function registerSessionRoutes(
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
+                { ...pr, source: 'create' },
               )
-            ).map(({ number, url, state }) => ({
-              number,
-              url,
-              ...(state ? { state } : {}),
-            }));
+            ).map(toSessionPrInfo);
+            // Reconcile the live entry to the authoritative persisted
+            // list: the bridge merge capped positionally while the
+            // sidecar caps by provenance authority — past the cap the
+            // two stores evict different entries, and every later event
+            // or rename response would serve the diverged list.
+            runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -5953,14 +6101,13 @@ export function registerSessionRoutes(
                       sessionId,
                       'active',
                     ),
-                    pr,
+                    { ...pr, source: 'create' },
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
+                // Reconcile the live entry to the authoritative persisted
+                // list (see the primary metadata route).
+                runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
@@ -5982,14 +6129,10 @@ export function registerSessionRoutes(
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
+                  { ...pr, source: 'create' },
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                effective.prs = persisted.map(toSessionPrInfo);
               }
               if (displayName !== undefined) {
                 const renamed = await service.renameSession(
@@ -6612,6 +6755,137 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  const SESSION_SEARCH_QUERY_MAX_LENGTH = 200;
+  const SESSION_SEARCH_MAX_RESULTS_LIMIT = 50;
+
+  // Content search over persisted session transcripts. Workspace-scoped like
+  // the sessions list route above: resolved-runtime only, read-only
+  // secondaries search their persisted store, never falls back to primary.
+  const searchWorkspaceSessionsHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions/search'
+          : 'GET /workspace/:id/sessions/search';
+      const liveRuntime = await resolveLiveCatalogRuntime(req, res, paramName);
+      if (liveRuntime === null) return;
+      const runtime =
+        liveRuntime ??
+        resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        const rawQuery = req.query['q'];
+        // Cap the trimmed query, consistent with the emptiness check and
+        // the matcher — whitespace padding the scan would discard must not
+        // count against the limit.
+        const trimmedQuery =
+          typeof rawQuery === 'string' ? rawQuery.trim() : '';
+        if (
+          trimmedQuery.length === 0 ||
+          trimmedQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`q\` must be a non-empty string of at most ${SESSION_SEARCH_QUERY_MAX_LENGTH} characters`,
+            code: 'invalid_search_query',
+          });
+          return;
+        }
+        let maxResults: number | undefined;
+        const rawMaxResults = req.query['maxResults'];
+        if (rawMaxResults !== undefined) {
+          const parsed =
+            typeof rawMaxResults === 'string' && /^\d+$/.test(rawMaxResults)
+              ? Number.parseInt(rawMaxResults, 10)
+              : Number.NaN;
+          if (
+            !Number.isSafeInteger(parsed) ||
+            parsed < 1 ||
+            parsed > SESSION_SEARCH_MAX_RESULTS_LIMIT
+          ) {
+            res.status(400).json({
+              error: `\`maxResults\` must be an integer between 1 and ${SESSION_SEARCH_MAX_RESULTS_LIMIT}`,
+              code: 'invalid_search_max_results',
+            });
+            return;
+          }
+          maxResults = parsed;
+        }
+        const controller = new AbortController();
+        const onRequestAborted = () => {
+          controller.abort(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onResponseClosed = () => {
+          if (!res.writableEnded) {
+            controller.abort(new DOMException('Response closed', 'AbortError'));
+          }
+        };
+        req.once('aborted', onRequestAborted);
+        res.once('close', onResponseClosed);
+        if (req.aborted || res.destroyed) onRequestAborted();
+        try {
+          const search = () =>
+            runWorkspaceInspectionWithLogPolicy(runtime, () =>
+              searchWorkspaceSessionsForResponse(
+                key,
+                trimmedQuery,
+                { ...(maxResults !== undefined ? { maxResults } : {}) },
+                {
+                  runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  signal: controller.signal,
+                },
+              ),
+            );
+          const result =
+            liveRuntime && deps.conversationRuntimeActivity
+              ? await deps.conversationRuntimeActivity.run(search)
+              : await search();
+          controller.signal.throwIfAborted();
+          if (res.destroyed) return;
+          res.status(200).json({ results: result.results });
+        } catch (err) {
+          if (controller.signal.aborted || res.destroyed) {
+            return;
+          }
+          throw err;
+        } finally {
+          req.off('aborted', onRequestAborted);
+          res.off('close', onResponseClosed);
+        }
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { code?: unknown }).code === 'daemon_draining'
+        ) {
+          res.status(503).json({
+            error: 'The daemon is draining and no longer accepts work.',
+            code: 'daemon_draining',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: failed to search sessions for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to search sessions',
+          code: 'session_search_failed',
+        });
+      }
+    };
+
+  app.get(
+    '/workspace/:id/sessions/search',
+    searchWorkspaceSessionsHandler('id'),
+  );
+  app.get(
+    '/workspaces/:workspace/sessions/search',
+    searchWorkspaceSessionsHandler('workspace'),
+  );
+
   // Last catalog version successfully exposed per bridge by the live-state
   // route. A newly observed version synchronously invalidates the persisted
   // catalog cache scopes before the version is answered, so a client that
@@ -6742,6 +7016,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const configId = body['configId'];
         const value = body['value'];
+        const persist = body['persist'];
         if (configId !== 'reasoning_effort') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort',
@@ -6754,11 +7029,32 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+          });
+          return;
+        }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
+          },
         );
-        res.status(200).json(response);
+        res.status(200).json({
+          configOptions: response.configOptions,
+          persisted:
+            response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
+        });
       },
     ),
   );
