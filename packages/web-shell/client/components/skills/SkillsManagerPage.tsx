@@ -171,7 +171,6 @@ export function SkillsManagerPage({
   const workspace = useWorkspace();
   const {
     status,
-    configStatus,
     skills,
     loading,
     error,
@@ -208,13 +207,6 @@ export function SkillsManagerPage({
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
   );
-  const selectedSkillManaged =
-    selectedSkill !== undefined &&
-    (selectedSkill.installedPath !== undefined ||
-      configStatus?.skills.some(
-        (skill) =>
-          skill.name.toLowerCase() === selectedSkill.name.toLowerCase(),
-      ));
   const activeWorkspaceCwd = connection.workspaceCwd ?? workspace.workspaceCwd;
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
@@ -451,11 +443,7 @@ export function SkillsManagerPage({
               >
                 <DropdownMenuGroup>
                   <DropdownMenuItem
-                    disabled={
-                      busySkill !== null ||
-                      !canToggleSkills ||
-                      !selectedSkillManaged
-                    }
+                    disabled={busySkill !== null || !canToggleSkills}
                     title={
                       !canToggleSkills
                         ? t('skills.toggleUnsupported')
@@ -470,7 +458,6 @@ export function SkillsManagerPage({
                     )}
                   </DropdownMenuItem>
                   {canManageSkills &&
-                  selectedSkillManaged &&
                   (selectedSkill.level === 'project' ||
                     selectedSkill.level === 'user') ? (
                     <DropdownMenuItem

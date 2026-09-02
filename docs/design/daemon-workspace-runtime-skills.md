@@ -34,7 +34,6 @@ config first, then ensures and reads the selected runtime in the background.
 With multiple registered workspaces it shows a workspace selector on the list
 page and the same disabled selector on the detail page. Without the feature it
 keeps the legacy primary-workspace routes and does not ensure a runtime.
-Runtime-only Extension Skills are visible but not managed through config routes.
 
 The new-session composer and deferred session bootstrap gate their split read
 on the `workspace_skills_config_runtime` feature. They show the selected
