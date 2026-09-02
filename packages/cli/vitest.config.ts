@@ -8,10 +8,6 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 
-import { isSlowTestHost } from './src/test-utils/slow-test-host.js';
-
-const slowTestHost = isSlowTestHost();
-
 export default defineConfig({
   resolve: {
     alias: {
@@ -163,10 +159,16 @@ export default defineConfig({
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
-    testTimeout: slowTestHost ? 60_000 : 15_000,
-    hookTimeout: slowTestHost ? 60_000 : undefined,
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 15_000,
+    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
-    maxWorkers: slowTestHost ? '25%' : undefined,
+    maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? '25%'
+      : undefined,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
     environment: 'jsdom',
