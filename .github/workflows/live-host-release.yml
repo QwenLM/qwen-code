@@ -366,7 +366,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
-          NPM_TAG: '${{ inputs.prerelease == true && "preview" || "latest" }}'
+          NPM_TAG: "${{ inputs.prerelease == true && 'preview' || 'latest' }}"
         run: |
           set -euo pipefail
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
