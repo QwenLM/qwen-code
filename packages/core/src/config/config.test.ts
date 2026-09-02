@@ -8881,6 +8881,30 @@ describe('Server Config (config.ts)', () => {
     patchSessionRecordSpy.mockRestore();
   });
 
+  it('carries the inbox token into the record, on the first patch and the retry', async () => {
+    // `toMatchObject`/`toEqual` treat { ipcPath } and { ipcPath, ipcToken:
+    // undefined } as equal, so the existing one-arg call sites pass whether
+    // or not the token is forwarded. Dropping ipcToken from either patch
+    // would publish an address peers cannot authenticate to — sends read as
+    // 'sent' and are silently dropped — with the whole suite still green.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      // The first patch is skipped, so the retry path carries the token too.
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    await config.updateSessionRegistryIpcPath('/tmp/peer.sock', 'tok-xyz');
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
+    for (const [patch] of patchSessionRecordSpy.mock.calls) {
+      expect(patch).toEqual({ ipcPath: '/tmp/peer.sock', ipcToken: 'tok-xyz' });
+    }
+    patchSessionRecordSpy.mockRestore();
+  });
+
   it('gives up on the peer inbox advertise after a bounded retry', async () => {
     const config = new Config(baseParams);
     config.trackSessionRegistration(Promise.resolve(true));

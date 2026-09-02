@@ -169,6 +169,34 @@ function isRequiredThinkingError(error: unknown): boolean {
 }
 
 /**
+ * True when the wire request carries inline media content parts. Gates the
+ * media-degradation retry: only a request that actually put media on the
+ * wire can be failing because the route rejects the media shape
+ * (QwenLM/qwen-code#10693).
+ */
+function wireRequestHasMediaContent(
+  wireRequest: Record<string, unknown> | undefined,
+): boolean {
+  const messages = wireRequest?.['messages'];
+  if (!Array.isArray(messages)) return false;
+  return messages.some((message) => {
+    const content = (message as { content?: unknown }).content;
+    return (
+      Array.isArray(content) &&
+      content.some((part) => {
+        const type = (part as { type?: unknown }).type;
+        return (
+          type === 'image_url' ||
+          type === 'input_audio' ||
+          type === 'video_url' ||
+          type === 'file'
+        );
+      })
+    );
+  });
+}
+
+/**
  * Error thrown when the API returns an error embedded as stream content
  * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
  * endpoints) return throttling errors as a normal SSE chunk with
@@ -1271,11 +1299,11 @@ export class ContentGenerationPipeline {
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
     let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    const executeAttempt = async () => {
+    const executeAttempt = async (attemptContext: RequestContext = context) => {
       openaiRequest = await this.buildRequest(
         request,
         userPromptId,
-        context,
+        attemptContext,
         isStreaming,
       );
 
@@ -1286,7 +1314,7 @@ export class ContentGenerationPipeline {
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
       const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      return executor(openaiRequest, context, telemetryAttempt);
+      return executor(openaiRequest, attemptContext, telemetryAttempt);
     };
 
     try {
@@ -1314,6 +1342,30 @@ export class ContentGenerationPipeline {
         });
         try {
           return await executeAttempt();
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
+      // A 400 on a request that actually carries inline media can be the
+      // route rejecting the media shape (inline data-URL image, the
+      // re-encoded JPEG, its size) rather than anything a retry of the
+      // identical history can fix. Retry once with all input modalities
+      // disabled so the converter reuses its existing
+      // unsupportedModalityPlaceholder path — the same in-band degradation
+      // as an explicit modality-off config (QwenLM/qwen-code#10693). If the
+      // degraded retry also fails, media was not the blocker and the error
+      // surfaces as before.
+      if (
+        request.config?.abortSignal?.aborted !== true &&
+        getErrorStatus(error) === 400 &&
+        wireRequestHasMediaContent(wireRequest)
+      ) {
+        debugLogger.warn(
+          'Media-bearing request rejected with 400; retrying once with media degraded to placeholders',
+          { model, originalError: getErrorMessage(error) },
+        );
+        try {
+          return await executeAttempt({ ...context, modalities: {} });
         } catch (retryError) {
           return await this.handleError(retryError, context, request);
         }

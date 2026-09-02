@@ -716,20 +716,31 @@ describe('assertTarArchiveLinksAreSafe', () => {
       },
     );
 
-    it.runIf(process.platform !== 'win32')(
-      'rejects a hard link even when it points inside the archive root',
-      async () => {
-        const archive = path.join(root, 'hard.tar');
-        await writeCraftedTar(archive, [
-          createTarFileHeader('original.txt', 0),
-          createTarFileHeader('hard.txt', 0, '1', 'original.txt'),
-        ]);
+    // Crafted rather than packed with `tar.c`, and deliberately so: a hard
+    // link is the one fixture that drives tar's PENDINGLINKS path, where
+    // [JOBDONE] re-processes the pending job and re-enters [PROCESS]. Under
+    // CPU contention that second pass can reach the finalization branch after
+    // the pack already ended, and minipass throws `Error: write after end`
+    // from a stream nothing awaits. It escapes as an uncaught exception, and
+    // `dangerouslyIgnoreUnhandledErrors` is false on Linux, so the whole
+    // suite exits non-zero with every test still green — a release failure
+    // whose log contains no FAIL line (release run 33576013293: 211 files,
+    // 9480 tests passed, exit 1). Locally it reproduced 3 times in 28 runs
+    // with the cores saturated. The bytes below are exactly what tar writes
+    // for a hard link (typeflag '1', linkname pointing at the original), so
+    // the scanner is still being handed a real-world archive shape; it just
+    // is not produced by a pack this test would have to outlive.
+    it('rejects a hard link even when it points inside the archive root', async () => {
+      const archive = path.join(root, 'hard.tar');
+      await writeCraftedTar(archive, [
+        createTarFileHeader('original.txt', 0),
+        createTarFileHeader('hard.txt', 0, '1', 'original.txt'),
+      ]);
 
-        await expect(
-          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-        ).rejects.toThrow('unsupported link entry');
-      },
-    );
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
 
     it.runIf(process.platform !== 'win32')(
       'still rejects a contained symlink when the option is off',

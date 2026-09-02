@@ -256,6 +256,9 @@ interface ChatEditorProps {
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   scratchWorkspaceSupported?: boolean;
   existingFolderWorkspaceSupported?: boolean;
+  standaloneTargetSupported?: boolean;
+  selectedStandaloneTarget?: boolean;
+  onSelectStandaloneTarget?: () => void;
   workspaceMutationBusy?: boolean;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
@@ -1524,6 +1527,9 @@ export const ChatEditor = memo(
       onSelectWorkspace,
       scratchWorkspaceSupported = false,
       existingFolderWorkspaceSupported = false,
+      standaloneTargetSupported = false,
+      selectedStandaloneTarget = false,
+      onSelectStandaloneTarget,
       workspaceMutationBusy = false,
       onCreateScratchWorkspace,
       onOpenExistingWorkspace,
@@ -2444,7 +2450,8 @@ export const ChatEditor = memo(
         onSelectWorkspace &&
         (workspaces.length > 1 ||
           scratchWorkspaceSupported ||
-          existingFolderWorkspaceSupported),
+          existingFolderWorkspaceSupported ||
+          standaloneTargetSupported),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -3141,12 +3148,15 @@ export const ChatEditor = memo(
                         existingFolderSupported={
                           existingFolderWorkspaceSupported
                         }
+                        standaloneSupported={standaloneTargetSupported}
+                        selectedStandalone={selectedStandaloneTarget}
                         className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
                           showWorkspaceSelectLabel
                             ? ''
                             : styles.workspaceSelectTriggerCompact
                         }`}
                         onSelectWorkspace={onSelectWorkspace}
+                        onSelectStandalone={onSelectStandaloneTarget}
                         onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
                         onOpenExistingFolder={
                           onOpenExistingWorkspace ?? (() => {})

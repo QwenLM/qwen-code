@@ -343,6 +343,7 @@ import {
   isReasoningSelectionSupported,
   parseReasoningSelection,
   REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NONE,
   type ReasoningSelection,
 } from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -10533,7 +10534,13 @@ export class Session implements SessionContext {
       !hasSessionSelection &&
       rawSelection !== undefined &&
       !supported &&
-      options.persist
+      options.persist &&
+      !(
+        selection !== undefined &&
+        selection !== REASONING_EFFORT_DEFAULT &&
+        selection !== REASONING_EFFORT_NONE &&
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory)
+      )
     ) {
       try {
         this.persistReasoningSelection(REASONING_EFFORT_DEFAULT);

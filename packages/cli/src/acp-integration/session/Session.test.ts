@@ -6516,7 +6516,7 @@ describe('Session', () => {
 
   describe('setModel', () => {
     function installReasoningPreference(
-      selection: 'none' | 'low' | 'max',
+      selection: 'none' | 'low' | 'high' | 'max',
       options: {
         trusted?: boolean;
         thinkingMandatory?: boolean;
@@ -6913,6 +6913,32 @@ describe('Session', () => {
         modelId: `claude-opus-4-6(${AuthType.USE_OPENAI})`,
       });
       expect(state.live.reasoning).toBeUndefined();
+    });
+
+    it('preserves a valid global tier when the current route only supports a toggle', async () => {
+      const state = installReasoningPreference('high', { trusted: true });
+      Object.assign(state.live, {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `glm-5.2(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.user.settings.model.reasoningEffort).toBe('high');
+      expect(state.workspace.settings.model.reasoningEffort).toBe('high');
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'model.reasoningEffort',
+        undefined,
+        expect.anything(),
+        expect.anything(),
+      );
     });
 
     it.each([

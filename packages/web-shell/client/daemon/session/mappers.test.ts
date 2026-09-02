@@ -77,6 +77,95 @@ const turnComplete: DaemonEvent = {
   data: { stopReason: 'end_turn' },
 };
 
+describe('session title metadata', () => {
+  it('keeps manual provenance with a renamed session', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_metadata_updated',
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Bug hunt',
+            titleSource: 'manual',
+          },
+        },
+      ),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('keeps manual provenance when a pr-only event echoes the same name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    expect(renamed).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+    expect(
+      applyEvent(renamed, {
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        // The bridge's pr-binding publish echoes the name without a
+        // provenance: binding a PR must not wipe the manual title.
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          prs: [
+            {
+              number: 9260,
+              url: 'https://github.com/QwenLM/qwen-code/pull/9260',
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      displayName: 'Bug hunt',
+      titleSource: 'manual',
+    });
+  });
+
+  it('drops provenance when an unstamped event changes the name', () => {
+    const renamed = applyEvent(
+      { status: 'connected' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 'session-1',
+          displayName: 'Bug hunt',
+          titleSource: 'manual',
+        },
+      },
+    );
+    const next = applyEvent(renamed, {
+      id: 2,
+      v: 1,
+      type: 'session_metadata_updated',
+      data: { sessionId: 'session-1', displayName: 'New name' },
+    });
+    expect(next.displayName).toBe('New name');
+    expect(next.titleSource).toBeUndefined();
+  });
+});
+
 describe('mapReasoningControls', () => {
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
