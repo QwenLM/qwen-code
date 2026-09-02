@@ -216,13 +216,11 @@ export class PermissionCardController {
     if (record.state !== 'pending') return;
     this.reserveTerminalProjection(record);
     record.state = 'claimed';
-    const response = record.context.respond('deny');
-    await this.finalize(record, 'expired');
-    try {
-      await response;
-    } catch (error) {
+    const response = record.context.respond('deny').catch((error) => {
       this.options.onError?.('expired permission cancellation', error);
-    }
+    });
+    await this.finalize(record, 'expired');
+    await response;
   }
 
   private async finalize(

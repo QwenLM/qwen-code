@@ -67,12 +67,14 @@ function createHarness(timeoutMs = 300_000, locale: 'en' | 'zh' = 'en') {
     openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
     updateInstance: vi.fn().mockResolvedValue(undefined),
   } as unknown as DingtalkInteractiveCardClient;
+  const onError = vi.fn();
   const controller = new PermissionCardController({
     client,
     timeoutMs,
     locale,
+    onError,
   });
-  return { client, controller };
+  return { client, controller, onError };
 }
 
 function callback(
@@ -505,5 +507,42 @@ describe('PermissionCardController', () => {
         cardParamMap: expect.objectContaining({ card_status: 'cancelled' }),
       }),
     );
+  });
+
+  it('keeps a rejecting timeout denial off the unhandled rejection queue', async () => {
+    const rejections: string[] = [];
+    const onUnhandled = (reason: unknown) =>
+      rejections.push(String((reason as Error).message));
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const projection = deferred<void>();
+      const { client, controller, onError } = createHarness(1);
+      vi.mocked(client.updateInstance).mockReturnValue(projection.promise);
+      const { context } = createContext();
+      const decisions: string[] = [];
+      context.respond = async (decision) => {
+        decisions.push(decision);
+        throw new Error('bridge offline');
+      };
+      await controller.present(context, { chatId: 'cid-1', isGroup: true });
+
+      await vi.waitFor(() =>
+        expect(client.updateInstance).toHaveBeenCalledOnce(),
+      );
+
+      expect(decisions).toEqual(['deny']);
+      expect(rejections).toEqual([]);
+      expect(onError).toHaveBeenCalledWith(
+        'expired permission cancellation',
+        expect.any(Error),
+      );
+      projection.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onError).toHaveBeenCalledOnce();
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });
