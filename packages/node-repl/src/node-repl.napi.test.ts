@@ -7,7 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFile, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NodeReplKernelManager } from './kernel-manager.js';
@@ -53,20 +53,35 @@ function terminateBuild(child: ChildProcess): void {
 
 function rebuildAddon(nodeGyp: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = execFile(
-      nodeGyp,
-      ['rebuild'],
-      {
-        cwd: fixtureDir,
-        detached: process.platform !== 'win32',
-      },
-      (error) => {
-        clearTimeout(timeout);
-        if (error) reject(error);
-        else resolve();
-      },
-    );
+    const child = spawn(nodeGyp, ['rebuild'], {
+      cwd: fixtureDir,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-16_384);
+    });
     const timeout = setTimeout(() => terminateBuild(child), 110_000);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason = signal ? `signal ${signal}` : `exit ${code ?? 'unknown'}`;
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          `node-gyp rebuild failed (${reason})${detail ? `: ${detail}` : ''}`,
+        ),
+      );
+    });
   });
 }
 
