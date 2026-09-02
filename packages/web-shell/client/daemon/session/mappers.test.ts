@@ -1176,6 +1176,31 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.skills).toEqual(['review']);
   });
 
+  it('maps command aliases from available_commands_update metadata', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      availableCommandsEvent(
+        [
+          {
+            name: 'compress',
+            description: 'Compress context',
+            input: null,
+            _meta: { source: 'builtin-command', altNames: ['summarize'] },
+          },
+        ],
+        [],
+      ),
+    );
+
+    expect(next.commands).toEqual([
+      expect.objectContaining({
+        name: 'compress',
+        source: 'builtin-command',
+        altNames: ['summarize'],
+      }),
+    ]);
+  });
+
   it('reads nested availableSkills from the daemon wire shape', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
