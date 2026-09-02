@@ -179,6 +179,7 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.Goal': '目標',
   'toolDisplayName.UpdateGoal': '更新目標',
+  'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.ManageMemory': '管理記憶',
   'toolDisplayName.SearchMemory': '搜尋記憶',

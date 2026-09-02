@@ -188,6 +188,7 @@ export default {
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
   'toolDisplayName.Goal': 'toolDisplayName.Goal',
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
+  'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.ManageMemory': 'toolDisplayName.ManageMemory',
   'toolDisplayName.SearchMemory': 'toolDisplayName.SearchMemory',

@@ -433,6 +433,19 @@ const SETTINGS_SCHEMA = {
         description: 'The preferred editor to open files in.',
         showInDialog: true,
       },
+      outputStyle: {
+        type: 'string',
+        label: 'Output Style',
+        category: 'General',
+        // Read once in `loadCliConfig` and frozen into `Config`; nothing
+        // applies a mid-session change, so the restart hint is the honest
+        // answer. Same as `general.outputLanguage`.
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+        showInDialog: false,
+      },
       vimMode: {
         type: 'boolean',
         label: 'Vim Mode',
@@ -3266,6 +3279,31 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  goals: {
+    type: 'object',
+    label: 'Goals',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for session Goals (/goal).',
+    showInDialog: false,
+    properties: {
+      modelProposed: {
+        type: 'enum',
+        label: 'Model-Proposed Goals',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 'alwaysAsk',
+        description:
+          'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. "alwaysAsk" (default) shows every proposal in an approval dialog and nothing is set until you accept it; "disabled" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored.',
+        showInDialog: true,
+        options: [
+          { value: 'alwaysAsk', label: 'Always ask' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+    },
+  },
   agents: {
     type: 'object',
     label: 'Agents',
