@@ -703,14 +703,18 @@ export function installTerminalResizeReflow(
             barePrintableCount = 0;
             burstCaptured = false;
             handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
+            pendingResetFrame = '';
+            pendingResetFullscreen = undefined;
           }
           debugLogger.debug('match', { printable });
           if (isVP && Date.now() < clearUntil) {
             debugLogger.debug('clear-viewport');
             chunk =
-              chunk.slice(0, match.index) +
-              CLEAR_VIEWPORT +
-              chunk.slice(match.index + match[0].length);
+              frameDiff && model.content !== ''
+                ? chunk.slice(0, match.index) + CLEAR_VIEWPORT + model.content
+                : chunk.slice(0, match.index) +
+                  CLEAR_VIEWPORT +
+                  chunk.slice(match.index + match[0].length);
           } else if (pendingAmplify > 0) {
             const target = pendingAmplify;
             pendingAmplify = 0;
@@ -862,6 +866,9 @@ export function installTerminalResizeReflow(
             expectFrame = false;
             barePrintableCount = 0;
             burstCaptured = false;
+            if (Date.now() < clearUntil && model.content !== '') {
+              chunk = CLEAR_VIEWPORT + model.content;
+            }
           } else if (diffHead === null) {
             if (modelFrame(chunk, barePrintableCount > 1 && !late)) {
               burstCaptured = true;
@@ -917,10 +924,10 @@ export function installTerminalResizeReflow(
             applyIncrementalDiff(model, chunk, currentWidth);
           if (frameDiff && !applied) modelStale = true;
           debugLogger.debug('diff', { applied });
-          if (applied && Date.now() < clearUntil) {
+          if (frameDiff && Date.now() < clearUntil) {
             // Clear-window rule: a diff inside the window cannot paint its
             // kept lines onto the resized/blanked viewport; replay the
-            // transformed frame in full instead.
+            // last coherent frame in full instead.
             chunk = CLEAR_VIEWPORT + model.content;
           }
         }

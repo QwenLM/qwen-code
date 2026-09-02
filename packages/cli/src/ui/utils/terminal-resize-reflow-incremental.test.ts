@@ -465,6 +465,110 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('repaints a stale erase-prefixed diff inside the clear window', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const rejected = prev.slice();
+      rejected[4] = `unsupported-${ESC}6n-content`;
+      stdout.write(
+        incrementalDiffFrame(prev, rejected, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+
+      stdout.columns = 12;
+      stdout.emit('resize');
+      const next = rejected.slice(0, 6);
+      next[1] = 'NEW-LINE';
+      stdout.written.length = 0;
+      stdout.write(
+        incrementalDiffFrame(rejected, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      expect(stdout.written).toEqual([
+        RETURN_PREFIX + ansiEscapes.clearViewport + prev.join('\n'),
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('repaints a rejected armed diff inside the clear window', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+
+      const rejected = prev.slice();
+      rejected[4] = `unsupported-${ESC}6n-content`;
+      stdout.written.length = 0;
+      stdout.write(
+        incrementalDiffFrame(prev, rejected, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      expect(stdout.written).toEqual([
+        ansiEscapes.clearViewport + prev.join('\n'),
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('repaints a stale idle diff inside the clear window', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const rejected = prev.slice();
+      rejected[4] = `unsupported-${ESC}6n-content`;
+      stdout.write(
+        incrementalDiffFrame(prev, rejected, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+
+      stdout.columns = 12;
+      stdout.emit('resize');
+      const followUp = rejected.slice();
+      followUp[0] = 'FOLLOW-UP-MUST-NOT-MIX';
+      stdout.written.length = 0;
+      stdout.write(
+        incrementalDiffFrame(rejected, followUp, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      expect(stdout.written).toEqual([
+        ansiEscapes.clearViewport + prev.join('\n'),
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
   it('does not clobber the frame model on a mid-content erase sequence', () => {
     // R10-1: a benign write merely CONTAINING eraseLines(1) mid-content
     // (echoed nested-TUI output, a library writing stdout directly) is not
@@ -1889,6 +1993,47 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       expect(replay).toContain(live[0]!);
       expect(replay).not.toContain(live[8]!);
       expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('drops a pending reset anchor when a clear-only shrink arms a handoff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const live = frameLines(12, 5).map((line) => `RESET-MARKER-${line}`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(ansiEscapes.clearTerminal + live.join('\n') + '\n');
+
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      const redraw = frameLines(12, 5).map((line) => `REDRAW-${line}`);
+      stdout.write(redraw.join('\n'));
+      const firstDiff = redraw.slice();
+      firstDiff[1] = 'FIRST-DIFF';
+      stdout.write(
+        incrementalDiffFrame(redraw, firstDiff, {
+          trailingNewline: false,
+        }),
+      );
+      const secondDiff = firstDiff.slice();
+      secondDiff[2] = 'SECOND-DIFF';
+      stdout.write(
+        incrementalDiffFrame(firstDiff, secondDiff, {
+          trailingNewline: false,
+        }),
+      );
+
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written).toEqual([ansiEscapes.clearViewport]);
     } finally {
       restore();
     }
