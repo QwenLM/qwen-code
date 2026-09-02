@@ -1047,6 +1047,7 @@ describe('parseHeldExpiry', () => {
     // unreadable value must not become an unbounded hold.
     expect(parseHeldExpiry(undefined)).toBe(DEFAULT_HELD_EXPIRY_MS);
     expect(parseHeldExpiry('forever')).toBe(DEFAULT_HELD_EXPIRY_MS);
+    expect(parseHeldExpiry('constructor')).toBe(DEFAULT_HELD_EXPIRY_MS);
     expect(parseHeldExpiry(600)).toBe(DEFAULT_HELD_EXPIRY_MS);
     expect(parseHeldExpiry(null)).toBe(DEFAULT_HELD_EXPIRY_MS);
   });

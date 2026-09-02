@@ -221,7 +221,7 @@ const HELD_EXPIRY_VALUES: Record<string, number | null> = {
  */
 export function parseHeldExpiry(value: unknown): number | null {
   if (value === undefined) return DEFAULT_HELD_EXPIRY_MS;
-  if (typeof value !== 'string' || !(value in HELD_EXPIRY_VALUES)) {
+  if (typeof value !== 'string' || !Object.hasOwn(HELD_EXPIRY_VALUES, value)) {
     debugLogger.debug(
       `unrecognized crossSessionHeldExpiry value (using the default): ${String(
         value,
