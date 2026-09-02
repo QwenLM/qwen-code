@@ -3549,9 +3549,9 @@ export const AppContainer = (props: AppContainerProps) => {
         // On by default: the schema declares `default: true`, but
         // `mergeSettings` doesn't apply schema defaults, so an unset value is
         // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Same treatment as
-        // `enableFollowupSuggestions` above — only an explicit `false` opts
-        // out.
+        // code unless the flag was explicitly set (#9230). Only an explicit
+        // `false` opts out of cache sharing. This flag does not inherit the
+        // follow-up suggestion runtime gate.
         enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {

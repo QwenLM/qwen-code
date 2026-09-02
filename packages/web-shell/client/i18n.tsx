@@ -3370,6 +3370,10 @@ const EN: Messages = {
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
+  'settings.label.ui.enableFollowupSuggestions':
+    'Enable Follow-up Suggestions',
+  'settings.description.ui.enableFollowupSuggestions':
+    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
   'settings.option.ui.chatWidth.1000': 'Regular',
   'settings.option.ui.chatWidth.wide': 'Ultra wide',
   'settings.label.visionModel': 'Vision Model',
@@ -6624,7 +6628,7 @@ const ZH: Messages = {
     '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
+    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
