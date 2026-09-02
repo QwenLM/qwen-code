@@ -76,9 +76,9 @@ env:
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
   # Single source of truth for the .github/scripts node:test suites — run by
-  # BOTH the github_ci_only helper step and the full-profile Test step, so a
-  # new helper test can't be added to one path and silently dropped from the
-  # other.
+  # BOTH the github_ci_only helper step and the full-profile helper step,
+  # both in `lint_and_static`, so a new helper test can't be added to one
+  # path and silently dropped from the other.
   HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
@@ -352,17 +352,18 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    # Accepts push on `main`: this is the only post-merge check faster than the
-    # ~40-minute E2E, and with no merge queue enabled nothing validates the
-    # merged tree before it lands either. The expensive and PR-shaped steps
-    # stay off it on their own gates, each by its own mechanism — the
-    # checkout-head verifier is restricted to pull_request / merge_group,
-    # while the test reporter carries no event gate at all: its same-repo
-    # clause (head.repo.full_name == github.repository) is empty on push. Do
-    # not "normalise" that clause into the event allowlist — it also keeps
-    # fork PRs out, and dorny/test-reporter needs `checks: write`, which
-    # fork-event runs do not have. So a push run is lint, static analysis and
-    # unit tests.
+    # Accepts push on `main`: one of the two post-merge checks faster than the
+    # ~40-minute E2E — the lint/static half lives in `lint_and_static` — and
+    # with no merge queue enabled nothing validates the merged tree before it
+    # lands either. The expensive and PR-shaped steps stay off it on their own
+    # gates, each by its own mechanism — the checkout-head verifier is
+    # restricted to pull_request / merge_group, while the test reporter
+    # carries no event gate at all: its same-repo clause (head.repo.full_name
+    # == github.repository) is empty on push. Do not "normalise" that clause
+    # into the event allowlist — it also keeps fork PRs out, and
+    # dorny/test-reporter needs `checks: write`, which fork-event runs do not
+    # have. So a push run is lint, static analysis and unit tests —
+    # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
@@ -983,6 +984,15 @@ jobs:
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
+
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -1047,15 +1057,20 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
-      # touches nothing but .github/ classifies as `github_ci_only`, and that
-      # is exactly the PR most likely to push a workflow file past GitHub's
-      # 500 KB start-runs limit — the limit that silently killed the autofix
-      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
-      - name: 'Check workflow file size'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        run: '.github/scripts/check-workflow-size.sh'
-
+      # The install step above starts the #10035 disk-pressure sampler; this
+      # is its collector, mirrored from `test`. Without it the lane produces
+      # the telemetry and destroys it with the runner temp dir on the exact
+      # ENOSPC death the sampler exists to explain. Distinct artifact name:
+      # both jobs can fail in one run, and upload-artifact v4+ rejects
+      # duplicate names.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-lint-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
       - name: 'GitHub CI helper checks'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
         timeout-minutes: 5
