@@ -88,6 +88,13 @@ export interface LivePromptOptions {
    */
   refreshContextFilesOnWrite?: boolean;
   /**
+   * Raw composer text for `UserPromptSubmit` provenance (`submitted_prompt`).
+   * Core only honours it on a UserQuery, so it rides the first turn and the
+   * tool-result continuations below omit it by construction — matching the
+   * documented rule that continuations carry no provenance.
+   */
+  submittedPrompt?: string;
+  /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
    * is minted here (first turn of a session, …).
@@ -264,12 +271,15 @@ export async function* livePromptEvents(
   const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
-      ? options?.modelOverride
-        ? {
-            type: SendMessageType.UserQuery,
-            modelOverride: options.modelOverride,
-          }
-        : undefined
+      ? {
+          type: SendMessageType.UserQuery,
+          ...(options?.modelOverride
+            ? { modelOverride: options.modelOverride }
+            : {}),
+          ...(options?.submittedPrompt
+            ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+        }
       : {
           type: SendMessageType.ToolResult,
           ...(options?.modelOverride

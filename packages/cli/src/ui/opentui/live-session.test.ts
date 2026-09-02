@@ -161,7 +161,7 @@ describe('livePromptEvents', () => {
     resetPromptCountForTesting();
   });
 
-  it('forwards string prompts without send options', async () => {
+  it('forwards string prompts as an explicit UserQuery send', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);
     const signal = new AbortController().signal;
@@ -174,7 +174,7 @@ describe('livePromptEvents', () => {
       .calls[0] as unknown[];
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
-    expect(options).toBeUndefined();
+    expect(options).toEqual({ type: SendMessageType.UserQuery });
   });
 
   it('uses the ink promptId format and increments promptCount per turn', async () => {
@@ -261,6 +261,41 @@ describe('livePromptEvents', () => {
       type: SendMessageType.UserQuery,
       modelOverride: 'fast-x',
     });
+  });
+
+  it('rides submittedPrompt on the first send and drops it on continuation', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'expanded payload', undefined, {
+        submittedPrompt: '@file.txt raw composer text',
+      }),
+    );
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    const [firstOptions, secondOptions] = sendMessageStream.mock.calls.map(
+      (call) => (call as unknown[])[3],
+    );
+    expect(firstOptions).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: '@file.txt raw composer text',
+    });
+    expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
   });
 
   it('appends drained steering texts after tool responses at the boundary', async () => {

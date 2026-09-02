@@ -90,6 +90,12 @@ export interface OpenTuiSubmitOptions {
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
+  /**
+   * Raw composer text for `UserPromptSubmit` provenance. Only the composer
+   * submit path sets it — a slash command's `submit_prompt` outcome carries
+   * generated content, which ink also submits without provenance.
+   */
+  submittedPrompt?: string;
 }
 
 export interface OpenTuiLiveTurn {
@@ -187,6 +193,7 @@ export function useOpenTuiLiveTurn(
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
           modelOverride: turnOptions?.modelOverride,
+          submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           onWaitingCall: (call) => {
@@ -243,10 +250,13 @@ export function useOpenTuiLiveTurn(
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
     ) => {
-      const text =
+      const contentText =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
+      // ink renders the composer text, never the `@`-expanded payload it
+      // produced; the expanded copy is for the model alone.
+      const displayText = options?.submittedPrompt ?? contentText;
       if (streamingRef.current) {
         // The steering queue is text-only; say so instead of losing the
         // attachments without a trace. Per-turn options ride on the queued
@@ -257,15 +267,15 @@ export function useOpenTuiLiveTurn(
             text: 'Image attachments cannot be queued mid-turn and were dropped.',
           });
         }
-        if (text.trim()) pushQueue(text);
+        if (displayText.trim()) pushQueue(displayText);
         return;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
       const prompt: PartListUnion =
-        parts.length > 0 ? [{ text }, ...parts] : content;
+        parts.length > 0 ? [{ text: contentText }, ...parts] : content;
       const promptId = nextLivePromptId(config);
-      apply({ type: 'user', text, promptId, sentToModel: true });
+      apply({ type: 'user', text: displayText, promptId, sentToModel: true });
       void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],

@@ -393,16 +393,23 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
   });
 });
 
-describe('canRunDuringStreaming (ink AppContainer fast path)', () => {
-  it('reports the command opt-in flag', () => {
+describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
+  it('defers the slash submissions a running turn must not race', () => {
     const host = createFakeHost();
     const dispatcher = new OpenTuiSlashDispatcher(host, services, [
       stub({ name: 'help', canRunDuringStreaming: true }),
       stub({ name: 'clear' }),
     ]);
-    expect(dispatcher.canRunDuringStreaming('/help')).toBe(true);
-    expect(dispatcher.canRunDuringStreaming('/clear')).toBe(false);
-    expect(dispatcher.canRunDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/help')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/clear')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('/nope')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/some/path/to/file')).toBe(
+      false,
+    );
+    expect(dispatcher.mustDeferDuringStreaming('?btw side question')).toBe(
+      false,
+    );
   });
 });
 

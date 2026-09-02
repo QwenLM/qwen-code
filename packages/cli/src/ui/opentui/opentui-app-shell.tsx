@@ -61,6 +61,8 @@ import {
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import { isAtCommand } from '../utils/commandUtils.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiShellConfirmation,
@@ -291,6 +293,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
+  // Slash submissions held back while a model turn streams (ink's message
+  // queue, restricted to commands: a queued prompt is the live turn's job).
+  const deferredCommandsRef = useRef<string[]>([]);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -363,20 +368,85 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
+      // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
+      // only a command that opted into canRunDuringStreaming runs now — the
+      // rest wait for idle instead of racing the stream.
+      if (streaming && (await gateway.mustDeferDuringStreaming(text))) {
+        const command = text.trim();
+        deferredCommandsRef.current.push(command);
+        notify(
+          `Queued ${command} — it will run when the current response ends.`,
+        );
+        return;
+      }
       const settlement = await gateway.dispatch(text);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
       }
       if (settlement.outcome === false) {
-        if (onSubmitPrompt) onSubmitPrompt(text, imagePaths);
-        else notify('The live prompt turn is not wired in this shell.');
+        if (!onSubmitPrompt) {
+          notify('The live prompt turn is not wired in this shell.');
+          return;
+        }
+        // ink parity (use-llm-stream processQuery): `@path` mentions expand
+        // into file content for the model, while the raw composer text rides
+        // along as UserPromptSubmit provenance (`submitted_prompt`).
+        const query = text.trim();
+        let content: PartListUnion = query;
+        if (isAtCommand(query)) {
+          const atResult = await handleAtCommand({
+            query,
+            config,
+            onDebugMessage: (message) => config.getDebugLogger().debug(message),
+            messageId: Date.now(),
+            // No turn exists yet at submit time, so expansion has nothing to
+            // be cancelled by — same fallback shape as client-tool-run.
+            signal: new AbortController().signal,
+          });
+          if (!atResult.shouldProceed || atResult.processedQuery === null) {
+            return;
+          }
+          content = atResult.processedQuery;
+        }
+        onSubmitPrompt(content, imagePaths, {
+          submittedPrompt: query || undefined,
+        });
         return;
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify],
+    [gateway, onSubmitPrompt, applyOutcome, notify, config, streaming],
   );
+
+  // Runs the commands the mid-turn gate held back, in submission order, once
+  // the turn ends (ink re-processes its queue on the same idle transition).
+  useEffect(() => {
+    if (streaming || deferredCommandsRef.current.length === 0) return;
+    const pending = deferredCommandsRef.current;
+    deferredCommandsRef.current = [];
+    void (async () => {
+      for (const [i, command] of pending.entries()) {
+        const settlement = await gateway.dispatch(command);
+        if (settlement.kind === 'rejected') {
+          notify(settlement.reason);
+          continue;
+        }
+        if (settlement.outcome === false) continue;
+        applyOutcome(settlement.outcome);
+        // A submit_prompt outcome starts a turn, so the commands behind it
+        // wait for the next idle transition rather than racing that stream.
+        if (
+          settlement.outcome.kind === 'submit_prompt' &&
+          onSubmitPrompt &&
+          i + 1 < pending.length
+        ) {
+          deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+          return;
+        }
+      }
+    })();
+  }, [streaming, gateway, notify, applyOutcome, onSubmitPrompt]);
 
   const userMessages = useMemo(
     () =>

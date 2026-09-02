@@ -45,6 +45,8 @@ const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
     loadRejects: false,
+    deferDuringStreaming: false,
+    handledTexts: [] as string[],
     host: null as unknown,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
@@ -116,12 +118,13 @@ vi.mock('./commands-dispatch.js', () => ({
     async loadCommands() {
       if (mocks.state.loadRejects) throw new Error('registry exploded');
     }
-    canRunDuringStreaming() {
-      return false;
+    async mustDeferDuringStreaming() {
+      return mocks.state.deferDuringStreaming;
     }
     cancel() {}
     dispose() {}
-    async handle() {
+    async handle(text: string) {
+      mocks.state.handledTexts.push(text);
       return mocks.state.handleResult;
     }
   },
@@ -195,6 +198,8 @@ describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.loadRejects = false;
+    mocks.state.deferDuringStreaming = false;
+    mocks.state.handledTexts.length = 0;
     mocks.state.host = null;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
@@ -316,6 +321,9 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'summarize the diff',
       undefined,
+      {
+        submittedPrompt: 'summarize the diff',
+      },
     );
   });
 
@@ -328,10 +336,11 @@ describe('OpenTuiApp shell wiring', () => {
     await submit('what is in these', ['a.png', 'b.png']);
     // The shell has no business choosing an image encoding: the entry layer
     // builds the real parts (ink: attachments), so the paths stay separate.
-    expect(onSubmitPrompt).toHaveBeenCalledWith('what is in these', [
-      'a.png',
-      'b.png',
-    ]);
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'what is in these',
+      ['a.png', 'b.png'],
+      { submittedPrompt: 'what is in these' },
+    );
   });
 
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
@@ -471,6 +480,37 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.inputProps?.['streaming']).toBe(true);
     (mocks.state.inputProps?.['onInterrupt'] as () => void)();
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  it('holds a mid-turn slash command until the turn ends', async () => {
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/compress');
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(screen.getByText(/Queued \/compress/)).toBeTruthy();
+
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(mocks.state.handledTexts).toEqual(['/compress']);
+  });
+
+  it('runs a mid-turn slash command that opted into streaming at once', async () => {
+    renderApp({ streaming: true });
+    await settle();
+    await submit('/help');
+    expect(mocks.state.handledTexts).toEqual(['/help']);
   });
 
   it('catches a subtree render error inside the error boundary', async () => {
