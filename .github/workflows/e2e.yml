@@ -201,40 +201,52 @@ jobs:
               npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
             }
 
-            acquire_daemon_write_lock() {
-              lock_deadline=$((SECONDS + 1800))
-              until flock --nonblock 9; do
-                if (( SECONDS >= lock_deadline )); then
-                  echo "::error::docker daemon write lock not acquired within 30 minutes"
-                  exit 1
-                fi
-                sleep 1
-              done
-            }
-
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
               mkdir -p "${HOME}/.cache/qwen-code-ci"
-              exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
-              if ! flock --wait 1800 8; then
-                echo "::error::docker build coordinator lock not acquired within 30 minutes"
-                exit 1
-              fi
+              # Host daemon lock, shared for the whole step and never
+              # upgraded: it only keeps the age-based prune (which takes it
+              # exclusively, non-blocking) off a daemon with Docker work in
+              # flight. #10605 upgraded it to exclusive to build an image,
+              # which starves that shard behind the test-phase readers of
+              # every other run on the host: in run 33637097713 shard 1/3
+              # gave up on the write lock after 30 minutes while a shard of
+              # run 33638984513 held the shared lock through its tests, and
+              # shard 2/3 then timed out on the coordinator lock shard 1/3
+              # was still holding.
               exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
               if ! flock --shared --wait 1800 9; then
                 echo "::error::docker daemon read lock not acquired within 30 minutes"
+                exit 1
+              fi
+              # Per-commit coordinator: one shard per host builds the image,
+              # its siblings wait here and then find it present.
+              exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
+              if ! flock --wait 1800 8; then
+                echo "::error::docker build coordinator lock not acquired within 30 minutes"
                 exit 1
               fi
             fi
 
             if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
               if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-                flock --unlock 9
-                acquire_daemon_write_lock
+                # Host build mutex: keeps concurrent image builds off one
+                # daemon. Held only while an image is prepared, never while
+                # tests run, so the wait is bounded by a build.
+                exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"
+                if ! flock --wait 1800 7; then
+                  echo "::error::docker build lock not acquired within 30 minutes"
+                  exit 1
+                fi
               fi
+              # Label- and age-filtered, so it cannot touch the image a
+              # concurrent shard is testing.
               docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
               if ! build_image; then
                 echo "::warning::sandbox image build failed; retrying once"
                 build_image
+              fi
+              if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+                flock --unlock 7
               fi
             else
               echo "Reusing sandbox image for ${GITHUB_SHA}"
@@ -243,7 +255,6 @@ jobs:
             sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
             export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-              flock --shared 9
               flock --unlock 8
             fi
           fi
