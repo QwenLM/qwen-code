@@ -7,9 +7,8 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NodeReplKernelManager } from './kernel-manager.js';
 import { NodeReplSecurityPolicy } from './security-policy.js';
@@ -23,20 +22,60 @@ import { NodeReplSecurityPolicy } from './security-policy.js';
 // test is skipped with a logged reason (the fixture is real, not synthesized).
 
 const fixtureDir = fileURLToPath(new URL('./fixtures/napi', import.meta.url));
-const execFileAsync = promisify(execFile);
+const windowsTaskkill = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 let builtAddonPath: string | null = null;
 let buildError: string | null = null;
 let manager: NodeReplKernelManager | null = null;
+
+function terminateBuild(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.pid) {
+    child.kill('SIGKILL');
+    return;
+  }
+  if (process.platform === 'win32') {
+    execFile(
+      windowsTaskkill,
+      ['/f', '/t', '/pid', String(child.pid)],
+      { timeout: 5_000 },
+      (error) => {
+        if (error) child.kill('SIGKILL');
+      },
+    );
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
+function rebuildAddon(nodeGyp: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      nodeGyp,
+      ['rebuild'],
+      {
+        cwd: fixtureDir,
+        detached: process.platform !== 'win32',
+      },
+      (error) => {
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      },
+    );
+    const timeout = setTimeout(() => terminateBuild(child), 110_000);
+  });
+}
 
 beforeAll(async () => {
   try {
     const nodeGyp = fileURLToPath(
       new URL('../../../node_modules/.bin/node-gyp', import.meta.url),
     );
-    await execFileAsync(nodeGyp, ['rebuild'], {
-      cwd: fixtureDir,
-      timeout: 110_000,
-    });
+    await rebuildAddon(nodeGyp);
     const candidate = path.join(
       fixtureDir,
       'build',
