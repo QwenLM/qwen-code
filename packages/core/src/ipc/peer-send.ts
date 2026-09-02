@@ -314,6 +314,8 @@ export async function sendToPeer(
   const frame = buildUserFrame({
     content: options.message,
     from: self.ipcPath,
+    // Our own inbox token, so the receiver's receipts authenticate back.
+    ...(self.ipcToken !== undefined ? { replyToken: self.ipcToken } : {}),
     fromName: self.name,
     // Pin the frame to the session the name resolved to. The address is
     // keyed by PID, and PIDs get reused: if that session has since been
@@ -336,7 +338,9 @@ export async function sendToPeer(
     state: 'pending',
   });
   try {
-    await sendPeerFrame(peer.ipcPath, frame);
+    await sendPeerFrame(peer.ipcPath, frame, {
+      ...(peer.ipcToken !== undefined ? { authToken: peer.ipcToken } : {}),
+    });
     return { kind: 'sent', peer, address };
   } catch (error) {
     if (

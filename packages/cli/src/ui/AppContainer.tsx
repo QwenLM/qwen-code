@@ -137,6 +137,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useEffortCommand } from './hooks/use-effort-command.js';
+import { useOutputStyleCommand } from './hooks/use-output-style-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -1596,6 +1597,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
 
+  const {
+    isOutputStyleDialogOpen,
+    openOutputStyleDialog,
+    handleOutputStyleSelect,
+  } = useOutputStyleCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1945,6 +1952,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
         try {
           cancelOngoingRequestRef.current();
@@ -1995,6 +2003,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -3707,6 +3716,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isEffortDialogOpen ||
+    isOutputStyleDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -4271,6 +4281,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
     isEffortDialogOpen,
     handleEffortSelect,
+    isOutputStyleDialogOpen,
+    handleOutputStyleSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -4752,6 +4764,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4898,6 +4911,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -5032,6 +5046,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -5124,6 +5139,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

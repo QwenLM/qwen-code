@@ -26,6 +26,7 @@ import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/dae
 import type {
   DaemonSessionGroupPresetColor,
   DaemonWorkspaceGitStatus,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
@@ -242,7 +243,7 @@ interface ChatEditorProps {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoning?: DaemonReasoningControls;
-  onSelectReasoningEffort?: (value: string) => Promise<void> | void;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -259,6 +260,8 @@ interface ChatEditorProps {
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   atWorkspaceCwd?: string;
+  composerScopeKey?: string;
+  workspaceFeaturesEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
@@ -1074,12 +1077,12 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect?: (value: string) => Promise<void> | void;
+  onSelect?: (value: ReasoningSelection) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
-  const select = async (value: string) => {
+  const select = async (value: ReasoningSelection) => {
     if (busy || !onSelect) return;
     setBusy(true);
     try {
@@ -1104,7 +1107,7 @@ function ModelReasoningControls({
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
-            void select(enabled ? reasoning.effort : 'none')
+            void select(enabled ? 'default' : 'none')
           }
         />
       </div>
@@ -1524,6 +1527,8 @@ export const ChatEditor = memo(
       onCreateScratchWorkspace,
       onOpenExistingWorkspace,
       atWorkspaceCwd,
+      composerScopeKey,
+      workspaceFeaturesEnabled = true,
       onChatWidthModeChange,
       onFocusFooter,
       dialogOpen = false,
@@ -1578,7 +1583,7 @@ export const ChatEditor = memo(
     // item can be capability-gated (hidden on daemons without the feature).
     const uploadWorkspace = useOptionalWorkspace();
     const uploadTarget = useMemo(() => {
-      if (!uploadWorkspace) return undefined;
+      if (!uploadWorkspace || !workspaceFeaturesEnabled) return undefined;
       // The host prop can force-disable upload even when the daemon advertises
       // the capability; it does NOT bypass the capability check. Both must
       // allow: `fileUploadEnabled === false` short-circuits, otherwise the
@@ -1606,7 +1611,12 @@ export const ChatEditor = memo(
       if (primaryMatches.length !== 1 || primaryMatches[0].trusted !== true)
         return undefined;
       return { client: uploadWorkspace.client, targetKey: '<primary>' };
-    }, [uploadWorkspace, atWorkspaceCwd, fileUploadEnabled]);
+    }, [
+      uploadWorkspace,
+      atWorkspaceCwd,
+      fileUploadEnabled,
+      workspaceFeaturesEnabled,
+    ]);
     const uploadEnabled = uploadTarget !== undefined;
     const maxUploadBytes =
       uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
@@ -1674,7 +1684,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
-      fileDragEnabled: fileUploadEnabled !== false,
+      fileDragEnabled: workspaceFeaturesEnabled && fileUploadEnabled !== false,
       placeholderText,
       commands,
       skills,
@@ -1695,6 +1705,10 @@ export const ChatEditor = memo(
       builtinAtProviders: resolvedBuiltinAtProviders,
       atProviders: resolvedAtProviders,
       atWorkspaceCwd,
+      composerScopeKey,
+      disableLegacyHistoryFallback: composerScopeKey === 'standalone',
+      attachmentsEnabled: workspaceFeaturesEnabled,
+      workspaceFeaturesEnabled,
       composerTagIcons,
       parseUserMessageContent,
       renderComposerTag,
@@ -2407,7 +2421,9 @@ export const ChatEditor = memo(
     const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
-        ? t(`reasoning.effort.${reasoning.effort}`)
+        ? reasoning.effort !== 'none' && reasoning.effort !== 'default'
+          ? t(`reasoning.effort.${reasoning.effort}`)
+          : t('reasoning.thinking')
         : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions
@@ -3100,7 +3116,9 @@ export const ChatEditor = memo(
                         ),
                         Boolean(skills?.length),
                       ])}
-                      addFileAvailable={fileUploadEnabled !== false}
+                      addFileAvailable={
+                        workspaceFeaturesEnabled && fileUploadEnabled !== false
+                      }
                       uploadAvailable={uploadEnabled}
                       onAddFiles={handleAddMenuFiles}
                       onFilePickerCancel={focusComposer}

@@ -23,6 +23,7 @@ import type {
   BackendHandle,
   ContentBlock,
 } from '../adaptor/types.js';
+import type { BackendRegistry } from '../adaptor/registry.js';
 import type { LiveScreenContextCapture } from '../host/live-host-coordinator.js';
 import type { LiveState } from '../host/types.js';
 import { buildLiveInstructions } from '../realtime/instructions.js';
@@ -34,7 +35,10 @@ import {
   type RealtimeTranscriptEntry,
 } from '../realtime/realtime-session.js';
 import type { SessionLog } from '../log/session-log.js';
-import { PermissionBroker } from '../permissions/permission-broker.js';
+import {
+  PermissionBroker,
+  type PendingPermission,
+} from '../permissions/permission-broker.js';
 import {
   APPSHOT_TOOL_NAME,
   HANDOFF_TOOL_NAME,
@@ -58,6 +62,7 @@ const MAX_ACCESSIBILITY_CHARS = 8_000;
 const MAX_VOICE_CONTEXT_ENTRIES = 12;
 const MAX_VOICE_CONTEXT_CHARS = 4_000;
 const MAX_SPOKEN_SUMMARY_CHARS = 200;
+const PERMISSION_REMINDER_DELAY_MS = 1_000;
 
 /**
  * The Host surface LiveSession drives. Structurally satisfied by the ported
@@ -93,7 +98,7 @@ export interface LiveRealtimeConfig {
 
 export interface LiveSessionOptions {
   host: LiveHostControl;
-  adaptor: BackendAdaptor;
+  registry: BackendRegistry;
   realtime: LiveRealtimeConfig;
   log: SessionLog;
   openRealtime?: typeof openQwenRealtimeSession;
@@ -107,12 +112,17 @@ interface CallContext {
   stopping: boolean;
   speechInProgress: boolean;
   responseInFlight: boolean;
+  /** Suppress asks until buffered backend events have drained on resume. */
+  restoringBackendEvents: boolean;
   caption: string;
+  loggedInputTranscripts: Map<string, string>;
+  loggedResponseTranscripts: Map<string, string>;
+  responseAuthorities: Map<string, string>;
+  permissionReminderTimer?: ReturnType<typeof setTimeout>;
   defaultSessionHandle?: string;
   /** Per backend-session event pump cancellation. */
   pumps: Map<string, AbortController>;
   injector: Injector;
-  broker: PermissionBroker;
   stopResolve?: (outcome: void | { error: string }) => void;
 }
 
@@ -169,20 +179,32 @@ function formatVoiceContext(
 
 export class LiveSession {
   private readonly host: LiveHostControl;
-  private readonly adaptor: BackendAdaptor;
+  private readonly registry: BackendRegistry;
   private readonly log: SessionLog;
   private readonly openRealtime: typeof openQwenRealtimeSession;
   private readonly gracefulStopDrainMs: number;
   private readonly handles = new HandleRegistry();
+  private readonly broker: PermissionBroker;
+  /** Stream sessions explicitly observed by this Live daemon across calls. */
+  private readonly observedSessions = new Map<string, BackendHandle>();
   private active?: CallContext;
 
   constructor(private readonly options: LiveSessionOptions) {
     this.host = options.host;
-    this.adaptor = options.adaptor;
+    this.registry = options.registry;
     this.log = options.log;
     this.openRealtime = options.openRealtime ?? openQwenRealtimeSession;
     this.gracefulStopDrainMs =
       options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS;
+    this.broker = new PermissionBroker({
+      adaptorFor: (backend) => this.adaptorFor(backend),
+      log: (type, payload) => this.log.write(type, payload),
+    });
+  }
+
+  /** The adaptor that owns a backend handle (registry routing). */
+  private adaptorFor(handle: BackendHandle): BackendAdaptor {
+    return this.registry.adaptorFor(handle);
   }
 
   /** LiveCallHandlers.onStart */
@@ -198,7 +220,11 @@ export class LiveSession {
       stopping: false,
       speechInProgress: false,
       responseInFlight: false,
+      restoringBackendEvents: true,
       caption: '',
+      loggedInputTranscripts: new Map(),
+      loggedResponseTranscripts: new Map(),
+      responseAuthorities: new Map(),
       pumps: new Map(),
       injector: new Injector({
         sink: {
@@ -213,17 +239,13 @@ export class LiveSession {
           },
         },
       }),
-      broker: new PermissionBroker({
-        adaptor: this.adaptor,
-        log: (type, payload) => this.log.write(type, payload),
-      }),
     };
     this.active = context;
     this.log.write('session.start', {
       callId: call.callId,
       epoch: call.epoch,
       mode: call.mode,
-      adaptor: this.adaptor.name,
+      backends: this.registry.names().join(','),
       model: this.options.realtime.model,
       voice: this.options.realtime.voice,
     });
@@ -258,6 +280,18 @@ export class LiveSession {
       }
       context.realtime = realtime;
       this.host.setCallState(call.epoch, 'listening');
+      for (const [sessionHandle, backend] of this.observedSessions) {
+        this.ensurePump(context, sessionHandle, backend);
+      }
+      // ACP keeps backend events in a local queue while a Live call is down.
+      // Let that synchronous backlog drain before replaying unresolved asks,
+      // so a buffered resolution retracts an old request before it is spoken.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (this.active !== context || context.stopping) return;
+      context.restoringBackendEvents = false;
+      for (const pending of this.broker.pendingUserRequests) {
+        this.enqueuePermission(context, pending);
+      }
     } catch (error) {
       this.log.write('error', {
         source: 'realtime',
@@ -381,13 +415,21 @@ export class LiveSession {
       onSpeechStarted: () => {
         if (!current()) return;
         context.speechInProgress = true;
-        context.injector.noteSpeechStarted();
+        const outputWasPlaying = context.injector.noteSpeechStarted();
+        if (context.responseInFlight || outputWasPlaying) {
+          this.host.clearOutput(context.epoch);
+          this.host.setCaption(context.epoch, '');
+          this.host.setStatusText(context.epoch);
+          context.injector.noteOutputCleared();
+          this.log.write('playback.cleared', {
+            reason: 'speech_started',
+          });
+        }
+        this.enqueuePendingPermissions(context);
         this.log.write('vad.speech_started', {});
       },
       onSpeechStopped: () => {
         if (!current()) return;
-        context.speechInProgress = false;
-        context.injector.noteSpeechStopped();
         this.log.write('vad.speech_stopped', {});
       },
       // The provider's input-commit ack: the utterance is out of the buffer,
@@ -397,23 +439,29 @@ export class LiveSession {
       onInputCommitted: () => {
         if (!current()) return;
         context.speechInProgress = false;
+        context.injector.noteInputCommitted();
         this.log.write('vad.speech_stopped', { phase: 'input_committed' });
       },
-      onInputTranscriptDone: (event: { text: string }) => {
+      onInputTranscriptDone: (event: { itemId?: string; text: string }) => {
         if (!current()) return;
         context.speechInProgress = false;
+        context.injector.noteInputCommitted();
         this.host.setTranscript?.(context.epoch, event.text);
         this.log.write('transcript.user', { text: event.text });
+        if (event.itemId) {
+          context.loggedInputTranscripts.set(event.itemId, event.text);
+        }
       },
       onOutputTextDelta: (event: { text: string; source: string }) => {
         if (!current()) return;
         context.caption = `${context.caption}${event.text}`;
         this.host.setCaption(context.epoch, context.caption);
       },
-      onOutputTextDone: (event: { text: string }) => {
+      onOutputTextDone: (event: { responseId: string; text: string }) => {
         if (!current()) return;
         context.caption = '';
         this.log.write('transcript.assistant', { text: event.text });
+        context.loggedResponseTranscripts.set(event.responseId, event.text);
       },
       onOutputAudioDelta: (event: { audio: Uint8Array }) => {
         if (!current()) return;
@@ -424,6 +472,7 @@ export class LiveSession {
         if (!current()) return;
         context.responseInFlight = true;
         context.injector.noteResponseCreated();
+        context.responseAuthorities.set(event.responseId, event.authority);
         // During the stop drain the call state must stay 'stopping' — a
         // 'speaking' flip here would strand the coordinator (its finish/fail
         // paths early-return unless the call is still 'stopping').
@@ -435,36 +484,69 @@ export class LiveSession {
           authority: event.authority,
         });
       },
-      onResponseDone: (event: { responseId: string }) => {
+      onResponseDone: (event: { responseId: string; inputItemId?: string }) => {
         if (!current()) return;
         context.responseInFlight = false;
         context.caption = '';
         context.injector.noteResponseDone();
+        const authority = context.responseAuthorities.get(event.responseId);
+        context.responseAuthorities.delete(event.responseId);
         if (!context.stopping) {
           this.host.setCallState(context.epoch, 'listening');
         }
         this.log.write('response.done', { responseId: event.responseId });
+        context.loggedResponseTranscripts.delete(event.responseId);
+        if (event.inputItemId) {
+          context.loggedInputTranscripts.delete(event.inputItemId);
+        }
+        if (authority === 'direct') {
+          this.schedulePermissionReminder(context);
+        }
       },
       onBargeIn: (event: { responseId: string }) => {
         if (!current()) return;
-        this.host.clearOutput(context.epoch);
-        this.host.setCaption(context.epoch, '');
-        this.host.setStatusText(context.epoch);
-        context.injector.noteOutputCleared();
-        this.log.write('playback.cleared', {
-          reason: 'barge_in',
-          responseId: event.responseId,
-        });
+        if (!context.speechInProgress) {
+          this.host.clearOutput(context.epoch);
+          this.host.setCaption(context.epoch, '');
+          this.host.setStatusText(context.epoch);
+          context.injector.noteOutputCleared();
+          this.log.write('playback.cleared', {
+            reason: 'barge_in',
+            responseId: event.responseId,
+          });
+        } else {
+          this.log.write('response.cancelled', {
+            responseId: event.responseId,
+          });
+        }
       },
       onFunctionCall: (event: RealtimeFunctionCall) => {
         if (!current()) return;
+        if (
+          event.name === RESPOND_PERMISSION_TOOL_NAME &&
+          context.permissionReminderTimer !== undefined
+        ) {
+          clearTimeout(context.permissionReminderTimer);
+          context.permissionReminderTimer = undefined;
+        }
         void this.dispatchTool(context, event);
       },
       onDirectTranscript: (event: {
+        responseId?: string;
+        inputItemId?: string;
         entries: readonly RealtimeTranscriptEntry[];
       }) => {
         if (!current()) return;
         for (const entry of event.entries) {
+          const alreadyLogged =
+            entry.role === 'user'
+              ? event.inputItemId !== undefined &&
+                context.loggedInputTranscripts.get(event.inputItemId) ===
+                  entry.text
+              : event.responseId !== undefined &&
+                context.loggedResponseTranscripts.get(event.responseId) ===
+                  entry.text;
+          if (alreadyLogged) continue;
           this.log.write(
             entry.role === 'user' ? 'transcript.user' : 'transcript.assistant',
             { text: entry.text, direct: true },
@@ -588,11 +670,23 @@ export class LiveSession {
     });
 
     handlers.set(SESSION_LIST_TOOL_NAME, async () => {
-      const sessions = await this.adaptor.listSessions();
-      return {
-        status: 'ok',
-        sessions: sessions.map((summary) => {
+      const rows: Array<Record<string, unknown>> = [];
+      for (const entry of this.registry.all()) {
+        // One dead backend must not empty the whole list.
+        let summaries;
+        try {
+          summaries = await entry.adaptor.listSessions();
+        } catch (error) {
+          this.log.write('error', {
+            source: 'session_list',
+            backend: entry.adaptor.name,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+        for (const summary of summaries) {
           const handle = this.handles.session(summary.handle);
+          const pending = this.broker.pendingForSession(handle);
           // Reconcile stale non-terminal jobs: a turn_complete emitted
           // while no pump was subscribed (pumps are per-call and aborted
           // at call end) would otherwise keep session_list reporting a
@@ -600,24 +694,55 @@ export class LiveSession {
           // report so a genuinely busy session is never touched.
           if (
             summary.state !== 'busy' &&
-            !this.adaptor.isBusy(summary.handle)
+            !entry.adaptor.isBusy(summary.handle)
           ) {
             this.handles.reconcileIdleSession(handle);
           }
           const activeJob = this.handles.activeJobForSession(handle);
-          return {
+          rows.push({
             handle,
+            backend: entry.adaptor.name,
             ...(summary.label ? { label: summary.label } : {}),
             ...(summary.cwd ? { cwd: summary.cwd } : {}),
-            state: this.adaptor.isBusy(summary.handle) ? 'busy' : summary.state,
+            state: pending
+              ? 'waiting_for_permission'
+              : entry.adaptor.isBusy(summary.handle)
+                ? 'busy'
+                : summary.state,
+            ...(pending
+              ? {
+                  pending_permission: {
+                    request_id: pending.requestHandle,
+                    title: pending.title,
+                  },
+                }
+              : {}),
             ...(activeJob ? { active_job: activeJob.jobHandle } : {}),
-          };
-        }),
-      };
+          });
+        }
+      }
+      return { status: 'ok', sessions: rows };
     });
 
     handlers.set(SESSION_CREATE_TOOL_NAME, async (args) => {
-      const backend = await this.adaptor.createSession({
+      let adaptor = this.registry.defaultAdaptor;
+      if (typeof args['backend'] === 'string' && args['backend'].trim()) {
+        const named = this.registry.byAdaptorName(args['backend'].trim());
+        if (!named) {
+          return {
+            status: 'error',
+            note: `unknown backend '${args['backend']}'; configured backends: ${this.registry.names().join(', ')}.`,
+          };
+        }
+        if (named.status !== 'ready') {
+          return {
+            status: 'error',
+            note: `backend '${named.adaptor.name}' is unavailable: ${named.lastError ?? 'preflight failed'}.`,
+          };
+        }
+        adaptor = named.adaptor;
+      }
+      const backend = await adaptor.createSession({
         ...(typeof args['cwd'] === 'string' ? { cwd: args['cwd'] } : {}),
         ...(typeof args['label'] === 'string' ? { label: args['label'] } : {}),
       });
@@ -640,9 +765,20 @@ export class LiveSession {
         ctx.activeTranscript,
         args['input_refs'],
       );
-      const busy = this.adaptor.isBusy(backend);
-      const receipt = await this.adaptor.prompt(backend, blocks, {
-        steer: busy,
+      const adaptor = this.adaptorFor(backend);
+      const caps = adaptor.capabilities();
+      const busy = adaptor.isBusy(backend);
+      // Image-capable backends only: strip image blocks the backend cannot
+      // take and say so in the receipt — silently dropping them would let
+      // the model claim the screenshot was delivered.
+      let sentBlocks = blocks;
+      let imageNote: string | undefined;
+      if (!caps.imageInput && blocks.some((b) => b.type === 'image')) {
+        sentBlocks = blocks.filter((b) => b.type !== 'image');
+        imageNote = 'this session cannot take images; sent the text only';
+      }
+      const receipt = await adaptor.prompt(backend, sentBlocks, {
+        steer: busy && caps.steering !== 'none',
       });
       if (receipt.status === 'rejected') {
         return {
@@ -657,7 +793,7 @@ export class LiveSession {
       // would ever transition it out).
       const existing =
         receipt.jobRef !== undefined
-          ? this.handles.jobByRef(receipt.jobRef)
+          ? this.handles.jobByRef(backend, receipt.jobRef)
           : undefined;
       const job =
         existing ??
@@ -668,11 +804,12 @@ export class LiveSession {
           task,
         });
       this.ensurePump(context, handle, backend);
+      const notes = [receipt.note, imageNote].filter(Boolean).join('. ');
       return {
         status: receipt.status,
         job: job.jobHandle,
         session: handle,
-        ...(receipt.note ? { note: receipt.note } : {}),
+        ...(notes ? { note: notes } : {}),
       };
     });
 
@@ -691,18 +828,38 @@ export class LiveSession {
           note: 'unknown session; call session_list first.',
         };
       }
-      if (!this.adaptor.isBusy(backend)) {
+      if (!this.adaptorFor(backend).isBusy(backend)) {
         this.handles.reconcileIdleSession(sessionHandle);
       }
       const activeJob = job ?? this.handles.activeJobForSession(sessionHandle);
+      const sessionPending = this.broker.pendingForSession(sessionHandle);
+      const jobPending =
+        activeJob?.jobRef !== undefined
+          ? this.broker.pendingForJob(backend, activeJob.jobRef)
+          : undefined;
+      const pending = job ? jobPending : sessionPending;
       return {
         status: 'ok',
         session: sessionHandle,
-        state: this.adaptor.isBusy(backend) ? 'busy' : 'idle',
+        state: pending
+          ? 'waiting_for_permission'
+          : this.adaptorFor(backend).isBusy(backend)
+            ? 'busy'
+            : 'idle',
+        ...(pending
+          ? {
+              pending_permission: {
+                request_id: pending.requestHandle,
+                title: pending.title,
+              },
+            }
+          : {}),
         ...(activeJob
           ? {
               job: activeJob.jobHandle,
-              job_state: activeJob.state,
+              job_state: jobPending
+                ? 'waiting_for_permission'
+                : activeJob.state,
               task: activeJob.task.slice(0, 200),
             }
           : {}),
@@ -725,7 +882,7 @@ export class LiveSession {
           note: 'unknown session or job; call session_list first.',
         };
       }
-      await this.adaptor.cancel(backend);
+      await this.adaptorFor(backend).cancel(backend);
       if (job) job.state = 'cancelled';
       return { status: 'cancelling', session: sessionHandle };
     });
@@ -747,8 +904,8 @@ export class LiveSession {
       const note = typeof args['note'] === 'string' ? args['note'].trim() : '';
       // Resolve before respond(): a delivered vote clears the pending entry,
       // and the backend handle is needed to relay the user's constraint.
-      const pending = context.broker.resolveHandle(requestHandle);
-      const outcome = await context.broker.respond(
+      const pending = this.broker.resolveHandle(requestHandle);
+      const outcome = await this.broker.respond(
         requestHandle,
         decision,
         note || undefined,
@@ -759,13 +916,18 @@ export class LiveSession {
           note: `no pending request ${requestHandle}.`,
         };
       }
+      if (pending) {
+        context.injector.retractPermission(
+          this.scopedPermissionId(pending.backend, pending.requestId),
+        );
+      }
       // The vote channel carries no free text; a user constraint ("only this
       // file") would otherwise be silently discarded — the grant would be
       // broader than the user believes. Relay it as a user instruction to
       // the same backend session through the existing prompt/steer path.
       if (note && pending && outcome === 'delivered') {
         try {
-          await this.adaptor.prompt(
+          await this.adaptorFor(pending.backend).prompt(
             pending.backend,
             [
               {
@@ -776,7 +938,7 @@ export class LiveSession {
                   `follow: ${note}`,
               },
             ],
-            { steer: this.adaptor.isBusy(pending.backend) },
+            { steer: this.adaptorFor(pending.backend).isBusy(pending.backend) },
           );
         } catch (error) {
           this.log.write('error', {
@@ -814,7 +976,9 @@ export class LiveSession {
         return { handle: context.defaultSessionHandle, backend };
       }
     }
-    const backend = await this.adaptor.createSession({ label: 'Voice chat' });
+    const backend = await this.registry.defaultAdaptor.createSession({
+      label: 'Voice chat',
+    });
     const handle = this.handles.session(backend);
     context.defaultSessionHandle = handle;
     return { handle, backend };
@@ -862,6 +1026,19 @@ export class LiveSession {
     backend: BackendHandle,
   ): void {
     if (context.pumps.has(sessionHandle)) return;
+    const caps = this.adaptorFor(backend).capabilities();
+    if (caps.eventDelivery !== 'stream') {
+      // A per-turn/poll backend has no long-lived stream to pump; its
+      // completions arrive another way. Guard so such an adaptor never
+      // spins a broken resubscribe loop.
+      this.log.write('error', {
+        source: 'pump',
+        session: sessionHandle,
+        message: `backend '${backend.adaptor}' does not stream events (${caps.eventDelivery}); not observed`,
+      });
+      return;
+    }
+    this.observedSessions.set(sessionHandle, backend);
     const abort = new AbortController();
     context.pumps.set(sessionHandle, abort);
     void this.pump(context, sessionHandle, backend, abort.signal).catch(
@@ -888,7 +1065,9 @@ export class LiveSession {
     while (this.active === context && !signal.aborted) {
       let sawEvent = false;
       try {
-        for await (const event of this.adaptor.events(backend, { signal })) {
+        for await (const event of this.adaptorFor(backend).events(backend, {
+          signal,
+        })) {
           if (this.active !== context) return;
           sawEvent = true;
           backoffMs = 1_000;
@@ -938,13 +1117,13 @@ export class LiveSession {
     switch (event.type) {
       case 'turn_started': {
         const job = event.jobRef
-          ? this.handles.jobByRef(event.jobRef)
+          ? this.handles.jobByRef(backend, event.jobRef)
           : undefined;
         if (job) job.state = 'running';
         return;
       }
       case 'progress': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         context.injector.enqueue({
           kind: 'progress',
           context: `[PROGRESS ${job?.jobHandle ?? sessionHandle}] ${event.summary}`,
@@ -961,7 +1140,7 @@ export class LiveSession {
         return;
       }
       case 'turn_complete': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         if (job) job.state = 'done';
         const label = job?.jobHandle ?? sessionHandle;
         const spokenSummary = lastSentence(
@@ -972,14 +1151,14 @@ export class LiveSession {
           kind: 'complete',
           context: `[COMPLETE ${label}] ${event.detail ?? event.summary}`,
           spoken: spokenSummary
-            ? `Task ${label} finished. ${spokenSummary}`
-            : `Task ${label} finished.`,
+            ? `${this.spokenTaskLabel(job)} finished. ${spokenSummary}`
+            : `${this.spokenTaskLabel(job)} finished.`,
           ...(job ? { jobHandle: job.jobHandle } : {}),
         });
         return;
       }
       case 'turn_error': {
-        const job = this.jobFor(sessionHandle, event.jobRef);
+        const job = this.jobFor(sessionHandle, backend, event.jobRef);
         if (job)
           job.state = event.error === 'cancelled' ? 'cancelled' : 'failed';
         const label = job?.jobHandle ?? sessionHandle;
@@ -993,28 +1172,31 @@ export class LiveSession {
         context.injector.enqueue({
           kind: 'error',
           context: `[ERROR ${label}] ${event.error}`,
-          spoken: `Task ${label} hit a problem. ${firstSentence(event.error, 120)}`,
+          spoken: `${this.spokenTaskLabel(job)} hit a problem. ${firstSentence(event.error, 120)}`,
           ...(job ? { jobHandle: job.jobHandle } : {}),
         });
         return;
       }
       case 'permission_request': {
-        void context.broker
+        void this.broker
           .onRequest({
             requestId: event.requestId,
             backend,
             sessionHandle,
+            ...(event.jobRef !== undefined ? { jobRef: event.jobRef } : {}),
             title: event.title,
             options: event.options,
           })
           .then((ask) => {
-            if (ask.autoAnswered || this.active !== context) return;
-            context.injector.enqueue({
-              kind: 'permission',
-              requestId: event.requestId,
-              context: `[PERMISSION ${ask.pending.requestHandle}] Session ${sessionHandle} wants to run: ${event.title}. Ask the user and relay their answer with respond_permission.`,
-              spoken: `The task wants to ${event.title}. Should I allow it?`,
-            });
+            if (
+              ask.autoAnswered ||
+              ask.alreadyPending ||
+              context.restoringBackendEvents ||
+              this.active !== context
+            ) {
+              return;
+            }
+            this.enqueuePermission(context, ask.pending);
           })
           .catch((error: unknown) => {
             // A rejected broker chain must never become an unhandled
@@ -1035,9 +1217,11 @@ export class LiveSession {
         return;
       }
       case 'permission_resolved': {
-        const pending = context.broker.onResolved(event.requestId);
+        const pending = this.broker.onResolved(backend, event.requestId);
+        const retracted = context.injector.retractPermission(
+          this.scopedPermissionId(backend, event.requestId),
+        );
         if (!event.byUs) {
-          const retracted = context.injector.retractPermission(event.requestId);
           if (!retracted && pending) {
             context.injector.enqueue({
               kind: 'progress',
@@ -1054,6 +1238,8 @@ export class LiveSession {
         // handle entirely and clear the default so
         // resolveHandoffTarget's createSession fall-through rebuilds.
         this.handles.closeSession(sessionHandle);
+        this.broker.clearSession(sessionHandle);
+        this.observedSessions.delete(sessionHandle);
         if (context.defaultSessionHandle === sessionHandle) {
           context.defaultSessionHandle = undefined;
         }
@@ -1066,13 +1252,58 @@ export class LiveSession {
 
   private jobFor(
     sessionHandle: string,
+    backend: BackendHandle,
     jobRef: string | undefined,
   ): JobRecord | undefined {
     if (jobRef) {
-      const byRef = this.handles.jobByRef(jobRef);
+      const byRef = this.handles.jobByRef(backend, jobRef);
       if (byRef) return byRef;
     }
     return this.handles.activeJobForSession(sessionHandle);
+  }
+
+  private enqueuePermission(
+    context: CallContext,
+    pending: PendingPermission,
+  ): void {
+    context.injector.enqueue({
+      kind: 'permission',
+      requestId: this.scopedPermissionId(pending.backend, pending.requestId),
+      context: `[PERMISSION ${pending.requestHandle}] Session ${pending.sessionHandle} wants to run: ${pending.title}. Ask the user and relay their answer with respond_permission in this response. Do not claim it was allowed until that tool returns status delivered.`,
+      spoken: `The task wants to ${pending.title}. Should I allow it?`,
+    });
+  }
+
+  private enqueuePendingPermissions(context: CallContext): void {
+    if (this.active !== context || context.stopping) return;
+    for (const pending of this.broker.pendingUserRequests) {
+      this.enqueuePermission(context, pending);
+    }
+  }
+
+  private schedulePermissionReminder(context: CallContext): void {
+    if (this.broker.pendingUserRequests.length === 0) return;
+    if (context.permissionReminderTimer !== undefined) {
+      clearTimeout(context.permissionReminderTimer);
+    }
+    context.permissionReminderTimer = setTimeout(() => {
+      context.permissionReminderTimer = undefined;
+      this.enqueuePendingPermissions(context);
+    }, PERMISSION_REMINDER_DELAY_MS);
+    context.permissionReminderTimer.unref?.();
+  }
+
+  private scopedPermissionId(
+    backend: BackendHandle,
+    requestId: string,
+  ): string {
+    return `${backend.adaptor}:${requestId}`;
+  }
+
+  private spokenTaskLabel(job: JobRecord | undefined): string {
+    if (!job) return 'A task';
+    const task = firstSentence(job.task, 80);
+    return task ? `The task to ${task}` : 'A task';
   }
 
   // -- injection sinks -------------------------------------------------------
@@ -1117,6 +1348,10 @@ export class LiveSession {
 
   private cleanupContext(context: CallContext): void {
     if (this.active === context) this.active = undefined;
+    if (context.permissionReminderTimer !== undefined) {
+      clearTimeout(context.permissionReminderTimer);
+      context.permissionReminderTimer = undefined;
+    }
     context.injector.dispose();
     for (const abort of context.pumps.values()) abort.abort();
     context.pumps.clear();
