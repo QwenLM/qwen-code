@@ -80,6 +80,14 @@ describe('describePromptTurnFailure', () => {
     }
   });
 
+  it('renders circular rejections without degrading', () => {
+    const err: Record<string, unknown> = { code: -32603 };
+    err['self'] = err;
+    const rendered = describePromptTurnFailure(err);
+    expect(rendered).toContain('[code -32603]');
+    expect(rendered).not.toContain('[object Object]');
+  });
+
   it('stringifies primitive rejections', () => {
     expect(describePromptTurnFailure('socket hang up')).toBe('socket hang up');
   });

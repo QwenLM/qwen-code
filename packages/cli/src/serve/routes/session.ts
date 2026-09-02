@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
@@ -466,18 +467,16 @@ export function describePromptTurnFailure(err: unknown): string {
     return `[${err.name}] ${detail}`;
   }
   const code = extractErrorCode(err);
-  let rendered = detail;
-  if (
+  // `extractErrorMessage` terminates in `String(err)`, which renders a plain
+  // object as `[object Object]`. Fall back to `inspect` for those: unlike
+  // `JSON.stringify` it never throws, so circular and non-serializable
+  // rejections stay readable instead of degrading again.
+  const rendered =
     typeof err === 'object' &&
     err !== null &&
-    (rendered === '' || rendered === String(err))
-  ) {
-    try {
-      rendered = JSON.stringify(err) ?? rendered;
-    } catch {
-      // Keep the extracted detail for non-serializable rejections.
-    }
-  }
+    (detail === '' || detail === String(err))
+      ? inspect(err, { depth: 2, breakLength: Infinity })
+      : detail;
   return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
