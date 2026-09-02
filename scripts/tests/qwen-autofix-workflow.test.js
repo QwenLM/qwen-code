@@ -23435,6 +23435,62 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // A genuine un-skip: the marker is removed with no addition anywhere.
+    // Additions are charged on their own, so a removal alone stays
+    // uncharged — the negative control the no-netting doctrine needs.
+    unskip: {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Un-skipping one test while silencing ANOTHER in the same file: the
+    // removed and added markers belong to different tests, so per-file
+    // netting must not cancel them.
+    'skip-cross-test': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+            "it.skip('b', () => {",
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
     // Glob magic in the filename: the weakening file's sibling matches the
     // same bare pattern, so only a literal pathspec measures them apart.
     literal: {
@@ -23462,6 +23518,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         }),
         AGENT_COMMIT,
       ],
+    },
+    // A non-JS test file: the JS naming pathspec is blind to it, but the
+    // deletion arm is language-agnostic and must still require an ack.
+    'python-test-delete': {
+      files: {
+        'python/tests/test_wrapper.py': [
+          'def test_wrap():',
+          '    assert wrap(1) == 1',
+          '    assert wrap(2) == 2',
+        ],
+      },
+      round: ['git rm -q python/tests/test_wrapper.py', AGENT_COMMIT],
     },
     // A dash-prefixed root filename is a legal git name and is enumerated
     // by the `**/` pathspec — the ack lookup must survive it too.
@@ -23553,6 +23621,37 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         'git rm -q pkg/b.test.ts',
         AGENT_COMMIT,
       ],
+    },
+    // Main adds a test file and the branch — carrying no unique commits
+    // of its own — resets onto origin/main, so main's commits ride the
+    // round range as ordinary parent-ful commits (no merge commit exists
+    // to seed the introduction set); the round then deletes the test
+    // main landed.
+    'ff-introduced-delete': {
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-test',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        'git rm -q pkg/b.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    // The freight twin: main WEAKENS a pre-existing test and the round
+    // only syncs onto origin/main. Main's delta crosses the fast-forward
+    // exactly as it crosses a real merge — it must not be charged.
+    'ff-main-weaken-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-weakens',
+      ],
+      round: ['git reset -q --hard origin/main', AGENT_COMMIT],
     },
     // Main deletes a pre-existing test; the round merges the deletion in
     // as freight and its own commit re-adds the file WEAKENED. The re-add
@@ -23843,6 +23942,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // A JSX-text decoy: <div>expect(...)</div> survives comment
+    // stripping and earns addition credit on the line arm; the blob
+    // census must drop a line whose regex state is still open at EOL
+    // (the </div> close mis-lexes as a regex head in valid TSX).
+    'jsx-text-decoy': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.tsx': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  const note = <div>expect(two()).toBe(2)</div>;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
     // A decoy line carrying the assertion token inside a STRING literal:
     // the added-side comment strip does not parse strings, so the decoy
     // earns an addition credit that cancels the genuine removal — the
@@ -24091,6 +24209,36 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // A multi-line-formatted assertion whose ONLY change is the matcher
+    // tail: expect( / two(), / ).toBe(2); becomes expect( / two(), / );
+    // — no head-token line is removed, the maximal relaxation.
+    'multiline-matcher-drop': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(',
+          '    two(),',
+          '  ).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(',
+            '    two(),',
+            '  );',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
     // The newline-split member chain: `it` and `.skip(` on two lines is
     // valid JS and runs as it.skip.
     'skip-split-line': {
@@ -24232,6 +24380,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // UNAVAILABLE — the net-range deletion must still be judged.
     'orphan-merge-back-delete': {
       files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -q --orphan rebuilt',
+        'git rm -qrf .',
+        'git commit -q --allow-empty -qm orphan-root',
+        'git merge -q --allow-unrelated-histories feature -m merge-back',
+        'git branch -f feature',
+        'git checkout -q feature',
+        'git rm -q pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    // The freight exemption's escape: the file is present at PR_BASE and
+    // main deleted it since, but the orphan root puts the per-commit
+    // discriminator UNAVAILABLE — the exemption may not drop the round's
+    // own deletion of it.
+    'orphan-freight-exemption-delete': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
       round: [
         'git checkout -q --orphan rebuilt',
         'git rm -qrf .',
@@ -25717,8 +25884,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'does not treat the repo-standard .skipIf environment guard as weakening',
       'does not charge a round for assertion lines its base merge merely carried',
       'does not charge a round for a test its base merge deleted on main',
-      'does not charge an edit that keeps an existing skip marker',
+      'does not charge a round for a weakening its fast-forward synced from main',
+      'accepts a skip-marker rename once acknowledged',
+      'does not charge a genuine un-skip',
       'accepts a dash-prefixed filename once acknowledged',
+      'accepts a deleted non-JS test once acknowledged',
       'does not charge a merge both sides strengthened identically',
       'accepts an honest ack for a newline-named test file',
       'accepts an honest ack for a tab-named test file',
@@ -26637,16 +26807,48 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     },
   );
 
+  it('charges an edit that reproduces an existing skip marker', () => {
+    // Renaming an already-skipped test re-adds its marker; additions are
+    // charged on their own — a removal in the same file cannot cancel
+    // them, because un-skipping one test cannot license silencing
+    // another. One ack entry answers the over-charge.
+    const r = runGate({ weaken: 'skiptouch' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
   it.skipIf(!hasBashMapfile)(
-    'does not charge an edit that keeps an existing skip marker',
+    'accepts a skip-marker rename once acknowledged',
     () => {
-      // Renaming an already-skipped test reproduces the marker line on the
-      // added side; the removed one must net against it.
-      const r = runGate({ weaken: 'skiptouch' });
+      const r = runGate({
+        weaken: 'skiptouch',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
       expect(r.status).toBe(0);
-      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+      expect(r.advisories).toContain('pkg/a.test.ts');
     },
   );
+
+  it('charges silencing one test under cover of un-skipping another', () => {
+    // The removed marker of the un-skipped test must not cancel the
+    // marker added on a DIFFERENT test in the same file.
+    const r = runGate({ weaken: 'skip-cross-test' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it.skipIf(!hasBashMapfile)('does not charge a genuine un-skip', () => {
+    // Removing a marker with no addition anywhere stays uncharged.
+    const r = runGate({ weaken: 'unskip' });
+    expect(r.status).toBe(0);
+    expect(r.advisories).not.toContain('weakened or removed pre-existing');
+  });
 
   it.skipIf(!hasBashMapfile)(
     'accepts a dash-prefixed filename once acknowledged',
@@ -26663,6 +26865,32 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       });
       expect(r.status).toBe(0);
       expect(r.advisories).toContain('-x.test.ts');
+    },
+  );
+
+  it('rejects deleting a non-JS test file the JS pathspec missed', () => {
+    // The gate's own header promises that any pre-existing runnable test
+    // file a round deletes is named — the deletion arm must see the
+    // repo's non-JS test shapes, not only the JS naming idioms.
+    const r = runGate({ weaken: 'python-test-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('python/tests/test_wrapper.py');
+    expect(r.rejection).toContain('test file deleted');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts a deleted non-JS test once acknowledged',
+    () => {
+      const r = runGate({
+        weaken: 'python-test-delete',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'python/tests/test_wrapper.py', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('python/tests/test_wrapper.py');
     },
   );
 
@@ -26686,6 +26914,28 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('pkg/b.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');
   });
+
+  it('charges deleting a test that arrived through a fast-forwarded main', () => {
+    // A branch with no unique commits ahead of main rides origin/main's
+    // commits as ordinary parents — no merge commit exists to seed the
+    // introduction set, so the main-ancestry seeding must.
+    const r = runGate({ weaken: 'ff-introduced-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge a round for a weakening its fast-forward synced from main',
+    () => {
+      // Main itself weakened the test; the round only synced onto it. A
+      // fast-forwarded main commit is main's side — freight, exactly as
+      // when the same delta crosses a real merge.
+      const r = runGate({ weaken: 'ff-main-weaken-freight' });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
 
   it('charges a weakened re-add of a test main deleted', () => {
     // Main's deletion rides the merge in as freight; the round's own
@@ -26820,6 +27070,18 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     const r = runGate({ weaken: 'string-decoy' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a JSX-text decoy cancelling a genuine assertion removal', () => {
+    // The <div>expect(...)</div> decoy survives comment stripping and
+    // earns addition credit on the line arm; the blob census must drop a
+    // line whose regex state is still open at EOL — the </div> close
+    // mis-lexes as a regex head — instead of counting the tokens the
+    // mis-lex leaked.
+    const r = runGate({ weaken: 'jsx-text-decoy' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.tsx');
     expect(r.rejection).toContain('assertion line(s) removed');
   });
 
@@ -26998,6 +27260,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.rejection).toContain('assertion line(s) removed');
   });
 
+  it('rejects deleting only the matcher-tail line of a multi-line assertion', () => {
+    // expect( / two(), / ).toBe(2); loses only its matcher tail: no
+    // head-token line is removed, so only the matcher-tail census sees
+    // that the assertion became expect(two());, the maximal relaxation.
+    const r = runGate({ weaken: 'multiline-matcher-drop' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
   it('rejects a skip marker split across a newline', () => {
     // `it` / `.skip(` on two lines is valid JS running as it.skip; the
     // joined view must measure it like the one-line form.
@@ -27067,6 +27339,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // the verdict must still judge the net-range deletion instead of
     // discarding it behind the UNAVAILABLE branch.
     const r = runGate({ weaken: 'orphan-merge-back-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('test file deleted');
+  });
+
+  it('surfaces a freight-shaped deletion when measurement is unavailable', () => {
+    // Present at PR_BASE, absent from origin/main — exempt as main's own
+    // deletion only while the per-commit discriminator ran; the orphan
+    // root puts measurement UNAVAILABLE, so the round's own deletion must
+    // surface instead of hiding behind the exemption.
+    const r = runGate({ weaken: 'orphan-freight-exemption-delete' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('test file deleted');
