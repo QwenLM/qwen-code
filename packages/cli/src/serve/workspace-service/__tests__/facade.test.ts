@@ -1135,6 +1135,31 @@ describe('createDaemonWorkspaceService', () => {
       expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
     });
 
+    it('fails closed when config Skill enumeration is unavailable', async () => {
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: false,
+        skills: [],
+        errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await expect(
+        svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global', {
+          refreshRuntime: false,
+        }),
+      ).rejects.toMatchObject({
+        code: 'skills_config_unavailable',
+        statusCode: 503,
+      });
+    });
+
     it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {
       const liveStatus = {
         v: 1,

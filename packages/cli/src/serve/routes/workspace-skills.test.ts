@@ -225,6 +225,25 @@ describe('workspace Skill management routes', () => {
     );
   });
 
+  it('does not report a missing Skill when config enumeration fails', async () => {
+    const harness = createHarness();
+    harness.getSkillsConfigStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      skills: [],
+      errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
+    });
+
+    const response = await request(harness.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('skills_config_unavailable');
+    expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
   it('prefers an exact-case configured Skill when names differ only by case', async () => {
     const harness = createHarness();
     const configured = harness.configStatus.skills.find(

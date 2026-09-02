@@ -2209,6 +2209,7 @@ describe('DELETE /workspaces/:workspace', () => {
     Object.assign(runtime.bridge, { sessionCount: 2, activePromptCount: 1 });
     const runtimeRemoval = createRemovalController(1);
     const removeByIds = vi.fn().mockResolvedValue(2);
+    const onWorkspaceRemoved = vi.fn();
     const acpHandle = {
       beginWorkspaceDrain: vi.fn(),
       cancelWorkspaceDrain: vi.fn(),
@@ -2223,6 +2224,7 @@ describe('DELETE /workspaces/:workspace', () => {
       workspaceRegistry: createMockRegistry([runtime]),
       runtimeRemoval,
       getAcpHandle: () => acpHandle as never,
+      onWorkspaceRemoved,
       workspaceRegistrationStore: {
         removeByIds,
       } as unknown as WorkspaceRegistrationStore,
@@ -2270,6 +2272,7 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(acpHandle.disposeWorkspace).toHaveBeenCalledWith(
       runtime.workspaceId,
     );
+    expect(onWorkspaceRemoved).toHaveBeenCalledWith(runtime.workspaceCwd);
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
     ).toBeUndefined();

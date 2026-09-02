@@ -1071,6 +1071,16 @@ export function createDaemonWorkspaceService(
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
           : await getWorkspaceSkillsStatus();
+      if (
+        opts?.refreshRuntime === false &&
+        (!status.initialized || status.errors?.length)
+      ) {
+        throw new WorkspaceSkillManagementError(
+          'skills_config_unavailable',
+          'Skills configuration could not be enumerated',
+          503,
+        );
+      }
       const expectedLevel = scope === 'workspace' ? 'project' : 'user';
       const matches = status.skills.filter(
         (candidate) => candidate.name.trim().toLowerCase() === normalizedName,

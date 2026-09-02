@@ -18,6 +18,7 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
     current: {
       status: undefined,
       skills: [] as DaemonWorkspaceSkillStatus[],
+      configSkills: undefined as DaemonWorkspaceSkillStatus[] | undefined,
       loading: false,
       error: undefined,
       ensureRuntime: vi.fn().mockResolvedValue(undefined),
@@ -42,7 +43,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ clientId: 'client-1' }),
   useSkills: () => ({
     ...skillsState.current,
-    configStatus: { skills: skillsState.current.skills },
+    configStatus: {
+      skills: skillsState.current.configSkills ?? skillsState.current.skills,
+    },
   }),
   useWorkspace: () => workspaceState.current,
 }));
@@ -53,17 +56,28 @@ const { I18nProvider } = await import('../../i18n');
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderPage(workspaceCwd?: string): Promise<void> {
+async function renderPage(
+  workspaceCwd?: string,
+  onUseSkill = vi.fn(),
+): Promise<void> {
   await act(async () => {
     root.render(
       <I18nProvider language="en">
         <SkillsManagerPage
           onClose={vi.fn()}
-          onUseSkill={vi.fn()}
+          onUseSkill={onUseSkill}
           workspaceCwd={workspaceCwd}
         />
       </I18nProvider>,
     );
+  });
+}
+
+async function openSkill(name: string): Promise<void> {
+  const skill = container.querySelector<HTMLElement>(`[aria-label="${name}"]`);
+  expect(skill).not.toBeNull();
+  await act(async () => {
+    skill!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
 }
 
@@ -123,6 +137,7 @@ beforeEach(() => {
   root = createRoot(container);
   skillsState.current.status = undefined;
   skillsState.current.skills = [];
+  skillsState.current.configSkills = undefined;
   skillsState.current.loading = false;
   skillsState.current.error = undefined;
   skillsState.current.ensureRuntime.mockClear();
@@ -259,6 +274,53 @@ describe('SkillsManagerPage', () => {
       true,
       { clientId: 'client-1' },
     );
+  });
+
+  it('keeps runtime-discovered installed Skills manageable', async () => {
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'external',
+        description: 'Added outside the daemon',
+        level: 'project',
+        modelInvocable: true,
+        disabledReason: 'hard',
+        installedPath: '/workspace/demo/.qwen/skills/external/SKILL.md',
+      },
+    ];
+    skillsState.current.configSkills = [];
+
+    await renderPage();
+    await openDisabledSkill('external');
+    await enableSelectedSkill();
+
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'external',
+      true,
+      { clientId: 'client-1' },
+    );
+  });
+
+  it('does not run a Skill from a workspace other than the active session', async () => {
+    const onUseSkill = vi.fn();
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'ok',
+        name: 'deploy',
+        description: 'Deploy from the selected workspace',
+        level: 'project',
+        modelInvocable: true,
+      },
+    ];
+
+    await renderPage('/workspace/secondary', onUseSkill);
+    await openSkill('deploy');
+
+    expect(runButton()?.disabled).toBe(true);
+    runButton()?.click();
+    expect(onUseSkill).not.toHaveBeenCalled();
   });
 
   it('shows the authoritative enabled state after a normal toggle', async () => {

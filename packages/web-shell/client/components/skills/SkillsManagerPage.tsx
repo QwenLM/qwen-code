@@ -210,9 +210,11 @@ export function SkillsManagerPage({
   );
   const selectedSkillManaged =
     selectedSkill !== undefined &&
-    configStatus?.skills.some(
-      (skill) => skill.name.toLowerCase() === selectedSkill.name.toLowerCase(),
-    );
+    (selectedSkill.installedPath !== undefined ||
+      configStatus?.skills.some(
+        (skill) =>
+          skill.name.toLowerCase() === selectedSkill.name.toLowerCase(),
+      ));
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],
@@ -416,7 +418,11 @@ export function SkillsManagerPage({
               </div>
             </div>
             <Button
-              disabled={selectedSkill.status === 'disabled'}
+              disabled={
+                selectedSkill.status === 'disabled' ||
+                (workspaceCwd !== undefined &&
+                  workspaceCwd !== workspace.workspaceCwd)
+              }
               onClick={() => onUseSkill(selectedSkill.name)}
             >
               <PlayIcon data-icon="inline-start" />

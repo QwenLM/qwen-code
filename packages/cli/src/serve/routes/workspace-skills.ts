@@ -290,6 +290,13 @@ async function deleteConfiguredSkill(
   scope: WorkspaceSkillScope,
 ): Promise<WorkspaceSkillMutationResult> {
   const status = await deps.getSkillsConfigStatus(workspaceCwd, trusted);
+  if (!status.initialized || status.errors?.length) {
+    throw new WorkspaceSkillManagementError(
+      'skills_config_unavailable',
+      'Skills configuration could not be enumerated',
+      503,
+    );
+  }
   const normalizedName = skillName.trim().toLowerCase();
   const matches = status.skills.filter(
     (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
