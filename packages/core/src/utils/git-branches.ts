@@ -28,6 +28,31 @@ export interface GitBranchInfo {
   upstreamGone?: boolean;
   ahead: number;
   behind: number;
+  /**
+   * Where `git push` would push, by git's own resolution
+   * (`branch.<name>.pushRemote` / `remote.pushDefault` / the upstream via
+   * `push.default`). Absent when git cannot resolve a push destination.
+   * Differs from `upstream` in triangular (fork) workflows.
+   */
+  pushTarget?: string;
+  /** Commits ahead of the push target; absent when `pushTarget` is. */
+  pushAhead?: number;
+  /** Commits behind the push target; absent when `pushTarget` is. */
+  pushBehind?: number;
+  /**
+   * Push destination resolves but its ref does not exist yet (`git push`
+   * would create the remote branch). `pushAhead`/`pushBehind` are absent.
+   */
+  pushGone?: boolean;
+  /**
+   * A push destination override is configured for this branch
+   * (`branch.<name>.pushRemote` or `remote.pushDefault`). Notably,
+   * `%(push)` cannot resolve a destination under the default
+   * `push.default=simple` in exactly this triangular shape even though a
+   * plain `git push` succeeds — so when this is set and `pushTarget` is
+   * absent, the push side is configured-but-unknown, not "the upstream".
+   */
+  pushConfigured?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -122,12 +147,31 @@ export async function fetchGitBranches(
   // error and returning an empty-but-"available" result.
   await runGit(cwd, ['rev-parse', '--git-dir'], env);
 
+  // Which branches have a push destination override. `--get-regexp` exits 1
+  // on no matches; treat that as empty. Keys print lowercased but the
+  // branch subsection keeps its case.
+  const pushConfigRaw = await runGit(
+    cwd,
+    [
+      'config',
+      '--get-regexp',
+      '^branch\\..*\\.pushremote$|^remote\\.pushdefault$',
+    ],
+    env,
+  ).catch(() => '');
+  const pushDefaultSet = /^remote\.pushdefault /m.test(pushConfigRaw);
+  const pushRemoteBranches = new Set(
+    [...pushConfigRaw.matchAll(/^branch\.(.*)\.pushremote /gm)].map(
+      (m) => m[1],
+    ),
+  );
+
   const [localRaw, remoteRaw, tagsRaw, headRaw, reflogRaw] = await Promise.all([
     runGit(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/heads/',
       ],
       env,
@@ -136,7 +180,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/remotes/',
       ],
       env,
@@ -159,7 +203,11 @@ export async function fetchGitBranches(
     ).catch(() => ''),
   ]);
 
-  const local = parseBranchLines(localRaw);
+  const local = parseBranchLines(localRaw).map((b) =>
+    pushDefaultSet || pushRemoteBranches.has(b.name)
+      ? { ...b, pushConfigured: true }
+      : b,
+  );
   const remote = parseBranchLines(remoteRaw);
   const tags = parseTagLines(tagsRaw);
   const recent = parseRecentBranches(reflogRaw, headRaw.trim());
@@ -210,6 +258,22 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
         // configured but its ref is missing; ahead/behind are meaningless then.
         const upstreamGone = upstream !== undefined && /\bgone\b/.test(track);
 
+        // Push-side counterpart: `%(push)` is git's own answer to "where
+        // would `git push` go", honoring pushRemote/pushDefault — the same
+        // resolution a plain `git push` uses, so no precedence is re-derived
+        // here. Empty when unresolvable (e.g. `push.default` cannot pick).
+        const pushTarget = parts[7] || undefined;
+        const pushTrack = parts[8] ?? '';
+        const pushGone = pushTarget !== undefined && /\bgone\b/.test(pushTrack);
+        let pushAhead: number | undefined;
+        let pushBehind: number | undefined;
+        if (pushTarget !== undefined && !pushGone) {
+          const pa = /ahead (\d+)/.exec(pushTrack);
+          const pb = /behind (\d+)/.exec(pushTrack);
+          pushAhead = pa ? parseInt(pa[1], 10) : 0;
+          pushBehind = pb ? parseInt(pb[1], 10) : 0;
+        }
+
         return {
           name,
           isHead,
@@ -217,6 +281,10 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
           ...(upstreamGone ? { upstreamGone } : {}),
           ahead,
           behind,
+          ...(pushTarget !== undefined ? { pushTarget } : {}),
+          ...(pushAhead !== undefined ? { pushAhead } : {}),
+          ...(pushBehind !== undefined ? { pushBehind } : {}),
+          ...(pushGone ? { pushGone } : {}),
           commitDate,
           commitSubject,
         };

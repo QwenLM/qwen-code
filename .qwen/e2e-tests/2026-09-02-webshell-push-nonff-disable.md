@@ -9,8 +9,14 @@ the sidebar git chip with the repo in each state:
 2. Behind 3, clean tree, ahead 0.
 3. Ahead 1 / behind 1 (diverged).
 4. Conflicted merge in progress on the branch, ahead 1 / behind 1.
-5. Update Project blocked by uncommitted changes (409 panel up), ahead 1 /
-   behind 0; click Push while the panel shows.
+5. Behind 1 with a dirty tracked file whose incoming change conflicts; click
+   Update Project to raise the 409 resolution panel.
+6. Triangular (fork) workflow: `branch.<name>.remote = upstream`,
+   `branch.<name>.pushRemote = origin`; behind `upstream/main` by 3, ahead of
+   `origin/main` by 2.
+7. Same triangular config, behind upstream, with the panel from state 5 up.
+8. Push destination configured (`pushRemote`) but never pushed — the push
+   ref does not exist yet.
 
 ## Checks
 
@@ -23,9 +29,21 @@ the sidebar git chip with the repo in each state:
 - State 4: Push shows the warning "Merging" and stays **enabled** — during an
   in-progress operation the behind count is in flux (concluding the merge is
   what resolves it), so the row only warns.
-- State 5: the pull-resolution panel clears and the push outcome shows in the
-  status line (unchanged from #10390's flow; the scenario's fixture must be
-  ahead-only now).
+- State 5: while the panel is up, the Push row is **disabled** ("Nothing to
+  push", dimmed) — the behind > 0 that raised the panel is exactly what
+  disables push. This is the reachable E2E check of the panel-vs-push
+  interaction; the "competing push clears the panel" race stays unit-only, on
+  the triangular fixture below.
+- State 6: Update Project shows `↓3 · upstream/main`; Push shows `↑2` and is
+  **enabled** — the disable reasons about the push target (git's `%(push)`
+  resolution), not the tracking upstream.
+- State 7: the panel is up (pull-side behind) while Push stays enabled
+  (push-side ahead); clicking Push clears the panel and shows its outcome —
+  the real-git shape of the unit race test.
+- State 8: Push stays enabled (pushing creates the remote branch).
+- After a **failed** Update Project (e.g. the upstream ref was deleted since
+  the last fetch), the listing re-fetches: the rows leave the pre-pull
+  snapshot without reopening the popover.
 - A caller status and the popover's own on-open fetch carrying the same
   `computedAt` render the fetched counters (tie breaks toward the fetch).
 

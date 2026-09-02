@@ -285,6 +285,92 @@ describe('fetchGitBranches upstream tracking', () => {
   });
 });
 
+describe('fetchGitBranches push-side tracking', () => {
+  it('reports the push target and its counts in a triangular workflow', async () => {
+    const dir = makeRepo();
+    const upstreamRemote = makeBareRemote();
+    const originRemote = makeBareRemote();
+    git(dir, 'remote', 'add', 'upstream', upstreamRemote);
+    git(dir, 'remote', 'add', 'origin', originRemote);
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'push', '-q', 'origin', 'master');
+    // Local gains one commit (ahead of origin), upstream gains one via a
+    // second clone (local behind upstream) — the fork-workflow shape.
+    fs.writeFileSync(path.join(dir, 'local.txt'), 'x\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitother-'));
+    tmpRoots.push(other);
+    git(other, 'clone', '-q', upstreamRemote, 'c');
+    const clone = path.join(other, 'c');
+    git(clone, 'config', 'user.email', 'test@example.com');
+    git(clone, 'config', 'user.name', 'Test');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'up.txt'), 'y\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'up');
+    git(clone, 'push', '-q', 'origin', 'master');
+    git(dir, 'fetch', '-q', 'upstream');
+
+    // Under the default `push.default=simple`, git refuses to resolve
+    // `@{push}` in a triangular repo even though a plain `git push`
+    // succeeds — the listing reports configured-but-unknown.
+    const simpleHead = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(simpleHead?.upstream).toBe('upstream/master');
+    expect(simpleHead?.behind).toBe(1);
+    expect(simpleHead?.pushTarget).toBeUndefined();
+    expect(simpleHead?.pushConfigured).toBe(true);
+
+    // With a resolvable push.default the push-side counts come through.
+    git(dir, 'config', 'push.default', 'current');
+    const head = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(1);
+    expect(head?.pushBehind).toBe(0);
+    expect(head?.pushGone).toBeUndefined();
+    expect(head?.pushConfigured).toBe(true);
+  });
+
+  it('marks a resolvable push destination whose ref is missing as pushGone', async () => {
+    const dir = makeRepo();
+    const upstreamRemote = makeBareRemote();
+    const originRemote = makeBareRemote();
+    git(dir, 'remote', 'add', 'upstream', upstreamRemote);
+    git(dir, 'remote', 'add', 'origin', originRemote);
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'config', 'push.default', 'current');
+    // Never pushed to origin: the push destination resolves by config but
+    // its ref does not exist — `git push` would create it.
+    const head = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushGone).toBe(true);
+    expect(head?.pushAhead).toBeUndefined();
+    expect(head?.pushBehind).toBeUndefined();
+  });
+
+  it('reports the upstream itself as push target in the plain clone shape', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'master');
+    const head = (await fetchGitBranches(dir)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(0);
+    expect(head?.pushBehind).toBe(0);
+    expect(head?.pushConfigured).toBeUndefined();
+  });
+});
+
 describe('fetchGitBranches recent branches', () => {
   it('lists recently checked-out branches from the reflog', async () => {
     const dir = makeRepo();

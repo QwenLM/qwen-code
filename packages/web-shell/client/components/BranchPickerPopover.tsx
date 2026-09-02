@@ -193,24 +193,50 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
+  // The push row reasons about the *push* destination, which may differ from
+  // the tracking upstream in triangular workflows. Three shapes:
+  //  - `pushTarget` resolved (git's own `%(push)` answer): its counts rule.
+  //  - `pushConfigured` without a target (`push.default=simple` cannot
+  //    resolve triangular even though plain `git push` succeeds): the push
+  //    side is unknown — fail open, never disable on upstream counts.
+  //  - Neither: a plain clone; the upstream is the push destination.
+  const pushKnown = head?.pushTarget !== undefined && head.pushGone !== true;
+  const pushSideUnknown =
+    head !== undefined &&
+    head.pushTarget === undefined &&
+    head.pushConfigured === true;
+  const pushAhead = pushKnown ? (head.pushAhead ?? 0) : ahead;
+  const pushBehind = pushKnown ? (head.pushBehind ?? 0) : behind;
   // A detached HEAD makes the daemon's `git push --set-upstream` fail, and a
-  // branch behind its upstream cannot push: moving the remote ref to an older
-  // (behind-only) or diverged tip is a non-fast-forward rejection regardless
-  // of config. Mid-operation the picture can change by the time the operation
-  // ends, so the row only warns then; conflicts alone don't stop a push.
+  // branch behind its push destination cannot push: moving that ref to an
+  // older or diverged tip is a non-fast-forward rejection. The counts are
+  // from the last fetch — a remote deleted or force-reset since then keeps
+  // the row disabled until a fetch refreshes the picture (Update Project
+  // re-fetches the listing even when the pull itself fails). A missing push
+  // ref (`pushGone`) never disables: pushing would create the branch.
+  // Mid-operation the picture can change by the time the operation ends, so
+  // the row only warns then; conflicts alone don't stop a push.
   const pushDisabled =
-    detached || (!s.operation && hasUpstream === true && behind > 0);
+    detached ||
+    (!s.operation &&
+      !pushSideUnknown &&
+      head?.pushGone !== true &&
+      hasUpstream === true &&
+      pushBehind > 0);
   if (blocker) {
     push = blocker;
   } else if (hasUpstream === false) {
     push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
-  } else if (ahead > 0 && behind > 0) {
+  } else if (pushAhead > 0 && pushBehind > 0) {
     push = {
-      text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
+      text: t('branchPicker.hint.aheadBehind', {
+        ahead: pushAhead,
+        behind: pushBehind,
+      }),
       tone: 'warning',
     };
-  } else if (ahead > 0) {
-    push = { text: `↑${ahead}`, tone: 'info' };
+  } else if (pushAhead > 0) {
+    push = { text: `↑${pushAhead}`, tone: 'info' };
   } else if (hasUpstream) {
     push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
   }
@@ -583,6 +609,10 @@ export function BranchPickerPopover({
           clearPullPanel();
           showStatus(pullErrorMessage(err), 'error');
         }
+        // Even a failed pull has usually fetched: refresh the listing (and
+        // the ahead/behind counts the action hints disable on) so an error
+        // never strands the rows on a pre-pull snapshot.
+        await fetchBranches();
       } finally {
         setBusyAction(null);
       }

@@ -430,11 +430,20 @@ describe('BranchPickerPopover actions', () => {
       success: true,
       output: 'pushed to origin',
     });
-    // Ahead-only: the push row must be enabled for this scenario (a branch
-    // behind its upstream now has push disabled as a non-fast-forward).
+    // Triangular fixture: behind the tracking upstream (so a real pull can
+    // fail with the 409 that raises the panel) while ahead of the push
+    // remote (so the Push row is genuinely enabled) — a state real git can
+    // occupy, unlike ahead-only-with-a-409.
     mountWithBranches({
       ...BRANCHES,
-      local: [{ ...BRANCHES.local[0], ahead: 1, behind: 0 }],
+      local: [
+        {
+          ...BRANCHES.local[0],
+          pushTarget: 'origin/main',
+          pushAhead: 1,
+          pushBehind: 0,
+        },
+      ],
     });
     await flush();
 
@@ -829,6 +838,77 @@ describe('deriveActionHints', () => {
       text: 'branchPicker.hint.setsUpstream',
       tone: 'info',
     });
+    expect(h.pushDisabled).toBe(false);
+  });
+
+  it('reasons about the push target, not the upstream, when they differ', () => {
+    // Triangular (fork) workflow: behind the tracking upstream, ahead of the
+    // push remote — `git push` fast-forwards origin and succeeds.
+    const triangular = branches({
+      upstream: 'upstream/main',
+      behind: 3,
+      pushTarget: 'origin/main',
+      pushAhead: 2,
+      pushBehind: 0,
+    });
+    const h = deriveActionHints(tKey, triangular, status());
+    expect(h.pull).toEqual({ text: '↓3 · upstream/main', tone: 'info' });
+    expect(h.push).toEqual({ text: '↑2', tone: 'info' });
+    expect(h.pushDisabled).toBe(false);
+
+    // Diverged from the push target itself: disabled with push-side counts.
+    const diverged = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        behind: 0,
+        pushTarget: 'origin/main',
+        pushAhead: 1,
+        pushBehind: 1,
+      }),
+      status(),
+    );
+    expect(diverged.push).toEqual({
+      text: 'branchPicker.hint.aheadBehind:{"ahead":1,"behind":1}',
+      tone: 'warning',
+    });
+    expect(diverged.pushDisabled).toBe(true);
+  });
+
+  it('fails open when a push override is configured but unresolvable (simple triangular)', () => {
+    // The R1-1 witness shape: branch.<name>.pushRemote set, push.default
+    // left at simple — `%(push)` cannot resolve, yet `git push` succeeds.
+    const h = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        behind: 3,
+        pushConfigured: true,
+      }),
+      status(),
+    );
+    expect(h.pushDisabled).toBe(false);
+    // Without the override the same counts disable (plain-clone shape).
+    expect(
+      deriveActionHints(
+        tKey,
+        branches({ upstream: 'upstream/main', behind: 3 }),
+        status(),
+      ).pushDisabled,
+    ).toBe(true);
+  });
+
+  it('never disables push when the push ref is missing (push would create it)', () => {
+    const h = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        behind: 2,
+        pushTarget: 'origin/feat',
+        pushGone: true,
+      }),
+      status(),
+    );
     expect(h.pushDisabled).toBe(false);
   });
 
@@ -1285,6 +1365,32 @@ describe('BranchPickerPopover action hints', () => {
     });
     await flush();
     expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BranchPickerPopover pull-failure refresh', () => {
+  it('re-fetches the listing when a pull fails, so the rows leave the pre-pull snapshot', async () => {
+    workspaceGitBranches
+      .mockResolvedValueOnce(branches({ upstream: 'origin/main', behind: 2 }))
+      .mockResolvedValue(branches({ upstream: 'origin/main', behind: 0 }));
+    workspaceGitPull.mockRejectedValueOnce(new Error('fetch refused'));
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({ status: status() });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+
+    const clickTarget = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((b) => b.textContent?.includes('Update Project'));
+    act(() => {
+      clickTarget?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('fetch refused');
   });
 });
 
