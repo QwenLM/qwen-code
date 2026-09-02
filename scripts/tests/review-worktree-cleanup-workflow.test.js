@@ -171,7 +171,7 @@ function expectQuarantineFallback(run) {
   // the for-loop list in ci.yml and qwen-code-pr-review.yml, or the sweep
   // silently no-ops and the checkout poisoning recurs.
   expect(code).toContain(
-    'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do',
+    'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do',
   );
   // The existence guard's `-L` arm is the only thing that sees a dangling
   // symlink (`-e` follows the link and reports it absent), and the chmod
@@ -347,6 +347,14 @@ describe('review worktree cleanup steps', () => {
       const restoreIdx = steps.findIndex(
         (s) => s.name === 'Restore workspace ownership',
       );
+      // Existence, not just ordering: with the step gone restoreIdx is -1
+      // and the ordering comparison below still passes, while root-owned
+      // leftovers defeat the sweep and the checkout again (the EACCES
+      // incident class the restore step exists for).
+      expect(
+        restoreIdx,
+        `job "${id}" lost its ownership restore`,
+      ).toBeGreaterThan(-1);
       expect(cleanIdx, id).toBeGreaterThan(restoreIdx);
       expect(cleanIdx, id).toBeLessThan(checkoutIdx);
       expectCleanupRecipe(run);
@@ -391,6 +399,52 @@ describe('review worktree cleanup steps', () => {
           expect(existsSync(join(workspace, '.qwenignore')), id).toBe(true);
           // Deleted, not moved: a workspace that removes cleanly must not
           // leave a quarantine directory behind on either copy.
+          expect(existsSync(join(root, '_qwen-quarantine')), id).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!sweepToolsAvailable)(
+    'removes a leftover trusted-ci-classifier before the classifier checkout',
+    () => {
+      // actions/checkout reuses a leftover directory whose origin URL
+      // matches and runs git — hooks included — inside it, so a residue of
+      // an earlier classifier checkout on the shared pool is a code-
+      // execution hole, not a warm cache. Both shared-pool workflows sweep
+      // the name (the review job inherits the same residue on the same
+      // pool), and the byte-identity pin above already forces every ci.yml
+      // copy to match the one exercised here.
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(join(workspace, 'trusted-ci-classifier', '.git', 'hooks'), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(
+            workspace,
+            'trusted-ci-classifier',
+            '.git',
+            'hooks',
+            'post-checkout',
+          ),
+          '#!/bin/sh\n',
+        );
+
+        try {
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(existsSync(join(workspace, 'trusted-ci-classifier')), id).toBe(
+            false,
+          );
           expect(existsSync(join(root, '_qwen-quarantine')), id).toBe(false);
         } finally {
           rmSync(root, { recursive: true, force: true });
