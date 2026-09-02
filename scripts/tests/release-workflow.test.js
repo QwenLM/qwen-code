@@ -537,11 +537,11 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"',
+    expect(testStep.run).toContain(
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
     expect(testStep.env.VITEST_RETRY).toBe(
-      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}",
+      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -556,6 +556,58 @@ describe('release workflow', () => {
         packageJson.scripts['test:ci'].split('&&').pop()?.trim(),
         path,
       ).toMatch(/^vitest run(?:\s|$)/);
+    }
+  });
+
+  it('passes --retry only when the release schedule asks for one', () => {
+    // The flag reaches every workspace's vitest, where a command line option
+    // outranks the config. Passing --retry=0 on stable releases would switch
+    // off a workspace's own retry (packages/sdk-typescript) on this lane
+    // alone, so the stable path must omit the flag rather than zero it.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [retry, expected] of [
+      ['2', '--retry=2'],
+      ['', null],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+      try {
+        const stub = join(dir, 'npm');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+        chmodSync(stub, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: retry,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, result.stderr).toBe(0);
+        const args = result.stdout.trim().split('\n');
+        expect(args, retry).toContain('--passWithNoTests');
+        // An empty positional would reach vitest as a test-name filter.
+        expect(args, retry).not.toContain('');
+        if (expected) {
+          expect(args, retry).toContain(expected);
+        } else {
+          expect(
+            args.some((arg) => arg.startsWith('--retry')),
+            retry,
+          ).toBe(false);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
