@@ -466,7 +466,11 @@ export class LiveSession {
       onOutputAudioDelta: (event: { audio: Uint8Array }) => {
         if (!current()) return;
         this.host.sendOutputAudio(context.epoch, event.audio);
-        context.injector.noteOutputAudio(event.audio.byteLength);
+        // v7 Host sends real playback_started/completed receipts;
+        // v6 Host doesn't, so treat each audio delta as playback
+        // started as a forward-compatible fallback. The injector's
+        // window stays closed until clearOutput or speechStarted.
+        context.injector.notePlaybackStarted();
       },
       onResponseCreated: (event: { responseId: string; authority: string }) => {
         if (!current()) return;
