@@ -246,6 +246,15 @@ describe('no-AK integration CI wiring', () => {
     expect(classifyJob).toContain(
       "ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'",
     );
+    // The classifier wrapper calls `repos/{}/pulls/{}/files` and
+    // `repos/{}/pulls/{}`, so the job token needs `pull-requests` scope:
+    // the workflow-level grant lists none, and without a job-level block a
+    // same-repo PR's file listing 403s and classification falls back to
+    // `full` — a regression against the base lane that classified under
+    // `pull-requests: 'write'` (#10548 verify F1).
+    expect(classifyJob).toContain(
+      "    permissions:\n      contents: 'read'\n      pull-requests: 'read'",
+    );
     expect(trustedClassifierCheckout).toContain(
       'if: "${{ github.event_name == \'pull_request\' }}"',
     );

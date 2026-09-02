@@ -445,7 +445,7 @@ describe('GitHub helper tests', () => {
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
     // setup-node and `npm ci` steps are gated on the full profile), so every
-    // suite it lists must import node: builtins only. These 8 suites import
+    // suite it lists must import node: builtins only. These 9 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
     // fresh hosted runner (#10548 review R6-1). The full-profile helper step
@@ -462,6 +462,7 @@ describe('GitHub helper tests', () => {
     const yamlSuites = [
       '.github/scripts/classify-release-notes.test.mjs',
       '.github/scripts/resolve-sandbox-image.test.mjs',
+      '.github/scripts/web-shell-visuals-publish.test.mjs',
       '.github/scripts/qwen-triage-workflow.test.mjs',
       '.github/scripts/assign-issue-owner.test.mjs',
       '.github/scripts/auto-minimize-spam.test.mjs',
