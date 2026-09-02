@@ -11,10 +11,9 @@
  * {@link OpenTuiAppHost}, the {@link OpenTuiSlashGateway} routing gate, and the
  * {@link OpenTuiErrorBoundary}. Only the collaborators the shell delegates to
  * are stubbed: the slash dispatcher (so a submission resolves to a chosen
- * outcome without running a real command), the `@`-mention expander, and the
- * child widgets it renders (the dialog mount and the composer, reduced to
- * string markers that also capture their props). This asserts the seams the
- * design names for this batch:
+ * outcome without running a real command) and the child widgets it renders (the
+ * dialog mount and the composer, reduced to string markers that also capture
+ * their props). This asserts the seams the design names for this batch:
  *
  *  - composer input flows through the gateway and the outcome is applied:
  *    `open_dialog` swaps the composer for the dialog mount, `submit_prompt`
@@ -23,10 +22,9 @@
  *    forwarded as a structured argument rather than folded into the text;
  *  - a submission that arrives while a turn responds is held unless the command
  *    opted into running mid-turn, then replayed in order on the idle edge;
- *  - an idle `@`-mention is expanded for the model while the raw composer text
- *    rides along as provenance, a mid-turn one is forwarded as plain text (it
- *    becomes steering, which drops the expansion), and a declined expansion
- *    reports the reason instead of silently sending nothing;
+ *  - a prompt reaches the live-turn seam as typed, with the raw text also
+ *    riding along as provenance — `@path` expansion belongs to the stream
+ *    layer, so text queued mid-turn is expanded too;
  *  - a failed dispatcher initialization rejects later submissions with the
  *    recorded reason instead of misrouting to the model;
  *  - the confirmation bridge renders a real modal (shell / action) and the
@@ -43,8 +41,6 @@ import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
-import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -56,11 +52,6 @@ const mocks = vi.hoisted(() => {
     loadRejects: false,
     deferDuringStreaming: false,
     handledTexts: [] as string[],
-    atCalls: [] as string[],
-    atResult: {
-      processedQuery: 'expanded file content',
-      shouldProceed: true,
-    } as HandleAtCommandResult,
     host: null as unknown,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
@@ -144,15 +135,6 @@ vi.mock('./commands-dispatch.js', () => ({
   },
 }));
 
-// @-mention expander: records the queries it receives and answers with the
-// configured result (the real one reads files through Config).
-vi.mock('../hooks/atCommandProcessor.js', () => ({
-  handleAtCommand: async ({ query }: { query: string }) => {
-    mocks.state.atCalls.push(query);
-    return mocks.state.atResult;
-  },
-}));
-
 // Child widgets: string markers that also record their props for assertions.
 vi.mock('./opentui-dialog-mount.js', () => ({
   OpenTuiDialogMount: (props: Record<string, unknown>) => {
@@ -223,11 +205,6 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.loadRejects = false;
     mocks.state.deferDuringStreaming = false;
     mocks.state.handledTexts.length = 0;
-    mocks.state.atCalls.length = 0;
-    mocks.state.atResult = {
-      processedQuery: 'expanded file content',
-      shouldProceed: true,
-    };
     mocks.state.host = null;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
@@ -371,66 +348,20 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
-  it('expands an idle @-mention and keeps the raw text as provenance', async () => {
+  it('forwards an @-mention raw, leaving expansion to the stream layer', async () => {
     const onSubmitPrompt = vi.fn();
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
-    mocks.state.atResult = {
-      processedQuery: 'EXPANDED FILE CONTENT',
-      shouldProceed: true,
-    };
 
+    // Expanding here would miss the text a turn queues mid-way, so the shell
+    // hands over what was typed and `livePromptEvents` resolves the mentions.
     await submit('summarize @src/a.ts');
-    expect(mocks.state.atCalls).toEqual(['summarize @src/a.ts']);
-    expect(onSubmitPrompt).toHaveBeenCalledWith(
-      'EXPANDED FILE CONTENT',
-      undefined,
-      { submittedPrompt: 'summarize @src/a.ts' },
-    );
-  });
-
-  it('forwards a mid-turn @-mention as plain text, since steering has no expansion', async () => {
-    const onSubmitPrompt = vi.fn();
-    renderApp({ streaming: true, onSubmitPrompt });
-    await settle();
-    mocks.state.handleResult = false;
-
-    // A submission arriving during a turn is not a fresh prompt: the expansion
-    // would be read from disk and then dropped on the steering hop.
-    await submit('summarize @src/a.ts');
-    expect(mocks.state.atCalls).toEqual([]);
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'summarize @src/a.ts',
       undefined,
       { submittedPrompt: 'summarize @src/a.ts' },
     );
-  });
-
-  it('reports a declined @-expansion instead of sending an unexpanded prompt', async () => {
-    const onSubmitPrompt = vi.fn();
-    renderApp({ onSubmitPrompt });
-    await settle();
-    mocks.state.handleResult = false;
-    const failure: IndividualToolCallDisplay = {
-      callId: 'client-read-1',
-      name: 'Read File(s)',
-      description: 'Error attempting to read files',
-      status: ToolCallStatus.Error,
-      resultDisplay: 'Error reading files (missing.ts): no such file',
-      confirmationDetails: undefined,
-    };
-    mocks.state.atResult = {
-      processedQuery: null,
-      shouldProceed: false,
-      toolDisplays: [failure],
-    };
-
-    await submit('read @missing.ts');
-    expect(onSubmitPrompt).not.toHaveBeenCalled();
-    expect(
-      screen.getByText('Error reading files (missing.ts): no such file'),
-    ).toBeTruthy();
   });
 
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
@@ -601,6 +532,28 @@ describe('OpenTuiApp shell wiring', () => {
     await settle();
     await submit('/help');
     expect(mocks.state.handledTexts).toEqual(['/help']);
+  });
+
+  it('stops the turn and exits on a mid-turn quit instead of queueing it', async () => {
+    const onQuit = vi.fn();
+    const onInterrupt = vi.fn();
+    // The dispatcher exempts the quit family from the mid-turn gate, so the
+    // shell has to reach the exit while the turn is still responding.
+    renderApp({ streaming: true, onQuit, onInterrupt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages: [],
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/quit');
+    expect(mocks.state.handledTexts).toEqual(['/quit']);
+    expect(screen.queryByText(/Queued/)).toBeNull();
+    expect(onQuit).toHaveBeenCalledWith([]);
+    // Cancel before exiting: the drain must not race a stream still writing.
+    expect(onInterrupt.mock.invocationCallOrder[0]).toBeLessThan(
+      onQuit.mock.invocationCallOrder[0],
+    );
   });
 
   it('catches a subtree render error inside the error boundary', async () => {

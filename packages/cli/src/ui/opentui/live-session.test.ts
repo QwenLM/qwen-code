@@ -24,6 +24,8 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
+import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 // The steering test drives one full tool round-trip; replace the scheduler
 // with a stub that completes the pending calls immediately.
@@ -139,6 +141,25 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+// The `@`-mention expander reads files through Config; record the queries it
+// receives and answer with the configured result. live-session owns the
+// expansion (ink expands in processQuery / resolveSteeredMessages, never at the
+// composer), so this is where the behaviour is pinned.
+const atMocks = vi.hoisted(() => ({
+  calls: [] as string[],
+  result: {
+    processedQuery: null,
+    shouldProceed: true,
+  } as HandleAtCommandResult,
+}));
+
+vi.mock('../hooks/atCommandProcessor.js', () => ({
+  handleAtCommand: async ({ query }: { query: string }) => {
+    atMocks.calls.push(query);
+    return atMocks.result;
+  },
+}));
+
 function createFakeConfig(sendMessageStream: (...args: unknown[]) => unknown) {
   return {
     initialize: vi.fn(async () => {}),
@@ -147,6 +168,11 @@ function createFakeConfig(sendMessageStream: (...args: unknown[]) => unknown) {
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
     getContentGeneratorConfig: () => ({ authType: 'qwen-oauth' }),
+    getDebugLogger: () => ({
+      debug: () => {},
+      warn: () => {},
+      error: () => {},
+    }),
   } as unknown as Config;
 }
 
@@ -157,8 +183,23 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
+  /** A `@path` read as the expander reports it (ink's tool_group entry). */
+  const readDisplay = (
+    overrides: Partial<IndividualToolCallDisplay> = {},
+  ): IndividualToolCallDisplay => ({
+    callId: 'client-read-1',
+    name: 'Read File(s)',
+    description: 'src/a.ts',
+    resultDisplay: 'FILE BODY',
+    status: ToolCallStatus.Success,
+    confirmationDetails: undefined,
+    ...overrides,
+  });
+
   beforeEach(() => {
     resetPromptCountForTesting();
+    atMocks.calls.length = 0;
+    atMocks.result = { processedQuery: null, shouldProceed: true };
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -246,6 +287,9 @@ describe('livePromptEvents', () => {
 
     const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
     expect(prompt).toBe(parts);
+    // ink expands only a string query (processQuery's `typeof query ===
+    // 'string'` branch), so an attachment payload rides through untouched.
+    expect(atMocks.calls).toEqual([]);
   });
 
   it('passes the per-turn modelOverride through send options', async () => {
@@ -296,6 +340,85 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it('expands an @-mention where the prompt enters the stream', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const expanded = [
+      { text: 'summarize @src/a.ts' },
+      { text: '--- Content from src/a.ts ---\nFILE BODY' },
+    ];
+    atMocks.result = {
+      processedQuery: expanded,
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = await drain(
+      livePromptEvents(config, 'summarize @src/a.ts', undefined, {
+        submittedPrompt: 'summarize @src/a.ts',
+      }),
+    );
+
+    expect(atMocks.calls).toEqual(['summarize @src/a.ts']);
+    const [prompt, , , options] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual(expanded);
+    // The transcript item (applied by the caller) keeps the typed text; the
+    // expanded payload is for the model, and provenance stays raw.
+    expect(options).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: 'summarize @src/a.ts',
+    });
+    // ink renders the read through handleAtCommand's addItem as a tool_group;
+    // here it is the same card, already settled.
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'tool-start',
+          id: 'client-read-1',
+          tool: 'Read File(s)',
+          title: 'src/a.ts',
+        },
+        { type: 'tool-result', id: 'client-read-1', display: 'FILE BODY' },
+        { type: 'tool-end', id: 'client-read-1', success: true, summary: 'ok' },
+      ]),
+    );
+  });
+
+  it('reports a failed @-mention read instead of sending the unexpanded text', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: null,
+      shouldProceed: false,
+      toolDisplays: [
+        readDisplay({
+          description: 'Error attempting to read files',
+          status: ToolCallStatus.Error,
+          resultDisplay: 'Error reading files (missing.ts): no such file',
+        }),
+      ],
+    };
+
+    const events = await drain(livePromptEvents(config, 'read @missing.ts'));
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'tool-result',
+          id: 'client-read-1',
+          display: 'Error reading files (missing.ts): no such file',
+        },
+        {
+          type: 'tool-end',
+          id: 'client-read-1',
+          success: false,
+          summary: 'error',
+        },
+      ]),
+    );
   });
 
   it('appends drained steering texts after tool responses at the boundary', async () => {

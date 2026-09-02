@@ -45,6 +45,9 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
+import { isAtCommand } from '../utils/commandUtils.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
+import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -220,6 +223,69 @@ function createEventQueue<T>() {
 }
 
 /**
+ * One `@path` read as the tool card ink renders through `handleAtCommand`'s
+ * `addItem` (a `tool_group` history item): start → result → end, so the card
+ * is already settled when it lands and a failed read explains itself.
+ */
+function atMentionCardEvents(
+  display: IndividualToolCallDisplay,
+): OpenTuiStreamEvent[] {
+  const events: OpenTuiStreamEvent[] = [
+    {
+      type: 'tool-start',
+      id: display.callId,
+      tool: display.name,
+      title: display.description,
+    },
+  ];
+  const text = renderResultDisplay(display.resultDisplay);
+  if (text)
+    events.push({ type: 'tool-result', id: display.callId, display: text });
+  const failed = display.status === ToolCallStatus.Error;
+  events.push({
+    type: 'tool-end',
+    id: display.callId,
+    success: !failed,
+    summary: failed ? 'error' : 'ok',
+  });
+  return events;
+}
+
+/**
+ * ink parity (use-llm-stream `processQuery` for a fresh turn,
+ * `resolveSteeredMessages` for text drained mid-turn): `@path` mentions are
+ * expanded where the prompt enters the stream, never at the composer, so the
+ * transcript keeps what the user typed and text queued during a turn is
+ * expanded by the time it reaches the model.
+ *
+ * `events` carries the read cards even when the expansion declines — the one
+ * decline is a failed read, and ink reports it instead of sending the
+ * unexpanded text.
+ */
+async function expandAtMentions(
+  config: Config,
+  query: string,
+  signal: AbortSignal,
+): Promise<{
+  parts: PartListUnion;
+  events: OpenTuiStreamEvent[];
+  declined: boolean;
+}> {
+  const result = await handleAtCommand({
+    query,
+    config,
+    onDebugMessage: (message) => config.getDebugLogger().debug(message),
+    messageId: Date.now(),
+    signal,
+  });
+  const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (!result.shouldProceed || result.processedQuery === null) {
+    return { parts: query, events, declined: true };
+  }
+  return { parts: result.processedQuery, events, declined: false };
+}
+
+/**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
  *
@@ -267,6 +333,14 @@ export async function* livePromptEvents(
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
   let nextPrompt: PartListUnion = prompt;
+  if (typeof prompt === 'string' && isAtCommand(prompt)) {
+    const expanded = await expandAtMentions(config, prompt, abort);
+    for (const ev of expanded.events) yield ev;
+    // A failed read reports itself on the card above; ink drops the
+    // submission rather than sending the unexpanded text to the model.
+    if (expanded.declined) return;
+    nextPrompt = expanded.parts;
+  }
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {

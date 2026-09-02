@@ -6,15 +6,45 @@
 
 /**
  * Pure-logic coverage for the live-turn driver: composer attachment folding
- * (unsupported/unreadable images must surface as notices, never vanish) and
- * the replay-batch fold (the transcript reset path for session switches).
+ * (unsupported/unreadable images must surface as notices, never vanish), the
+ * replay-batch fold (the transcript reset path for session switches), and the
+ * mid-turn queue hand-off to the next turn.
  */
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
-import { foldBatch, imagePathsToParts } from './live-turn.js';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
+import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  foldBatch,
+  imagePathsToParts,
+  useOpenTuiLiveTurn,
+} from './live-turn.js';
+
+// Stream-layer stub: records what each turn was handed and holds the first
+// turn open until the test releases it, so a second submission lands mid-turn.
+const live = vi.hoisted(() => ({
+  turns: [] as Array<{ prompt: unknown; options: unknown }>,
+  waiters: [] as Array<() => void>,
+}));
+
+vi.mock('./live-session.js', () => ({
+  nextLivePromptId: () => `session-1########${live.turns.length}`,
+  async *livePromptEvents(
+    _config: unknown,
+    prompt: unknown,
+    _signal: unknown,
+    options: unknown,
+  ) {
+    live.turns.push({ prompt, options });
+    if (live.turns.length === 1) {
+      await new Promise<void>((resolve) => live.waiters.push(resolve));
+    }
+    yield { type: 'done' };
+  },
+}));
 
 describe('imagePathsToParts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'opentui-live-turn-'));
@@ -69,5 +99,43 @@ describe('foldBatch', () => {
 
   it('returns an empty transcript for an empty batch', () => {
     expect(foldBatch([])).toEqual([]);
+  });
+});
+
+describe('useOpenTuiLiveTurn mid-turn queue', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+  });
+
+  it('replays queued mid-turn text as the next turn, raw and with provenance', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    expect(result.current.streaming).toBe(true);
+
+    act(() => {
+      result.current.submit('look @notes.md');
+    });
+    expect(result.current.queueLength).toBe(1);
+
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+      await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    });
+
+    // The queue holds what was typed, and the follow-on turn hands it over
+    // unchanged: resolving `@path` mentions is the stream layer's job, so a
+    // pre-expanded payload here would arrive with its provenance lost. The
+    // rest of the options object is the driver's own plumbing.
+    expect(live.turns[1]?.prompt).toBe('look @notes.md');
+    expect(live.turns[1]?.options).toMatchObject({
+      submittedPrompt: 'look @notes.md',
+    });
+    expect(result.current.queueLength).toBe(0);
   });
 });

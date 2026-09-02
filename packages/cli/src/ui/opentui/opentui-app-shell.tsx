@@ -61,8 +61,6 @@ import {
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
-import { isAtCommand } from '../utils/commandUtils.js';
-import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiShellConfirmation,
@@ -354,6 +352,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return;
         case 'quit':
+          // ink's quit action cancels the ongoing request before the exit
+          // drains, so a mid-turn /quit stops the stream instead of racing the
+          // cleanup chain (recording flush, config.shutdown) against a turn
+          // that is still writing. A no-op when nothing is in flight.
+          onInterrupt?.();
           onQuit?.(outcome.messages);
           return;
         default: {
@@ -362,7 +365,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, notify],
+    [onSubmitPrompt, onQuit, onInterrupt, notify],
   );
 
   const onSubmit = useCallback(
@@ -389,41 +392,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify('The live prompt turn is not wired in this shell.');
           return;
         }
-        // ink parity (use-llm-stream processQuery): `@path` mentions expand
-        // into file content for the model, while the raw composer text rides
-        // along as UserPromptSubmit provenance (`submitted_prompt`). Skipped
-        // mid-turn because a submission that arrives during a turn becomes
-        // steering, which carries text only — the expansion would be read and
-        // then dropped.
+        // The raw typed text is both the prompt and the `UserPromptSubmit`
+        // provenance; `@path` expansion happens where the prompt enters the
+        // stream (live-session), so text queued mid-turn expands too.
         const query = text.trim();
-        let content: PartListUnion = query;
-        if (!streaming && isAtCommand(query)) {
-          const atResult = await handleAtCommand({
-            query,
-            config,
-            onDebugMessage: (message) => config.getDebugLogger().debug(message),
-            messageId: Date.now(),
-            // No turn exists yet at submit time, so expansion has nothing to
-            // be cancelled by — same fallback shape as client-tool-run.
-            signal: new AbortController().signal,
-          });
-          if (!atResult.shouldProceed || atResult.processedQuery === null) {
-            // The one decline path is a failed file read, which reports why on
-            // the tool display it appends last.
-            const failure = atResult.toolDisplays?.at(-1)?.resultDisplay;
-            if (typeof failure === 'string') notify(failure);
-            return;
-          }
-          content = atResult.processedQuery;
-        }
-        onSubmitPrompt(content, imagePaths, {
+        onSubmitPrompt(query, imagePaths, {
           submittedPrompt: query || undefined,
         });
         return;
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify, config, streaming],
+    [gateway, onSubmitPrompt, applyOutcome, notify, streaming],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once

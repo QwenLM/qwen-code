@@ -15,6 +15,14 @@
  * boundary as genuine steering content (`drainSteering`), and whatever is
  * still queued when the turn ends becomes the next turn — so user input is
  * never silently dropped.
+ *
+ * `@path` mentions are expanded where a prompt enters the stream
+ * ({@link livePromptEvents}), never here: an idle submit and queued text that
+ * becomes the next turn both reach the model with file content while the
+ * transcript keeps what was typed. Text drained as in-flight steering still
+ * rides raw — ink expands that hop too (`resolveSteeredMessages`, with a read
+ * timeout and a queue restore on cancel) — and the model can resolve the
+ * literal mention with a read tool.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -91,9 +99,10 @@ export interface OpenTuiSubmitOptions {
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
   /**
-   * Raw composer text for `UserPromptSubmit` provenance. Only the composer
-   * submit path sets it — a slash command's `submit_prompt` outcome carries
-   * generated content, which ink also submits without provenance.
+   * Raw typed text for `UserPromptSubmit` provenance. Set by the composer
+   * submit and by the follow-on turn built from the mid-turn queue; a slash
+   * command's `submit_prompt` outcome carries generated content, which ink
+   * also submits without provenance.
    */
   submittedPrompt?: string;
 }
@@ -235,7 +244,11 @@ export function useOpenTuiLiveTurn(
             const text = drainQueue().join('\n');
             if (text.trim()) {
               apply({ type: 'user', text });
-              void runTurn(text, nextLivePromptId(config));
+              // ink keeps provenance for a queued submission, and the raw text
+              // is what the stream layer expands `@path` mentions from.
+              void runTurn(text, nextLivePromptId(config), {
+                submittedPrompt: text,
+              });
             }
           }
         }
@@ -250,13 +263,10 @@ export function useOpenTuiLiveTurn(
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
     ) => {
-      const contentText =
+      const text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
-      // ink renders the composer text, never the `@`-expanded payload it
-      // produced; the expanded copy is for the model alone.
-      const displayText = options?.submittedPrompt ?? contentText;
       if (streamingRef.current) {
         // The steering queue is text-only; say so instead of losing the
         // attachments without a trace. Per-turn options ride on the queued
@@ -267,15 +277,15 @@ export function useOpenTuiLiveTurn(
             text: 'Image attachments cannot be queued mid-turn and were dropped.',
           });
         }
-        if (displayText.trim()) pushQueue(displayText);
+        if (text.trim()) pushQueue(text);
         return;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
       const prompt: PartListUnion =
-        parts.length > 0 ? [{ text: contentText }, ...parts] : content;
+        parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
-      apply({ type: 'user', text: displayText, promptId, sentToModel: true });
+      apply({ type: 'user', text, promptId, sentToModel: true });
       void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],

@@ -382,6 +382,10 @@ export class OpenTuiSlashDispatcher {
    * take waits for idle. False for input `handle()` hands back to the model
    * (a `/`-prefixed path) and for btw side-questions (`/btw`, `?btw`), which
    * ink submits mid-turn as steering rather than queueing.
+   *
+   * Quit is exempt ahead of the opt-in check: ink runs its quit family before
+   * the queue precisely so an exit can stop an active stream instead of
+   * waiting for it to end.
    */
   mustDeferDuringStreaming(rawQuery: string): boolean {
     const trimmed = rawQuery.trim();
@@ -389,6 +393,8 @@ export class OpenTuiSlashDispatcher {
       return false;
     }
     const { commandToExecute } = parseSlashCommand(trimmed, this.commandList);
+    // Matched on the resolved command, so `/exit` is covered as an altName.
+    if (commandToExecute?.name === 'quit') return false;
     return commandToExecute?.canRunDuringStreaming !== true;
   }
 
