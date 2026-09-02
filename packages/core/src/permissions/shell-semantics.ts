@@ -241,7 +241,7 @@ function isStaticRedirectFilesystemTarget(target: string): boolean {
   if (isFileDescriptorTarget(target) || isNetworkPseudoDevice(target)) {
     return false;
   }
-  return !/[$`*?\[\]{}]/.test(target);
+  return !/[$`*?[\]{}]/.test(target);
 }
 
 /**
@@ -325,7 +325,7 @@ function hasUnresolvedWriteRedirect(command: string): boolean {
     }
     const unquoted = target.replace(/^(["'])(.*)\1$/, '$2');
     if (!unquoted || unquoted === '/dev/null') continue;
-    if (fdAlloc || /[$`*?\[\]{}]/.test(unquoted) || target.startsWith('&'))
+    if (fdAlloc || /[$`*?[\]{}]/.test(unquoted) || target.startsWith('&'))
       return true;
     // Glued/no-space and clobber forms are not reliably represented by the
     // legacy whitespace tokenizer; force the conservative floor.
