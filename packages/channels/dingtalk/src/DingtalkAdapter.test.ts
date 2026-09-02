@@ -6360,6 +6360,106 @@ describe('DingtalkChannel outbound image delivery', () => {
   });
 });
 
+describe('DingtalkChannel quoted message context', () => {
+  function buildReplyDownstream(repliedMsg: Record<string, unknown>) {
+    return {
+      data: JSON.stringify({
+        msgId: 'message-reply',
+        conversationType: '1',
+        conversationId: 'cid-reply',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        text: {
+          content: 'follow-up question',
+          isReplyMsg: true,
+          repliedMsg,
+        },
+      }),
+      headers: { messageId: 'message-reply' },
+    } as unknown as DWClientDownStream;
+  }
+
+  function deliverReply(repliedMsg: Record<string, unknown>): Envelope {
+    const channel = createChannel();
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(buildReplyDownstream(repliedMsg));
+    const calls = vi.mocked(channel.handleInbound).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[0]![0];
+  }
+
+  it('extracts quoted plain-text replies from content.content', () => {
+    const envelope = deliverReply({
+      msgType: 'text',
+      senderId: 'someone-else',
+      content: { content: 'the original question' },
+    });
+
+    expect(envelope.referencedText).toBe('the original question');
+    expect(envelope.isReplyToBot).toBe(false);
+  });
+
+  it('extracts quoted markdown replies from content.text', () => {
+    const envelope = deliverReply({
+      msgType: 'markdown',
+      senderId: 'someone-else',
+      content: { text: '## heading body' },
+    });
+
+    expect(envelope.referencedText).toBe('## heading body');
+  });
+
+  it('extracts quoted richText replies that use msgType-shaped parts', () => {
+    const envelope = deliverReply({
+      msgType: 'richText',
+      senderId: 'someone-else',
+      content: {
+        richText: [
+          { msgType: 'text', content: 'look at this' },
+          { msgType: 'picture', downloadCode: 'opaque-code' },
+          { msgType: 'text', content: 'please' },
+        ],
+      },
+    });
+
+    expect(envelope.referencedText).toBe('look at this[image]please');
+  });
+
+  it('extracts quoted interactiveCard text from the cardContent tree', () => {
+    const envelope = deliverReply({
+      msgType: 'interactiveCard',
+      msgId: 'dt-card',
+      senderId: 'bot-user',
+      content: {
+        cardContent: [
+          {
+            elementType: 'LIST',
+            children: [
+              {
+                elementType: 'RICHTEXT',
+                children: [
+                  {
+                    elementType: 'TEXT',
+                    value: 'Hi! How can I help you today?',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(envelope.referencedText).toBe('Hi! How can I help you today?');
+    expect(envelope.isReplyToBot).toBe(true);
+  });
+});
+
 describe('DingtalkChannel outbound file projection', () => {
   afterEach(() => {
     vi.restoreAllMocks();

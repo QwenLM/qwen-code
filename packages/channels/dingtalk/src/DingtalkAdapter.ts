@@ -76,13 +76,22 @@ import type {
 
 interface DingTalkRichTextPart {
   type?: string;
+  msgType?: string;
   text?: string;
+  content?: string;
   downloadCode?: string;
   atName?: string;
 }
 
+interface DingTalkCardElement {
+  elementType?: string;
+  value?: string;
+  children?: DingTalkCardElement[];
+}
+
 interface DingTalkMessageContent {
   text?: string;
+  content?: string;
   richText?: DingTalkRichTextPart[];
   downloadCode?: string;
   fileName?: string;
@@ -92,6 +101,7 @@ interface DingTalkMessageContent {
   chatRecord?: unknown;
   records?: unknown;
   messages?: unknown;
+  cardContent?: DingTalkCardElement[];
 }
 
 interface DingTalkRepliedMsg {
@@ -2222,8 +2232,6 @@ export class DingtalkChannel extends ChannelBase {
       const isReplyToBot =
         !!data.chatbotUserId && replied.senderId === data.chatbotUserId;
 
-      // Note: DingTalk doesn't include content for interactiveCard replies
-      // (bot responses sent via webhook). Only user message quotes have text.
       const text = this.summarizeRepliedContent(replied);
       const downloadCode = replied.content?.downloadCode;
       const mediaType = this.mediaTypeFromMsgType(replied.msgType);
@@ -2287,25 +2295,34 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
-   * Build a text summary from a repliedMsg, handling text, richText, chat
-   * records, and media message types with placeholders.
+   * Build a text summary from a repliedMsg, handling text, markdown,
+   * richText, chat records, interactiveCard, and media message types with
+   * placeholders.
    */
   private summarizeRepliedContent(replied: DingTalkRepliedMsg): string {
-    const msgType = replied.msgType;
+    const msgType = replied.msgType?.toLowerCase();
     const content = replied.content;
+
+    // Text quotes carry the body in content.content; markdown uses
+    // content.text, which the generic fallback below handles.
+    if (msgType === 'text' && content?.content?.trim()) {
+      return content.content.trim();
+    }
 
     // Direct text content
     if (content?.text?.trim()) {
       return content.text.trim();
     }
 
-    // RichText: concatenate text parts, placeholder for images
+    // RichText: concatenate text parts, placeholder for images. Quoted
+    // richText segments use {msgType, content} rather than {type, text}.
     if (content?.richText && Array.isArray(content.richText)) {
       const parts: string[] = [];
       for (const part of content.richText) {
-        const partType = part.type || 'text';
-        if (partType === 'text' && part.text) {
-          parts.push(part.text);
+        const partType = (part.type || part.msgType || 'text').toLowerCase();
+        const partText = part.text ?? part.content;
+        if (partType === 'text' && partText?.trim()) {
+          parts.push(partText.trim());
         } else if (partType === 'picture') {
           parts.push('[image]');
         } else if (partType === 'at' && part.atName) {
@@ -2316,7 +2333,7 @@ export class DingtalkChannel extends ChannelBase {
       if (summary) return summary;
     }
 
-    if (msgType === 'chatRecord') {
+    if (msgType === 'chatrecord') {
       // The quote budget, not the record budget: this text becomes
       // `envelope.referencedText`, which `ChannelBase` renders through
       // `sanitizeQuotedText(..., 500)`. Rendered to 4000 the quote arrives cut
@@ -2331,9 +2348,31 @@ export class DingtalkChannel extends ChannelBase {
       return text;
     }
 
+    // Interactive cards (usually quoted bot replies) have no flat text
+    // field; the body lives in TEXT nodes of the cardContent element tree.
+    if (msgType === 'interactivecard') {
+      return this.collectCardText(content?.cardContent);
+    }
+
     // Media type placeholders. Shared with the chat-record entry formatter so
     // the same message type is never described two ways to the model.
     return mediaTypePlaceholder(msgType, content?.fileName) ?? '';
+  }
+
+  private collectCardText(nodes: DingTalkCardElement[] | undefined): string {
+    const segments: string[] = [];
+    const walk = (items: DingTalkCardElement[]): void => {
+      for (const node of items) {
+        if (!node || typeof node !== 'object') continue;
+        if (node.elementType === 'TEXT' && typeof node.value === 'string') {
+          const trimmed = node.value.trim();
+          if (trimmed) segments.push(trimmed);
+        }
+        if (Array.isArray(node.children)) walk(node.children);
+      }
+    };
+    if (Array.isArray(nodes)) walk(nodes);
+    return segments.join('\n');
   }
 
   /**
