@@ -973,9 +973,16 @@ class ExportBudget {
     this.truncated = true;
   }
 
+  private homeSafeText(value: string): string {
+    const redacted = redactHomePaths(value);
+    if (!containsUnredactedHomePath(redacted, true)) return redacted;
+    this.markTruncated('home_path_omitted');
+    return '[home path omitted]';
+  }
+
   label(value: unknown, maxLength: number, redact = true): string {
     const initiallySafe = safeLabel(value, maxLength);
-    const redacted = redact ? redactHomePaths(initiallySafe) : initiallySafe;
+    const redacted = redact ? this.homeSafeText(initiallySafe) : initiallySafe;
     const safe = safeLabel(redacted, maxLength);
     if (initiallySafe !== value || safe !== redacted) {
       this.markTruncated('label_sanitized');
@@ -996,11 +1003,11 @@ class ExportBudget {
   }
 
   plainText(value: string): string {
-    return this.applyTextBudget(redactHomePaths(value));
+    return this.applyTextBudget(this.homeSafeText(value));
   }
 
   text(value: string): string {
-    value = redactHomePaths(value);
+    value = this.homeSafeText(value);
     const onComplexityLimit = (): void => {
       this.truncated = true;
       this.diagnostics.add('markdown_complexity_exceeded', 'warning', 1, true);
@@ -1476,6 +1483,7 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'permission_resolution_sanitized',
   'tool_result_presentation_missing',
   'file_attachment_excluded',
+  'home_path_omitted',
   'label_sanitized',
 ]);
 
@@ -1500,7 +1508,11 @@ function assertNoForbiddenFields(value: unknown): void {
       const safePathField =
         key !== undefined &&
         ['path', 'cwd', 'origin', 'projectName', 'repository'].includes(key);
-      if (key !== 'data' && containsUnredactedHomePath(entry, !safePathField)) {
+      if (
+        key !== 'data' &&
+        key !== 'thumbnailUrl' &&
+        containsUnredactedHomePath(entry, !safePathField)
+      ) {
         throw new ExportTranscriptDocumentError('home_path_forbidden');
       }
       return;
@@ -1900,7 +1912,12 @@ function isSafeExportPath(value: unknown): value is string {
 }
 
 const EXPORT_URL_PATTERN =
-  /\b(?:https?:\/\/[^/\s<>"'\x60()?#]*(?:\/[^\s<>"'\x60?#]*)?|data:image\/[A-Za-z0-9.+-]+;base64,[^\s<>"'\x60]+)/gi;
+  /\b(?:https?:\/\/[^/\s<>"'\x60()?#]*(?:\/[^\s<>"'\x60?#,;()|\\]*)?|data:image\/[A-Za-z0-9.+-]+;base64,[^\s<>"'\x60]+)/gi;
+const HOME_USERNAME_SEGMENT_SOURCE = String.raw`(?:"[^"/\\\r\n]+"|'[^'/\\\r\n]+'|[^/\\\t\r\n<>\x60,;:|()]+(?=[/\\])|[^/\\\s<>"'\x60,;:|()]+)`;
+const FILE_HOME_PATH_SOURCE = String.raw`file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const LOCAL_HOME_PATH_SOURCE = String.raw`(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const FILE_HOME_PATH_PATTERN = new RegExp(FILE_HOME_PATH_SOURCE, 'gi');
+const LOCAL_HOME_PATH_PATTERN = new RegExp(LOCAL_HOME_PATH_SOURCE, 'gi');
 
 function redactHomePaths(value: string): string {
   return redactHomePathStructures(value);
@@ -1939,14 +1956,8 @@ function redactNonHttpHomePathStructures(value: string): string {
 
 function redactRawHomePathStructures(value: string): string {
   return value
-    .replace(
-      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/gi,
-      'file://[home]',
-    )
-    .replace(
-      /(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*[^/\\\s<>\x60,;:|()]+/gi,
-      '[home]',
-    );
+    .replace(FILE_HOME_PATH_PATTERN, 'file://[home]')
+    .replace(LOCAL_HOME_PATH_PATTERN, '[home]');
 }
 
 function containsUnredactedHomePath(
@@ -2006,14 +2017,7 @@ function decodePrintablePercentEscapes(value: string): string {
 
 function containsRawHomePath(value: string): boolean {
   const normalized = value.replaceAll('\\', '/');
-  return (
-    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/i.test(
-      value,
-    ) ||
-    /(?:[A-Za-z]:)?(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>\x60,;:|()]+/i.test(
-      normalized,
-    )
-  );
+  return /(?:^|\/)(?:home|Users)\/(?:\.\/|\/)*(?=[^/\r\n])/i.test(normalized);
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

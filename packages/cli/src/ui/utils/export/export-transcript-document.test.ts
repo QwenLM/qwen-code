@@ -222,8 +222,11 @@ describe('ExportTranscriptDocumentV1', () => {
               {
                 text: [
                   'see /home/"alice"/notes',
-                  "(https://evil)/home/alice/x",
+                  '(https://evil)/home/alice/x',
                   "curl 'http://127.0.0.1:3000/open?file=/home/alice/doc.md'",
+                  'Saved output to C:\\Users\\John Smith\\file.txt today',
+                  'Visit https://example.com/a,/home/urluser/private.txt now',
+                  'Visit https://example.com/a;file:///home/fileuser/private.txt now',
                   'see /home/alice/notes',
                 ].join('\n'),
               },
@@ -239,6 +242,10 @@ describe('ExportTranscriptDocumentV1', () => {
 
     expect(text).toContain('[home]');
     expect(text).not.toContain('alice');
+    expect(text).not.toContain('John');
+    expect(text).not.toContain('Smith');
+    expect(text).not.toContain('urluser');
+    expect(text).not.toContain('fileuser');
     expect(text).not.toContain('/home/');
     expect(text).not.toContain('%2Fhome');
   });
@@ -419,7 +426,11 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('redacts nested home layouts in projectName', () => {
-    for (const cwd of ['/usr/home/alice', '/export/home/alice', '\\server\\home\\alice']) {
+    for (const cwd of [
+      '/usr/home/alice',
+      '/export/home/alice',
+      '\\server\\home\\alice',
+    ]) {
       const document = createExportTranscriptDocumentV1(
         [
           record('nested-home', null, {
@@ -1575,7 +1586,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('budgets image-generation thumbnails as raster data, not visible text', () => {
-    const thumbnailData = 'A'.repeat(600 * 1024);
+    const thumbnailData = `/Users/alice${'A'.repeat(600 * 1024 - 12)}`;
     const thumbnailUrl = `data:IMAGE/PNG;base64,${thumbnailData}`;
     const document = createExportTranscriptDocumentV1(
       [
