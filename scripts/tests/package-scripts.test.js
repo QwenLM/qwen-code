@@ -65,6 +65,27 @@ describe('package scripts', () => {
     expect(buildOrder).toContain("'packages/qwen-live',");
   });
 
+  it('keeps the Mem0 Extension manifest aligned with release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      "'integrations/external-context-mem0/qwen-extension.json'",
+    );
+    expect(versionScript).toContain(
+      'const mem0Manifest = readJson(mem0ManifestPath);',
+    );
+    expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain(
+      'writeJson(mem0ManifestPath, mem0Manifest);',
+    );
+    expect(versionScript).toContain(
+      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
+    );
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -515,6 +536,7 @@ describe('package scripts', () => {
     const publishJob = getWorkflowJob(workflow, 'publish');
 
     for (const stepName of [
+      'Publish @qwen-code/external-context-mem0',
       'Publish @qwen-code/audio-capture',
       'Publish @qwen-code/qwen-code',
       'Publish @qwen-code/channel-base',
@@ -557,6 +579,11 @@ describe('package scripts', () => {
       [
         '.github/workflows/release.yml',
         'publish',
+        'Publish @qwen-code/external-context-mem0',
+      ],
+      [
+        '.github/workflows/release.yml',
+        'publish',
         'Publish @qwen-code/audio-capture',
       ],
       [
@@ -589,6 +616,7 @@ describe('package scripts', () => {
     }
 
     for (const packageDirectory of [
+      'integrations/external-context-mem0',
       'packages/audio-capture',
       'packages/cli',
       'packages/channels/base',

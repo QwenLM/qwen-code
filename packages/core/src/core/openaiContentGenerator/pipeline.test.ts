@@ -2890,6 +2890,9 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toHaveLength(2);
       expect(results[0]).toBe(mockLlmResponse1);
       expect(results[1]).toBe(mockLlmResponse2);
+      expect(mockProvider.getResponseParsingOptions).toHaveBeenCalledWith(
+        'test-model',
+      );
       const [, firstChunkContext] = (
         mockConverter.convertOpenAIChunkToLlm as Mock
       ).mock.calls[0];
