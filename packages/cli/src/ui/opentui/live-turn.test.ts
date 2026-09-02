@@ -13,8 +13,30 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
-import { foldBatch, imagePathsToParts } from './live-turn.js';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { livePromptEvents } from './live-session.js';
+import {
+  foldBatch,
+  imagePathsToParts,
+  useOpenTuiLiveTurn,
+} from './live-turn.js';
+
+vi.mock('./live-session.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./live-session.js')>();
+  return {
+    ...original,
+    livePromptEvents: vi.fn(),
+    nextLivePromptId: vi.fn(() => 'prompt-id'),
+  };
+});
+
+const mockedLivePromptEvents = vi.mocked(livePromptEvents);
+
+beforeEach(() => {
+  mockedLivePromptEvents.mockReset();
+});
 
 describe('imagePathsToParts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'opentui-live-turn-'));
@@ -69,5 +91,47 @@ describe('foldBatch', () => {
 
   it('returns an empty transcript for an empty batch', () => {
     expect(foldBatch([])).toEqual([]);
+  });
+});
+
+describe('useOpenTuiLiveTurn', () => {
+  it('preserves raw submitted text when an expanded prompt is queued', async () => {
+    let finishFirstTurn: () => void = () => {};
+    const firstTurnFinished = new Promise<void>((resolve) => {
+      finishFirstTurn = resolve;
+    });
+    mockedLivePromptEvents
+      .mockImplementationOnce(async function* () {
+        await firstTurnFinished;
+      })
+      .mockImplementationOnce(async function* () {});
+
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => result.current.submit('first prompt'));
+    await waitFor(() => expect(result.current.streaming).toBe(true));
+
+    act(() =>
+      result.current.submit('expanded file contents', undefined, {
+        submittedPrompt: '@context.txt summarize',
+      }),
+    );
+    expect(result.current.queueLength).toBe(1);
+
+    await act(async () => {
+      finishFirstTurn();
+      await firstTurnFinished;
+    });
+    await waitFor(() =>
+      expect(mockedLivePromptEvents).toHaveBeenCalledTimes(2),
+    );
+
+    const queuedTurn = mockedLivePromptEvents.mock.calls[1];
+    expect(queuedTurn?.[1]).toBe('expanded file contents');
+    expect(queuedTurn?.[3]).toMatchObject({
+      submittedPrompt: '@context.txt summarize',
+    });
   });
 });

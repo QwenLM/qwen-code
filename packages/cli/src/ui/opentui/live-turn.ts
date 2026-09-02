@@ -93,6 +93,11 @@ export interface OpenTuiSubmitOptions {
   onComplete?: () => Promise<void>;
 }
 
+interface QueuedPrompt {
+  text: string;
+  submittedPrompt?: string;
+}
+
 export interface OpenTuiLiveTurn {
   items: readonly LiveHistoryItem[];
   streaming: boolean;
@@ -139,7 +144,7 @@ export function useOpenTuiLiveTurn(
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
     [],
   );
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<QueuedPrompt[]>([]);
   const [queueLength, setQueueLength] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -162,12 +167,12 @@ export function useOpenTuiLiveTurn(
     setItems((prev) => foldLiveEvent(prev, ev));
   }, []);
 
-  const pushQueue = useCallback((text: string) => {
-    queueRef.current.push(text);
+  const pushQueue = useCallback((prompt: QueuedPrompt) => {
+    queueRef.current.push(prompt);
     setQueueLength(queueRef.current.length);
   }, []);
 
-  const drainQueue = useCallback((): string[] => {
+  const drainQueue = useCallback((): QueuedPrompt[] => {
     const drained = queueRef.current;
     queueRef.current = [];
     setQueueLength(0);
@@ -190,7 +195,7 @@ export function useOpenTuiLiveTurn(
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
-          drainSteering: drainQueue,
+          drainSteering: () => drainQueue().map(({ text }) => text),
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
@@ -227,11 +232,14 @@ export function useOpenTuiLiveTurn(
           // Whatever survived the tool-boundary drain becomes the next turn.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const text = drainQueue().join('\n');
+            const queued = drainQueue();
+            const text = queued.map(({ text }) => text).join('\n');
             if (text.trim()) {
               apply({ type: 'user', text });
               void runTurn(text, nextLivePromptId(config), {
-                submittedPrompt: text,
+                submittedPrompt: queued
+                  .map(({ text, submittedPrompt }) => submittedPrompt ?? text)
+                  .join('\n'),
               });
             }
           }
@@ -261,7 +269,9 @@ export function useOpenTuiLiveTurn(
             text: 'Image attachments cannot be queued mid-turn and were dropped.',
           });
         }
-        if (text.trim()) pushQueue(text);
+        if (text.trim()) {
+          pushQueue({ text, submittedPrompt: options?.submittedPrompt });
+        }
         return;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
@@ -314,7 +324,9 @@ export function useOpenTuiLiveTurn(
 
   const popQueue = useCallback((): string | null => {
     if (queueRef.current.length === 0) return null;
-    return drainQueue().join('\n');
+    return drainQueue()
+      .map(({ text }) => text)
+      .join('\n');
   }, [drainQueue]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
