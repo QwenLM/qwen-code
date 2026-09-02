@@ -282,7 +282,9 @@ export async function getOptInToolNotFoundMessage(
   ) => boolean | Promise<boolean>,
 ): Promise<string | undefined> {
   const canonicalName = resolveToolName(unknownToolName);
-  const definition = OPT_IN_TOOL_MESSAGES[canonicalName];
+  const definition = Object.hasOwn(OPT_IN_TOOL_MESSAGES, canonicalName)
+    ? OPT_IN_TOOL_MESSAGES[canonicalName]
+    : undefined;
   if (!definition || (await isCanonicalToolRegistered(canonicalName))) {
     return undefined;
   }

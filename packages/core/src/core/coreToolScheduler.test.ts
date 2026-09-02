@@ -55,6 +55,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   extractToolFilePaths,
+  getOptInToolNotFoundMessage,
   isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
 import type { CallableTool, Part, PartListUnion } from '@google/genai';
@@ -6878,6 +6879,23 @@ describe('CoreToolScheduler', () => {
       }
     });
 
+    it.each(['toString', 'constructor', 'hasOwnProperty', 'valueOf'])(
+      'keeps Object.prototype name %s on the generic not-found path',
+      async (name) => {
+        const message = await getOptInToolNotFoundMessage(
+          {
+            getDisabledTools: () => new Set<string>(),
+            getPermissionManager: () => null,
+            isTodoWriteEnabled: () => false,
+          } as unknown as Config,
+          name,
+          () => false,
+        );
+
+        expect(message).toBeUndefined();
+      },
+    );
+
     it('should attribute a missing list_directory to the workspace tools toggle when it is disabled there', async () => {
       const mockToolRegistry = {
         getAllToolNames: () => ['glob', 'read_file'],
@@ -7053,6 +7071,35 @@ describe('CoreToolScheduler', () => {
         'Enable it with the tools.todoWrite.enabled',
       );
     });
+
+    it.each([
+      { settingEnabled: true, settingHint: false },
+      { settingEnabled: false, settingHint: true },
+    ])(
+      'should attribute denied todo_write when settingEnabled=$settingEnabled',
+      async ({ settingEnabled, settingHint }) => {
+        const message = await getOptInToolNotFoundMessage(
+          {
+            getDisabledTools: () => new Set<string>(),
+            getPermissionManager: () =>
+              ({
+                findMatchingDenyRule: () => 'todo_write',
+                isToolDisabledByCoreToolsAllowList: () => false,
+              }) as unknown as PermissionManager,
+            isTodoWriteEnabled: () => settingEnabled,
+          } as unknown as Config,
+          'todo_write',
+          () => false,
+        );
+
+        expect(message).toContain(
+          'blocked by the permissions.deny or --exclude-tools rule',
+        );
+        expect(
+          message?.includes('Enable tools.todoWrite.enabled as well.'),
+        ).toBe(settingHint);
+      },
+    );
 
     it('should not claim list_directory is disabled when an alias is used for a registered tool', async () => {
       const lsTool = {
