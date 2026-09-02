@@ -35,6 +35,7 @@ import {
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
+import * as localPathOpen from './local-path-open.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -11224,6 +11225,114 @@ describe('runQwenServe runtime startup failures', () => {
           );
           expect(status.capabilities.features).not.toContain(
             'native_directory_picker',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'mirrors the local path open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-open-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalPathOpenAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_open');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_open',
+          );
+        } else {
+          expect(capabilities.features).not.toContain('workspace_local_open');
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_open',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'mirrors the local terminal open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-terminal-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalTerminalAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_terminal');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_terminal',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'workspace_local_terminal',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_terminal',
           );
         }
         // Probed once while the bootstrap app was built, not per request.

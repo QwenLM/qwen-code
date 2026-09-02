@@ -31,12 +31,14 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
-import { AgentEventType } from '../../agents/runtime/agent-events.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+} from '../../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
-  AgentEventEmitter,
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -214,6 +216,7 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionWorkflowPlanRevision: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         model: 'parent-model',
@@ -812,6 +815,33 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
       );
+    });
+
+    it('requires an approved Workflow todo ID for top-level agents', () => {
+      vi.mocked(config.getSessionWorkflowPlanRevision).mockReturnValue({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call',
+        todoIds: ['inspect-ui'],
+      });
+
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      expect(agentTool.validateToolParams(validParams)).toContain(
+        'cannot start until the Session Workflow plan is approved',
+      );
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+
+      expect(agentTool.validateToolParams(validParams)).toContain(
+        '"todo_id" is required',
+      );
+      expect(
+        agentTool.validateToolParams({ ...validParams, todo_id: 'other' }),
+      ).toContain('must match the approved Session Workflow');
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          todo_id: 'inspect-ui',
+        }),
+      ).toBeNull();
     });
 
     it('should reject empty subagent_type', async () => {
@@ -5622,6 +5652,7 @@ describe('AgentTool', () => {
       const toolCall = resultSnapshot?.toolCalls?.find(
         (entry) => entry.callId === 'call-read-1',
       );
+      expect(resultSnapshot?.toolCalls).toHaveLength(1);
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
       expect(toolCall?.boundaryArtifact).toEqual({
@@ -5677,6 +5708,38 @@ describe('AgentTool', () => {
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
       expect(toolCall).not.toHaveProperty('boundaryArtifact');
+    });
+
+    it('retains invoked skill names for Session Workflow agents', async () => {
+      vi.mocked(config.getSessionWorkflowPlanRevision).mockReturnValue({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call',
+        todoIds: ['inspect-skill'],
+      });
+      const snapshots: AgentResultDisplay[] = [];
+      const runtimeEmitter = new AgentEventEmitter();
+      const invocation = createInvocationWithEventDrivenAgent(() => {});
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: { model: 'subagent-model' },
+        getEventEmitter: () => runtimeEmitter,
+      } as ReturnType<AgentHeadless['getCore']>);
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        runtimeEmitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-skill-1',
+          name: 'skill',
+          args: { skill: 'repo-ops' },
+          description: 'Loading repo-ops',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      expect(snapshots.at(-1)?.skills).toEqual(['repo-ops']);
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
@@ -6343,6 +6406,45 @@ describe('AgentTool', () => {
         }),
       );
       expect(mockSubagentDispose).not.toHaveBeenCalled();
+    });
+
+    it('clears the completed run summary in the hot continuation patch', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+      expect(resident?.continue('Now inspect the helper')).toBe(true);
+
+      // The hot continuation patch must clear run N-1's terminal summary —
+      // mirroring the cold-resume patch — so a crash mid-continuation cannot
+      // leave discovery restoring the completed run's stats/activities as the
+      // live run's state.
+      const runningPatch = patchMetaSpy.mock.calls.find(
+        ([, update]) => update.status === 'running' && update.resumeCount === 1,
+      );
+      expect(runningPatch).toBeDefined();
+      // toMatchObject treats undefined as absent, so assert key presence.
+      expect(runningPatch?.[1]).toHaveProperty('stats', undefined);
+      expect(runningPatch?.[1]).toHaveProperty('recentActivities', undefined);
+
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(2);
+      });
+      patchMetaSpy.mockRestore();
     });
 
     it('claims finishing-window input before publishing completion', async () => {

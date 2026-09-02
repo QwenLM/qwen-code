@@ -355,6 +355,69 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
   ).toBeUndefined();
 });
 
+it('refreshes the shared proactive token after a card request returns 401', async () => {
+  let tokenRequests = 0;
+  let cardRequests = 0;
+  const fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/gettoken?')) {
+        tokenRequests++;
+        return new Response(
+          JSON.stringify({
+            access_token: tokenRequests === 1 ? 'stale-token' : 'fresh-token',
+            expires_in: 7200,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === 'https://api.dingtalk.com/v1.0/card/instances') {
+        cardRequests++;
+        return cardRequests === 1
+          ? new Response('expired', { status: 401 })
+          : new Response('{}', { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+  const channel = createChannel();
+  const state = channel as unknown as {
+    proactiveToken?: { token: string; expiresAt: number };
+    interactiveCardClient: {
+      options: { invalidateAccessToken(token: string): void };
+      updateInstance(input: {
+        outTrackId: string;
+        cardParamMap: Record<string, unknown>;
+      }): Promise<void>;
+    };
+  };
+  const cardClient = state.interactiveCardClient;
+
+  await cardClient.updateInstance({
+    outTrackId: 'status-1',
+    cardParamMap: {},
+  });
+
+  expect(tokenRequests).toBe(2);
+  expect(cardRequests).toBe(2);
+  expect(
+    fetchSpy.mock.calls
+      .filter(
+        ([input]) =>
+          String(input) === 'https://api.dingtalk.com/v1.0/card/instances',
+      )
+      .map(
+        ([, init]) =>
+          (init?.headers as Record<string, string>)[
+            'x-acs-dingtalk-access-token'
+          ],
+      ),
+  ).toEqual(['stale-token', 'fresh-token']);
+  state.interactiveCardClient.options.invalidateAccessToken('stale-token');
+  expect(state.proactiveToken?.token).toBe('fresh-token');
+  fetchSpy.mockRestore();
+});
+
 function createCallbackResultChannel(
   result: DingtalkCardCallbackResult,
 ): DingtalkChannelInstance {
@@ -1615,6 +1678,16 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
+  it('disposes status-card recovery when disconnected', () => {
+    const channel = createChannel();
+    const dispose = vi.fn();
+    Object.assign(channel, { statusCardController: { dispose } });
+
+    channel.disconnect();
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it('passes the configured model to the status card controller', () => {
     const channel = createChannel({ model: 'qwen3.7-max' });
 
@@ -7361,22 +7434,49 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(2);
   });
 
-  it('throws when the token endpoint rejects', async () => {
-    const channel = proactive(createChannel());
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    stubProactiveFetch(
-      undefined,
-      () =>
-        new Response(
-          JSON.stringify({ errcode: 40089, errmsg: 'invalid credential' }),
-          { status: 200 },
-        ),
-    );
+  it.each([
+    [40001, 'invalid credential'],
+    [40013, 'invalid appKey'],
+    [40089, 'invalid credential'],
+    [40096, 'invalid appKey or appSecret'],
+    [90002, 'invalid appKey'],
+    [90003, 'app not found'],
+  ])(
+    'classifies gettoken errcode %s as a non-retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
-      'gettoken errcode=40089',
-    );
-  });
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: false });
+    },
+  );
+
+  it.each([
+    [-1, '系统繁忙'],
+    [88, 'throttled'],
+  ])(
+    'classifies gettoken errcode %s as a retryable token error',
+    async (errcode, errmsg) => {
+      const channel = proactive(createChannel());
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubProactiveFetch(
+        undefined,
+        () =>
+          new Response(JSON.stringify({ errcode, errmsg }), { status: 200 }),
+      );
+
+      const request = channel.pushProactive(groupTarget, 'hello');
+      await expect(request).rejects.toThrow(`gettoken errcode=${errcode}`);
+      await expect(request).rejects.toMatchObject({ retryable: true });
+    },
+  );
 
   it('skips blank text without calling the API', async () => {
     const channel = proactive(createChannel());
