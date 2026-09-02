@@ -21,7 +21,7 @@ const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
 );
 
 vi.mock('../agent-view/supervisor-store.js', () => ({
-  readAgentViewSessionState: mockReadAgentViewSessionState,
+  readAgentViewSessionStateForControl: mockReadAgentViewSessionState,
   sanitizeSessionId: (sessionId: string) => sessionId.toLowerCase(),
 }));
 
