@@ -8,8 +8,13 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
-import { FatalConfigError } from '../utils/errors.js';
+import {
+  getProjectHash,
+  isTempDirPath,
+  QWEN_DIR,
+  sanitizeCwd,
+} from '../utils/paths.js';
+import { FatalConfigError, isNodeError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -637,7 +642,7 @@ export class Storage {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
 
-  /** Age threshold for removing project entries that never gained content. */
+  /** Age threshold for removing stale temp-project residue. */
   private static readonly ORPHAN_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 
   async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
@@ -647,10 +652,9 @@ export class Storage {
   /**
    * Removes orphaned project snapshot directories under
    * `<runtime>/projects/` (issue #7906). This startup sweep is
-   * deliberately conservative: it only removes stale entries that never
-   * gained any content. Record-bearing entries may be shared by multiple
-   * sessions, processes, or hosts; proving they are unowned needs a
-   * durable ownership protocol and is outside this small cleanup.
+   * deliberately conservative: it removes only stale sidecar-only entries
+   * whose sidecars prove they belong to a missing temp/worktree path.
+   * Entries with transcripts or other durable records are retained.
    */
   static async cleanOrphanProjectDirs(currentProjectId: string): Promise<{
     removed: string[];
@@ -678,10 +682,20 @@ export class Storage {
         continue;
       }
       try {
-        if (Storage.isStaleEmptyEntry(entryPath, now)) {
-          fs.rmSync(entryPath, { recursive: true, force: true });
-          result.removed.push(entry);
+        const sidecars = Storage.getStaleTempResidueSidecars(
+          entryPath,
+          entry,
+          now,
+        );
+        if (!sidecars) {
+          continue;
         }
+        for (const sidecar of sidecars) {
+          fs.unlinkSync(sidecar);
+        }
+        fs.rmdirSync(path.join(entryPath, 'chats'));
+        fs.rmdirSync(entryPath);
+        result.removed.push(entry);
       } catch (error) {
         result.errors.push({ entry, error });
       }
@@ -689,30 +703,141 @@ export class Storage {
     return result;
   }
 
-  private static isStaleEmptyEntry(entryPath: string, now: number): boolean {
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(entryPath);
-    } catch {
-      return false;
-    }
+  private static getStaleTempResidueSidecars(
+    entryPath: string,
+    entryName: string,
+    now: number,
+  ): string[] | null {
+    const stat = fs.lstatSync(entryPath);
     if (
       !stat.isDirectory() ||
       now - stat.mtimeMs <= Storage.ORPHAN_STALE_AGE_MS
     ) {
-      return false;
+      return null;
     }
-    return Storage.countFiles(entryPath) === 0;
+
+    const entryContents = fs.readdirSync(entryPath, { withFileTypes: true });
+    if (
+      entryContents.length !== 1 ||
+      entryContents[0]?.name !== 'chats' ||
+      !entryContents[0].isDirectory()
+    ) {
+      return null;
+    }
+
+    const chatsDir = path.join(entryPath, 'chats');
+    const chatFiles = fs.readdirSync(chatsDir, { withFileTypes: true });
+    if (chatFiles.length === 0) {
+      return null;
+    }
+
+    const sidecars: string[] = [];
+    let projectRoot: string | undefined;
+    for (const file of chatFiles) {
+      if (!file.isFile() || !file.name.endsWith('.worktree.json')) {
+        return null;
+      }
+      const filePath = path.join(chatsDir, file.name);
+      const fileStat = fs.lstatSync(filePath);
+      if (
+        !fileStat.isFile() ||
+        now - fileStat.mtimeMs <= Storage.ORPHAN_STALE_AGE_MS
+      ) {
+        return null;
+      }
+      const metadata = Storage.readWorktreeCleanupMetadata(filePath);
+      if (!metadata) {
+        return null;
+      }
+
+      const { originalCwd, worktreePath } = metadata;
+      if (
+        !path.isAbsolute(originalCwd) ||
+        !path.isAbsolute(worktreePath) ||
+        sanitizeCwd(originalCwd) !== entryName ||
+        !Storage.isExplicitlyMissing(originalCwd) ||
+        !isTempDirPath(originalCwd) ||
+        !Storage.isManagedWorktreePath(originalCwd, worktreePath) ||
+        !Storage.isExplicitlyMissing(worktreePath)
+      ) {
+        return null;
+      }
+
+      const resolvedProjectRoot = path.resolve(originalCwd);
+      if (
+        projectRoot !== undefined &&
+        !Storage.pathsEqual(projectRoot, resolvedProjectRoot)
+      ) {
+        return null;
+      }
+      projectRoot = resolvedProjectRoot;
+      sidecars.push(filePath);
+    }
+    return sidecars;
   }
 
-  /** Counts files under an entry; any file means the entry has content. */
-  private static countFiles(dirPath: string, depth = 0): number {
-    let count = 0;
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      const child = path.join(dirPath, entry.name);
-      count += entry.isDirectory() ? Storage.countFiles(child, depth + 1) : 1;
+  private static readWorktreeCleanupMetadata(
+    filePath: string,
+  ): { originalCwd: string; worktreePath: string } | null {
+    let data: unknown;
+    try {
+      data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        return null;
+      }
+      throw error;
     }
-    return count;
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      return null;
+    }
+    const value = data as Record<string, unknown>;
+    const requiredFields = [
+      'slug',
+      'worktreePath',
+      'worktreeBranch',
+      'originalCwd',
+      'originalBranch',
+      'originalHeadCommit',
+    ];
+    if (requiredFields.some((field) => typeof value[field] !== 'string')) {
+      return null;
+    }
+    return {
+      originalCwd: value['originalCwd'] as string,
+      worktreePath: value['worktreePath'] as string,
+    };
+  }
+
+  private static isManagedWorktreePath(
+    originalCwd: string,
+    worktreePath: string,
+  ): boolean {
+    const parent = path.resolve(originalCwd, QWEN_DIR, 'worktrees');
+    const child = path.resolve(worktreePath);
+    return (
+      !Storage.pathsEqual(parent, child) &&
+      isResolvedPathWithinDirectory(child, parent)
+    );
+  }
+
+  private static pathsEqual(a: string, b: string): boolean {
+    return platformFoldsCase() ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
+
+  private static isExplicitlyMissing(filePath: string): boolean {
+    try {
+      fs.statSync(filePath);
+      return false;
+    } catch (error) {
+      if (
+        isNodeError(error) &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+      ) {
+        return true;
+      }
+      throw error;
+    }
   }
 
   static getOAuthCredsPath(): string {

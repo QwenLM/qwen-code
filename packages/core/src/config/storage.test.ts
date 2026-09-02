@@ -12,6 +12,7 @@ import os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
 import { FatalConfigError } from '../utils/errors.js';
+import { sanitizeCwd } from '../utils/paths.js';
 
 const mockRealpathSync = vi.hoisted(() =>
   // Default to the identity so isTempDirPath/realpathNearestExisting
@@ -20,6 +21,7 @@ const mockRealpathSync = vi.hoisted(() =>
 );
 const mockReaddirSync = vi.hoisted(() => vi.fn());
 const mockMkdirSync = vi.hoisted(() => vi.fn());
+const mockRmdirSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -35,11 +37,15 @@ vi.mock('node:fs', async (importOriginal) => {
   mockMkdirSync.mockImplementation(
     (...args: Parameters<typeof actual.mkdirSync>) => actual.mkdirSync(...args),
   );
+  mockRmdirSync.mockImplementation(
+    (...args: Parameters<typeof actual.rmdirSync>) => actual.rmdirSync(...args),
+  );
   const mocked = {
     ...actual,
     realpathSync: mockRealpathSync,
     readdirSync: mockReaddirSync,
     mkdirSync: mockMkdirSync,
+    rmdirSync: mockRmdirSync,
   };
   return {
     ...mocked,
@@ -734,9 +740,35 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   const STALE_AGE_MS = 2 * 24 * 60 * 60 * 1000;
 
-  const ageEntry = (entryPath: string) => {
+  const age = (...paths: string[]) => {
     const past = new Date(Date.now() - STALE_AGE_MS);
-    actualFs.utimesSync(entryPath, past, past);
+    for (const filePath of paths) {
+      actualFs.utimesSync(filePath, past, past);
+    }
+  };
+
+  const createSidecarEntry = (
+    originalCwd = path.join(baseDir, 'gone-project'),
+    sessionId = 'session-1',
+  ) => {
+    const entryName = sanitizeCwd(originalCwd);
+    const entry = path.join(projectsDir, entryName);
+    const chatsDir = path.join(entry, 'chats');
+    const sidecar = path.join(chatsDir, `${sessionId}.worktree.json`);
+    actualFs.mkdirSync(chatsDir, { recursive: true });
+    actualFs.writeFileSync(
+      sidecar,
+      JSON.stringify({
+        slug: 'scratch',
+        worktreePath: path.join(originalCwd, '.qwen', 'worktrees', 'scratch'),
+        worktreeBranch: 'scratch',
+        originalCwd,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      }),
+    );
+    age(sidecar, chatsDir, entry);
+    return { entry, entryName, chatsDir, sidecar };
   };
 
   // The env var beats setRuntimeBaseDir() in getRuntimeBaseDir():
@@ -759,6 +791,10 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       (...args: Parameters<typeof actualFs.mkdirSync>) =>
         actualFs.mkdirSync(...args),
     );
+    mockRmdirSync.mockImplementation(
+      (...args: Parameters<typeof actualFs.rmdirSync>) =>
+        actualFs.rmdirSync(...args),
+    );
     baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
     projectsDir = path.join(baseDir, 'projects');
     actualFs.mkdirSync(projectsDir, { recursive: true });
@@ -775,53 +811,134 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     actualFs.rmSync(baseDir, { recursive: true, force: true });
   });
 
-  it('keeps stale entries that contain any persisted content', async () => {
-    const entry = path.join(projectsDir, '-recorded');
-    actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, 'chats', 'session-1.jsonl'),
-      JSON.stringify({ cwd: '/tmp/gone', type: 'qwen' }) + '\n',
-    );
-    ageEntry(entry);
+  it('removes stale worktree sidecars for a gone temp project', async () => {
+    const { entry, entryName } = createSidecarEntry();
     const result = await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(entry)).toBe(true);
-    expect(result).toEqual({ removed: [], errors: [] });
+
+    expect(actualFs.existsSync(entry)).toBe(false);
+    expect(result).toEqual({ removed: [entryName], errors: [] });
   });
 
-  it('removes empty entries older than one day', async () => {
-    const stale = path.join(projectsDir, '-stale-empty');
-    actualFs.mkdirSync(stale, { recursive: true });
-    ageEntry(stale);
-    const result = await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(stale)).toBe(false);
-    expect(result).toEqual({ removed: ['-stale-empty'], errors: [] });
-  });
+  it.each([
+    ['a transcript', 'session-1.jsonl'],
+    ['a runtime claim', 'session-1.1.runtime.json'],
+    ['an unknown file', 'unknown'],
+  ])('keeps an entry containing %s', async (_label, fileName) => {
+    const { entry, chatsDir } = createSidecarEntry();
+    actualFs.writeFileSync(path.join(chatsDir, fileName), 'content');
+    age(entry);
 
-  it('keeps fresh empty entries', async () => {
-    const fresh = path.join(projectsDir, '-fresh-empty');
-    actualFs.mkdirSync(fresh, { recursive: true });
     await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(fresh)).toBe(true);
+
+    expect(actualFs.existsSync(entry)).toBe(true);
   });
 
-  it('keeps stale entries whose only file is an old orphan marker', async () => {
-    const entry = path.join(projectsDir, '-marker-only');
-    actualFs.mkdirSync(entry, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(entry, '.qwen-orphan-since'),
-      String(Date.now() - STALE_AGE_MS),
+  it('keeps empty entries because they do not prove a temp origin', async () => {
+    const entry = path.join(projectsDir, 'empty');
+    actualFs.mkdirSync(entry);
+    age(entry);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps a sidecar whose project entry name does not match originalCwd', async () => {
+    const { entry, entryName } = createSidecarEntry();
+    const collidingEntry = path.join(projectsDir, `${entryName}-different`);
+    actualFs.renameSync(entry, collidingEntry);
+    age(collidingEntry);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(collidingEntry)).toBe(true);
+  });
+
+  it('keeps colliding sidecars that disagree about the project root', async () => {
+    const firstRoot = path.join(baseDir, 'collision-root');
+    const secondRoot = path.join(baseDir, 'collision', 'root');
+    const first = createSidecarEntry(firstRoot, 'first');
+    const second = createSidecarEntry(secondRoot, 'second');
+    expect(first.entryName).toBe(second.entryName);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(first.entry)).toBe(true);
+  });
+
+  it('keeps an existing temp project', async () => {
+    const { entry } = createSidecarEntry(baseDir);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps a missing persistent project', async () => {
+    const originalCwd = path.join(
+      path.parse(baseDir).root,
+      'qwen-persistent-test',
+      path.basename(baseDir),
     );
-    ageEntry(entry);
+    const { entry } = createSidecarEntry(originalCwd);
+
     await Storage.cleanOrphanProjectDirs('current');
+
     expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps a sidecar whose worktree is outside the managed subtree', async () => {
+    const { entry, sidecar } = createSidecarEntry();
+    const metadata = JSON.parse(actualFs.readFileSync(sidecar, 'utf8'));
+    metadata.worktreePath = path.join(baseDir, 'different-project');
+    actualFs.writeFileSync(sidecar, JSON.stringify(metadata));
+    age(sidecar, entry);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps malformed and fresh sidecars', async () => {
+    const malformed = createSidecarEntry(
+      path.join(baseDir, 'gone-malformed'),
+      'malformed',
+    );
+    actualFs.writeFileSync(malformed.sidecar, '{');
+    age(malformed.sidecar, malformed.entry);
+    const fresh = createSidecarEntry(path.join(baseDir, 'gone-fresh'), 'fresh');
+    const now = new Date();
+    actualFs.utimesSync(fresh.sidecar, now, now);
+
+    await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(malformed.entry)).toBe(true);
+    expect(actualFs.existsSync(fresh.entry)).toBe(true);
+  });
+
+  it('keeps content created while an entry is being removed', async () => {
+    const { entry, chatsDir } = createSidecarEntry();
+    mockRmdirSync.mockImplementationOnce((dirPath) => {
+      actualFs.writeFileSync(path.join(chatsDir, 'new-session.jsonl'), 'live');
+      return actualFs.rmdirSync(dirPath);
+    });
+
+    const result = await Storage.cleanOrphanProjectDirs('current');
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(actualFs.existsSync(path.join(chatsDir, 'new-session.jsonl'))).toBe(
+      true,
+    );
+    expect(result.removed).toEqual([]);
+    expect(result.errors).toHaveLength(1);
   });
 
   it('never touches the current project entry', async () => {
-    const current = path.join(projectsDir, 'current');
-    actualFs.mkdirSync(current, { recursive: true });
-    ageEntry(current);
-    await Storage.cleanOrphanProjectDirs('current');
-    expect(actualFs.existsSync(current)).toBe(true);
+    const { entry, entryName } = createSidecarEntry();
+
+    await Storage.cleanOrphanProjectDirs(entryName);
+
+    expect(actualFs.existsSync(entry)).toBe(true);
   });
 
   it('is a no-op when the projects dir does not exist', async () => {

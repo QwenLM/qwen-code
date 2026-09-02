@@ -3545,10 +3545,8 @@ export class Config {
       })();
     }
 
-    // Fire-and-forget sweep of empty project entries under
-    // `<runtime>/projects/`. Entries with transcripts or sidecars may be
-    // shared across sessions/processes/hosts, so startup does not try to
-    // infer ownership from stale cwd evidence.
+    // Fire-and-forget sweep of stale sidecar-only entries whose metadata
+    // identifies a vanished temporary project root.
     setImmediate(() => {
       void Storage.cleanOrphanProjectDirs(
         sanitizeCwd(this.storage.getProjectRoot()),
