@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { copyOpenTuiAssets } from '../copy_bundle_assets.js';
 
 function seedOpentuiPackages(root) {
@@ -102,6 +102,45 @@ describe('copyOpenTuiAssets', () => {
       const copied = copyOpenTuiAssets({ root });
       expect(copied).toEqual([]);
       expect(existsSync(join(root, 'dist', 'opentui-assets'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('drops a stale tree from an earlier bundle', () => {
+    const root = mkdtempSync(join(tmpdir(), 'opentui-bundle-assets-'));
+    try {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({}));
+      seedOpentuiPackages(root);
+      // Simulate a leftover from an earlier bundle whose source set still
+      // included a platform this install no longer carries: the runtime
+      // gate checks key existence only, so it must not survive a re-copy.
+      const staleKey = '@opentui/core-linux-x64-musl/libopentui.so';
+      const stalePath = join(
+        root,
+        'dist',
+        'opentui-assets',
+        ...staleKey.split('/'),
+      );
+      mkdirSync(dirname(stalePath), { recursive: true });
+      writeFileSync(stalePath, 'stale');
+
+      const copied = copyOpenTuiAssets({ root });
+
+      expect(copied).not.toContain(staleKey);
+      expect(existsSync(stalePath)).toBe(false);
+      expect(
+        existsSync(
+          join(
+            root,
+            'dist',
+            'opentui-assets',
+            '@opentui',
+            'core-darwin-arm64',
+            'libopentui.dylib',
+          ),
+        ),
+      ).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

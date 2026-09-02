@@ -67,6 +67,13 @@ function spawnScriptPty(cmd, args, opts = {}) {
       }
     },
     write: (d) => child.stdin.write(d),
+    destroy: () => {
+      try {
+        child.kill();
+      } catch {
+        // already dead — nothing further to do
+      }
+    },
   };
 }
 
@@ -195,20 +202,19 @@ export function capture(command, options = {}) {
     let nonce = null;
     if (tty === 'script') {
       // script(1)-based PTY: some renderers (OpenTUI) accept a script-allocated
-      // PTY but not the node-pty backend. Capture script's stdout as the stream.
-      const tmp = `/tmp/tui-parity-script-${randomUUID()}.log`;
+      // PTY but not the node-pty backend. Route through spawnScriptPty so the
+      // argv form follows the platform (the trailing-positional form below
+      // only works on BSD script(1); util-linux rejects it).
       ttyEvidence.backend = 'script';
-      ttyEvidence.allocated = true;
       try {
-        child = spawn('script', ['-q', tmp, ...command], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          detached: true,
+        ptyProc = spawnScriptPty(command[0], command.slice(1), {
           env: childEnv,
         });
       } catch (err) {
         settle({ spawnError: err.message });
         return;
       }
+      ttyEvidence.allocated = true;
     } else if (tty === 'native') {
       backend = loadPtyBackend();
       if (!backend) {

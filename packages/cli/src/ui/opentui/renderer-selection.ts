@@ -24,11 +24,12 @@
 export const TUI_RENDERER_ENV_VAR = 'QWEN_TUI_RENDERER';
 
 /**
- * Turns the unsupported-runtime ink fallback into a hard failure. The silent
- * fallback is the right user-facing behavior, but the renderer-matrix E2E
- * legs need "green run really exercised opentui": with this set, an explicit
- * opentui request on a runtime that cannot load the native renderer throws
- * instead of serving ink. Never set it in product defaults.
+ * Turns the ink fallback into a hard failure. The silent fallback is the
+ * right user-facing behavior, but the renderer-matrix E2E legs need "green
+ * run really exercised opentui": with this set, an explicit opentui request
+ * that cannot be served — the runtime cannot load the native renderer, or
+ * the OpenTUI entry fails to boot — throws instead of serving ink. Never set
+ * it in product defaults.
  */
 export const TUI_RENDERER_STRICT_ENV_VAR = 'QWEN_TUI_RENDERER_STRICT';
 
@@ -41,6 +42,12 @@ export interface RendererSelection {
   renderer: TuiRendererChoice;
   /** Human-readable reason, for debug logging. Never shown to the user. */
   reason: string;
+  /**
+   * Whether QWEN_TUI_RENDERER_STRICT forbids ink fallbacks after the probe
+   * too: the dispatcher consults this when the OpenTUI entry fails to boot
+   * and re-throws instead of serving ink.
+   */
+  strict: boolean;
 }
 
 /** Minimum runtime versions that can initialize the OpenTUI native FFI. */
@@ -122,7 +129,9 @@ export function isOpenTuiRuntimeSupported(
  * renderer matrix, it turns the unsupported-runtime ink fallback into a throw
  * so a matrix leg cannot pass while a fallback secretly served ink. This
  * function is called before the dispatcher's own try/catch, so the throw
- * surfaces as a loud startup failure.
+ * surfaces as a loud startup failure. The flag also survives into
+ * {@link RendererSelection.strict} so the dispatcher can block the
+ * boot-failure fallback the same way.
  */
 export function selectTuiRenderer(
   envValue: string | undefined = process.env[TUI_RENDERER_ENV_VAR],
@@ -130,17 +139,19 @@ export function selectTuiRenderer(
   env: NodeJS.ProcessEnv = process.env,
 ): RendererSelection {
   const requested = envValue?.trim().toLowerCase();
+  const strictValue = env[TUI_RENDERER_STRICT_ENV_VAR]?.trim().toLowerCase();
+  const strict = strictValue === '1' || strictValue === 'true';
   if (requested !== OPEN_TUI_RENDERER_VALUE) {
     return {
       renderer: 'ink',
       reason: requested
         ? `${TUI_RENDERER_ENV_VAR}=${envValue} is not "${OPEN_TUI_RENDERER_VALUE}"`
         : `${TUI_RENDERER_ENV_VAR} is not set`,
+      strict,
     };
   }
   if (!isOpenTuiRuntimeSupported(probe)) {
-    const strict = env[TUI_RENDERER_STRICT_ENV_VAR]?.trim().toLowerCase();
-    if (strict === '1' || strict === 'true') {
+    if (strict) {
       throw new Error(
         `${TUI_RENDERER_ENV_VAR}=${OPEN_TUI_RENDERER_VALUE} was requested, but this runtime cannot initialize the OpenTUI native FFI ` +
           `(needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION}) and ` +
@@ -150,10 +161,12 @@ export function selectTuiRenderer(
     return {
       renderer: 'ink',
       reason: `OpenTUI requested but the runtime cannot initialize its native FFI (needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION})`,
+      strict,
     };
   }
   return {
     renderer: 'opentui',
     reason: `${TUI_RENDERER_ENV_VAR}=${OPEN_TUI_RENDERER_VALUE} on a supported runtime`,
+    strict,
   };
 }

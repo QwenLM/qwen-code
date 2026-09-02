@@ -7,6 +7,13 @@ PROMPT="${1:-hi}"
 SESS=qwcmp
 S=$(command -v qwen || true)
 S2=$(command -v qwen2 || true)
+if [ -z "$S" ] || [ -z "$S2" ]; then
+  echo "需要 qwen 和 qwen2 都在 PATH 中（当前: qwen=${S:-缺失}, qwen2=${S2:-缺失}）" >&2
+  exit 1
+fi
+INK_OUT=$(mktemp /tmp/qwen-ink.XXXXXX.txt)
+OTUI_OUT=$(mktemp /tmp/qwen-opentui.XXXXXX.txt)
+trap 'rm -f "$INK_OUT" "$OTUI_OUT"' EXIT
 tmux kill-session -t $SESS 2>/dev/null || true
 tmux new-session -d -s $SESS -x 120 -y 40 \; \
   split-window -h \; \
@@ -18,9 +25,9 @@ sleep 6
 tmux send-keys -t $SESS:0.0 "$PROMPT" Enter
 tmux send-keys -t $SESS:0.1 "$PROMPT" Enter
 sleep 12
-tmux capture-pane -p -t $SESS:0.0 > /tmp/qwen-ink.txt
-tmux capture-pane -p -t $SESS:0.1 > /tmp/qwen-opentui.txt
+tmux capture-pane -p -t $SESS:0.0 > "$INK_OUT"
+tmux capture-pane -p -t $SESS:0.1 > "$OTUI_OUT"
 tmux kill-session -t $SESS 2>/dev/null || true
-echo "=== ink (original) ==="; tail -20 /tmp/qwen-ink.txt
-echo "=== opentui (qwen2) ==="; tail -20 /tmp/qwen-opentui.txt
-echo "=== diff (behavior) ==="; diff /tmp/qwen-ink.txt /tmp/qwen-opentui.txt | head -40 || true
+echo "=== ink (original) ==="; tail -20 "$INK_OUT"
+echo "=== opentui (qwen2) ==="; tail -20 "$OTUI_OUT"
+echo "=== diff (behavior) ==="; diff "$INK_OUT" "$OTUI_OUT" | head -40 || true

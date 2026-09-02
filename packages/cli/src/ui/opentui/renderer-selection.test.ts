@@ -148,4 +148,25 @@ describe('selectTuiRenderer', () => {
   it('keeps ink when the flag explicitly asks for ink', () => {
     expect(selectTuiRenderer('ink', supported).renderer).toBe('ink');
   });
+
+  it('reports strict in every selection path', () => {
+    expect(
+      selectTuiRenderer('opentui', supported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: '1',
+      }).strict,
+    ).toBe(true);
+    expect(
+      selectTuiRenderer('opentui', supported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: 'false',
+      }).strict,
+    ).toBe(false);
+    expect(selectTuiRenderer('opentui', supported).strict).toBe(false);
+    // Present even on ink selections: the dispatcher consults the field when
+    // the OpenTUI entry fails to boot, regardless of the probe outcome.
+    expect(
+      selectTuiRenderer(undefined, supported, {
+        [TUI_RENDERER_STRICT_ENV_VAR]: 'true',
+      }).strict,
+    ).toBe(true);
+  });
 });

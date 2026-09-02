@@ -317,6 +317,10 @@ function stampReviewSourceDigest(root, distDir) {
 export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
   distDir ??= join(root, 'dist');
   const destRoot = join(distDir, 'opentui-assets');
+  // Start from a clean tree: the runtime gate below checks key existence
+  // only, so a tree left by an earlier bundle would still satisfy it and
+  // ship stale native libraries after the installed platform set changed.
+  fs.rmSync(destRoot, { recursive: true, force: true });
 
   // @opentui/core may sit in the root node_modules or be hoisted into
   // packages/cli/node_modules (it is a cli dependency); try both anchors.

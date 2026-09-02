@@ -68,15 +68,16 @@ const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
 // so each standalone archive must ship the matching platform package(s).
 // Stage every platform variant (like the clipboard addons) because release
-// packaging cross-builds all targets from a single host. Declared before the
+// packaging cross-builds all targets from a single host. Linux is glibc-only
+// on purpose: RELEASE_TARGETS bundles glibc-linked Bun binaries that cannot
+// start on musl hosts, so the -musl render packages would be dead weight
+// claiming support the archive cannot deliver. Declared before the
 // top-level `main()` call below (ESM const TDZ).
 const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-darwin-arm64',
   '@opentui/core-darwin-x64',
   '@opentui/core-linux-arm64',
-  '@opentui/core-linux-arm64-musl',
   '@opentui/core-linux-x64',
-  '@opentui/core-linux-x64-musl',
   '@opentui/core-win32-arm64',
   '@opentui/core-win32-x64',
 ];
@@ -124,7 +125,11 @@ async function main() {
     await downloadFile(`${runtimeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
     const nativeModulesDir = stageClipboardPackages(runtimeDir);
-    const opentuiModulesDir = stageOpenTuiPackages(runtimeDir);
+    // Only the bun runtime consumes the staged OpenTUI packages; the
+    // --runtime=node escape hatch must not install them (nor fail on a
+    // missing lockfile entry) at all.
+    const opentuiModulesDir =
+      runtime === 'bun' ? stageOpenTuiPackages(runtimeDir) : undefined;
 
     for (const target of RELEASE_TARGETS) {
       await packageTarget({

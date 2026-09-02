@@ -58,15 +58,14 @@ const TARGET_CLIPBOARD_PACKAGE = new Map([
 
 // Temporary OpenTUI preview: platform packages whose native render library is
 // resolved at runtime via `import('@opentui/core-<platform>-<arch>')`. Linux
-// targets carry both glibc and musl variants (selected via OPENTUI_LIBC).
+// is glibc-only: the bundled Bun runtime is glibc-linked and cannot start on
+// musl hosts, so shipping -musl render packages would claim support the
+// archive cannot deliver.
 const TARGET_OPENTUI_PACKAGES = new Map([
   ['darwin-arm64', ['@opentui/core-darwin-arm64']],
   ['darwin-x64', ['@opentui/core-darwin-x64']],
-  [
-    'linux-arm64',
-    ['@opentui/core-linux-arm64', '@opentui/core-linux-arm64-musl'],
-  ],
-  ['linux-x64', ['@opentui/core-linux-x64', '@opentui/core-linux-x64-musl']],
+  ['linux-arm64', ['@opentui/core-linux-arm64']],
+  ['linux-x64', ['@opentui/core-linux-x64']],
   ['win-x64', ['@opentui/core-win32-x64']],
 ]);
 
