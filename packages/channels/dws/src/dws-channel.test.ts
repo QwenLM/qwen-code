@@ -1084,6 +1084,55 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
+  it('only dispatches complete commands matching the configured message prefix', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ messagePrefix: '/review' }),
+    );
+
+    for (const [messageId, content] of [
+      ['plain', 'please review 123'],
+      ['empty', '/review'],
+      ['whitespace-only', '/review   '],
+      ['similar', '/reviewer 123'],
+      ['embedded', 'please /review 123'],
+      ['wrong-case', '/Review 123'],
+      ['joined', '@Qwen/review 123'],
+      ['malformed-mention', '@Qwen@Other /review 123'],
+    ]) {
+      await client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', messageId, content),
+      );
+    }
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'direct',
+        '  /review   456  ',
+        { referencedText: '/review should not affect matching' },
+      ),
+    );
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'valid',
+        '@Qwen @Code\n/review https://github.com/QwenLM/qwen-code/pull/123',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'direct', text: '456' }),
+      expect.objectContaining({
+        messageId: 'valid',
+        text: 'https://github.com/QwenLM/qwen-code/pull/123',
+      }),
+    ]);
+  });
+
   it('lets polling recover a stale replayed document notification', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

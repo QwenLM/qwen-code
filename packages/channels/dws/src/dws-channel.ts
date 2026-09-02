@@ -62,6 +62,7 @@ const TODO_CHAT_PREFIX = 'todo:';
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
+  messagePrefix?: unknown;
   startReaction?: unknown;
   endReaction?: unknown;
   watchTodos?: unknown;
@@ -176,6 +177,25 @@ function configuredBoolean(
     throw new Error(`DWS channel field ${field} must be a boolean.`);
   }
   return value;
+}
+
+function filterByMessagePrefix(
+  text: string,
+  prefix: string | undefined,
+): string | undefined {
+  if (!prefix) return text;
+  let command = text;
+  if (!command.startsWith(prefix)) {
+    while (command.startsWith('@')) {
+      const mention = command.match(/^@[^@\s]+\s+/u)?.[0];
+      if (!mention) return undefined;
+      command = command.slice(mention.length);
+    }
+  }
+  if (!command.startsWith(prefix)) return undefined;
+  const suffix = command.slice(prefix.length);
+  if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
+  return suffix.trim();
 }
 
 function parseDocumentMentionNotification(
@@ -505,6 +525,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly userInstructions?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
+  private readonly messagePrefix?: string;
   private readonly startReactionName: string;
   private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
@@ -533,6 +554,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     client?: DwsClientLike,
   ) {
     const profile = configuredString(config.profile, 'profile');
+    const messagePrefix = configuredString(
+      config.messagePrefix,
+      'messagePrefix',
+    );
     const startReactionName =
       configuredString(config.startReaction, 'startReaction') ??
       DEFAULT_START_REACTION;
@@ -591,6 +616,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }));
     this.startReactionName = startReactionName;
     this.endReactionName = endReactionName;
+    this.messagePrefix = messagePrefix;
     this.watchTodos = watchTodos;
   }
 
@@ -1592,13 +1618,20 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
+    const rawText = message.content.trim();
+    const text = filterByMessagePrefix(rawText, this.messagePrefix);
+    if (this.messagePrefix && !text) {
+      this.markProcessedMessage(key);
+      this.saveCursor();
+      return;
+    }
+
     const target: DwsImTarget =
       source.kind === 'direct'
         ? { kind: 'direct', openDingTalkId: message.senderId }
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    const text = message.content.trim();
     if (!text) {
       this.markProcessedMessage(key);
       this.saveCursor();
