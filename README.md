@@ -163,7 +163,7 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 
 ### Avg Score Trend
 
-![Qwen Code version Avg Score trend](./.github/assets/qwen-code-version-score-trend.svg)
+![Qwen Code version Avg Score trend](./.github/assets/qwen-code-avg-score-trend.svg)
 
 ## Ecosystem
 
