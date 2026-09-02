@@ -740,21 +740,25 @@ jobs:
               fi
             fi
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
-            npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            # See e2e.yml: closing the lock descriptors in the child keeps
+            # a descendant that outlives this job from holding the lock.
+            npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
               flock --unlock 7
+              exec 7>&-
             fi
           fi
           sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
           export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
             flock --unlock 8
+            exec 8>&-
           fi
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'

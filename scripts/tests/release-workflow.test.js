@@ -1281,8 +1281,13 @@ describe('release workflow', () => {
     expect(testStep.run).not.toContain('acquire_daemon_write_lock');
     expect(testStep.run).not.toContain('flock --unlock 9');
     expect(testStep.run).not.toContain('flock --nonblock 9');
-    expect(testStep.run).toContain('integration-tests cli');
-    expect(testStep.run).toContain('integration-tests interactive');
+    // A flock lives on the open file description: a descendant inheriting
+    // the descriptor past the job would keep the lock on the host.
+    expect(testStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+    expect(testStep.run).toContain('exec 7>&-');
+    expect(testStep.run).toContain('exec 8>&-');
+    expect(testStep.run).toContain('integration-tests cli 9>&-');
+    expect(testStep.run).toContain('integration-tests interactive 9>&-');
   });
 
   it('digest-pins every sandbox base image', () => {

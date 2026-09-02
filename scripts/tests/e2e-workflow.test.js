@@ -112,6 +112,21 @@ describe('e2e workflow', () => {
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
     });
+
+    it('closes the lock descriptors in every child process', () => {
+      // A flock lives on the open file description, so a descendant that
+      // inherits the descriptor and outlives its job keeps holding the lock
+      // on the host. This shell keeps its own copy of the descriptor, so
+      // closing it in children costs nothing.
+      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
+      expect(runStep.run).toContain('exec 7>&-');
+      expect(runStep.run).toContain('exec 8>&-');
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Prune dangling docker images',
+      );
+      expect(cleanupStep.run).toContain("--filter 'until=24h' 9>&-");
+    });
   });
 
   describe('sandbox:none shard retry', () => {
