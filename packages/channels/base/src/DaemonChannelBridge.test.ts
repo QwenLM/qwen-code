@@ -3852,6 +3852,84 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('passes refused and failed session-scoped permission votes through', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote: true,
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-refused',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    session.respondToSessionPermission.mockResolvedValueOnce(false);
+    await expect(
+      bridge.respondToPermission('req-refused', response),
+    ).resolves.toBe(false);
+    expect(session.respondToSessionPermission).toHaveBeenCalledWith(
+      'req-refused',
+      response,
+    );
+
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-failed',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(2));
+
+    session.respondToSessionPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    await expect(
+      bridge.respondToPermission('req-failed', response),
+    ).rejects.toThrow('permission failed');
+    await expect(
+      bridge.respondToPermission('req-failed', response),
+    ).resolves.toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
   it('treats terminal stream frames and completion as session death', async () => {
     const failedEvents = new EventQueue();
     failedEvents.fail(new Error('network down'));
