@@ -182,6 +182,7 @@ function detectRollbackAndGetBaseline(npmDistTag) {
  */
 export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
+  '@qwen-code/external-context-mem0',
   '@qwen-code/audio-capture',
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',
@@ -346,10 +347,41 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   };
 }
 
+function listExistingStableTags() {
+  const output = execSync(`git tag -l 'v*'`).toString();
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag) && semver.valid(tag))
+    .sort(semver.rcompare);
+}
+
 function getLatestStableReleaseTag() {
   try {
     const result = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
-    return result ? result.latestTag : '';
+    if (!result) return '';
+    const npmDerivedTag = result.latestTag;
+    let existingTags;
+    try {
+      existingTags = listExistingStableTags();
+    } catch (gitError) {
+      // Without a tag listing we cannot verify; keep the npm-derived tag as
+      // before rather than dropping the release-notes anchor entirely.
+      console.error(
+        `Could not list git tags to verify ${npmDerivedTag} (${gitError.message}); using the npm-derived tag as-is.`,
+      );
+      return npmDerivedTag;
+    }
+    if (existingTags.includes(npmDerivedTag)) return npmDerivedTag;
+    // A half-shipped release can leave the npm baseline ahead of any git tag
+    // (npm publish succeeded, tag creation failed). Anchoring the release
+    // notes at a tag that does not exist makes GitHub fall back to the entire
+    // branch history, so anchor at the latest stable tag that does exist.
+    const fallbackTag = existingTags[0] ?? '';
+    console.error(
+      `npm-derived previous tag ${npmDerivedTag} does not exist in git; falling back to ${fallbackTag || '<none>'}.`,
+    );
+    return fallbackTag;
   } catch (error) {
     console.error(
       `Failed to determine latest stable release tag: ${error.message}`,

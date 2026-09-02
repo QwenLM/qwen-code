@@ -20,7 +20,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_PR_URL_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
@@ -55,11 +58,13 @@ import type {
   ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
+  CurrentSessionScheduledTaskCreateHandler,
   ExternalToolGuardHandler,
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
+
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
   LIVE_TASK_TOOL_NAMES,
@@ -70,6 +75,11 @@ import {
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import {
+  isScheduledTaskRunSource,
+  parseSessionSource,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from './session-source.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
 // typing lets the bridge factory pass the full mediator instance
@@ -93,6 +103,16 @@ import {
   type SessionAttachmentReference,
   type SessionAttachmentStore,
 } from './sessionAttachments.js';
+
+const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
+const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
+/**
+ * A per-run scheduled task prompt is the task's own prompt (already capped at
+ * the same ceiling by the scheduled-task REST route) plus a short execution
+ * context header. Allow that header on top of the ceiling so a task written at
+ * the limit still dispatches.
+ */
+const SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS = 1024;
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -189,6 +209,28 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
     err instanceof Error &&
     err.name === 'FsError' &&
     typeof (err as { kind?: unknown }).kind === 'string'
+  );
+}
+
+interface ExistingSessionScheduledTaskCreateErrorShape {
+  name: 'ExistingSessionScheduledTaskCreateError';
+  message: string;
+  status: number;
+  code: string;
+}
+
+function isExistingSessionScheduledTaskCreateErrorShape(
+  err: unknown,
+): err is ExistingSessionScheduledTaskCreateErrorShape {
+  if (!(err instanceof Error)) return false;
+  const status = (err as Error & { status?: unknown }).status;
+  const code = (err as Error & { code?: unknown }).code;
+  return (
+    err.name === 'ExistingSessionScheduledTaskCreateError' &&
+    typeof status === 'number' &&
+    Number.isFinite(status) &&
+    typeof code === 'string' &&
+    code.length > 0
   );
 }
 
@@ -493,6 +535,17 @@ function preserveFsErrorOverAcp(err: unknown): never {
   throw err;
 }
 
+function preserveScheduledTaskCreateErrorOverAcp(err: unknown): never {
+  if (isExistingSessionScheduledTaskCreateErrorShape(err)) {
+    throw new RequestError(err.status >= 500 ? -32603 : -32602, err.message, {
+      errorKind: err.code,
+      status: err.status,
+      hint: err.message,
+    });
+  }
+  throw err;
+}
+
 /**
  * Translate the mediator's internal `PermissionResolution` to the
  * ACP-shaped `RequestPermissionResponse` the agent expects.
@@ -617,8 +670,16 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  artifactWorkspaceReady: boolean;
+  prepareArtifactWorkspace?: () => Promise<void>;
+  artifactWorkspacePreparation?: Promise<void>;
+  deferredArtifactBatches: BridgeClientDeferredArtifactBatch[];
+  deferredArtifactInputCount: number;
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
@@ -664,6 +725,12 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
+}
+
+export interface BridgeClientDeferredArtifactBatch {
+  artifacts: SessionArtifactInput[];
+  options?: Parameters<SessionArtifactStore['upsertMany']>[1];
+  turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
 }
 
 interface PreparedSessionUpdateFrames {
@@ -847,6 +914,7 @@ export class BridgeClient implements Client {
      * source-compatible.
      */
     private readonly onGoalTurnEnded?: (sessionId: string) => void,
+    private readonly onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler,
   ) {}
 
   async requestPermission(
@@ -1110,6 +1178,43 @@ export class BridgeClient implements Client {
     }
   }
 
+  async ingestSessionUpdateArtifactsReady(
+    entry: BridgeClientSessionEntry,
+    updates: SessionUpdate[],
+  ): Promise<void> {
+    for (const update of updates) {
+      const prepared = this.prepareSessionUpdateFrames(
+        { sessionId: entry.sessionId, update },
+        entry,
+      );
+      if (prepared.artifacts.length === 0) continue;
+      const ingested = await this.upsertAndPublishArtifactsReady(
+        entry,
+        prepared.artifacts,
+        { trustedPublisher: prepared.trustedPublisher },
+        prepared.turn,
+      );
+      if (!ingested) throw new Error('Artifact ingestion failed.');
+    }
+  }
+
+  async drainDeferredSessionArtifacts(
+    entry: BridgeClientSessionEntry,
+  ): Promise<void> {
+    while (entry.deferredArtifactBatches.length > 0) {
+      const batch = entry.deferredArtifactBatches[0];
+      const ingested = await this.upsertAndPublishArtifactsReady(
+        entry,
+        batch.artifacts,
+        batch.options,
+        batch.turn,
+      );
+      if (!ingested) throw new Error('Deferred artifact ingestion failed.');
+      entry.deferredArtifactBatches.shift();
+      entry.deferredArtifactInputCount -= batch.artifacts.length;
+    }
+  }
+
   /**
    * Daemon token-burn accounting for LIVE model turns. Called only from
    * `sessionUpdate` (the live session/update fan-in), never from
@@ -1234,6 +1339,11 @@ export class BridgeClient implements Client {
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
+    }
+    if (
+      method === SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask
+    ) {
+      return this.handleCreateCurrentSessionScheduledTask(params);
     }
     if (method === SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext) {
       return this.handleLiveScreenContextCapture(params);
@@ -1773,14 +1883,30 @@ export class BridgeClient implements Client {
         '`prompt` must be a non-empty string',
       );
     }
+    const source = parseSessionSource(params['sourceType'], params['sourceId']);
+    if ('error' in source) {
+      throw RequestError.invalidParams(undefined, source.error);
+    }
+    if (
+      source.sourceType !== undefined &&
+      source.sourceType !== SCHEDULED_TASK_RUN_SOURCE_TYPE
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sourceType` is not settable on a sub-session',
+      );
+    }
+    const promptLimit = isScheduledTaskRunSource(source)
+      ? MAX_SUB_SESSION_PROMPT_CHARS + SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS
+      : MAX_SUB_SESSION_PROMPT_CHARS;
     // The child is a separate process; this is a trust boundary. Without a cap
     // it can hand the daemon a multi-MB string to deserialize, copy for the
     // display name, and dispatch into a new session. Same ceiling the
     // scheduled-task REST route applies to the prompts it accepts.
-    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+    if (prompt.length > promptLimit) {
       throw RequestError.invalidParams(
         undefined,
-        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+        `\`prompt\` exceeds the ${promptLimit}-character limit`,
       );
     }
     const completion = params['completion'];
@@ -1823,6 +1949,7 @@ export class BridgeClient implements Client {
         ? { model }
         : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...source,
       callerSessionId,
     });
     return {
@@ -1835,6 +1962,121 @@ export class BridgeClient implements Client {
         ? { parentSessionPersisted: result.parentSessionPersisted }
         : {}),
     };
+  }
+
+  private async handleCreateCurrentSessionScheduledTask(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onCreateCurrentSessionScheduledTask) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const promptId = params['promptId'];
+    const cron = params['cron'];
+    const prompt = params['prompt'];
+    const recurring = params['recurring'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` must name a session owned by this connection',
+      );
+    }
+    if (typeof promptId !== 'string' || promptId.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`promptId` must be a non-empty string',
+      );
+    }
+    if (
+      typeof cron !== 'string' ||
+      cron.length === 0 ||
+      cron.length > MAX_SCHEDULED_TASK_CRON_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`cron\` must be a non-empty string within the ${MAX_SCHEDULED_TASK_CRON_CHARS}-character limit`,
+      );
+    }
+    if (
+      typeof prompt !== 'string' ||
+      prompt.length === 0 ||
+      prompt.length > MAX_SCHEDULED_TASK_PROMPT_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`prompt\` must be non-empty and within the ${MAX_SCHEDULED_TASK_PROMPT_CHARS}-character limit`,
+      );
+    }
+    if (typeof recurring !== 'boolean') {
+      throw RequestError.invalidParams(
+        undefined,
+        '`recurring` must be a boolean',
+      );
+    }
+
+    const entry = this.resolveEntry(callerSessionId);
+    if (
+      !entry ||
+      entry.sessionId !== callerSessionId ||
+      entry.promptActive !== true ||
+      entry.activePromptId !== promptId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'The caller session does not own the active prompt',
+      );
+    }
+    if (
+      entry.parentSessionId !== undefined ||
+      entry.sourceId !== undefined ||
+      (entry.sourceType !== undefined && entry.sourceType !== 'default')
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'The caller session source cannot own a scheduled task',
+      );
+    }
+
+    const result = await this.onCreateCurrentSessionScheduledTask({
+      callerSessionId,
+      promptId,
+      cron,
+      prompt,
+      recurring,
+      assertCallerPromptActive: () => {
+        const currentEntry = this.resolveEntry(callerSessionId);
+        if (
+          currentEntry !== entry ||
+          currentEntry.promptActive !== true ||
+          currentEntry.activePromptId !== promptId
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'The caller session no longer owns the active prompt',
+          );
+        }
+      },
+    }).catch((error: unknown) =>
+      preserveScheduledTaskCreateErrorOverAcp(error),
+    );
+    if (
+      typeof result.id !== 'string' ||
+      result.id.length === 0 ||
+      typeof result.cron !== 'string' ||
+      result.cron.length === 0
+    ) {
+      throw RequestError.internalError(
+        undefined,
+        'Scheduled-task host returned an invalid result',
+      );
+    }
+    return { id: result.id, cron: result.cron };
   }
 
   private async handleLiveScreenContextCapture(
@@ -1946,7 +2188,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
-   * `qwen/notify/session/terminal-sequence`, and
+   * `qwen/notify/session/terminal-sequence`,
+   * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
+   * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
@@ -2196,6 +2440,50 @@ export class BridgeClient implements Client {
       }
       return;
     }
+    if (method === 'qwen/notify/session/pr-binding') {
+      // The child persists the PR sidecar itself (the daemon never sees the
+      // write); this notification only carries the catalog-clock mark so
+      // version-watching clients refetch the catalog that now includes the
+      // binding — the same propagation automatic title updates use. Validate
+      // the payload anyway: sessionId becomes a log/lookup key and the url a
+      // rendered link target on other consumers of this channel.
+      const sessionId = params['sessionId'];
+      const pr = params['pr'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        pr === null ||
+        typeof pr !== 'object' ||
+        Array.isArray(pr)
+      ) {
+        return;
+      }
+      const record = pr as Record<string, unknown>;
+      const number = record['number'];
+      const url = record['url'];
+      if (
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length === 0 ||
+        url.length > SESSION_PR_URL_MAX_LENGTH ||
+        !/^https?:\/\//i.test(url) ||
+        // Mirrors the bridge's hasControlCharacter: the url lands in an
+        // audit line, so control characters would forge log lines.
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
+      return;
+    }
     if (method === 'qwen/notify/session/recording-degraded') {
       const sessionId = params['sessionId'];
       if (
@@ -2352,6 +2640,64 @@ export class BridgeClient implements Client {
     options?: Parameters<SessionArtifactStore['upsertMany']>[1],
     turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'> = {},
   ): Promise<void> {
+    if (!entry.artifactWorkspaceReady) {
+      this.deferArtifactBatch(entry, artifacts, options, turn);
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred reason=workspace_not_bound`,
+      );
+      return;
+    }
+    try {
+      await entry.prepareArtifactWorkspace?.();
+    } catch {
+      // A failing prepare rejects the whole update and would silently drop the
+      // batch; park it in the deferred queue so a later drain retries it.
+      this.deferArtifactBatch(entry, artifacts, options, turn);
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred reason=workspace_prepare_failed`,
+      );
+      return;
+    }
+    await this.upsertAndPublishArtifactsReady(entry, artifacts, options, turn);
+  }
+
+  private deferArtifactBatch(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options: Parameters<SessionArtifactStore['upsertMany']>[1] | undefined,
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
+  ): void {
+    if (artifacts.length === 0) return;
+    entry.deferredArtifactBatches.push({ artifacts, options, turn });
+    entry.deferredArtifactInputCount += artifacts.length;
+    const limit = entry.artifacts.inputBatchLimit();
+    let truncated = false;
+    while (entry.deferredArtifactInputCount > limit) {
+      const first = entry.deferredArtifactBatches[0];
+      if (!first) break;
+      const overflow = entry.deferredArtifactInputCount - limit;
+      if (first.artifacts.length <= overflow) {
+        entry.deferredArtifactBatches.shift();
+        entry.deferredArtifactInputCount -= first.artifacts.length;
+      } else {
+        first.artifacts = first.artifacts.slice(overflow);
+        entry.deferredArtifactInputCount -= overflow;
+      }
+      truncated = true;
+    }
+    if (truncated) {
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred_truncated reason=workspace_not_bound`,
+      );
+    }
+  }
+
+  private async upsertAndPublishArtifactsReady(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options?: Parameters<SessionArtifactStore['upsertMany']>[1],
+    turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'> = {},
+  ): Promise<boolean> {
     try {
       const result = await entry.artifacts.upsertMany(artifacts, options);
       for (const warning of result.warnings ?? []) {
@@ -2362,12 +2708,14 @@ export class BridgeClient implements Client {
         );
       }
       this.publishArtifactChanges(entry, result.changes, turn);
+      return true;
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
           artifactIngestionErrorReason(error),
         )}`,
       );
+      return false;
     }
   }
 

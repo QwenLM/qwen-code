@@ -1,0 +1,20 @@
+{
+  "name": "external-context-mem0",
+  "displayName": {
+    "en": "Mem0 External Context",
+    "zh": "Mem0 外部上下文"
+  },
+  "description": {
+    "en": "Configurable retrieval from an administrator-bound Mem0-compatible service",
+    "zh": "从管理员绑定的 Mem0 兼容服务检索外部上下文"
+  },
+  "version": "0.22.3",
+  "mcpServers": {
+    "external-context-mem0": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}main.js"],
+      "cwd": "${extensionPath}",
+      "includeTools": ["context_search"]
+    }
+  }
+}

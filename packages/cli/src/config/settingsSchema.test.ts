@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
@@ -65,6 +65,31 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
+    });
+
     it('should have correct structure for each setting', () => {
       Object.entries(getSettingsSchema()).forEach(([_key, definition]) => {
         expect(definition).toHaveProperty('type');
@@ -101,6 +126,12 @@ describe('SettingsSchema', () => {
         expect(definition.properties).toBeDefined();
         expect(typeof definition.properties).toBe('object');
       });
+    });
+
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
     });
 
     it('should have accessibility nested properties', () => {
@@ -209,6 +240,16 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
     });
 
+    it('should have general.outputStyle setting in schema', () => {
+      const outputStyle = getSettingsSchema().general.properties!.outputStyle;
+
+      expect(outputStyle).toBeDefined();
+      expect(outputStyle.type).toBe('string');
+      expect(outputStyle.category).toBe('General');
+      expect(outputStyle.default).toBe(undefined);
+      expect(outputStyle.requiresRestart).toBe(true);
+    });
+
     it('should have plansDirectory setting in schema', () => {
       expect(getSettingsSchema().plansDirectory).toBeDefined();
       expect(getSettingsSchema().plansDirectory.type).toBe('string');
@@ -259,6 +300,33 @@ describe('SettingsSchema', () => {
       expect(exploreModel.default).toBe('inherit');
       expect(exploreModel.requiresRestart).toBe(true);
       expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should keep cross-session messaging off by default', () => {
+      // The default is the entire security posture of the feature: shipping
+      // it flipped on would open every session on the box to peer messages.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
     });
 
     it('should define model grade settings', () => {

@@ -13,6 +13,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   createNodeReplMcpServer,
+  NODE_REPL_INSTRUCTIONS,
   resolveContextFromEnv,
 } from './mcp-server.js';
 
@@ -54,7 +55,7 @@ function textOf(result: unknown): string {
 }
 
 describe('node_repl MCP server', () => {
-  it('exposes exactly the three tools with correct schemas', async () => {
+  it('exposes the five focused tools with correct schemas', async () => {
     const { client, close } = await connected();
     try {
       const { tools } = await client.listTools();
@@ -62,17 +63,19 @@ describe('node_repl MCP server', () => {
       expect(names).toEqual([
         'node_repl',
         'node_repl_add_node_module_dir',
+        'node_repl_cancel',
         'node_repl_reset',
+        'node_repl_wait',
       ]);
       const repl = tools.find((t) => t.name === 'node_repl');
       expect(repl?.inputSchema['required']).toEqual(['code']);
       expect(repl?.inputSchema['additionalProperties']).toBe(false);
-      // All three declared params must be advertised.
+      // All four declared params must be advertised.
       expect(
         Object.keys(
           (repl?.inputSchema['properties'] ?? {}) as Record<string, unknown>,
         ).sort(),
-      ).toEqual(['code', 'timeout_ms', 'title']);
+      ).toEqual(['code', 'timeout_ms', 'title', 'yield_time_ms']);
       // Arbitrary code execution must be advertised as destructive/open-world.
       expect(repl?.annotations).toMatchObject({
         readOnlyHint: false,
@@ -93,6 +96,12 @@ describe('node_repl MCP server', () => {
         tools.find((t) => t.name === 'node_repl_add_node_module_dir')
           ?.annotations,
       ).toMatchObject({ destructiveHint: false, idempotentHint: true });
+      expect(
+        tools.find((t) => t.name === 'node_repl_wait')?.annotations,
+      ).toMatchObject({ readOnlyHint: true, openWorldHint: true });
+      expect(
+        tools.find((t) => t.name === 'node_repl_cancel')?.annotations,
+      ).toMatchObject({ idempotentHint: false, openWorldHint: true });
     } finally {
       await close();
     }
@@ -109,6 +118,112 @@ describe('node_repl MCP server', () => {
       ).version as string;
       expect(client.getServerVersion()?.version).toBe(expected);
       expect(expected).toMatch(/^\d+\.\d+\.\d+/);
+    } finally {
+      await close();
+    }
+  });
+
+  it('advertises only the compact Node REPL runtime contract', async () => {
+    const { client, close } = await connected();
+    try {
+      expect(client.getInstructions()).toBe(NODE_REPL_INSTRUCTIONS);
+      expect(NODE_REPL_INSTRUCTIONS.length).toBeLessThan(2048);
+      expect(NODE_REPL_INSTRUCTIONS).not.toMatch(
+        /Computer Use|cua-sdk|RecreationBench/,
+      );
+      expect(NODE_REPL_INSTRUCTIONS).toContain('globalThis');
+      expect(NODE_REPL_INSTRUCTIONS).toContain('node_repl_cancel');
+      expect(NODE_REPL_INSTRUCTIONS).toContain('nodeRepl.signal');
+      expect(NODE_REPL_INSTRUCTIONS).toContain(
+        'Runtime errors retain completed statement state',
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('yields, cancels, and retains the persistent kernel state', async () => {
+    const { client, close } = await connected();
+    try {
+      await client.callTool({
+        name: 'node_repl',
+        arguments: {
+          code: 'globalThis.marker = {}; const marker = globalThis.marker;',
+        },
+      });
+      const running = await client.callTool({
+        name: 'node_repl',
+        arguments: {
+          code: 'await new Promise((resolve) => setTimeout(resolve, 60_000)); const mustNotCommit = true;',
+          yield_time_ms: 10,
+          timeout_ms: 60_000,
+        },
+      });
+      const match = textOf(running).match(
+        /cell ([0-9a-f]{8}-[0-9a-f-]{27}) is still running/i,
+      );
+      expect(match?.[1]).toBeTruthy();
+
+      const cancelled = await client.callTool({
+        name: 'node_repl_cancel',
+        arguments: { cell_id: match![1], yield_time_ms: 5_000 },
+      });
+      expect((cancelled as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(cancelled)).toMatch(/cancelled/i);
+
+      const retained = await client.callTool({
+        name: 'node_repl',
+        arguments: {
+          code: 'nodeRepl.write(`${marker === globalThis.marker}|${typeof mustNotCommit}`);',
+        },
+      });
+      expect(textOf(retained)).toContain('true|undefined');
+    } finally {
+      await close();
+    }
+  });
+
+  it('waits for the only active cell and rejects conflicting lifecycle calls', async () => {
+    const { client, close } = await connected();
+    try {
+      const running = await client.callTool({
+        name: 'node_repl',
+        arguments: {
+          code: 'await new Promise((resolve) => setTimeout(resolve, 100)); nodeRepl.write("finished");',
+          yield_time_ms: 10,
+        },
+      });
+      const match = textOf(running).match(
+        /cell ([0-9a-f]{8}-[0-9a-f-]{27}) is still running/i,
+      );
+      expect(match?.[1]).toBeTruthy();
+
+      const conflict = await client.callTool({
+        name: 'node_repl',
+        arguments: { code: 'nodeRepl.write("must-not-run");' },
+      });
+      expect((conflict as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(conflict)).toMatch(/already has active cell/i);
+
+      const reset = await client.callTool({
+        name: 'node_repl_reset',
+        arguments: {},
+      });
+      expect((reset as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(reset)).toMatch(/active; cancel it/i);
+
+      const completed = await client.callTool({
+        name: 'node_repl_wait',
+        arguments: { cell_id: match![1], yield_time_ms: 5_000 },
+      });
+      expect((completed as { isError?: boolean }).isError).not.toBe(true);
+      expect(textOf(completed)).toContain('finished');
+
+      const next = await client.callTool({
+        name: 'node_repl',
+        arguments: { code: 'nodeRepl.write("next");' },
+      });
+      expect(textOf(next)).toContain('next');
     } finally {
       await close();
     }

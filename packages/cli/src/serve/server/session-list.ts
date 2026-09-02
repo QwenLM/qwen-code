@@ -6,14 +6,19 @@
 
 import {
   addDaemonRequestAttribute,
+  SESSION_PR_LIST_LIMIT,
   SessionService,
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
+  toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
+  type SessionPr,
 } from '@qwen-code/qwen-code-core';
+import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -25,6 +30,8 @@ import {
   type PersistedSessionListSnapshot,
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
+import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
+import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -57,6 +64,8 @@ export interface ListWorkspaceSessionsOptions {
   sourceType?: string;
   /** Further restrict `sourceType` matches to this source identifier. */
   sourceId?: string;
+  /** Internal Conversations catalog restricted to top-level standalone rows. */
+  conversationKind?: 'standalone-top-level';
 }
 
 export interface ListWorkspaceSessionsResult {
@@ -149,6 +158,7 @@ interface OrganizedCursor {
   archiveState: SessionArchiveState;
   sourceType?: string;
   sourceId?: string;
+  conversationKind?: 'standalone-top-level';
   last: OrganizedCursorKey;
   emitted?: string[];
 }
@@ -186,6 +196,7 @@ function parseOrganizedCursor(
     archiveState: SessionArchiveState;
     sourceType?: string;
     sourceId?: string;
+    conversationKind?: 'standalone-top-level';
   },
 ): { last: OrganizedCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
@@ -208,7 +219,8 @@ function parseOrganizedCursor(
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
-      (parsed as OrganizedCursor).sourceId !== expected.sourceId
+      (parsed as OrganizedCursor).sourceId !== expected.sourceId ||
+      (parsed as OrganizedCursor).conversationKind !== expected.conversationKind
     ) {
       throw new Error('invalid organized cursor');
     }
@@ -228,6 +240,7 @@ function encodeOrganizedCursor(
   archiveState: SessionArchiveState,
   sourceType?: string,
   sourceId?: string,
+  conversationKind?: 'standalone-top-level',
   emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
@@ -236,6 +249,7 @@ function encodeOrganizedCursor(
       archiveState,
       sourceType,
       sourceId,
+      conversationKind,
       last,
       ...(emitted.length > 0 ? { emitted } : {}),
     }),
@@ -277,12 +291,22 @@ interface SessionMetadataFilter {
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+  conversationKind?: 'standalone-top-level';
 }
 
 function matchesSessionMetadataSource(
   session: BridgeSessionSummary,
-  filter: Pick<SessionMetadataFilter, 'sourceType' | 'sourceId'>,
+  filter: Pick<
+    SessionMetadataFilter,
+    'sourceType' | 'sourceId' | 'conversationKind'
+  >,
 ): boolean {
+  if (
+    filter.conversationKind === 'standalone-top-level' &&
+    classifyTopLevelConversationSource(session)?.kind !== 'standalone'
+  ) {
+    return false;
+  }
   const sourceTypeMatches =
     filter.sourceType === undefined ||
     session.sourceType === filter.sourceType ||
@@ -320,6 +344,8 @@ function parseMetadataSessionCursor(
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
       (parsed as { sourceId?: unknown }).sourceId !== expected.sourceId ||
+      (parsed as { conversationKind?: unknown }).conversationKind !==
+        expected.conversationKind ||
       (parsed as { archiveState?: unknown }).archiveState !==
         expected.archiveState
     ) {
@@ -434,7 +460,7 @@ async function enrichPrSidecars(
     if (sidecar) {
       bySessionId.set(sessionId, {
         ...summary,
-        prs: sidecar.map(({ number, url }) => ({ number, url })),
+        prs: sidecarToPrInfos(sidecar),
       });
     }
   }
@@ -497,19 +523,136 @@ function mergeLiveSessionSummary(
     isArchived: false,
   };
   // The live entry only knows PR bindings from this daemon lifetime while the
-  // sidecar-enriched persisted summary holds the full history — merge by PR
-  // number (live url wins, live-only bindings sort latest) instead of letting
-  // the spread overwrite the history.
+  // sidecar-enriched persisted summary holds the full history. The sidecar is
+  // the append-only binding-time record (last = latest — the order the badge
+  // renders by), so it supplies the merged order; the live entry overlays
+  // fresher volatile data onto it. Positional concatenation (persisted-only
+  // before live) breaks that order whenever a persisted-only binding is
+  // NEWER than a live one — exactly what a shell-hook write lands after a
+  // GitDialog bind. For `state` the sidecar wins: the refresh timer rewrites
+  // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
-    const livePrs = live.prs ?? [];
-    merged.prs = [
-      ...(existing.prs ?? []).filter(
-        (p) => !livePrs.some((l) => l.number === p.number),
-      ),
-      ...livePrs,
-    ];
+    merged.prs = mergeSummaryPrs(existing.prs, live.prs);
   }
   return merged;
+}
+
+function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
+  return sidecar.map(toSessionPrInfo);
+}
+
+/**
+ * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
+ * summary rendering. The sidecar is the append-only binding-time record
+ * (last = latest — the order the badge renders by), so it supplies the
+ * merged order; the live entry overlays fresher volatile data onto it.
+ * Positional concatenation (persisted-only before live) breaks that order
+ * whenever a persisted-only binding is NEWER than a live one — exactly what
+ * a shell-hook write lands after a GitDialog bind. For `state` and `issues`
+ * the persisted sidecar wins: the refresh timer rewrites them there, while
+ * the live entry is frozen at bind-time — and only for the same PR (same
+ * canonical url), whose live spelling (a query, a trailing slash) is kept.
+ * A same-numbered entry at a DIFFERENT canonical url is another PR: the
+ * sidecar-only writers (the shell hook, backfill) re-bind without touching
+ * the live entry, so the persisted binding wins wholesale and no stale live
+ * field survives; when a hand-edited sidecar holds two same-numbered
+ * entries, the live binding attaches to the url-matched one. A binding
+ * present only in the live entry was either bound this daemon lifetime and
+ * has not landed in the sidecar yet (the newest binding), or was EVICTED
+ * from the sidecar once it overflowed; eviction only happens at the cap, so
+ * below it a live-only entry is genuinely the newest and at the cap it must
+ * not be re-appended as the session's latest.
+ */
+function mergeSummaryPrs(
+  persistedPrs: readonly SessionPrInfo[] | undefined,
+  livePrs: readonly SessionPrInfo[] | undefined,
+): SessionPrInfo[] {
+  const live = livePrs ?? [];
+  const persisted = persistedPrs ?? [];
+  const liveByNumber = new Map(live.map((l) => [l.number, l]));
+  const persistedNumbers = new Set(persisted.map((p) => p.number));
+  const consumedLive = new Set<number>();
+  const ordered: SessionPrInfo[] = [];
+  for (const p of persisted) {
+    const liveEntry = liveByNumber.get(p.number);
+    if (!liveEntry) {
+      ordered.push(p);
+      continue;
+    }
+    const samePr =
+      canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(liveEntry.url);
+    // Matched by url, not a number-keyed map: a hand-edited sidecar can
+    // hold two same-numbered entries, and the live binding must attach to
+    // its own entry, not whichever one comes last.
+    const matchedTwinExists = persisted.some(
+      (q) =>
+        q.number === p.number &&
+        canonicalSessionPrUrl(q.url) === canonicalSessionPrUrl(liveEntry.url),
+    );
+    if (!samePr && matchedTwinExists) continue;
+    if (consumedLive.has(p.number)) continue;
+    consumedLive.add(p.number);
+    ordered.push(
+      samePr
+        ? {
+            ...liveEntry,
+            ...(p.state ? { state: p.state } : {}),
+            ...(p.issues ? { issues: p.issues } : {}),
+          }
+        : p,
+    );
+  }
+  for (const liveEntry of live) {
+    // Gate on the PERSISTED size: eviction only happens at the cap, so
+    // below it a live-only entry is genuinely the newest binding and must
+    // not be dropped once the running total fills up — the final slice
+    // keeps the newest and evicts the oldest persisted instead.
+    if (
+      !persistedNumbers.has(liveEntry.number) &&
+      persisted.length < SESSION_PR_LIST_LIMIT
+    ) {
+      ordered.push(liveEntry);
+    }
+  }
+  return ordered.slice(-SESSION_PR_LIST_LIMIT);
+}
+
+/**
+ * Builds the first-page insertion for a session that is live but has no
+ * persisted record yet. The bind route persists the PR sidecar before the
+ * session's first flush, so best-effort read it: the row then renders the
+ * sidecar's refreshed `state` instead of the live entry's bind-time
+ * snapshot, matching {@link mergeLiveSessionSummary}.
+ */
+async function liveOnlySummary(
+  live: BridgeSessionSummary,
+  sessionService: SessionService,
+  signal?: AbortSignal,
+): Promise<BridgeSessionSummary> {
+  const summary: BridgeSessionSummary = {
+    ...live,
+    createdAt: live.createdAt,
+    clientCount: live.clientCount,
+    hasActivePrompt: live.hasActivePrompt,
+    isArchived: false,
+  };
+  let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+  try {
+    const sidecarPath = sessionService.getPrSessionPathForArchiveState(
+      live.sessionId,
+      'active',
+    );
+    sidecar = signal
+      ? await readSessionPrs(sidecarPath, { signal })
+      : await readSessionPrs(sidecarPath);
+  } catch {
+    signal?.throwIfAborted();
+    sidecar = null;
+  }
+  if (sidecar) {
+    summary.prs = mergeSummaryPrs(sidecarToPrInfos(sidecar), live.prs);
+  }
+  return summary;
 }
 
 function clonePersistedSummary(
@@ -809,6 +952,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           archiveState,
           sourceType: options.sourceType,
           sourceId: options.sourceId,
+          conversationKind: options.conversationKind,
         })
       : undefined;
   const cursorKey = cursor?.last;
@@ -885,13 +1029,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           bySessionId.set(
             live.sessionId,
             applyOrganization(
-              {
-                ...live,
-                createdAt: live.createdAt,
-                clientCount: live.clientCount,
-                hasActivePrompt: live.hasActivePrompt,
-                isArchived: false,
-              },
+              await liveOnlySummary(live, sessionService, readOptions.signal),
               organization,
             ),
           );
@@ -978,6 +1116,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       archiveState,
       options.sourceType,
       options.sourceId,
+      options.conversationKind,
       emitted,
     );
   }
@@ -1013,28 +1152,56 @@ async function listWorkspaceSessionsByMetadataForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  const canonicalizeStandaloneIds =
+    filter.conversationKind === 'standalone-top-level';
+  const conflictedStandaloneIds = new Set<string>();
+  const persistedTimeById = new Map<string, number>();
   for (const session of persisted.sessions) {
-    bySessionId.set(session.sessionId, clonePersistedSummary(session));
+    let sessionId = session.sessionId;
+    if (canonicalizeStandaloneIds) {
+      const parsed = parseCallerSuppliedSessionId(sessionId);
+      if (parsed.kind !== 'valid') continue;
+      sessionId = parsed.sessionId;
+      if (conflictedStandaloneIds.has(sessionId)) continue;
+      if (bySessionId.has(sessionId)) {
+        bySessionId.delete(sessionId);
+        persistedTimeById.delete(sessionId);
+        conflictedStandaloneIds.add(sessionId);
+        continue;
+      }
+    }
+    bySessionId.set(sessionId, {
+      ...clonePersistedSummary(session),
+      sessionId,
+    });
+    persistedTimeById.set(sessionId, getSummaryActivityTime(session));
   }
   // Activity floors: the key a row falls back to once its live entry is gone.
-  const persistedTimeById = new Map(
-    persisted.sessions.map((session) => [
-      session.sessionId,
-      getSummaryActivityTime(session),
-    ]),
-  );
   const liveSessionIds = new Set<string>();
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
-        liveSessionIds.add(live.sessionId);
-        const existing = bySessionId.get(live.sessionId);
+        let sessionId = live.sessionId;
+        if (canonicalizeStandaloneIds) {
+          const parsed = parseCallerSuppliedSessionId(sessionId);
+          if (
+            parsed.kind !== 'valid' ||
+            conflictedStandaloneIds.has(parsed.sessionId)
+          ) {
+            continue;
+          }
+          sessionId = parsed.sessionId;
+        }
+        const canonicalLive =
+          sessionId === live.sessionId ? live : { ...live, sessionId };
+        liveSessionIds.add(sessionId);
+        const existing = bySessionId.get(sessionId);
         if (existing) {
           bySessionId.set(
-            live.sessionId,
-            mergeLiveSessionSummary(existing, live),
+            sessionId,
+            mergeLiveSessionSummary(existing, canonicalLive),
           );
         } else if (
           // See the matching comment in
@@ -1043,18 +1210,19 @@ async function listWorkspaceSessionsByMetadataForResponse(
           // re-check when nothing was truncated.
           !persisted.truncated ||
           !(await (readOptions.signal
-            ? sessionService.sessionExists(live.sessionId, {
+            ? sessionService.sessionExists(sessionId, {
                 signal: readOptions.signal,
               })
-            : sessionService.sessionExists(live.sessionId)))
+            : sessionService.sessionExists(sessionId)))
         ) {
-          bySessionId.set(live.sessionId, {
-            ...live,
-            createdAt: live.createdAt,
-            clientCount: live.clientCount,
-            hasActivePrompt: live.hasActivePrompt,
-            isArchived: false,
-          });
+          bySessionId.set(
+            sessionId,
+            await liveOnlySummary(
+              canonicalLive,
+              sessionService,
+              readOptions.signal,
+            ),
+          );
         }
       }
     } catch (error) {
@@ -1191,7 +1359,8 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   if (
     options?.parentSessionId !== undefined ||
-    options?.sourceType !== undefined
+    options?.sourceType !== undefined ||
+    options?.conversationKind !== undefined
   ) {
     return listWorkspaceSessionsByMetadataForResponse(
       bridge,
@@ -1207,6 +1376,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
           : {}),
         ...(options.sourceId !== undefined
           ? { sourceId: options.sourceId }
+          : {}),
+        ...(options.conversationKind !== undefined
+          ? { conversationKind: options.conversationKind }
           : {}),
       },
       readOptions,
@@ -1276,13 +1448,10 @@ async function listWorkspaceSessionsForResponseInRuntime(
             })
           : sessionService.sessionExists(live.sessionId))))
     ) {
-      bySessionId.set(live.sessionId, {
-        ...live,
-        createdAt: live.createdAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-        isArchived: false,
-      });
+      bySessionId.set(
+        live.sessionId,
+        await liveOnlySummary(live, sessionService, readOptions.signal),
+      );
     }
   }
 
@@ -1299,48 +1468,141 @@ async function listWorkspaceSessionsForResponseInRuntime(
   return { sessions, nextCursor };
 }
 
-export function listLiveWorkspaceSessionsForResponse(
+export async function listLiveWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options?: Pick<ListWorkspaceSessionsOptions, 'cursor' | 'size'>,
-): ListWorkspaceSessionsResult {
-  const rawSize = options?.size;
-  const requestedSize =
-    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
-      ? rawSize
-      : DEFAULT_SESSION_PAGE_SIZE;
-  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
-  const cursorKey =
-    options?.cursor !== undefined
-      ? parseLiveSessionCursor(options.cursor)
-      : undefined;
-  const sessions = bridge
-    .listWorkspaceSessions(workspaceCwd)
-    .sort((a, b) =>
-      compareLiveSessionCursorKeys(
-        getLiveSessionCursorKey(a),
-        getLiveSessionCursorKey(b),
+  readOptions: { runtimeBaseDir?: string; signal?: AbortSignal } = {},
+): Promise<ListWorkspaceSessionsResult> {
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+    const rawSize = options?.size;
+    const requestedSize =
+      typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
+        ? rawSize
+        : DEFAULT_SESSION_PAGE_SIZE;
+    const pageSize = Math.min(
+      Math.max(requestedSize, 1),
+      MAX_SESSION_PAGE_SIZE,
+    );
+    const cursorKey =
+      options?.cursor !== undefined
+        ? parseLiveSessionCursor(options.cursor)
+        : undefined;
+    const sessions = bridge
+      .listWorkspaceSessions(workspaceCwd)
+      .sort((a, b) =>
+        compareLiveSessionCursorKeys(
+          getLiveSessionCursorKey(a),
+          getLiveSessionCursorKey(b),
+        ),
+      );
+    const afterCursor =
+      cursorKey === undefined
+        ? sessions
+        : sessions.filter(
+            (session) =>
+              compareLiveSessionCursorKeys(
+                cursorKey,
+                getLiveSessionCursorKey(session),
+              ) < 0,
+          );
+    const page = afterCursor.slice(0, pageSize);
+    // The bind route persists the PR sidecar before the session's first
+    // flush, and a bridge entry re-created after a restart/close/reload
+    // carries no `prs`, so every live-only row must read the sidecar like
+    // the sibling live-only paths do — unconditionally.
+    const sessionService = new SessionService(workspaceCwd);
+    const enriched = await Promise.all(
+      page.map((summary) =>
+        liveOnlySummary(summary, sessionService, readOptions.signal),
       ),
     );
-  const afterCursor =
-    cursorKey === undefined
-      ? sessions
-      : sessions.filter(
-          (session) =>
-            compareLiveSessionCursorKeys(
-              cursorKey,
-              getLiveSessionCursorKey(session),
-            ) < 0,
+    const nextCursor =
+      page.length < afterCursor.length
+        ? encodeLiveSessionCursor(
+            getLiveSessionCursorKey(page[page.length - 1]!),
+          )
+        : undefined;
+    return {
+      sessions: enriched,
+      ...(nextCursor !== undefined ? { nextCursor } : {}),
+    };
+  });
+}
+
+export interface SearchWorkspaceSessionsResult {
+  results: Array<{ session: BridgeSessionSummary; snippet: string }>;
+}
+
+/**
+ * Searches user/assistant message text across the workspace's persisted
+ * active sessions and returns one summary + snippet per matching session,
+ * most recently modified first. Persisted-only: live sessions without a
+ * flushed transcript have no searchable content yet, and read-only secondary
+ * runtimes may only inspect the persisted store.
+ */
+export async function searchWorkspaceSessionsForResponse(
+  workspaceCwd: string,
+  query: string,
+  options: { maxResults?: number } = {},
+  readOptions: ListWorkspaceSessionsReadOptions = {},
+): Promise<SearchWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+    const sessionService = new SessionService(workspaceCwd);
+    const hits = await sessionService.searchSessionContent(query, {
+      ...(options.maxResults !== undefined
+        ? { maxResults: options.maxResults }
+        : {}),
+      ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+    });
+    const bySessionId = new Map<string, BridgeSessionSummary>();
+    // Ghost hits (sessions the client's loaded catalog page doesn't carry)
+    // must render with the same organization state as catalog entries —
+    // pin/group/color — or they break the pin/group invariants downstream.
+    const organizationSnapshot =
+      await createSessionOrganizationService(workspaceCwd).readSnapshot();
+    readOptions.signal?.throwIfAborted();
+    for (const hit of hits) {
+      readOptions.signal?.throwIfAborted();
+      const item = await sessionService.getSessionListItem(hit.sessionId);
+      if (item)
+        bySessionId.set(
+          hit.sessionId,
+          applyOrganization(
+            toSummary(item),
+            organizationSnapshot.sessions.get(hit.sessionId),
+          ),
         );
-  const page = afterCursor.slice(0, pageSize);
-  const nextCursor =
-    page.length < afterCursor.length
-      ? encodeLiveSessionCursor(getLiveSessionCursorKey(page[page.length - 1]!))
-      : undefined;
-  return {
-    sessions: page,
-    ...(nextCursor !== undefined ? { nextCursor } : {}),
-  };
+    }
+    await enrichWorktreeSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    readOptions.signal?.throwIfAborted();
+    const results: SearchWorkspaceSessionsResult['results'] = [];
+    for (const hit of hits) {
+      const session = bySessionId.get(hit.sessionId);
+      if (session) results.push({ session, snippet: hit.snippet });
+    }
+    return { results };
+  });
 }
 
 /**

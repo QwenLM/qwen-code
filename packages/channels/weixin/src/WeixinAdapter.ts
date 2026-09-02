@@ -21,7 +21,12 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText, sendImage, detectImageMime } from './send.js';
+import {
+  sendText,
+  sendImage,
+  detectImageMime,
+  markdownToPlainText,
+} from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
@@ -52,13 +57,12 @@ function escapeRegex(s: string): string {
 
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
-  private activeTypingChats = new Set<string>();
+  private activeTypingSessions = new Map<string, Map<string, number>>();
   private typingKeepaliveIntervals = new Map<
     string,
     ReturnType<typeof setInterval>
   >();
   private typingKeepaliveInFlight = new Set<string>();
-  private typingKeepaliveArmedAt = new Map<string, number>();
   /**
    * Per-chat generation token; stale setTyping continuations bail out.
    * Entries are reclaimed only by `disconnect()` — deleting them in
@@ -162,21 +166,21 @@ export class WeixinChannel extends ChannelBase {
     );
   }
 
-  protected override onPromptStart(chatId: string): void {
-    this.startTyping(chatId);
+  protected override onPromptStart(chatId: string, sessionId: string): void {
+    this.startTyping(chatId, sessionId);
   }
 
-  protected override onPromptEnd(chatId: string): void {
-    this.stopTyping(chatId);
+  protected override onPromptEnd(chatId: string, sessionId: string): void {
+    this.stopTyping(chatId, sessionId);
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
-      this.startTyping(event.chatId);
+      this.startTyping(event.chatId, event.sessionId);
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
-      this.stopTyping(event.chatId);
+      this.stopTyping(event.chatId, event.sessionId);
     }
   }
 
@@ -185,56 +189,73 @@ export class WeixinChannel extends ChannelBase {
     image?: CdnRef,
     file?: FileCdnRef,
   ): Promise<void> {
-    // Download image from CDN
-    if (image) {
-      try {
-        const imageData = await downloadAndDecrypt(
-          image.encryptQueryParam,
-          image.aesKey,
-        );
-        envelope.imageBase64 = imageData.toString('base64');
-        envelope.imageMimeType = detectImageMime(imageData);
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
-        );
+    await this.prepareThenHandleInbound(envelope, async () => {
+      // Download image from CDN
+      if (image) {
+        try {
+          const imageData = await downloadAndDecrypt(
+            image.encryptQueryParam,
+            image.aesKey,
+          );
+          envelope.imageBase64 = imageData.toString('base64');
+          envelope.imageMimeType = detectImageMime(imageData);
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
+          );
+        }
       }
-    }
 
-    // Download file from CDN, save to temp dir
-    if (file) {
-      try {
-        const fileData = await downloadAndDecrypt(
-          file.encryptQueryParam,
-          file.aesKey,
-        );
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(
-          dir,
-          basename(file.fileName) || `file_${Date.now()}`,
-        );
-        writeFileSync(filePath, fileData);
-        envelope.attachments = [
-          {
-            type: 'file',
-            filePath,
-            mimeType: 'application/octet-stream',
-            fileName: file.fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
-        );
-        envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+      // Download file from CDN, save to temp dir
+      if (file) {
+        try {
+          const fileData = await downloadAndDecrypt(
+            file.encryptQueryParam,
+            file.aesKey,
+          );
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(
+            dir,
+            basename(file.fileName) || `file_${Date.now()}`,
+          );
+          writeFileSync(filePath, fileData);
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: 'application/octet-stream',
+              fileName: file.fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
+        }
       }
-    }
-
-    await super.handleInbound(envelope);
+    });
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendProjectedMessage(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendProjectedMessage(chatId, text, sourceLabel);
+  }
+
+  private async sendProjectedMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
     const contextToken = getContextToken(chatId) || '';
 
     // Parse [IMAGE: /path/to/file.png] markers from text.
@@ -264,11 +285,18 @@ export class WeixinChannel extends ChannelBase {
     // Clean up double blank lines left by removed markers
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
 
+    const plainText = cleanedText ? markdownToPlainText(cleanedText) : '';
+    const visibleText = plainText
+      ? this.formatAttributedText(plainText, sourceLabel)
+      : parsedImages.length > 0
+        ? sourceLabel
+        : undefined;
+
     // Send text first if non-empty
-    if (cleanedText) {
+    if (visibleText) {
       await sendText({
         to: chatId,
-        text: cleanedText,
+        text: visibleText,
         baseUrl: this.baseUrl,
         token: this.token,
         contextToken,
@@ -301,7 +329,10 @@ export class WeixinChannel extends ChannelBase {
           try {
             await sendText({
               to: chatId,
-              text: '图片发送失败，请稍后重试',
+              text: this.formatAttributedText(
+                '图片发送失败，请稍后重试',
+                sourceLabel,
+              ),
               baseUrl: this.baseUrl,
               token: this.token,
               contextToken,
@@ -326,14 +357,19 @@ export class WeixinChannel extends ChannelBase {
     }
     this.typingKeepaliveIntervals.clear();
     this.typingKeepaliveInFlight.clear();
-    this.typingKeepaliveArmedAt.clear();
     this.typingGenerations.clear();
-    this.activeTypingChats.clear();
+    this.activeTypingSessions.clear();
   }
 
-  private startTyping(chatId: string): void {
-    if (this.activeTypingChats.has(chatId)) return;
-    this.activeTypingChats.add(chatId);
+  private startTyping(chatId: string, sessionId: string): void {
+    const sessions =
+      this.activeTypingSessions.get(chatId) ?? new Map<string, number>();
+    if (sessions.has(sessionId)) return;
+    const firstSession = sessions.size === 0;
+    sessions.set(sessionId, Date.now());
+    this.activeTypingSessions.set(chatId, sessions);
+    if (!firstSession) return;
+
     const controller = this.abortController;
     const generation = (this.typingGenerations.get(chatId) ?? 0) + 1;
     this.typingGenerations.set(chatId, generation);
@@ -347,69 +383,75 @@ export class WeixinChannel extends ChannelBase {
       // must not touch the live turn's typing state. A late success still
       // re-set the server-side indicator after our CANCEL, so compensate —
       // but only while the chat is idle; if a successor turn is live
-      // (activeTypingChats re-added), an unconditional CANCEL here would
+      // (activeTypingSessions re-added), an unconditional CANCEL here would
       // blank the successor's indicator mid-turn. A late failure is
       // harmless and must not delete live state.
       if (generation !== this.typingGenerations.get(chatId)) {
-        if (started && !this.activeTypingChats.has(chatId)) {
+        if (started && !this.activeTypingSessions.has(chatId)) {
           void this.setTyping(chatId, false);
         }
         return;
       }
-      if (!started) {
-        this.activeTypingChats.delete(chatId);
-        return;
-      }
-      if (!this.activeTypingChats.has(chatId)) {
+      if (started && !this.activeTypingSessions.has(chatId)) {
         void this.setTyping(chatId, false);
         return;
       }
-      this.startTypingKeepalive(chatId);
+      if (this.activeTypingSessions.has(chatId)) {
+        this.startTypingKeepalive(chatId);
+      }
     });
   }
 
-  private stopTyping(chatId: string): void {
+  private stopTyping(chatId: string, sessionId: string): void {
+    const sessions = this.activeTypingSessions.get(chatId);
+    if (!sessions?.delete(sessionId)) return;
+    if (sessions.size > 0) return;
+    this.activeTypingSessions.delete(chatId);
+    this.stopTypingChat(chatId);
+  }
+
+  private stopTypingChat(chatId: string): void {
     // Invalidate any in-flight initial TYPING of a previous turn.
     this.typingGenerations.set(
       chatId,
       (this.typingGenerations.get(chatId) ?? 0) + 1,
     );
     this.stopTypingKeepalive(chatId);
-    if (!this.activeTypingChats.delete(chatId)) return;
     void this.setTyping(chatId, false);
   }
 
   /**
    * Refreshes TYPING periodically while the chat stays in
-   * `activeTypingChats`, so the indicator survives long turns. The interval
-   * is only armed after the initial TYPING is confirmed, and each tick
-   * self-reaps once the chat is no longer typing or the backstop
-   * (`TYPING_KEEPALIVE_MAX_MS`) elapses, so a missed terminal event cannot
-   * keep it alive indefinitely.
+   * active sessions, so the indicator survives long turns. Each tick expires
+   * only sessions that exceeded the backstop; newer sessions in the same chat
+   * keep ownership.
    */
   private startTypingKeepalive(chatId: string): void {
     if (this.typingKeepaliveIntervals.has(chatId)) return;
-    this.typingKeepaliveArmedAt.set(chatId, Date.now());
     this.typingKeepaliveIntervals.set(
       chatId,
       setInterval(() => {
-        if (!this.activeTypingChats.has(chatId)) {
+        const sessions = this.activeTypingSessions.get(chatId);
+        if (!sessions) {
           this.stopTypingKeepalive(chatId);
           return;
         }
-        const armedAt = this.typingKeepaliveArmedAt.get(chatId);
-        if (
-          armedAt !== undefined &&
-          Date.now() - armedAt >= TYPING_KEEPALIVE_MAX_MS
-        ) {
-          // Wedged turn — bound the leak and clear the indicator. The
-          // backstop firing is the only observable signal that a turn never
-          // emitted a terminal event, so leave a log line tying the dropped
-          // indicator to the wedged chat.
+        const now = Date.now();
+        let expiredSessions = 0;
+        for (const [sessionId, startedAt] of sessions) {
+          if (now - startedAt >= TYPING_KEEPALIVE_MAX_MS) {
+            sessions.delete(sessionId);
+            expiredSessions++;
+          }
+        }
+        if (expiredSessions > 0) {
           process.stderr.write(
-            `[Weixin:${this.name}] Typing keepalive backstop (${TYPING_KEEPALIVE_MAX_MS}ms) elapsed for chat ${chatId} without a terminal event; clearing the indicator\n`,
+            `[Weixin:${this.name}] Typing keepalive backstop (${TYPING_KEEPALIVE_MAX_MS}ms) elapsed for ${expiredSessions} session(s) in chat ${chatId}\n`,
           );
-          this.stopTyping(chatId);
+        }
+        if (sessions.size === 0) {
+          this.activeTypingSessions.delete(chatId);
+          this.stopTypingChat(chatId);
           return;
         }
         // Don't overlap keepalive requests for the same chat.
@@ -427,13 +469,21 @@ export class WeixinChannel extends ChannelBase {
     if (interval === undefined) return;
     clearInterval(interval);
     this.typingKeepaliveIntervals.delete(chatId);
-    this.typingKeepaliveArmedAt.delete(chatId);
     // A refresh in flight from the ending turn would otherwise keep the flag
     // set until it settles (up to the post() timeout), and every keepalive
     // tick of the successor turn would early-return on the dedup check —
     // leaving the new indicator unrefreshed across the turn boundary. The
     // stale request's own `.finally` delete is then a harmless no-op.
     this.typingKeepaliveInFlight.delete(chatId);
+  }
+
+  override onSessionDied(sessionId: string): void {
+    for (const [chatId, sessions] of this.activeTypingSessions) {
+      if (sessions.has(sessionId)) {
+        this.stopTyping(chatId, sessionId);
+      }
+    }
+    super.onSessionDied(sessionId);
   }
 
   private async setTyping(userId: string, typing: boolean): Promise<boolean> {

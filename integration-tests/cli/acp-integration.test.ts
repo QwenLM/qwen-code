@@ -512,7 +512,9 @@ function setupAcpTest(
       },
     });
 
-    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: { OPENAI_MODEL: 'qwen3-coder-plus' },
+    });
 
     try {
       // Initialize
@@ -546,13 +548,7 @@ function setupAcpTest(
       const initialReasoningOption = newSession.configOptions.find(
         (opt) => opt.id === 'reasoning_effort',
       );
-      expect(initialReasoningOption).toMatchObject({
-        category: 'thought_level',
-        currentValue: 'default',
-      });
-      expect(
-        initialReasoningOption?.options.map((option) => option.value),
-      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
+      expect(initialReasoningOption).toBeUndefined();
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -616,11 +612,22 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
-      expect(
-        setModelResult.configOptions.find(
-          (opt) => opt.id === 'reasoning_effort',
-        )?.currentValue,
-      ).toBe('default');
+      const reasoningOption = setModelResult.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(reasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(reasoningOption?.options.map((option) => option.value)).toEqual([
+        'none',
+        'default',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
 
       const setReasoningResult = (await sendRequest(
         'session/set_config_option',
@@ -664,7 +671,7 @@ function setupAcpTest(
         response: {
           code: -32602,
           message:
-            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, none, low, medium, high, xhigh, max',
         },
       });
     } catch (e) {
@@ -748,8 +755,15 @@ function setupAcpTest(
       })) as { sessionId: string };
       expect(newSession.sessionId).toBeTruthy();
 
-      // Wait for available_commands_update to be received
-      await delay(1000);
+      await rig.poll(
+        () =>
+          sessionUpdates.some(
+            (update) =>
+              update.update?.sessionUpdate === 'available_commands_update',
+          ),
+        5000,
+        100,
+      );
 
       // Verify available_commands_update is received
       const commandsUpdate = sessionUpdates.find(

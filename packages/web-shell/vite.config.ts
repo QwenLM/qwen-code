@@ -14,7 +14,8 @@ const daemonProxy: ProxyOptions = {
     if (
       req.method === 'GET' &&
       (req.url?.startsWith('/extensions/') ||
-        req.url?.startsWith('/session-catalog/')) &&
+        req.url?.startsWith('/session-catalog/') ||
+        req.url?.startsWith('/live/')) &&
       /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
     ) {
       return req.url;
@@ -51,14 +52,13 @@ export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
       '@': resolve(__dirname, './client'),
       ...(command === 'serve'
         ? {
-            '@qwen-code/webui/daemon-react-sdk': resolve(
-              __dirname,
-              '../webui/src/daemon-react-sdk.ts',
-            ),
-            '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
             '@qwen-code/sdk/daemon': resolve(
               __dirname,
               '../sdk-typescript/src/daemon/index.ts',
@@ -70,7 +70,7 @@ export default defineConfig(({ command }) => ({
           }
         : {}),
     },
-    dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
+    dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
     outDir: '../dist',
@@ -91,6 +91,7 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
@@ -112,12 +113,24 @@ export default defineConfig(({ command }) => ({
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.
       '/usage': daemonProxy,
+      // Standalone-session CRUD (`/standalone/sessions*`) — the sidebar's
+      // standalone sessions list/load/create. Without it the SPA fallback
+      // returns index.html in dev and clicking or creating a standalone
+      // session fails JSON parsing.
+      '/standalone': daemonProxy,
+      // Live voice routes (`/live/status`, `/live/setup`, ...). The prefix
+      // overlaps `client/live/*` source modules; the bypass above exempts
+      // those source files from proxying.
+      '/live': daemonProxy,
       // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
       // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
       // path — a bare `/voice` prefix would shadow the client's own
       // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
       // vite must serve, and blanks the page.
       '/voice/stream': { ...daemonProxy, ws: true },
+      // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
+      // HTTP upgrade to the daemon, same as `/voice/stream`.
+      '/terminal': { ...daemonProxy, ws: true },
     },
   },
 }));

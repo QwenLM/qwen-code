@@ -104,15 +104,36 @@ if (tarballs.length !== 1 || tarballs[0] !== packed.filename) {
     `expected exactly one Node REPL tarball, found ${tarballs.join(', ')}`,
   );
 }
-run('npm', [
-  'publish',
-  tarball,
-  '--dry-run',
-  '--access',
-  'public',
-  '--json',
-  `--registry=${npmRegistry}`,
-]);
+const remoteIntegrityResult = spawnSync(
+  'npm',
+  [
+    'view',
+    `${packed.name}@${packed.version}`,
+    'dist.integrity',
+    `--registry=${npmRegistry}`,
+  ],
+  { cwd: packageRoot, encoding: 'utf8', stdio: 'pipe' },
+);
+if (remoteIntegrityResult.error) throw remoteIntegrityResult.error;
+const remoteIntegrity =
+  remoteIntegrityResult.status === 0 ? remoteIntegrityResult.stdout.trim() : '';
+if (remoteIntegrity) {
+  if (remoteIntegrity !== packed.integrity) {
+    throw new Error(
+      `${packed.name}@${packed.version} already exists with different integrity`,
+    );
+  }
+} else {
+  run('npm', [
+    'publish',
+    tarball,
+    '--dry-run',
+    '--access',
+    'public',
+    '--json',
+    `--registry=${npmRegistry}`,
+  ]);
+}
 
 const consumer = mkdtempSync(path.join(tmpdir(), 'qwen-node-repl-consumer-'));
 const textOf = (result) =>
@@ -161,7 +182,6 @@ try {
   if (!existsSync(serverEntry)) {
     throw new Error('clean install is missing the Node REPL entry point');
   }
-
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverEntry],
@@ -173,11 +193,22 @@ try {
   });
   try {
     await client.connect(transport);
+    const instructions = client.getInstructions() ?? '';
+    if (
+      instructions.length === 0 ||
+      instructions.length >= 2048 ||
+      !instructions.includes('session-persistent JavaScript kernel') ||
+      instructions.includes('Computer Use')
+    ) {
+      throw new Error(
+        'MCP initialize instructions are not the minimal Node REPL contract',
+      );
+    }
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
     if (
       names.join(',') !==
-      'node_repl,node_repl_add_node_module_dir,node_repl_reset'
+      'node_repl,node_repl_add_node_module_dir,node_repl_cancel,node_repl_reset,node_repl_wait'
     ) {
       throw new Error(`unexpected MCP tools: ${names.join(',')}`);
     }

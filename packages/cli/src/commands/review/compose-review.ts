@@ -22,7 +22,9 @@
 
 import type { CommandModule } from 'yargs';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tmpFile } from './lib/paths.js';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
@@ -33,8 +35,12 @@ import {
 } from './lib/coverage.js';
 import {
   compressSummary,
+  BASELINES,
+  DIRECTIONS,
   SEVERITIES,
   SOURCES,
+  type Baseline,
+  type Direction,
   type Severity,
   type Source,
 } from './findings.js';
@@ -69,11 +75,16 @@ import {
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
+import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
+  LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
+  LEDGER_MAX_TITLE,
+  claimLocator,
+  isLedgerClosure,
   isLedgerFinding,
   isStandInName,
   normalizeLedgerFinding,
@@ -84,9 +95,10 @@ import {
   streakOf,
   volumeOf,
   type Ledger,
+  type LedgerClosure,
   type LedgerFinding,
 } from './lib/ledger.js';
-import { mdField } from './lib/md-field.js';
+import { mdField, stripCommentGrammar } from './lib/md-field.js';
 import {
   convergenceAdvisory,
   convergenceAssessment,
@@ -108,6 +120,7 @@ import {
   carriedClaimLine,
   countInlineFindings,
   markerStrippedBody,
+  readClaimHead,
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
@@ -181,6 +194,338 @@ const MARKER_RESERVE = LEDGER_MAX_BYTES + 2;
 const BODY_SAFETY_MARGIN = 512;
 
 /**
+ * Everything the decided-stop grant reads off the plan and the cache it
+ * names, taken in ONE read each. The grant used to re-read both files per
+ * consumer — the fence hashed the cache in one `readFileSync` and the
+ * ledger enumeration read it again in another — and nothing bound the bytes
+ * the fence certified to the bytes the grant enumerated: a writer
+ * alternating the model-writable cache between the stamped state and an
+ * emptied one won that race in a measured probe. The snapshot is the one
+ * owner of the bytes for the whole grant; the hash and the enumeration are
+ * projections of the same buffer.
+ *
+ * `reason` is the capture's own decided-stop reason — the
+ * `nothingToReview.reason` field `capture-local` writes when the round is
+ * one of the three decided stops — or null when the plan carries no
+ * decision. The FIELD is the capture's own: no full-round plan carries it,
+ * so a model-written `stopReRule` on a full round finds nothing here and is
+ * refused. (The path arrives through the model-written state — the same
+ * seam every other `planPath` reader here trusts.) The REASON certifies
+ * what could have moved since the ledger round, and the grant's per-reason
+ * ruling constraints read that certification.
+ */
+interface StopSnapshot {
+  reason: string | null;
+  target: string | null;
+  cachePath: string | null;
+  /**
+   * The scope-emptied split key the capture published — the paths whose
+   * recorded change is gone. A `superseded` disposition is deduced ONLY
+   * from membership here; absent or empty licences none.
+   */
+  supersededPaths: readonly string[];
+  cache:
+    | { kind: 'no-path' }
+    | { kind: 'missing' }
+    | { kind: 'unreadable' }
+    | { kind: 'bytes'; bytes: Buffer };
+}
+
+function readStopSnapshot(planPath: string | undefined): StopSnapshot {
+  const empty: StopSnapshot = {
+    reason: null,
+    target: null,
+    cachePath: null,
+    supersededPaths: [],
+    cache: { kind: 'no-path' },
+  };
+  if (!planPath) return empty;
+  let plan: {
+    nothingToReview?: unknown;
+    target?: unknown;
+    cachePath?: unknown;
+    incremental?: { scope?: { supersededPaths?: unknown } };
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as typeof plan;
+  } catch {
+    return empty;
+  }
+  if (typeof plan !== 'object' || plan === null) return empty;
+  const stop = plan.nothingToReview;
+  const reason =
+    typeof stop === 'object' &&
+    stop !== null &&
+    typeof (stop as { reason?: unknown }).reason === 'string' &&
+    (stop as { reason: string }).reason !== ''
+      ? (stop as { reason: string }).reason
+      : null;
+  const target =
+    typeof plan.target === 'string' && plan.target !== '' ? plan.target : null;
+  const cachePath =
+    typeof plan.cachePath === 'string' && plan.cachePath !== ''
+      ? plan.cachePath
+      : null;
+  const rawSuperseded = plan.incremental?.scope?.supersededPaths;
+  const supersededPaths = Array.isArray(rawSuperseded)
+    ? rawSuperseded.filter((p): p is string => typeof p === 'string')
+    : [];
+  let cache: StopSnapshot['cache'] = { kind: 'no-path' };
+  if (cachePath !== null) {
+    try {
+      cache = { kind: 'bytes', bytes: readFileSync(cachePath) };
+    } catch (err) {
+      // A cache that does not exist recorded no findings — an EMPTY
+      // baseline, not an unreadable one. Every other read failure is
+      // unreadable: the grant must refuse, never enumerate a guess.
+      cache =
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { kind: 'missing' }
+          : { kind: 'unreadable' };
+    }
+  }
+  return { reason, target, cachePath, supersededPaths, cache };
+}
+
+/**
+ * The rulings each decided-stop reason licences — the capture's own
+ * certification of what could have moved since the ledger round (SKILL Step
+ * 1's stop branches prescribe the same split): `unchanged-since-last-round`
+ * certifies a byte-identical tree where every open finding stands VERBATIM
+ * (dispositions are DEDUCED, not judged); `scope-emptied` certifies each
+ * anchored path removed or byte-identical, so a finding stands or its bytes
+ * superseded it — nothing was reviewed that could fix; `clean-tree`
+ * certifies nothing moved since the findings were recorded, so the re-rule
+ * JUDGES them. A reason this table does not name licences nothing — the
+ * grant fails closed on it.
+ */
+const STOP_REASON_RULINGS: Record<string, readonly string[]> = {
+  'unchanged-since-last-round': ['still-stands'],
+  'scope-emptied': ['still-stands', 'superseded'],
+  'clean-tree': ['still-stands', 'fixed', 'superseded'],
+};
+
+/**
+ * Why a reason's licence is narrower than the full ruling set — the refusal
+ * line's second half. `clean-tree` carries no entry: every ruling is
+ * licensed there, so no refusal is ever built for it.
+ */
+const STOP_REASON_REFUSAL: Record<string, string> = {
+  'unchanged-since-last-round': 'a byte-identical tree can only still-stand',
+  'scope-emptied':
+    'an emptied scope still-stands or supersedes — nothing was reviewed that could fix',
+};
+
+/**
+ * The cache ledger's bytes bound into the stop fence — the SHA-256 of the
+ * snapshot's bytes, or null when there is no file to hash. A cache that
+ * does not exist holds no findings, so null IS a stampable value: the
+ * capture stamps it when nothing was cached, and the grant fails closed on
+ * a file that appeared since. Computed from the SNAPSHOT, never a second
+ * disk read: the hash the fence certifies and the ledger the grant
+ * enumerates must be projections of one buffer (the TOCTOU the snapshot
+ * exists to close).
+ */
+function cacheFindingsHash(cache: StopSnapshot['cache']): string | null {
+  if (cache.kind !== 'bytes') return null;
+  return createHash('sha256').update(cache.bytes).digest('hex');
+}
+
+/**
+ * The fence `run.ts` applies to the same decided-stop decision, read
+ * against the ONE sidecar the capture could have stamped for THIS plan —
+ * never the family: a family scan let a sidecar stamped for another target
+ * vouch for this one. The fence binds what it finds three ways — the run
+ * id the parent published (when one is), the plan's own stop reason (the
+ * licence-bearing field is the capture's, not the plan's; `run.ts`'s
+ * `readStopSidecar` reads it from the sidecar too), and the cache ledger's
+ * content hash the capture stamped at stop time, so the grant's baseline
+ * is the ledger the capture saw. With NO published id (an interactive
+ * round no `review run` gate reads) the run-id equality alone is waived —
+ * the sidecar itself is still required, and its reason, cache path, and
+ * findings hash still bind: `capture-local` stamps all three with or
+ * without a parent, so there is always something to match, and skipping
+ * the fence outright left every interactive grant gated by nothing but
+ * model-supplied inputs. Anything else — no usable target, a missing,
+ * unparsable, or foreign-stamped sidecar, a departed reason, cache path,
+ * or hash — fails closed. Returns null when the fence passes; the refusal
+ * line's second half otherwise.
+ */
+function stopSidecarFenceRefusal(
+  snap: StopSnapshot,
+  planStopReason: string,
+  env: NodeJS.ProcessEnv | undefined,
+): string | null {
+  const runIdRaw = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  const runId =
+    typeof runIdRaw === 'string' && runIdRaw !== '' ? runIdRaw : null;
+  if (snap.target === null) {
+    return (
+      'the plan carries no usable target — the sidecar the capture ' +
+      'stamped for this re-rule cannot be located.'
+    );
+  }
+  const noSidecar =
+    runId !== null
+      ? 'a run id is published but no stop sidecar carries its stamp — a ' +
+        'stale or foreign stop plan matches the shape but never the fence.'
+      : "no stop sidecar carries the capture's stamp for this plan — a " +
+        'stop plan without its capture-written sidecar is a shape, not a ' +
+        'decision.';
+  let stop: {
+    runId?: unknown;
+    reason?: unknown;
+    cachePath?: unknown;
+    findingsHash?: unknown;
+    supersededPaths?: unknown;
+  };
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(tmpFile(snap.target, 'stop.json'), 'utf8'),
+    );
+    // `JSON.parse('null')` succeeds — a null or non-object sidecar must be
+    // the designed refusal, never a bare TypeError off a property read.
+    if (typeof parsed !== 'object' || parsed === null) return noSidecar;
+    stop = parsed as typeof stop;
+  } catch {
+    return noSidecar;
+  }
+  if (runId !== null && stop.runId !== runId) {
+    return noSidecar;
+  }
+  if (stop.reason !== planStopReason) {
+    return (
+      `the stamped stop sidecar records reason '${String(stop.reason)}', ` +
+      `not the plan's '${planStopReason}' — the licence is the capture's ` +
+      'own decision, not a reason chosen for it.'
+    );
+  }
+  if (stop.cachePath !== snap.cachePath) {
+    return (
+      'the stamped stop sidecar names a different cache than the plan — ' +
+      "the grant's baseline must be the ledger the capture saw."
+    );
+  }
+  if (stop.findingsHash !== cacheFindingsHash(snap.cache)) {
+    return (
+      'the cache findings are not the ones the capture stamped — the ' +
+      'ledger moved between capture and compose.'
+    );
+  }
+  // The scope-emptied split binds too: the `superseded` deduction reads
+  // membership off the plan's `supersededPaths`, and the plan is
+  // model-editable after the capture wrote it — a split edited between
+  // capture and compose could blanket-supersede a live blocker past a
+  // fence that bound only reason/cache/hash. Only the capture-stamped
+  // copy certifies the split; a sidecar without one (older, or
+  // hand-written) fails closed for this reason.
+  if (planStopReason === 'scope-emptied') {
+    const stamped = stop.supersededPaths;
+    if (
+      !Array.isArray(stamped) ||
+      JSON.stringify(stamped) !== JSON.stringify(snap.supersededPaths)
+    ) {
+      return (
+        "the plan's supersededPaths depart from the split the capture " +
+        'stamped — a superseded deduction reads only the ' +
+        'capture-certified split.'
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * The status vocabulary a ledger row may carry — Step 6's own ruling
+ * discipline. Anything else is a DRIFTED row, and a drifted row is an
+ * unreadable baseline, never a skipped one: `status: 'oppn'` silently
+ * shrank the open set below what the ledger really held.
+ */
+const LEDGER_STATUS_VOCABULARY = new Set(['open', 'fixed', 'superseded']);
+
+/**
+ * The OPEN Critical entries in the cache ledger the snapshot read — the
+ * exact set a decided-stop re-rule owes a ruling for, each with the title
+ * the ledger recorded under its id when it carries one (the
+ * body↔disposition cross-check binds a re-assertion's content against it)
+ * and the file it cited (the scope-emptied `superseded` deduction reads
+ * membership in `supersededPaths` off it). Null when the plan names no
+ * cache or the ledger cannot be read: the completeness check then refuses,
+ * because a re-rule whose baseline cannot be read cannot be shown
+ * complete. One exception: a cache file that does not exist recorded no
+ * findings, so the baseline is EMPTY, not unreadable — that is the
+ * nothing-open stop's no-event compose. The cache is model-written (Step
+ * 8's prose rules), so every entry is re-validated, and a shape violation
+ * — a drifted `status` string included — is an unreadable baseline, never
+ * a skipped row: skipping shrinks the open set below what the ledger
+ * really holds, and the grant would issue over Criticals it could not
+ * enumerate. Enumerated from the SNAPSHOT's bytes — the same buffer the
+ * fence hashed — so no second read can race the certification.
+ */
+function openLedgerCriticalEntries(
+  snap: StopSnapshot,
+): Array<{ id: string; title?: string; file?: string }> | null {
+  if (snap.cache.kind === 'no-path' || snap.cache.kind === 'unreadable') {
+    return null;
+  }
+  if (snap.cache.kind === 'missing') return [];
+  try {
+    const cache = JSON.parse(snap.cache.bytes.toString('utf8')) as unknown;
+    if (typeof cache !== 'object' || cache === null || Array.isArray(cache)) {
+      return null;
+    }
+    // Older caches carry no findings — nothing to track.
+    if (!('findings' in cache)) return [];
+    // Present but not an array — the baseline is unreadable, not empty.
+    if (!Array.isArray(cache.findings)) return null;
+    const entries: Array<{ id: string; title?: string; file?: string }> = [];
+    // A repeated id is the same unreadable-baseline refusal as any other
+    // shape violation: two rows under one id collapse the grant's
+    // set-based completeness check and the last-wins title/file maps into
+    // ONE disposition — the "shrank the open set below what the ledger
+    // really holds" shape, from the ledger side (the disposition-side
+    // duplicate was already refused).
+    const seenIds = new Set<string>();
+    for (const f of cache.findings) {
+      const e = f as {
+        id?: unknown;
+        severity?: unknown;
+        status?: unknown;
+        title?: unknown;
+        file?: unknown;
+      };
+      if (
+        typeof e !== 'object' ||
+        e === null ||
+        typeof e.id !== 'string' ||
+        e.id === '' ||
+        (e.severity !== 'Critical' && e.severity !== 'Suggestion') ||
+        typeof e.status !== 'string' ||
+        !LEDGER_STATUS_VOCABULARY.has(e.status)
+      ) {
+        return null;
+      }
+      if (seenIds.has(e.id)) return null;
+      seenIds.add(e.id);
+      if (e.severity === 'Critical' && e.status === 'open') {
+        entries.push({
+          id: e.id,
+          ...(typeof e.title === 'string' && e.title.trim() !== ''
+            ? { title: e.title.trim() }
+            : {}),
+          ...(typeof e.file === 'string' && e.file !== ''
+            ? { file: e.file }
+            : {}),
+        });
+      }
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does this plan name a pull request? The budget and the marker must not
  * disagree about whether a marker will ride, so both ask here.
  */
@@ -222,6 +567,79 @@ const MAX_DEFERRED_SUGGESTION_CHARS = 240;
 const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
 
 /**
+ * The axes a claim line carries (#10291) — `[certifies-falsely]` /
+ * `[fails-closed]` for the direction, `[regression]` / `[new-surface]` for
+ * the baseline — read from the claim line's HEAD SLOT only (`readClaimHead`):
+ * never the title's prose, where a review of this very pipeline quotes the
+ * tags without meaning them, and never the body's writable tail, where a
+ * forged pair in a footer would defer every drafted Critical at once. The
+ * posted comment carries them visibly, the way it carries `[probe]`: the
+ * classification is the review's own claim about the finding, and the
+ * autofix grep reads the same line.
+ *
+ * An axis carrying BOTH of its tags is a contradiction and reads as
+ * unclassified — which every consumer treats as "posts" — rather than as
+ * either value: the tags decide whether a blocker leaves the posting set,
+ * and a guess there is the direction that loses work.
+ */
+function axesOfClaim(claim: string | null): {
+  direction?: Direction;
+  baseline?: Baseline;
+} {
+  if (claim === null) return {};
+  const seen = new Set(readClaimHead(claim).axes);
+  const one = <T extends string>(list: readonly T[]): T | undefined => {
+    const hits = list.filter((v) => seen.has(v));
+    return hits.length === 1 ? hits[0] : undefined;
+  };
+  const direction = one(DIRECTIONS);
+  const baseline = one(BASELINES);
+  return {
+    ...(direction === undefined ? {} : { direction }),
+    ...(baseline === undefined ? {} : { baseline }),
+  };
+}
+
+/**
+ * The ONE statement of which Critical the critical floor defers (#10291):
+ * `fails-closed` on `new-surface` — the change narrows what works in a
+ * surface the merge base never had, so merging it certifies nothing false
+ * and regresses nothing. Every other combination posts: a wrong result
+ * presented as correct (`certifies-falsely`) breaks the core promise
+ * whatever its baseline, a `regression` makes the merge worse than the base
+ * whatever its direction, and a Critical missing either axis is one the
+ * floor cannot classify — a blocker in doubt posts.
+ */
+function floorDefersCritical(axes: {
+  direction?: Direction;
+  baseline?: Baseline;
+}): boolean {
+  return axes.direction === 'fails-closed' && axes.baseline === 'new-surface';
+}
+
+/** The marker's one-letter spellings of the axes a claim carries. */
+function ledgerAxes(axes: { direction?: Direction; baseline?: Baseline }): {
+  d?: 'c' | 'f';
+  b?: 'r' | 'n';
+} {
+  return {
+    ...(axes.direction === undefined
+      ? {}
+      : {
+          d:
+            axes.direction === 'certifies-falsely'
+              ? ('c' as const)
+              : ('f' as const),
+        }),
+    ...(axes.baseline === undefined
+      ? {}
+      : {
+          b: axes.baseline === 'regression' ? ('r' as const) : ('n' as const),
+        }),
+  };
+}
+
+/**
  * A deferred finding, TYPED. The convergence posture removes findings from
  * posting through exactly one channel, and for four review rounds that
  * channel was free text re-parsed for provenance it did not carry: a
@@ -246,11 +664,19 @@ export interface DeferredEntry {
   /** The finding's source tag — decides deterministic (`build`/`test`/`probe`). */
   source: Source;
   /**
-   * The finding's severity. Only `Suggestion` defers; a `Critical` here is
-   * RELOCATED into the body Criticals (a Critical is never deferred), and a
-   * `Nice to have` is refused (terminal-only, never publishable).
+   * The finding's severity. A `Suggestion` defers; a `Critical` defers only
+   * by its axes at a resolved critical floor — `fails-closed` on
+   * `new-surface` (#10291) — and is otherwise RELOCATED into the body
+   * Criticals; a `Nice to have` is refused (terminal-only, never publishable).
    */
   severity: Severity;
+  /**
+   * A Critical's decision axes, copied from the findings artifact. Both must
+   * be present for the entry to defer; a Critical carrying neither, or one,
+   * is relocated — the floor never guesses a blocker out of the posting set.
+   */
+  direction?: Direction;
+  baseline?: Baseline;
   /** One-line claim, rendered inside a code span; a location count may be appended. */
   title: string;
   /** For a pattern aggregate: how many further locations the finding covers. */
@@ -271,7 +697,18 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
     entry.locations && entry.locations > 0
       ? ` (+${entry.locations} locations)`
       : '';
-  return `${loc}${agg} — [${entry.source}] ${entry.title}`;
+  // A classified Critical in the list is the one line there whose severity
+  // the reader cannot assume, so it says so and carries every axis it
+  // settled — as the same bracket tags the posted claim line uses. Each
+  // axis present, not both-or-nothing: a half-classified Critical the
+  // verifier could settle on one side only keeps that side on its record.
+  const axes = [entry.direction, entry.baseline]
+    .filter((a) => a !== undefined)
+    .map((a) => ` [${a}]`)
+    .join('');
+  const classified =
+    entry.severity === 'Critical' && axes !== '' ? ` Critical${axes}` : '';
+  return `${loc}${agg} — [${entry.source}]${classified} ${entry.title}`;
 }
 
 /**
@@ -328,13 +765,13 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
     throw new TypeError(
-      `compose-review: deferredSuggestions must be an array of {file, line?, source, severity, title, locations?} entries, got ${JSON.stringify(value)}`,
+      `compose-review: deferredSuggestions must be an array of {file, line?, source, severity, direction?, baseline?, title, locations?} entries, got ${JSON.stringify(value)}`,
     );
   }
   return value.map((raw, i) => {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       throw new TypeError(
-        `compose-review: deferredSuggestions[${i}] must be an object {file, line?, source, severity, title, locations?} — a free-text entry is not accepted, the channel is typed`,
+        `compose-review: deferredSuggestions[${i}] must be an object {file, line?, source, severity, direction?, baseline?, title, locations?} — a free-text entry is not accepted, the channel is typed`,
       );
     }
     const o = raw as Record<string, unknown>;
@@ -347,6 +784,8 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
     const severity = o['severity'];
     const line = o['line'];
     const locations = o['locations'];
+    const direction = o['direction'];
+    const baseline = o['baseline'];
     if (file === '' || title === '') {
       throw new TypeError(
         `compose-review: deferredSuggestions[${i}] needs a non-empty file and title`,
@@ -390,11 +829,41 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
         `compose-review: deferredSuggestions[${i}].locations must be a non-negative integer when present`,
       );
     }
+    // The axes are enums like `severity`, refused when present and outside
+    // the list: they decide whether a BLOCKER leaves the posting set, and a
+    // misspelling that silently read as "unclassified" would post the
+    // finding — the fail-open direction — without anyone seeing why.
+    if (
+      direction !== undefined &&
+      direction !== null &&
+      (typeof direction !== 'string' ||
+        !DIRECTIONS.includes(direction as Direction))
+    ) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].direction must be one of ${DIRECTIONS.join('|')} when present, got ${JSON.stringify(direction)}`,
+      );
+    }
+    if (
+      baseline !== undefined &&
+      baseline !== null &&
+      (typeof baseline !== 'string' ||
+        !BASELINES.includes(baseline as Baseline))
+    ) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].baseline must be one of ${BASELINES.join('|')} when present, got ${JSON.stringify(baseline)}`,
+      );
+    }
     return {
       file,
       ...(typeof line === 'number' ? { line } : {}),
       source: source as Source,
       severity: severity as Severity,
+      ...(typeof direction === 'string'
+        ? { direction: direction as Direction }
+        : {}),
+      ...(typeof baseline === 'string'
+        ? { baseline: baseline as Baseline }
+        : {}),
       title,
       ...(typeof locations === 'number' && locations > 0 ? { locations } : {}),
     };
@@ -403,23 +872,44 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
 
 /**
  * The deferral channel's split, shared by the body composer and the ledger
- * marker: `Critical` entries are RELOCATED into the body Criticals (a
- * Critical is never deferred — it counts toward `C`, blocks, and rides the
- * machine ledger), the rest defer. One split, two readers, no parsing.
+ * marker: a `Critical` entry stays deferred only when the critical floor is
+ * in effect AND its axes say `fails-closed` on `new-surface` (#10291); every
+ * other Critical is RELOCATED into the body Criticals — it counts toward
+ * `C`, blocks, and rides the machine ledger — and the rest defer. One
+ * split, two readers, no parsing.
+ *
+ * `criticalDeferralLicensed` is the ENFORCEMENT reading of the floor
+ * (`criticalFloorInEffect`), never the reporting one: this split moves a
+ * blocker out of the posting set, and a posture the module had to guess at
+ * must not do that. It is deliberately narrower than the Suggestion
+ * licence — the rounds-2–5 code-age rule never defers a Critical.
  */
-function splitDeferralChannel(raw: unknown): {
+function splitDeferralChannel(
+  raw: unknown,
+  criticalDeferralLicensed: boolean,
+): {
   deferred: DeferredEntry[];
   relocated: string[];
+  /**
+   * The relocated entries themselves, parallel to `relocated`: the ledger
+   * build stamps a relocated Critical's axes from the TYPED entry, never
+   * by re-parsing the rendered line it posts as (#10291).
+   */
+  relocatedEntries: DeferredEntry[];
   /** Relocated entries whose `source` is deterministic — no verifier owed. */
   relocatedDeterministic: number;
 } {
   const entries = toDeferredEntries(raw);
-  const relocatedEntries = entries.filter((e) => e.severity === 'Critical');
+  const defers = (e: DeferredEntry): boolean =>
+    e.severity !== 'Critical' ||
+    (criticalDeferralLicensed && floorDefersCritical(e));
+  const relocatedEntries = entries.filter((e) => !defers(e));
   return {
-    deferred: entries.filter((e) => e.severity !== 'Critical'),
+    deferred: entries.filter(defers),
+    relocatedEntries,
     relocated: relocatedEntries.map(
       (e) =>
-        `${mdField(boundDeferredLine(renderDeferredEntry(e)))} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
+        `${mdField(boundDeferredLine(renderDeferredEntry(e)))} _(relocated from the deferral channel — a Critical is deferred only as fails-closed on new surface at a critical floor; this one posts)_`,
     ),
     relocatedDeterministic: relocatedEntries.filter((e) =>
       DETERMINISTIC_SOURCES.has(e.source),
@@ -609,9 +1099,19 @@ export function floorEnforcedReroute(
   const indices: number[] = [];
   const entries: DeferredEntry[] = [];
   drafted.forEach((c, i) => {
-    if (severityOf(c) !== 'suggestion') return;
+    const sev = severityOf(c);
+    if (sev === null) return;
     const body = typeof c.body === 'string' ? c.body : '';
     const claim = carriedClaimLine(body);
+    // The Critical arm (#10291): a blocker leaves the posting set only when
+    // the review itself classified it, on the claim line, as fails-closed on
+    // new surface — the ONE combination the floor defers. Untagged,
+    // half-tagged or self-contradicting claims stay inline: the backstop
+    // never guesses a Critical out of the posting set. No deterministic
+    // carve-out on this arm — the axis pair is an explicit classification,
+    // and a `[probe]` beside it says only how the finding was confirmed.
+    const critical = sev === 'critical';
+    if (critical && !floorDefersCritical(axesOfClaim(claim))) return;
     // The floor excludes deterministic findings — by their source (SKILL
     // Step 6: a `[build]`/`[test]`/`[probe]` finding is pre-confirmed and
     // the posture leaves it inline at any floor). The inline channel
@@ -626,10 +1126,14 @@ export function floorEnforcedReroute(
     // deterministic and stays inline — the fail-open direction of every
     // other arm here — but the window is one line the tag convention owns,
     // not the entire comment.
-    if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) return;
+    if (!critical && claim !== null && DETERMINISTIC_TAG_RE.test(claim)) return;
     const file =
       typeof c.path === 'string' && c.path.trim() !== '' ? c.path : null;
     if (file === null) return;
+    // A moved Critical keeps the source its claim line's head slot declares,
+    // so a `[probe]`-confirmed one is not charged a second verifier delivery
+    // it never owed; the Suggestion arm never reaches here with a tag.
+    const head = readClaimHead(claim ?? '');
     // The title carries the WHOLE marker-stripped body, collapsed to one
     // line — not just the claim line: the skill mandates multi-line
     // Suggestion bodies (failure scenario, suggested fix), and a moved
@@ -640,8 +1144,20 @@ export function floorEnforcedReroute(
     // (`R2-4: …`) stays at the front so the human record keeps the
     // cross-round identity; an all-marker comment gets the same locatable
     // fallback the ledger builder uses.
+    // A moved Critical's record drops the tags the entry now carries as
+    // fields — the axis pair, and the source tag it was read from — so the
+    // rendered line does not spell them twice. From the claim line's HEAD
+    // SLOT only: a bracketed axis word in the body prose ("not a
+    // [regression] — the surface is new") is the record's own text, and
+    // the deferral line is the moved blocker's only published surface.
+    const stripped = markerStrippedBody(body) ?? '';
+    const nl = stripped.indexOf('\n');
+    const first = nl === -1 ? stripped : stripped.slice(0, nl);
+    const record = critical
+      ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
+      : first;
     const title = collapseToLine(
-      stripReviewFooter(markerStrippedBody(body) ?? ''),
+      stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
     );
     indices.push(i);
     entries.push({
@@ -651,8 +1167,14 @@ export function floorEnforcedReroute(
       c.line > 0
         ? { line: c.line }
         : {}),
-      source: 'review',
-      severity: 'Suggestion',
+      source: critical && head.source !== undefined ? head.source : 'review',
+      severity: critical ? 'Critical' : 'Suggestion',
+      ...(critical
+        ? {
+            direction: 'fails-closed' as const,
+            baseline: 'new-surface' as const,
+          }
+        : {}),
       title: title !== '' ? title : '(comment carried no text)',
     });
   });
@@ -712,10 +1234,11 @@ export interface ComposeReviewInput {
    * streak engages the floor, #9903 — or under an explicit
    * `--severity-floor critical`, and the rounds-2-5 code-age rule). TYPED
    * entries — see
-   * `DeferredEntry`: only otherwise-postable high-confidence Suggestions
-   * belong here (a `Critical` is relocated into the body Criticals, a
-   * `Nice to have` is refused; low-confidence findings stay terminal-only and
-   * never enter the state). They are neither drafted inline nor counted
+   * `DeferredEntry`: otherwise-postable high-confidence Suggestions belong
+   * here, and — at a floor in effect — a Critical whose axes are
+   * fails-closed on new-surface (#10291); any other `Critical` is relocated
+   * into the body Criticals, a `Nice to have` is refused; low-confidence
+   * findings stay terminal-only and never enter the state). They are neither drafted inline nor counted
    * toward `S` — a deferral must not regenerate a review round — but they
    * must not vanish either: the body renders them as a disclosed,
    * NON-capping list, so the record survives on the PR while the round
@@ -799,6 +1322,36 @@ export interface ComposeReviewInput {
    */
   findingsPath?: string;
   /**
+   * The decided-stop re-rule (SKILL Step 1's stop branches): the capture
+   * decided there is nothing to review, and the orchestrator re-ruled the
+   * cache ledger's OPEN Criticals against the current tree. One entry per
+   * open ledger Critical, under its ledger id, with the Step 6 ruling.
+   *
+   * Machine-checked for completeness before anything is granted: the set of
+   * ids here must equal the set of open Critical ids in the ledger the
+   * plan's `cachePath` names — both directions — and every `still-stands`
+   * ruling must have a matching body Critical carrying its id while
+   * `fixed`/`superseded` ones must not. Any mismatch throws; a model cannot
+   * drop a blocker by omitting its row, and cannot resurrect one the ledger
+   * never held. The grant additionally requires the plan to carry the
+   * capture's own `nothingToReview` field (no full-round plan does) and —
+   * under a `review run` parent, which publishes a run id — the runId-fenced
+   * stop sidecar the same capture wrote.
+   *
+   * Granted, it exempts the round from the agent-transcript floors: no
+   * agents ran, so no transcripts, receipts, verifiers or script-lint
+   * evidence exist or CAN exist — demanding them is an unsatisfiable cap.
+   * The verify floor is covered by the completeness check itself: every
+   * posted blocker is a re-assertion, under its original id, of a finding a
+   * previous full round verified.
+   */
+  stopReRule?: {
+    dispositions: Array<{
+      id: string;
+      ruling: 'still-stands' | 'fixed' | 'superseded';
+    }>;
+  };
+  /**
    * Where to look for the harness's records. Defaults to the environment the CLI
    * exported. A test seam only — production never passes it, and a model cannot:
    * `compose-review` reads its input as JSON, and this is not serialisable into
@@ -868,7 +1421,8 @@ export interface ComposeReviewResult {
    */
   remediation: string[];
   /**
-   * How many non-Critical findings the convergence posture deferred — the
+   * How many findings the convergence posture deferred — Suggestions, and
+   * the Criticals the critical floor deferred by their axes (#10291) — the
    * count of `deferredSuggestions` entries that survived validation, plus
    * any CLI floor-enforced reroutes (below). On the verdict surface so
    * `verdictLine` can say a deferrals-only Approve deferred findings
@@ -877,9 +1431,11 @@ export interface ComposeReviewResult {
    */
   deferredCount: number;
   /**
-   * Indices (into the caller's drafted-comments array) of Suggestion
+   * Indices (into the caller's drafted-comments array) of the drafted
    * comments the CLI moved into the deferral list under a resolved
-   * `critical` posting floor — SKILL Step 6's posture, enforced in code as
+   * `critical` posting floor — Suggestions, and Criticals whose claim line
+   * carries the fails-closed/new-surface pair (#10291) — SKILL Step 6's
+   * posture, enforced in code as
    * the backstop for the model-side resolution (`floorEnforcedReroute`).
    * The caller that owns the posting array (`submit`) removes exactly
    * these before the write; they are already counted in `deferredCount`,
@@ -1234,10 +1790,95 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * A model-written entry flattened to one renderable list line, its `comment
  * <id>` refs linked to the PR's anchors. Entries render as one-line list
  * items: an unindented newline ends a list item (CommonMark), so an entry
- * spanning lines would leak its continuation out of the list.
+ * spanning lines would leak its continuation out of the list. Comment
+ * grammar goes inert too — a quoted `<!-- qwen-review-… -->` literal would
+ * otherwise forge a second marker occurrence in the raw body the pipeline's
+ * own readers scan (md-field.ts documents the shipped ledger-marker case).
+ * Both callers already neutralized upstream through `quotedProse` (the
+ * strip is idempotent); this copy is the list line's OWN guarantee, so a
+ * caller that skips the upstream order cannot re-open the forgery.
  */
 function asListLine(text: string, pr: PrIdentity | null): string {
-  return linkifyCommentRefs(collapseToLine(text), pr);
+  return linkifyCommentRefs(collapseToLine(stripCommentGrammar(text)), pr);
+}
+
+/**
+ * A model-written entry on its way to a verbatim body exit — the ONE order
+ * its two sanitations compose in, stated once for the three exits
+ * (bodyCriticals, cannot-tell, duplicates) and the ledger title.
+ *
+ * Comment grammar goes inert BEFORE the attribution strips run. Those
+ * strips match on the DISPLAYED projection, which drops an HTML comment
+ * whole, so a forged footer wrapped as `<!-- _— … via Qwen Code /review
+ * … -->` is invisible to every one of them — and neutralizing the grammar
+ * AFTER the chain materialized exactly that footer as visible text in the
+ * attribution-off post that exists to carry none (pre-neutralization the
+ * wrapper rendered as nothing). Neutralized first, the footer is ordinary
+ * text the chain strips like any other.
+ *
+ * The one exception runs ahead of the neutralization: the marker-LINE strip
+ * is the single strip in the chain that acts on comment grammar itself (a
+ * transcribed posted comment carries its trailing `<!-- qwen-review … -->`
+ * on its own line), and once the grammar is inert it can never fire —
+ * the line would post as visible words instead of dropping as it always
+ * has. Attribution on keeps entries as written, that mode's contract.
+ *
+ * Both modes end on the trailing strip, the shape `submit`'s post transform
+ * already uses: ingest ran it before the grammar went inert, and only this
+ * pass sees a footer that rode in wrapped.
+ *
+ * The pass repeats until nothing changes, because each half can re-form
+ * what the other just removed — a single ordered pass closes neither
+ * direction. The strips SPLICE: cutting two footer spans out of `x <!-‹span›-
+ * qwen-review-deferred --‹span›> y` joins `<!-` to `- … --` to `>` and
+ * posts a live `<!-- qwen-review-deferred -->` (or a forged ledger opener)
+ * the grammar strip never saw, because no delimiter existed when it ran.
+ * And neutralization JOINS: `via Qwen<!-‹span›-Code /review` strips to
+ * `Qwen<!--Code`, which neutralizes to the footer phrase `via Qwen Code
+ * /review` the chain has already finished looking for — so a trailing
+ * grammar strip alone (the obvious patch) trades the forged marker for a
+ * forged footer. Every strip in the chain deletes or leaves its input
+ * alone, none lengthens, so the loop ends within the entry's length; and
+ * at the fixpoint every step is the identity on its input (a changing
+ * step strictly shortens), so the result carries no comment grammar, no
+ * marker line, no footer span and no trailing footer at once — the
+ * closure a caller can rely on without knowing which strip ran last.
+ */
+function quotedProse(text: string, attribution: boolean): string {
+  let current = text;
+  for (;;) {
+    const inert = stripCommentGrammar(
+      attribution ? current : stripCommentMarkerLines(current),
+    );
+    const next = stripReviewFooter(
+      attribution ? inert : stripForUnattributedPost(inert),
+    );
+    if (next === current) return current;
+    current = next;
+  }
+}
+
+/**
+ * Whether an entry would post as nothing from a verbatim body exit — the
+ * gate `ingestBodyCriticals` and the cannot-tell ingest share, stated once
+ * so the two cannot drift from each other or from the render legs.
+ *
+ * Two projections, both refused: the entry as written through the
+ * attribution-off strip chain (a marker-only or comment-only draft is
+ * invisible scaffolding whatever the exit later makes of it — the shape
+ * `submit`'s gate refuses), and the entry through the exit's own closure,
+ * `quotedProse`. The second is not implied by the first: the closure
+ * neutralizes comment grammar and re-runs the chain on what that exposes,
+ * so an entry held up only by a footer that comment grammar had split —
+ * `_— m via Qwen<!-‹span›-Code /review_` — projects as visible prose
+ * as written yet strips to nothing at the exit, and would post as an
+ * empty body Critical that still counts toward REQUEST_CHANGES.
+ */
+function rendersAsNothingAtExit(entry: string): boolean {
+  return (
+    rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry))) ||
+    rendersAsNothing(quotedProse(entry, false))
+  );
 }
 
 /**
@@ -1261,12 +1902,13 @@ function formatCannotTell(
     // Entries arrive collapsed (one list item each); an unattributed entry
     // goes through the full fixpoint sanitation — the entry is quoted into
     // a body that carries no canonical footer, so a surviving footer or
-    // marker in any position would be the post's only attribution. The
-    // marker check goes through `severityOf` (trims first — a leading space
-    // used to leak the marker past this strip into the posted body), and
-    // the strip is iterative — a looping model drafts stacked markers and a
-    // single slice posts the second one.
-    const source = attribution ? raw : stripForUnattributedPost(raw);
+    // marker in any position would be the post's only attribution — with
+    // its comment grammar inert FIRST (`quotedProse` says why the order is
+    // load-bearing). The marker check goes through `severityOf` (trims
+    // first — a leading space used to leak the marker past this strip into
+    // the posted body), and the strip is iterative — a looping model drafts
+    // stacked markers and a single slice posts the second one.
+    const source = quotedProse(raw, attribution);
     const unmarked =
       severityOf({ body: source }) === null
         ? source
@@ -1393,9 +2035,7 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map((entry) =>
-      stripReviewFooter(attribution ? entry : stripForUnattributedPost(entry)),
-    )
+    .map((entry) => quotedProse(entry, attribution))
     .filter((entry) => entry.trim() !== '');
 }
 
@@ -1472,8 +2112,17 @@ export function composeReview(
   // defines "measured". SKILL tells the round to omit the field there; this
   // refusal is the module's half, symmetric with round 1 — absence then
   // carries the streak, exactly as an unmeasured round must.
+  // A stop re-rule is the THIRD unmeasurable state: no agents ran, so
+  // nothing this round could have derived a fresh/induced split — every
+  // posted entry is a carried-id re-assertion the grant itself proves is
+  // NOT fresh, which is exactly what let a model-written census satisfy
+  // the fresh <= reported cross-check and mint the non-convergence blocker
+  // over a round that measured nothing. Refused as null so the streak
+  // CARRIES rather than resets, like the other two.
   const readCensus =
-    prevRound === 0 || input.contextUnavailable === true
+    prevRound === 0 ||
+    input.contextUnavailable === true ||
+    input.stopReRule !== undefined
       ? null
       : churnCensusOf(input.convergence);
   const churnCensus =
@@ -1521,12 +2170,14 @@ export function composeReview(
   const prevForConvergence = {
     ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
     findings: prevFacts.findings,
+    closed: prevFacts.closed,
     truncated: prevFacts.truncated,
     complete: prevRound > 0 && !prevFacts.truncated,
     round: prevRound,
     anchored: prevFacts.anchored,
     foreign: prevFacts.foreign,
     merged: prevFacts.merged,
+    anonymousAdoption: prevFacts.anonymousAdoption,
     ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
     ...(prevFacts.fresh === undefined ? {} : { fresh: prevFacts.fresh }),
   };
@@ -1635,29 +2286,157 @@ export function composeReview(
         (_, i) => !drop.has(i),
       ),
       // The seam counts were derived from the pre-enforcement drafts by the
-      // boundary; keep them in agreement with the set that remains. Both
-      // shapes `toCount` accepts adjust — the number, and the legacy list
-      // form counted by its length — or an array-shaped seam would skip the
-      // adjustment and the count would disagree with the reduced posting
-      // set. Clamped: a caller whose count already disagreed with its
-      // drafts must degrade to a wrong-but-composable zero, never to a
-      // toCount refusal that loses the round.
-      ...(() => {
-        const seam = input.suggestionsInline as unknown;
-        const counted =
-          typeof seam === 'number'
-            ? seam
-            : Array.isArray(seam)
-              ? seam.length
-              : undefined;
-        return counted === undefined
-          ? {}
-          : {
-              suggestionsInline: Math.max(0, counted - reroute.indices.length),
-            };
-      })(),
+      // boundary; keep them in agreement with the set that remains — each
+      // severity by the entries the reroute moved at that severity, since
+      // the Critical arm (#10291) moves blockers too, and a `C` still
+      // counting a moved Critical would block on a finding the body records
+      // as deferred. Both shapes `toCount` accepts adjust — the number, and
+      // the legacy list form counted by its length — or an array-shaped
+      // seam would skip the adjustment and the count would disagree with
+      // the reduced posting set. Clamped: a caller whose count already
+      // disagreed with its drafts must degrade to a wrong-but-composable
+      // zero, never to a toCount refusal that loses the round.
+      ...adjustedSeam(
+        'suggestionsInline',
+        input.suggestionsInline,
+        reroute.entries.filter((e) => e.severity === 'Suggestion').length,
+      ),
+      ...adjustedSeam(
+        'criticalsInline',
+        input.criticalsInline,
+        reroute.entries.filter((e) => e.severity === 'Critical').length,
+      ),
     };
   }
+  // The posted work list, built ONCE here rather than inside the marker:
+  // three consumers share one id space — the marker that stamps it, the
+  // closure mint below, and the successor-chain check inside the diagnosis,
+  // which reads this round's findings as the build stamped them.
+  const carriedWorkList = {
+    ids: new Set(prevFacts.findings.map((f) => f.id)),
+    // A round that recovered NO predecessor knows nothing about which ids
+    // were real — the id space is shared across environments and a first
+    // round on a machine with no side file is the ordinary case — so it
+    // cannot call a claimed id a stray. Only a recovered, untruncated list
+    // is evidence of absence.
+    complete: prevRound > 0 && !prevFacts.truncated,
+  };
+  // The enforcement reading, computed ONCE for the three consumers that act
+  // on it — the reroute above read it through `floorEnforcedReroute`, the
+  // deferral split in the ledger build and the body read it here, and the
+  // mechanism-health check reports it — so no two can resolve the floor
+  // differently within one compose.
+  const floorInEffect = criticalFloorInEffect(
+    input.severityFloor,
+    input.contextUnavailable === true,
+    prevRound,
+    signalEngaged,
+  );
+  const postedLedger = buildPostedLedger(
+    effective,
+    Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+    carriedWorkList,
+    floorInEffect,
+  );
+  // The closures this round mints (#9905): the previous work list's
+  // Criticals this round does not re-post — `fixed` and `superseded` both
+  // read as closure, and a positional diff needs no more. Minted ONLY where
+  // absence from the posting set MEANS "ruled fixed" — the same honesty
+  // rule the anchor applies, one consumer down, with the SAME legs the
+  // sibling `openCriticals` gate applies to the identical inference: a
+  // PARTIAL previous list (a vanished id may be the byte budget, not a
+  // ruling) and a PURE-FOREIGN list whose entries are a stranger's, not a
+  // shortened version of this account's (#9526), and an ANONYMOUSLY ADOPTED
+  // list — the persist seam's machine-readable record that the file's
+  // findings were adopted with no identity to vouch them, which walks
+  // through this inference exactly like a pure-foreign one. The anchor's
+  // fail-closed
+  // predicate — `anchorFailsClosed(cappedBy, scopeUnproven, …)` — binds the
+  // closures too, at the diagnosis and the marker where `cappedBy` and
+  // `scopeUnproven` are known (this function returns before the body
+  // computes them): a closure is the inference "ruled fixed", and a round
+  // that could not show it READ the diff — or that publicly answered
+  // "cannot tell" on a Critical — cannot support it. In all of them the
+  // mint stays silent rather than guesses — thin history stays silent.
+  const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
+  // Claim identity, not id identity: a claim this round RE-POSTS without a
+  // carried id — a gate Critical regenerated from the report, a model
+  // re-post the readback lost — gets a FRESH id in the build (or no build
+  // entry at all), so the original is absent from `postedIds` while the
+  // claim still stands. Read absent-by-id alone, a still-standing blocker
+  // mints a closure every round of its life, in the very body that
+  // re-posts it open. So the join ALSO runs on the locator projection the
+  // gate-repost dedup uses — over the SAME build the marker stamps, so the
+  // record and the mint cannot disagree about what closed, with the SAME
+  // write-capped window on both sides: the previous list's titles were
+  // sliced to LEDGER_MAX_TITLE at write time (and again at read), so a
+  // build-side projection over the uncapped title never meets a previous
+  // locator that outruns the cap.
+  const standingClaims = new Set(
+    (postedLedger?.findings ?? [])
+      .map((g) => claimLocator(g.title.slice(0, LEDGER_MAX_TITLE)))
+      .filter((k) => k !== ''),
+  );
+  // The re-post channels — the typed deferral channel and the reroute the
+  // floor enforcement feeds into it — carry claims OUTSIDE the build's id
+  // space, and their join is an ID join, never a text projection: four
+  // review rounds each patched a hand-rolled projection here, and each
+  // generation of fixes grew the next defect (R4-1: a moved-path re-file,
+  // a dash-less collapsed body, a Suggestion-severity re-voice — three
+  // entrances one probe round named, in a space of re-post shapes that
+  // cannot be enumerated and closed one entrance at a time). An entry
+  // whose title BEARS the original id proves which claim it re-posts —
+  // severity, path, and wording are all irrelevant to that readback; an
+  // entry that bears none proves nothing — it may carry ANY vanished
+  // claim — so the round fails closed and mints no closure at all: the
+  // same honesty leg the mint applies to a PARTIAL previous list, one
+  // element the round cannot account for suppressing the whole inference.
+  // The cost is a true closure withheld beside an id-less re-post; the
+  // opposite error is a fabricated lineage the sentinel fires one round
+  // later. Parse ONLY where the build above already parsed the same
+  // channel — a null build returned before any parse, so this adds no
+  // throw the round did not already have.
+  const repostEntries = [
+    ...(postedLedger === null
+      ? []
+      : toDeferredEntries(input.deferredSuggestions)),
+    ...reroute.entries,
+  ];
+  const repostedIds = new Set<string>();
+  let repostUnidentified = false;
+  for (const e of repostEntries) {
+    // Through the same head-slot strip the ledger builder applies: an
+    // entry whose title leads with the axis tags before its id still
+    // names the claim it re-posts (#10291).
+    const carried = LEDGER_ID_READBACK.exec(
+      readClaimHead(e.title).stripped,
+    )?.[1];
+    // The same membership test `isCarry` applies in the build: an id the
+    // complete previous list never held is a stray — a renumbered or
+    // re-minted token, not a carry — and reading it as one would shield a
+    // claim the entry does not name while the claim it actually re-posts
+    // mints a closure. Over a partial list the mint is already silent, so
+    // the verdict this leg reaches there is inert.
+    if (carried === undefined || !carriedWorkList.ids.has(carried))
+      repostUnidentified = true;
+    else repostedIds.add(carried);
+  }
+  const closuresThisRound: LedgerClosure[] =
+    carriedWorkList.complete &&
+    postedLedger !== null &&
+    !(prevFacts.foreign === true && prevFacts.merged !== true) &&
+    prevFacts.anonymousAdoption !== true &&
+    !repostUnidentified
+      ? prevFacts.findings
+          .filter(
+            (f) =>
+              f.sev === 'C' &&
+              !postedIds.has(f.id) &&
+              !repostedIds.has(f.id) &&
+              !standingClaims.has(claimLocator(f.title)),
+          )
+          .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
+      : [];
   // Is the loop settling? Measured from facts this round already holds — the
   // previous work list and volume from the side file, this round's drafts —
   // and rendered as an observation. It changes nothing about what the round
@@ -1678,18 +2457,21 @@ export function composeReview(
     reroute,
     {
       prev: prevForConvergence,
+      // The chain's two closure generations and its new side, all from the
+      // one build above — the marker stamps exactly these closures, so the
+      // note and the record cannot disagree.
+      closuresThisRound,
+      repostUnidentified,
+      ...(postedLedger === null
+        ? {}
+        : { thisRoundFindings: postedLedger.findings }),
       // Read from the same input `floorEnforcedReroute` just acted on, through
       // the one predicate both share — so the advice cannot recommend a floor
       // the enforcement above already applied, nor name it a way the
       // enforcement note in the same body contradicts.
       floor: floorKind === undefined ? ('o' as const) : ('c' as const),
       ...(floorKind === undefined ? {} : { criticalFloorKind: floorKind }),
-      floorEnforcementEngaged: criticalFloorInEffect(
-        input.severityFloor,
-        input.contextUnavailable === true,
-        prevRound,
-        signalEngaged,
-      ),
+      floorEnforcementEngaged: floorInEffect,
       // The streak the trigger just resolved, so the deferral header can
       // say WHY the floor engaged ahead of the round-6 schedule.
       flatRounds,
@@ -1721,23 +2503,16 @@ export function composeReview(
     result.dimensionGapsAreDepthOnly ?? false,
     attribution,
     runtimeModelId,
-    prevRound,
     prevFacts.src0,
     postedInline,
     result.postedFresh,
     prevFacts.posted,
     floorKind,
-    {
-      ids: new Set(prevFacts.findings.map((f) => f.id)),
-      // A round that recovered NO predecessor knows nothing about which ids
-      // were real — the id space is shared across environments and a first
-      // round on a machine with no side file is the ordinary case — so it
-      // cannot call a claimed id a stray. Only a recovered, untruncated list
-      // is evidence of absence.
-      complete: prevRound > 0 && !prevFacts.truncated,
-    },
+    postedLedger,
+    closuresThisRound,
     churnRounds,
     flatRounds,
+    result.recommendations,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -1750,6 +2525,23 @@ export function composeReview(
   return marker
     ? { ...withVolume, body: `${withVolume.body}\n\n${marker}` }
     : withVolume;
+}
+
+/** A boundary-counted seam, reduced by what the reroute moved — see above. */
+function adjustedSeam(
+  key: 'criticalsInline' | 'suggestionsInline',
+  seam: unknown,
+  moved: number,
+): Partial<Pick<ComposeReviewInput, typeof key>> {
+  const counted =
+    typeof seam === 'number'
+      ? seam
+      : Array.isArray(seam)
+        ? seam.length
+        : undefined;
+  return counted === undefined || moved === 0
+    ? {}
+    : { [key]: Math.max(0, counted - moved) };
 }
 
 /**
@@ -1914,9 +2706,11 @@ const EMPTY_PREV_FACTS = {
   churnRounds: 0,
   flatRounds: 0,
   findings: [] as LedgerFinding[],
+  closed: [] as LedgerClosure[],
   truncated: false,
   foreign: false,
   merged: false,
+  anonymousAdoption: false,
   anchored: false,
 };
 
@@ -1969,12 +2763,25 @@ function prevLedgerFacts(
    * as "the previous round found nothing".
    */
   findings: LedgerFinding[];
+  /**
+   * The Criticals the previous round closed — its marker's minted closures,
+   * validated through the ledger's own admission test like the findings.
+   * Feeds the successor-chain signal (#9905). Empty when nothing was
+   * recovered or the marker predates the field — silence, never a guess.
+   */
+  closed: LedgerClosure[];
   /** Its marker shed findings to fit the byte budget: the list is partial. */
   truncated: boolean;
   /** It was recovered from a marker this account did not post. */
   foreign: boolean;
   /** That marker was merged over this account's own findings. */
   merged: boolean;
+  /**
+   * Its findings were adopted by an ANONYMOUS whole-write — recovery ran
+   * with no identity to vouch them, so the closure mint reads the list
+   * like a pure-foreign one. Absent on files a pre-telemetry writer made.
+   */
+  anonymousAdoption: boolean;
   /** The posting floor it ran under, when its marker recorded one. */
   floor?: 'c' | 'o';
   /** How many of its comments were findings reported for the first time. */
@@ -2022,6 +2829,7 @@ function prevLedgerFacts(
     ) as Ledger & {
       foreign?: unknown;
       merged?: unknown;
+      anonymousAdoption?: unknown;
       anchorFromRound?: unknown;
     };
     const round =
@@ -2108,6 +2916,24 @@ function prevLedgerFacts(
       graftRefusedThisRound = inc.effective === false || inc.upToDate === true;
     }
 
+    // The previous round's minted closures, through the ledger's own
+    // admission test on the same route as the findings — the side file is
+    // the same untrusted shape arriving by another route, and a closure
+    // claiming a round past the file's own is a squat the parser refuses.
+    // The count cap binds here as on the two sibling routes (`parseLedger`
+    // and the serializer): the caps exist for the hand-edited or planted
+    // file, which is bound by no mint, and this route is the one a planted
+    // `qwen-review-pr-<n>-prev-ledger.json` arrives by.
+    // Travels with the round like the work list does: a file with no
+    // usable round is one this read cannot place, and its closures would
+    // seed the successor-chain check for a round this read calls 0.
+    const closed =
+      round === 0 || !Array.isArray(prev.closed)
+        ? []
+        : prev.closed
+            .filter((c): c is LedgerClosure => isLedgerClosure(c, round))
+            .slice(-LEDGER_MAX_CLOSED);
+
     return {
       round,
       src0,
@@ -2121,6 +2947,7 @@ function prevLedgerFacts(
       // for a round this read calls 0 — the posted body would cite rounds 5
       // and up beside a marker stamping round 1.
       findings: round === 0 ? [] : findings,
+      closed,
       // The marker had to shed findings to fit its byte budget, so what came
       // back is known-incomplete (measured at up to 35 shed per round on the
       // worst PRs this diagnosis speaks to). Carried rather than dropped: the
@@ -2137,6 +2964,9 @@ function prevLedgerFacts(
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
       merged: round !== 0 && prev.merged === true,
+      // Travels with the findings it qualifies and the round, for the same
+      // reason both of those do.
+      anonymousAdoption: round !== 0 && prev.anonymousAdoption === true,
       // The previous round's anchor, as a yes/no THIS round can use. Two
       // consecutive withholds are the shape the self-check discloses; the
       // sha itself is Step 1's business, not this read's. A CERTIFIED
@@ -2205,6 +3035,86 @@ export function anchorFailsClosed(
 }
 
 /**
+ * This round's work list as the marker will stamp it. Extracted from the
+ * marker builder so the closure mint and the successor-chain check read the
+ * SAME build — a second `buildLedger` call composed beside the first is the
+ * drift class the marker's own id space cannot survive (the two reads would
+ * disagree the moment either leg's inputs are edited).
+ *
+ * Null when the review names no PR — exactly the marker's own condition: a
+ * local review has no previous round to mint closures against, no marker to
+ * carry them, and no script-lint gate to read (its planPath is absent, and
+ * the gate demands one).
+ */
+function buildPostedLedger(
+  input: ComposeReviewInput,
+  round: number,
+  carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
+  /** The enforcement reading of the floor — the Critical deferral licence. */
+  criticalDeferralLicensed: boolean,
+): Ledger | null {
+  const planPath = input.planPath;
+  if (planPath === undefined || !planNamesPr(planPath)) return null;
+  const split = splitDeferralChannel(
+    input.deferredSuggestions,
+    criticalDeferralLicensed,
+  );
+  return buildLedger(
+    // Capped by the caller, because the round is the id space and the parser
+    // refuses an id from past the cap: an uncapped stamp of prevRound + 1 met
+    // the serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
+    // marker whose own parser dropped every finding — invisibly, with the
+    // anchor still riding. The recovery path already refuses rounds above the
+    // cap, so prevRound can reach it only AT the cap, where staying there
+    // loses id uniqueness across those rounds and nothing else — against a
+    // counter no real PR approaches.
+    round,
+    (input.draftedComments ?? []) as Array<{
+      path?: unknown;
+      line?: unknown;
+      body?: unknown;
+    }>,
+    [
+      // The same rule the body applied, through the same statement of
+      // it: a re-post of a claim the gate regenerates below is dropped
+      // here too, or the work-list grows a second entry for one blocker
+      // every round.
+      ...withoutGateReposts(
+        ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
+        scriptLintGate(planPath).criticals,
+      ),
+      // The same split the body performed: a relocated Critical is a
+      // posted, counted blocker and must enter the work list — carrying
+      // the axes its TYPED entry settled (#10291), a half-classified one
+      // included — and a Critical the floor DEFERRED by its axes stays out
+      // of it, like any other deferral.
+      ...split.relocated.map((text, i) => ({
+        text,
+        direction: split.relocatedEntries[i].direction,
+        baseline: split.relocatedEntries[i].baseline,
+      })),
+      // The gate's Criticals, for the same reason: a gate Critical is a
+      // posted, counted blocker too — leaving it out let the next
+      // round's persistence half read "no prior Critical" over a round
+      // that posted one (#9526).
+      //
+      // A SECOND invocation, not the body composer's result — the two
+      // live in different functions and nothing passes the value across.
+      // What makes them agree is that `scriptLintGate` is pure in
+      // `planPath` and its inputs (the plan JSON, the report, the diff)
+      // are immutable for the length of one synchronous compose; it is
+      // NOT the single-origin discipline `postedInline` gets one line
+      // below. So the standing hazard is an edit, not a race: anything
+      // that filters, caps, or carves out what the BODY pushes must
+      // change this list too, or the posted body and the carried work
+      // list stop describing the same round (R4-1).
+      ...scriptLintGate(planPath).criticals,
+    ],
+    carriedWorkList,
+  );
+}
+
+/**
  * The next round's marker, or null when this review has no PR to carry one.
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
@@ -2216,19 +3126,37 @@ function ledgerMarkerFor(
   dimensionGapsAreDepthOnly: boolean,
   attribution: boolean,
   runtimeModelId: string | undefined,
-  prevRound: number,
   prevSrc0: number,
   postedInline: number,
   freshInline: number,
   prevPostedInline: number | undefined,
   floorKind: CriticalFloorKind | undefined,
-  carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
+  /**
+   * This round's work list AS BUILT by the caller — one id space shared
+   * with the closure mint and the successor-chain check, never a second
+   * build that could disagree with either. Null exactly when this review
+   * has no PR to carry a marker — the same condition this function's own
+   * `null` return names.
+   */
+  postedLedger: Ledger | null,
+  /**
+   * The closures the caller minted over the recovered previous list. The
+   * marker carries them so the next round's sentinel reads one generation
+   * back (#9905). Advisory data, but NOT like the findings: a closure is
+   * the inference "ruled fixed", and a fail-closed round supports no such
+   * inference — a vanished id may sit in the territory nobody re-read — so
+   * the field rides only when the anchor's own predicate lets the anchor
+   * ride, and the serializer's cascade sheds it before the anchor.
+   */
+  closed: LedgerClosure[],
   churnRounds: number,
   flatRounds: number,
+  recommendations: readonly Recommendation[] | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
     if (!planNamesPr(input.planPath)) return null;
+    if (postedLedger === null) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
@@ -2338,52 +3266,11 @@ function ledgerMarkerFor(
         ? certifying
         : undefined;
     return serializeLedger({
-      ...buildLedger(
-        // Capped, because the round is the id space and the parser refuses an
-        // id from past the cap: an uncapped stamp of prevRound + 1 met the
-        // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
-        // marker whose own parser dropped every finding — invisibly, with the
-        // anchor still riding. The recovery path already refuses rounds above
-        // the cap, so prevRound can reach it only AT the cap, where staying
-        // there loses id uniqueness across those rounds and nothing else —
-        // against a counter no real PR approaches.
-        Math.min(prevRound + 1, LEDGER_MAX_ROUND),
-        (input.draftedComments ?? []) as Array<{
-          path?: unknown;
-          line?: unknown;
-          body?: unknown;
-        }>,
-        [
-          // The same rule the body applied, through the same statement of
-          // it: a re-post of a claim the gate regenerates below is dropped
-          // here too, or the work-list grows a second entry for one blocker
-          // every round.
-          ...withoutGateReposts(
-            ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
-            scriptLintGate(input.planPath).criticals,
-          ),
-          // The same split the body performed: a relocated Critical is a
-          // posted, counted blocker and must enter the work list.
-          ...splitDeferralChannel(input.deferredSuggestions).relocated,
-          // The gate's Criticals, for the same reason: a gate Critical is a
-          // posted, counted blocker too — leaving it out let the next
-          // round's persistence half read "no prior Critical" over a round
-          // that posted one (#9526).
-          //
-          // A SECOND invocation, not the body composer's result — the two
-          // live in different functions and nothing passes the value across.
-          // What makes them agree is that `scriptLintGate` is pure in
-          // `planPath` and its inputs (the plan JSON, the report, the diff)
-          // are immutable for the length of one synchronous compose; it is
-          // NOT the single-origin discipline `postedInline` gets one line
-          // below. So the standing hazard is an edit, not a race: anything
-          // that filters, caps, or carves out what the BODY pushes must
-          // change this list too, or the posted body and the carried work
-          // list stop describing the same round (R4-1).
-          ...scriptLintGate(input.planPath).criticals,
-        ],
-        carriedWorkList,
-      ),
+      ...postedLedger,
+      // Gated by the SAME predicate the diagnosis applies (composeReviewBody):
+      // one shared decision, evaluated once per consumer, over the one set
+      // of cap inputs the caller passes both.
+      ...(!failClosed && closed.length > 0 ? { closed } : {}),
       // The pair falls together: a sha with no model reads to the next
       // round as a pre-field marker rather than as "nobody certified this".
       ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
@@ -2426,6 +3313,14 @@ function ledgerMarkerFor(
       // The floor trigger's streak rides beside the churn streak — same
       // rung, same zero-omission; see the field's own note in `Ledger`.
       ...(flatRounds > 0 ? { flatRounds } : {}),
+      // The diagnosis's matched codes, off the SAME derivation the posted
+      // paragraph and `result.recommendations` render from — one origin, so
+      // the codes an outside consumer wires (#10107) and the sentences a
+      // human reads cannot describe different rounds. Absent when the round
+      // produced no diagnosis, exactly as the result field is.
+      ...(recommendations !== undefined && recommendations.length > 0
+        ? { rec: recommendations.map((r) => r.code) }
+        : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -2516,9 +3411,10 @@ function ingestBodyCriticals(value: unknown): string[] {
   // post: strip the trailing forged footer BEFORE the emptiness projection
   // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
   // passes as ballast, the render legs strip it entirely, and a bare-marker
-  // entry posts and counts.
+  // entry posts and counts. And it projects through the exit's closure as
+  // well (`rendersAsNothingAtExit` says why one projection is not enough).
   for (const entry of entries) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a body Critical renders as nothing (marker-only, ' +
           'empty comment, or otherwise invisible) — redraft it with the ' +
@@ -2565,6 +3461,22 @@ function composeReviewBody(
     prev: PrevRound;
     floor?: 'c' | 'o';
     criticalFloorKind?: CriticalFloorKind;
+    /**
+     * The closures this round mints and this round's built work list — the
+     * successor-chain check's two inputs (#9905), both computed by the
+     * caller from the one `buildPostedLedger` build the marker stamps.
+     * Absent in direct-call tests: the signal reads `[]` and stays silent.
+     */
+    closuresThisRound?: readonly LedgerClosure[];
+    thisRoundFindings?: readonly LedgerFinding[];
+    /**
+     * Whether a re-post channel carried an element the recovered work list
+     * cannot place — an entry bearing no id that list held. The caller's
+     * closure mint fails closed over that state, and the `land-and-defer`
+     * gate below rests on the identical absence inference, so it withholds
+     * on it too — the same honesty leg, one consumer over.
+     */
+    repostUnidentified?: boolean;
     /**
      * Whether the CODE backstop enforces the floor this round reports. The
      * two readings differ by one thing — the reporting one folds an absent
@@ -2623,11 +3535,19 @@ function composeReviewBody(
   // the next round rules on, not a lost round. The split lives in the
   // shared helper: the ledger marker performs the same one, so a relocated
   // blocker also rides the work list.
+  // The Critical deferral licence is the ENFORCEMENT reading the caller
+  // resolved (#10291); a direct-call compose with no history behind it
+  // passes none, and none reads as "relocate" — the fail-toward-posting
+  // direction every arm of the floor takes.
   const {
     deferred: modelDeferred,
     relocated: relocatedCriticals,
+    relocatedEntries,
     relocatedDeterministic,
-  } = splitDeferralChannel(input.deferredSuggestions);
+  } = splitDeferralChannel(
+    input.deferredSuggestions,
+    convergence?.floorEnforcementEngaged === true,
+  );
   // The floor-enforced reroutes join the model's deferrals AFTER the split:
   // they are constructed typed by this module's own code (see
   // `floorEnforcedReroute`), so routing them through the model-channel
@@ -2649,7 +3569,21 @@ function composeReviewBody(
   // rendered list is capped at MAX_DEFERRED_SUGGESTION_LINES, and an
   // enforcement note pointing at a list that truncated away the entries
   // it names would be a disclosure contradicting its own record.
-  const deferredSuggestions = [...reroute.entries, ...modelDeferred];
+  // Criticals FIRST, in either channel (#10291): the rendered list is
+  // capped at MAX_DEFERRED_SUGGESTION_LINES, and a deferred Critical's line
+  // is the moved blocker's only published surface — the one that carries
+  // its id across rounds — so it must never be the entry a round of twenty
+  // rerouted Suggestions pushes past the cap. Within each class the
+  // enforced entries still come before the model's, and the enforcement
+  // note below counts what actually rendered.
+  const isCriticalEntry = (e: DeferredEntry): boolean =>
+    e.severity === 'Critical';
+  const deferredSuggestions = [
+    ...reroute.entries.filter(isCriticalEntry),
+    ...modelDeferred.filter(isCriticalEntry),
+    ...reroute.entries.filter((e) => !isCriticalEntry(e)),
+    ...modelDeferred.filter((e) => !isCriticalEntry(e)),
+  ];
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -2689,7 +3623,7 @@ function composeReviewBody(
   // to nothing must fail the draft, not vanish — silently dropping it lifts
   // the `cannot-tell-existing-critical` cap and flips the verdict.
   for (const entry of cannotTell) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+    if (rendersAsNothingAtExit(entry)) {
       throw new Error(
         'compose-review: a cannot-tell entry renders as nothing ' +
           '(marker-only, empty comment, or otherwise invisible) — ' +
@@ -2902,16 +3836,213 @@ function composeReviewBody(
   // the re-post out of the body while `modelBodyCriticals` still counted it
   // toward `criticalsNeedingVerify` — a blocker the linter proved would go on
   // pulling the unverified cap through a copy that no longer posts.
-  const gate = input.planPath
-    ? scriptLintGate(input.planPath)
-    : { criticals: [], unreviewed: [], disclosed: [] };
+  // The decided-stop re-rule grant — validated fail-closed BEFORE any floor
+  // is skipped. See ComposeReviewInput.stopReRule for the contract; every
+  // refusal here THROWS rather than degrading to the regular floors, because
+  // running transcript floors over a stop state composes garbage caps and
+  // the orchestrator needs the actual reason.
+  // The granted dispositions, captured for the body↔disposition
+  // cross-check below — that check runs over the FINAL body set, after the
+  // deferral channel's relocation push and the gate-repost dedup, so the
+  // grant records the rulings and the check binds them to what posts.
+  const stopRulings = new Map<string, string>();
+  // The titles the ledger recorded under each open Critical id, captured
+  // inside the grant below for the body↔disposition cross-check: a
+  // re-assertion binds by CONTENT against them, not by id alone.
+  const ledgerTitles = new Map<string, string>();
+  // Re-assertions the id binding admitted but no recorded title vouched
+  // for — they lose the verify-floor exemption below, and (on a granted
+  // stop, where no tool ran this round) a deterministic tag on one is
+  // prose, not provenance, so it loses the deterministic exception too.
+  let unvouchedReAssertions = 0;
+  let unvouchedTaggedReAssertions = 0;
+  let unvouchedRelocatedDeterministic = 0;
+  // The granted plan's own target, kept for the post-bind sidecar consume —
+  // re-reading the plan there would be the second read the snapshot
+  // doctrine exists to avoid.
+  let grantedStopTarget: string | null = null;
+  const stopReRuleGranted = (() => {
+    // Model-written state: the declared type promises an object, the file
+    // on disk can hand anything — a `null` here must be the designed
+    // refusal, never a bare TypeError off a property read.
+    const srrRaw: unknown = input.stopReRule;
+    // ONE plan read and ONE cache read for the whole grant — the fence's
+    // hash and the completeness check's enumeration are projections of the
+    // same snapshot, so nothing can move between certification and use.
+    const snap = readStopSnapshot(input.planPath);
+    if (srrRaw === undefined) {
+      // A decided stop composes ONLY through its re-rule: a stop plan
+      // walked through the regular floors would mint a non-blocking
+      // verdict over a ledger nobody re-ruled, and `run.ts` would read it
+      // as this round's completion — exit 0 over the standing blockers.
+      if (snap.reason !== null) {
+        throw new Error(
+          `compose-review refused: the plan carries a decided stop ` +
+            `('${snap.reason}') but no stopReRule — a decided stop ` +
+            'composes only through its re-rule.',
+        );
+      }
+      return false;
+    }
+    if (
+      srrRaw === null ||
+      typeof srrRaw !== 'object' ||
+      Array.isArray(srrRaw)
+    ) {
+      throw new Error(
+        'stopReRule refused: stopReRule must be an object carrying ' +
+          'dispositions — one entry per open ledger Critical.',
+      );
+    }
+    const srr = srrRaw as { dispositions?: unknown };
+    if (!Array.isArray(srr.dispositions)) {
+      throw new Error(
+        'stopReRule.dispositions must be an array — one entry per open ' +
+          'ledger Critical.',
+      );
+    }
+    if (criticalsInline > 0) {
+      throw new Error(
+        'stopReRule refused: inline Criticals cannot ride a stop re-rule — ' +
+          'a granted stop re-asserts only ledger ids a previous full round ' +
+          'verified, and no verifier ran this round.',
+      );
+    }
+    // The floor's reroute and the model's own deferral channel are the same
+    // hole from two sides: a Critical riding either leg posts in the body's
+    // deferral list without ever reaching the body↔disposition bind. On a
+    // stop round nothing new was reviewed, so a deferral-channel Critical
+    // can only be a rerouted draft or a claim the bind cannot reach —
+    // refuse both, before any floor is skipped.
+    if (
+      reroute.entries.some((e) => e.severity === 'Critical') ||
+      modelDeferred.some((e) => e.severity === 'Critical')
+    ) {
+      throw new Error(
+        'stopReRule refused: a Critical rides the deferral channel — every ' +
+          'Critical on a stop re-rule must be a bound re-assertion in ' +
+          'bodyCriticals, and the deferral channel is not bound.',
+      );
+    }
+    const stopReason = snap.reason;
+    if (stopReason === null) {
+      throw new Error(
+        'stopReRule refused: the plan carries no nothingToReview decision — ' +
+          'a full round takes the regular floors, never the stop re-rule.',
+      );
+    }
+    // Object.hasOwn, never a bare read: the reason arrives through
+    // model-written plan state, and a prototype-chain key (`__proto__`,
+    // `constructor`) resolves through the table's prototype instead of
+    // undefined — the refusal must name the reason, not throw a TypeError.
+    const allowedRulings = Object.hasOwn(STOP_REASON_RULINGS, stopReason)
+      ? STOP_REASON_RULINGS[stopReason]
+      : undefined;
+    if (allowedRulings === undefined) {
+      throw new Error(
+        `stopReRule refused: unknown stop reason '${stopReason}' — the ` +
+          'grant fails closed on a reason it cannot rule.',
+      );
+    }
+    const fenceRefusal = stopSidecarFenceRefusal(snap, stopReason, input.env);
+    if (fenceRefusal !== null) {
+      throw new Error(`stopReRule refused: ${fenceRefusal}`);
+    }
+    const ledger = openLedgerCriticalEntries(snap);
+    if (ledger === null) {
+      throw new Error(
+        'stopReRule refused: the ledger the plan names cannot be read — a ' +
+          're-rule whose baseline is unreadable cannot be shown complete.',
+      );
+    }
+    const ledgerFiles = new Map<string, string>();
+    for (const e of ledger) {
+      if (e.title !== undefined) ledgerTitles.set(e.id, e.title);
+      if (e.file !== undefined) ledgerFiles.set(e.id, e.file);
+    }
+    for (const dRaw of srr.dispositions as unknown[]) {
+      const d = dRaw as { id?: unknown; ruling?: unknown } | null;
+      if (
+        typeof d?.id !== 'string' ||
+        d.id === '' ||
+        !['still-stands', 'fixed', 'superseded'].includes(d?.ruling as string)
+      ) {
+        throw new Error(
+          'stopReRule refused: every disposition needs an id and a ruling ' +
+            'of still-stands, fixed, or superseded.',
+        );
+      }
+      if (stopRulings.has(d.id)) {
+        throw new Error(
+          `stopReRule refused: duplicate disposition for ${d.id}.`,
+        );
+      }
+      stopRulings.set(d.id, d.ruling as string);
+    }
+    const ledgerSet = new Set(ledger.map((e) => e.id));
+    for (const id of ledgerSet) {
+      if (!stopRulings.has(id)) {
+        throw new Error(
+          `stopReRule refused: open ledger Critical ${id} has no ` +
+            'disposition — a blocker cannot be dropped by omitting its row.',
+        );
+      }
+    }
+    for (const id of stopRulings.keys()) {
+      if (!ledgerSet.has(id)) {
+        throw new Error(
+          `stopReRule refused: disposition ${id} matches no open ledger ` +
+            'Critical — a ruling cannot invent its subject.',
+        );
+      }
+    }
+    for (const [id, ruling] of stopRulings) {
+      if (!allowedRulings.includes(ruling)) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} under ` +
+            `${stopReason} — ${STOP_REASON_REFUSAL[stopReason]}.`,
+        );
+      }
+      // `scope-emptied` licences `superseded` as a DEDUCED ruling, and the
+      // deduction's input is the capture-published split: the cited file's
+      // membership in `supersededPaths`. A ruling is only deduced when the
+      // machine reads the deduction's input — a `superseded` whose cited
+      // file the capture did not name as superseded (or whose row records
+      // no file at all) is a judgement wearing a deduction's licence.
+      // `clean-tree` is the JUDGED stop; its `superseded` needs no split.
+      if (ruling === 'superseded' && stopReason === 'scope-emptied') {
+        const cited = ledgerFiles.get(id);
+        if (cited === undefined || !snap.supersededPaths.includes(cited)) {
+          throw new Error(
+            `stopReRule refused: ${id} is ruled superseded but ` +
+              (cited === undefined
+                ? 'the ledger records no file for it'
+                : `its cited file '${cited}' is not in the plan's ` +
+                  'supersededPaths') +
+              ' — a deduced supersession must read its deduction from the ' +
+              "capture's published split.",
+          );
+        }
+      }
+    }
+    grantedStopTarget = snap.target;
+    // The body↔disposition cross-check is NOT here: it runs below, over the
+    // final local body set. Relocation pushes entries after this point and
+    // ingest transforms them, so a check over the raw input missed both.
+    return true;
+  })();
+  const gate =
+    input.planPath && !stopReRuleGranted
+      ? scriptLintGate(input.planPath)
+      : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
   bodyCriticals.push(...ownAfterGateDedup);
   const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
-  // in the body on every verdict, but never fed into the cap.
-  const gateDisclosed: string[] = [];
+  // in the body on every verdict, but never fed into the cap. Bilingual pairs —
+  // see `scriptLintGate` for why this channel can afford a real translation.
+  const gateDisclosed: Array<{ en: string; zh: string }> = [];
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
@@ -2920,7 +4051,146 @@ function composeReviewBody(
   // resolve one after a specialist inspects it, so capping here would make every
   // affected review impossible to approve.
   const repositoryContextNotes: string[] = [];
-  if (input.planPath) {
+  if (stopReRuleGranted) {
+    // No agents ran: the round IS the capture's stop decision plus the
+    // orchestrator's re-rule of the open ledger. Disclosed on every verdict
+    // so the body says what kind of round this was — through its OWN block
+    // (`stopRoundBlock` below), never `gateDisclosed`: that channel's one
+    // renderer wraps every entry in "Not linted (tool limitation…)", and a
+    // round kind is not a linting gap.
+    // The body↔disposition cross-check, over the FINAL local set — the
+    // ingested entries plus the deferral channel's relocated Criticals,
+    // past the gate-repost dedup — because that set is what the body posts.
+    // Ids bind PER ENTRY through the claim head's own leading token — the
+    // same readback the ledger builder applies — never by substring over
+    // the joined text: a prefix collision (`R1-1` ⊂ `R1-10`) or a sibling
+    // id quoted inside another entry's prose is not a re-assertion. The
+    // relocated leg reads the TYPED entry's title because its rendered
+    // line wraps the claim where no readback reaches.
+    const stillStands = new Set<string>();
+    for (const [id, ruling] of stopRulings) {
+      if (ruling === 'still-stands') stillStands.add(id);
+    }
+    const carriedIds = new Set<string>();
+    // A re-assertion binds by CONTENT, not by id alone: the claim title
+    // read back from the entry must equal the title the ledger recorded
+    // under that id — the SKILL's verbatim re-assertion contract makes
+    // the equality exact. An id alone would let a brand-new claim wear a
+    // verified id's exemption. An entry the ledger recorded no title for
+    // keeps its id binding but loses the verify-floor exemption below —
+    // returned to the caller, because the relocated leg must also strip
+    // such an entry's deterministic-source credit (its typed `source` is
+    // prose on a round no tool ran, exactly like an own-leg tag).
+    const bindEntry = (
+      claim: { id?: string; fixInduced: boolean; title: string },
+      scanText?: string,
+    ): boolean => {
+      if (claim.fixInduced) {
+        throw new Error(
+          `stopReRule refused: ${claim.id ?? 'a body Critical'} carries ` +
+            'the (fix-induced) marking — a stop re-rule posts only ' +
+            're-assertions of verified findings, never new work under ' +
+            'an old id.',
+        );
+      }
+      const id = claim.id;
+      if (id === undefined || !stopRulings.has(id)) {
+        throw new Error(
+          'stopReRule refused: a body Critical must carry exactly one ' +
+            'still-stands ledger id — an entry no re-rule ruled standing ' +
+            'posts a blocker no full round verified.',
+        );
+      }
+      const ruling = stopRulings.get(id);
+      if (ruling !== 'still-stands') {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} yet a body ` +
+            'Critical still carries its id — one ruling per finding.',
+        );
+      }
+      const recorded = ledgerTitles.get(id);
+      let unvouched = false;
+      if (recorded === undefined) {
+        unvouched = true;
+        unvouchedReAssertions++;
+        if (scanText !== undefined && DETERMINISTIC_TAG_RE.test(scanText)) {
+          unvouchedTaggedReAssertions++;
+        }
+      } else if (recorded !== claim.title) {
+        throw new Error(
+          `stopReRule refused: ${id} is re-asserted with content that ` +
+            'departs from the title the ledger recorded — a standing ' +
+            'blocker re-asserts its verified claim, not a new claim ' +
+            'under an old id.',
+        );
+      }
+      carriedIds.add(id);
+      return unvouched;
+    };
+    const ownCount = bodyCriticals.length - relocatedCriticals.length;
+    for (const entry of bodyCriticals.slice(0, ownCount)) {
+      bindEntry(
+        readClaim(
+          stripForUnattributedPost(entry).replace(LEADING_INVISIBLE_RE, ''),
+        ),
+        entry,
+      );
+    }
+    for (const entry of relocatedEntries) {
+      // The relocated leg binds the COLLAPSED title, symmetric with the
+      // collapse the own leg's entries get at ingest: a multi-line title
+      // whose first line matches the recorded claim must not smuggle new
+      // claims in its tail past a first-line-only readback — the ledger
+      // builder records only the first line, so no future round would ever
+      // rule on the tail. The leading-invisible strip is the same symmetry.
+      const unvouched = bindEntry(
+        readClaim(collapseEntry(entry.title).replace(LEADING_INVISIBLE_RE, '')),
+      );
+      // An unvouched relocated re-assertion loses its deterministic-source
+      // credit: `relocatedDeterministic` counted it on the typed `source`
+      // alone, and on a granted stop no tool ran that could make that
+      // source provenance — without this the unverified softening below is
+      // defeated by exactly the entries nobody's recorded title vouched.
+      if (unvouched && DETERMINISTIC_SOURCES.has(entry.source)) {
+        unvouchedRelocatedDeterministic++;
+      }
+    }
+    for (const id of stillStands) {
+      if (!carriedIds.has(id)) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled still-stands but no body ` +
+            'Critical carries its id — a standing blocker must post.',
+        );
+      }
+    }
+    if (bodyCriticals.length !== stillStands.size) {
+      throw new Error(
+        `stopReRule refused: ${bodyCriticals.length} body Criticals ` +
+          `over ${stillStands.size} still-stands rulings — every ` +
+          'still-stands ruling re-asserts exactly one body Critical.',
+      );
+    }
+    // Interim hardening for the write-surface class (#10654): an
+    // interactive (no-run-id) sidecar is CONSUMED once every bind above
+    // passed — nothing else ever reads it (no parent is polling), and
+    // left on disk it re-licences this same plan on a later, moved tree
+    // (a replay clears a blocker no round re-verified). Consumed only
+    // AFTER the full grant, so a refusal above leaves the sidecar for the
+    // orchestrator's corrected retry. The gated sidecar stays: the parent
+    // still reads it for completion, and its runId fence already refuses
+    // replays across runs.
+    const grantRunId = (input.env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+    if (
+      (typeof grantRunId !== 'string' || grantRunId === '') &&
+      grantedStopTarget !== null
+    ) {
+      try {
+        unlinkSync(tmpFile(grantedStopTarget, 'stop.json'));
+      } catch {
+        // already gone
+      }
+    }
+  } else if (input.planPath) {
     // The gate ran above, where its claims were needed to dedup the model's
     // re-posts before provenance was taken. ONE invocation, reused here.
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
@@ -2966,9 +4236,31 @@ function composeReviewBody(
   );
   const nonDeterministicBodyCriticals =
     ownBodyCriticals.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length +
-    (relocatedCount - relocatedDeterministic);
-  const criticalsNeedingVerify =
-    criticalsInline + nonDeterministicBodyCriticals;
+    (relocatedCount - relocatedDeterministic) +
+    // On a granted stop no tool ran this round, so an UNVOUCHED
+    // re-assertion's `[build]`/`[test]`/`[probe]` substring is prose, not
+    // provenance, and may not feed the deterministic exception the
+    // softening reads. Vouched re-assertions keep theirs — they re-assert
+    // findings a full round verified, tag and all — and the CLI-minted
+    // nonConvergence Critical is deterministic by provenance and never
+    // rides this term. The relocated term is the same correction on the
+    // other leg: an unvouched relocated entry was counted into
+    // `relocatedDeterministic` on its typed `source` alone, and adding it
+    // back here keeps its blocker unverified-softenable like its own-leg
+    // twin.
+    (stopReRuleGranted
+      ? unvouchedTaggedReAssertions + unvouchedRelocatedDeterministic
+      : 0);
+  const criticalsNeedingVerify = stopReRuleGranted
+    ? // Every posted blocker on a granted stop re-rule is a re-assertion,
+      // under its original id, of a finding a previous full round verified —
+      // and the completeness gate above already proved the set exact. But
+      // the exemption belongs to the entries the ledger's recorded title
+      // vouched for: a re-assertion nobody recorded content for cannot be
+      // SHOWN to be one, and rides the regular floor instead. No verifier
+      // ran this round because no agents did.
+      unvouchedReAssertions
+    : criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
   // it must end up true whenever the review posts non-deterministic Criticals
   // and CANNOT SHOW they were verified — verifier absent, transcripts
@@ -2988,7 +4280,14 @@ function composeReviewBody(
   //
   // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
   // transcripts are found from the environment the CLI exported.
-  if (!input.planPath) {
+  if (stopReRuleGranted) {
+    // Nothing to recompute: no agents, no transcripts, no receipts. The
+    // grant's two-read gate (the plan's own nothingToReview plus the
+    // runId-fenced sidecar) is what stands where coverage proof would.
+    // The verify floor still reads the exemption: a re-assertion the
+    // recorded title could not vouch for leaves its Critical unverified.
+    criticalsUnverified = criticalsNeedingVerify >= 1;
+  } else if (!input.planPath) {
     coverageEntries.push({
       subject: 'coverage',
       reason:
@@ -3464,6 +4763,18 @@ function composeReviewBody(
         posted: postedInline,
         prev: convergence.prev,
         drafts: draftedFindingsOf(input.draftedComments),
+        // The fail-closed leg the mint's comment names: cappedBy and
+        // scopeUnproven are only known here, after the body's caps were
+        // computed, so this is where the gate applies for the note — the
+        // marker applies the same predicate for the record (ledgerMarkerFor),
+        // and the two cannot disagree about what closed.
+        ...(convergence.closuresThisRound === undefined ||
+        anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly)
+          ? {}
+          : { closuresThisRound: convergence.closuresThisRound }),
+        ...(convergence.thisRoundFindings === undefined
+          ? {}
+          : { thisRoundFindings: convergence.thisRoundFindings }),
         ...(convergence.floor === undefined
           ? {}
           : { floor: convergence.floor }),
@@ -3499,6 +4810,14 @@ function composeReviewBody(
         // - a PURE-FOREIGN list (foreign, not merged over this account's
         //   own): this account's entries are in no work list at all, so its
         //   own open Criticals cannot be re-posted.
+        // - an ANONYMOUSLY ADOPTED list: the persist seam's record that the
+        //   findings were adopted with no identity to vouch them. The same
+        //   leg the closure mint reads — the list walks like a pure-foreign
+        //   one through every absence inference.
+        // - an UNACCOUNTED re-post: a deferral or reroute entry this round
+        //   posted bears no id the recovered work list held, so a vanished
+        //   Critical may be the claim it re-voices. The caller's mint fails
+        //   closed over the same state.
         //
         // Passed anyway, the body carries "no Critical is open" beside its
         // own disclosure of what it could not read, and the artifact tells a
@@ -3509,7 +4828,11 @@ function composeReviewBody(
           dimensionGapsAreDepthOnly,
         ) &&
         convergence.prev.complete === true &&
-        !(convergence.prev.foreign === true && convergence.prev.merged !== true)
+        !(
+          convergence.prev.foreign === true && convergence.prev.merged !== true
+        ) &&
+        convergence.prev.anonymousAdoption !== true &&
+        convergence.repostUnidentified !== true
           ? { openCriticals }
           : {}),
       })
@@ -3659,6 +4982,11 @@ function composeReviewBody(
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
+  // A stop re-rule that cleared every blocker still reviewed NOTHING new —
+  // it re-ruled old findings on a tree the capture certified unchanged. A
+  // Comment passes `--fail-on request-changes` exactly like an Approve
+  // would, without claiming a review that never ran.
+  if (stopReRuleGranted && event === 'APPROVE') event = 'COMMENT';
   // The caps that reach a Request changes — because they remove the premise
   // the never-soften rule stands on. "A REQUEST_CHANGES earned by a
   // confirmed Critical is never softened" presumes CONFIRMED, and these
@@ -3696,9 +5024,15 @@ function composeReviewBody(
   // Presubmit downgrades apply after the caps and only when the verdict they
   // name was the one on the table — `baseEvent` is the row before every cap,
   // so a softening cap that ran first cannot erase the presubmit's reasons.
+  // Never on a granted stop re-rule: no presubmit ran this round (no agents
+  // did), so `input.presubmit` can only be stale or forged there — and a
+  // model-written `downgradeRequestChanges: true` was the one softening
+  // channel the grant did not machine-check, moving a certified-standing
+  // blocker to COMMENT and exit 0 under `--fail-on request-changes`.
   let downgraded = false;
   let downgradedFrom: 'Approve' | 'Request changes' | null = null;
   if (
+    !stopReRuleGranted &&
     (event === 'APPROVE' || (baseEvent === 'APPROVE' && event === 'COMMENT')) &&
     downgradeApprove
   ) {
@@ -3706,6 +5040,7 @@ function composeReviewBody(
     downgraded = true;
     downgradedFrom = 'Approve';
   } else if (
+    !stopReRuleGranted &&
     (event === 'REQUEST_CHANGES' ||
       (baseEvent === 'REQUEST_CHANGES' && event === 'COMMENT')) &&
     downgradeRequestChanges
@@ -3720,6 +5055,18 @@ function composeReviewBody(
     downgradedFrom = 'Request changes';
   }
 
+  // Candidates the pre-verify carried-ledger dedup set aside (issue #10105) —
+  // read from the report the Step 4 command wrote, the same
+  // model-out-of-the-loop shape as `scriptLintGate` but non-capping: nothing
+  // is owed, so an absent or stale report renders nothing. Only validated ids
+  // are quoted (the titles are model-written and stay in the report), so this
+  // block needs none of the sanitation the model-written lists above get.
+  // Read ABOVE the low-signal gate: its carve-out turns on the set-aside
+  // count, and the rendering below only formats what this reads.
+  const ledgerDedup: ReturnType<typeof ledgerDedupFacts> = input.planPath
+    ? ledgerDedupFacts(input.planPath)
+    : { droppedCount: 0, ids: [] };
+
   // A zero-finding Approve over a non-trivial source diff is disclosed, not
   // capped. Every gate above proves the agents READ the diff; none proves the
   // review could tell good code from bad, and a dogfooded weak-model run
@@ -3733,11 +5080,15 @@ function composeReviewBody(
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
   // A deferrals-only APPROVE is not low signal: the agents DID report
   // findings — this run recorded them as deferred — and the low-signal
-  // sentence's whole claim is that none reported any.
+  // sentence's whole claim is that none reported any. A dedup-only APPROVE
+  // is the same shape one step earlier: the agents reported findings the
+  // round set aside as already carried, so "none reported a finding" would
+  // contradict the disclosure two lines below it.
   if (
     event === 'APPROVE' &&
     input.planPath &&
-    deferredSuggestions.length === 0
+    deferredSuggestions.length === 0 &&
+    ledgerDedup.droppedCount === 0
   ) {
     let plan: RosterPlan | undefined;
     try {
@@ -3852,6 +5203,10 @@ function composeReviewBody(
       zh: 'persistently-critical 收敛建议',
     },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
+    1.5: {
+      en: 'the carried-ledger dedup disclosure',
+      zh: 'carried-ledger 去重披露',
+    },
     2: {
       en: 'the not-reviewed and non-blocking disclosures',
       zh: '未审查范围与非阻断披露',
@@ -3914,8 +5269,9 @@ function composeReviewBody(
    * fold yields FIRST (it is a translation of the English above it, so it
    * costs the author nothing the body does not still say), then parts by
    * ascending `trim` rank (the mechanism-health note, then the residual-risk
-   * advisory, then the deferral display, then the not-reviewed disclosures,
-   * then the convergence observation), the blockers and the caps never, and
+   * advisory, then the deferral display, then the carried-ledger dedup
+   * disclosure, then the not-reviewed disclosures, then the convergence
+   * observation), the blockers and the caps never, and
    * every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
@@ -3936,14 +5292,15 @@ function composeReviewBody(
    * Every exit of `render` that dropped a rank owes this line — the
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
-   * Four of the five TRIM ranks keep a second durable copy, and the
+   * Five of the six TRIM ranks keep a second durable copy, and the
    * ladder's order now follows that fact almost exactly: trim rank -1's
    * health note and trim rank 0's residual-risk advisory both ride the
    * composed result and print as `HEALTH:` and `RESIDUAL-RISK:`, trim rank
    * 1's deferrals are each a `D<round>-<n>` entry in the findings artifact,
-   * and trim rank 3's observation rides the composed result too (and
-   * prints as `CONVERGENCE:`) — it is last for the arithmetic its own block
-   * explains, not for want of a copy. Trim rank 2 is the exception — a
+   * trim rank 1.5's dedup disclosure keeps its whole content in the dedup
+   * report on disk, and trim rank 3's observation rides the composed result
+   * too (and prints as `CONVERGENCE:`) — it is last for the arithmetic its
+   * own block explains, not for want of a copy. Trim rank 2 is the exception — a
    * trimmed disclosure section survives nowhere but the terminal summary,
    * so ask for it there rather than pointing at an artifact that does not
    * carry it.
@@ -4218,8 +5575,11 @@ function composeReviewBody(
     }
     const bareGap =
       bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
-    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerNamed];
-    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerNamed];
+    // Caller-named entries are prose the CLI does not control; comment
+    // grammar goes inert like at every other verbatim exit.
+    const callerShown = callerNamed.map((entry) => stripCommentGrammar(entry));
+    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerShown];
+    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerShown];
     notReviewedParts.push({
       en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
       zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
@@ -4262,16 +5622,24 @@ function composeReviewBody(
   const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
   const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
   if (whiffedDimensions.length > 0) {
+    const whiffedShown = whiffedDimensions.map((d) => stripCommentGrammar(d));
     notReviewedParts.push({
-      en: `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
-      zh: `未审查：${whiffedDimensions.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
+      en: `Not reviewed: ${whiffedShown.join(', ')} — the agent returned no evidence of its walk twice.`,
+      zh: `未审查：${whiffedShown.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
     });
   }
   for (const d of explainedCaller) {
-    // Caller prose, untranslatable by construction — quoted as-is in both.
+    // Caller prose, untranslatable by construction — quoted as-is in both
+    // halves, its comment grammar inert. The Chinese label SAYS so: without
+    // the parenthetical, the 中文说明 block presented an all-English sentence
+    // as its translation (#10567's posted body), and the reader is left
+    // wondering whether the translation machinery broke. The payload keeps
+    // its own English full stop — closing an English sentence with "。" is
+    // the other half of that mismatch.
+    const disclosed = stripCommentGrammar(d);
     notReviewedParts.push({
-      en: `Not reviewed: ${d}.`,
-      zh: `未审查：${d}。`,
+      en: `Not reviewed: ${disclosed}.`,
+      zh: `未审查（原文为英文）：${disclosed}.`,
     });
   }
   // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
@@ -4389,20 +5757,20 @@ function composeReviewBody(
       ...[...named].map(([subject, { count }]) =>
         count > 1 ? `${subject} (×${count})` : subject,
       ),
-    ];
+    ].map((part) => stripCommentGrammar(part));
     const shownZh = [
       ...(gap ? [gap.phraseZh] : []),
       ...[...named.values()].map(({ zh, count }) =>
         count > 1 ? `${zh}（×${count}）` : zh,
       ),
-    ];
+    ].map((part) => stripCommentGrammar(part));
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
-        ? `Not reviewed: ${shown.join(', ')} — ${reason}.`
+        ? `Not reviewed: ${shown.join(', ')} — ${stripCommentGrammar(reason)}.`
         : `Not reviewed: ${shown.join(', ')}.`,
       zh: reason
-        ? `未审查：${shownZh.join('、')}——${reasonZh}。`
+        ? `未审查：${shownZh.join('、')}——${stripCommentGrammar(reasonZh)}。`
         : `未审查：${shownZh.join('、')}。`,
     });
   }
@@ -4439,9 +5807,17 @@ function composeReviewBody(
   // attributed template's severity signal; an unattributed post quotes the
   // blocker through the full fixpoint sanitation — no prefix, no forged
   // footer in any position (the body carries no canonical footer here, so
-  // a surviving forged one would be the post's only attribution).
+  // a surviving forged one would be the post's only attribution). "As-is"
+  // stops at comment grammar either way: a literal `<!-- qwen-review-… -->`
+  // in blocker prose would forge a second marker in the channel the
+  // pipeline's own readers scan raw — and it goes inert BEFORE the
+  // sanitation, then again after anything the sanitation spliced back
+  // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => (attribution ? withMarker(l) : stripForUnattributedPost(l)))
+    .map((l) => {
+      const quoted = quotedProse(l, attribution);
+      return attribution ? withMarker(quoted) : quoted;
+    })
     .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
@@ -4482,6 +5858,43 @@ function composeReviewBody(
           },
         ];
 
+  const MAX_DEDUP_IDS_SHOWN = 12;
+  const dedupIdsShown = ledgerDedup.ids
+    .slice(0, MAX_DEDUP_IDS_SHOWN)
+    .map(({ id, n }) => (n > 1 ? `${id} ×${n}` : id));
+  const dedupIdsMore = ledgerDedup.ids.length - dedupIdsShown.length;
+  const dedupIdList =
+    dedupIdsShown.length === 0
+      ? ''
+      : dedupIdsShown.join(', ') +
+        (dedupIdsMore > 0 ? `, +${dedupIdsMore} more` : '');
+  const ledgerDedupBlock: Bi[] =
+    ledgerDedup.droppedCount === 0
+      ? []
+      : [
+          {
+            // Its OWN rank, between the deferral list and the disclosures —
+            // see the ladder comment where the ranks are named. Sharing rank
+            // 1 keyed every notice surface (the rank's name, the artifact
+            // pointer, `bodyTrim.deferralList`) on the deferral list over a
+            // round whose only trim was this block.
+            trim: 1.5,
+            en:
+              `${ledgerDedup.droppedCount} candidate finding(s) this round's ` +
+              `reviewers re-derived matched entries already carried on this PR ` +
+              `and were set aside before verification` +
+              (dedupIdList ? ` (${dedupIdList})` : '') +
+              ` — a matched posted finding is ruled in the previous-round ` +
+              `status as always, and a matched deferral stays on the standing ` +
+              `deferral record.`,
+            zh:
+              `本轮评审重新推导出的 ${ledgerDedup.droppedCount} 条候选发现与本 PR ` +
+              `已携带的条目匹配，已在验证前搁置` +
+              (dedupIdList ? `（${dedupIdList}）` : '') +
+              `——被匹配的已发布条目照常在上一轮状态区裁定，被匹配的延后条目仍保留在延后清单记录中。`,
+          },
+        ];
+
   const contextUnavailableClause: Bi = {
     keep: 1,
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
@@ -4515,6 +5928,27 @@ function composeReviewBody(
         }
       : undefined;
 
+  // The round-kind disclosure, on its own line — never inside the lint
+  // gate's "Not linted" wrapper: a decided-stop re-rule is not a tool
+  // limitation, and a reader handed "Not linted: Decided-stop re-rule …"
+  // reads the round kind as a linting gap. Rendered on the two events a
+  // granted stop can produce (REQUEST_CHANGES and COMMENT; APPROVE is
+  // demoted before the body composes).
+  const stopRoundBlock: Bi[] = stopReRuleGranted
+    ? [
+        {
+          trim: 2,
+          en:
+            'Decided-stop re-rule: the verdict below is the re-rule of the ' +
+            "cache ledger's open Criticals against the current tree — no " +
+            'review agents ran this round.',
+          zh:
+            '决定性停止重裁：以下裁决是对 cache 台账中 open Critical 在当前' +
+            '树上的重裁——本轮没有任何评审 agent 运行。',
+        },
+      ]
+    : [];
+
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
   // it does not cap the verdict (it is a tool limitation, not a finding or an
@@ -4523,8 +5957,8 @@ function composeReviewBody(
     ? [
         {
           trim: 2,
-          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
-          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
         },
       ]
     : [];
@@ -4574,8 +6008,9 @@ function composeReviewBody(
       ]
     : [];
 
-  // Non-Critical findings the convergence posture deferred: disclosed on
-  // EVERY event, never capping. The disclosure is the record the round
+  // Findings the convergence posture deferred — Suggestions, and the
+  // axes-classified Criticals (#10291): disclosed on EVERY event, never
+  // capping. The disclosure is the record the round
   // discipline demands — a deferral silently dropped is a finding lost, and
   // a deferral that capped would withhold the incremental anchor and
   // regenerate exactly the full-diff re-review the posture exists to end.
@@ -4631,10 +6066,10 @@ function composeReviewBody(
   // them — the overflow identities survive in the run report, and a
   // universal "listed below" over an absent entry is a false record on
   // exactly the accuracy surface this disclosure exists for.
-  const enforcedShown = Math.min(
-    reroute.entries.length,
-    MAX_DEFERRED_SUGGESTION_LINES,
-  );
+  const enforcedEntries = new Set<DeferredEntry>(reroute.entries);
+  const enforcedShown = deferredSuggestions
+    .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .filter((e) => enforcedEntries.has(e)).length;
   const enforcedOverflow = reroute.entries.length - enforcedShown;
   // Why the floor engaged, when it engaged ahead of the round-6 schedule:
   // the signal-driven trigger (#9903) is the one posture change the round's
@@ -4649,15 +6084,54 @@ function composeReviewBody(
           zh: `——发布下限因首次发现速率连续 ${convergence.flatRounds ?? 0} 轮未下降而提前生效`,
         }
       : { en: '', zh: '' };
+  // Named by severity: a moved Critical (#10291) is the one move a reader
+  // would not expect from a "floor", so the sentence says which axes moved
+  // it rather than folding it into a Suggestion count.
+  const enforcedSuggestions = reroute.entries.filter(
+    (e) => e.severity === 'Suggestion',
+  ).length;
+  const enforcedCriticals = reroute.entries.length - enforcedSuggestions;
+  const enforcedWhat = {
+    en: [
+      enforcedSuggestions > 0 ? `${enforcedSuggestions} Suggestion(s)` : '',
+      enforcedCriticals > 0
+        ? `${enforcedCriticals} fails-closed, new-surface Critical(s)`
+        : '',
+    ]
+      .filter((s) => s !== '')
+      .join(' and '),
+    zh: [
+      enforcedSuggestions > 0 ? `${enforcedSuggestions} 条 Suggestion` : '',
+      enforcedCriticals > 0
+        ? `${enforcedCriticals} 条 fails-closed 且 new-surface 的 Critical`
+        : '',
+    ]
+      .filter((s) => s !== '')
+      .join('和'),
+  };
   const floorEnforcedNote: Bi[] =
     reroute.entries.length > 0
       ? [
           {
-            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor${signalFloorNote.en}; the CLI moved them into the deferral list below (floor enforcement${enforcedOverflow > 0 ? ` — ${enforcedShown} listed, ${enforcedOverflow} more inside the overflow count` : ''}).`,
-            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论${signalFloorNote.zh}；CLI 已将其移入下方延后清单（下限强制执行${enforcedOverflow > 0 ? `——列出 ${enforcedShown} 条，其余 ${enforcedOverflow} 条计入溢出计数` : ''}）。`,
+            en: `${enforcedWhat.en} were drafted inline past the resolved critical posting floor${signalFloorNote.en}; the CLI moved them into the deferral list below (floor enforcement${enforcedOverflow > 0 ? ` — ${enforcedShown} listed, ${enforcedOverflow} more inside the overflow count` : ''}).`,
+            zh: `${enforcedWhat.zh} 在已解析的 critical 发布下限之外被起草为行内评论${signalFloorNote.zh}；CLI 已将其移入下方延后清单（下限强制执行${enforcedOverflow > 0 ? `——列出 ${enforcedShown} 条，其余 ${enforcedOverflow} 条计入溢出计数` : ''}）。`,
           },
         ]
       : [];
+  // The Criticals the posture deferred by their axes (#10291), in either
+  // channel: the header names them, because "deferred, not a blocker" is a
+  // sentence the reader expects over Suggestions and must be told applies
+  // to a Critical only under the ONE combination the floor defers.
+  const deferredCriticals = deferredSuggestions.filter(
+    (e) => e.severity === 'Critical',
+  ).length;
+  const deferredCriticalNote =
+    deferredCriticals > 0
+      ? {
+          en: `; ${deferredCriticals} Critical(s) among them are deferred by their axes — fails-closed on new surface, where no wrong result is certified and the merge base had neither the surface nor the defect — and remain follow-up work recorded in the findings artifact`,
+          zh: `；其中 ${deferredCriticals} 条 Critical 按其失败方向与对照基线延后——fails-closed 且 new-surface：未认证任何错误结果，且 merge base 既无该功能面也无该缺陷——作为后续工作记录在 findings 工件中`,
+        }
+      : { en: '', zh: '' };
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
     ? [
         ...floorEnforcedNote,
@@ -4668,12 +6142,19 @@ function composeReviewBody(
           // (rank -1) goes before it — and the artifact and the terminal
           // report keep every entry whole.
           trim: 1,
-          en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker)${signalFloorNote.en} — recorded, not requested in this round:\n\n${deferredShown
+          // The marker is how later tooling (an agent collecting deferred
+          // Suggestions across rounds) locates the block — the prose heading
+          // alone is the only other anchor, and rewording it must not break
+          // that lookup. It rides the SAME fragment so a budget trim drops
+          // the pointer with the list it would point at. The blank line is
+          // load-bearing: an HTML block swallowing the next line is the
+          // CommonMark quirk the ack/fallback markers already document.
+          en: `<!-- qwen-review-deferred -->\n\nDeferred under the convergence posture (round ${deferredRound}, not a blocker)${signalFloorNote.en} — recorded, not requested in this round${deferredCriticalNote.en}:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
             .join(
               '\n',
             )}${deferredMore > 0 ? `\n- …and ${deferredMore} more (see the run report)` : ''}`,
-          zh: `收敛姿态下延后（第 ${deferredRound} 轮，非阻断）${signalFloorNote.zh}——已记录，本轮不要求修改：共 ${deferredSuggestions.length} 条（原文未翻译，列表见上方英文部分）。`,
+          zh: `收敛姿态下延后（第 ${deferredRound} 轮，非阻断）${signalFloorNote.zh}——已记录，本轮不要求修改${deferredCriticalNote.zh}：共 ${deferredSuggestions.length} 条（原文未翻译，列表见上方英文部分）。`,
         },
       ]
     : [];
@@ -4695,7 +6176,8 @@ function composeReviewBody(
   // maintainer it is written for receives it whole on the terminal
   // `RESIDUAL-RISK:` line AND in the composed JSON, which the persisted
   // artifact carries. The deferral list below it keeps one copy (the
-  // findings artifact), the disclosures below that keep none but the
+  // findings artifact), the dedup disclosure below that keeps the dedup
+  // report on disk, the disclosures below that keep none but the
   // terminal report, and the observation last is the author's only sentence
   // about the shape of the loop. Sharing a rank with any of them is what
   // the trim notice cannot survive: it names what a rank drops, and rank
@@ -4746,7 +6228,8 @@ function composeReviewBody(
   // makes the trim notice name it when it does. It is ranked LAST because
   // it is the cheapest block to keep and the only one whose reader is the
   // author of the pull request alone — the deferral list has a second
-  // durable copy in the findings artifact, the disclosures are restated in
+  // durable copy in the findings artifact, the dedup disclosure in the
+  // dedup report on disk, the disclosures are restated in
   // the terminal report, and the mechanism-health note above it is written
   // for the operator, who has the `HEALTH:` line. This paragraph is the
   // whole of what this pipeline tells a PR author about a loop that is not
@@ -4772,8 +6255,10 @@ function composeReviewBody(
         // Nominally engaged, mechanically not: the floor resolved to
         // critical and Suggestion-level findings posted inline anyway.
         // The REPORTING reading resolved the floor to critical, the
-        // enforcement backstop did not, AND a Suggestion posted inline
-        // because of it. All three, because the sentence asserts all three.
+        // enforcement backstop did not, AND a finding the floor would have
+        // deferred — a Suggestion, or an axes-pair Critical (#10291) —
+        // posted inline because of it. All three, because the sentence
+        // asserts all three.
         //
         // The first two hold on EVERY default-config round from 6 on — the
         // readings differ only in folding an absent floor to `auto` — so
@@ -4795,7 +6280,7 @@ function composeReviewBody(
         postureNotEngaging:
           convergence.criticalFloorKind !== undefined &&
           convergence.floorEnforcementEngaged === false &&
-          deferrableSuggestionsInline(input.draftedComments) > 0,
+          deferrableFindingsInline(input.draftedComments) > 0,
         // Two consecutive withholds — this round's decision read through the
         // marker's OWN predicate, and the recovered round's recorded anchor.
         anchorChainBroken:
@@ -4872,9 +6357,11 @@ function composeReviewBody(
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...approachBlock,
       ...duplicatesBlock,
+      ...ledgerDedupBlock,
       ...cannotTellBlock,
       ...notReviewedForBody,
       ...unverifiedTagsBlock,
+      ...stopRoundBlock,
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
@@ -4927,9 +6414,12 @@ function composeReviewBody(
     // With posture-deferred Suggestions on record, "No issues found" would be
     // a lie the deferral list two lines down contradicts: the review DID find
     // them — it recorded them and chose, per the posture, not to request them.
+    // The carried-ledger dedup disclosure contradicts it the same way: the
+    // reviewers derived those candidates; the round set them aside because
+    // the PR already carries them.
     const body = render(
       [
-        deferredSuggestionsBlock.length
+        deferredSuggestionsBlock.length || ledgerDedupBlock.length
           ? {
               keep: 1,
               en: 'No blocking issues. LGTM! ✅',
@@ -4940,6 +6430,7 @@ function composeReviewBody(
               en: 'No issues found. LGTM! ✅',
               zh: '未发现问题。LGTM！✅',
             },
+        ...ledgerDedupBlock,
         ...notReviewedForBody,
         ...deferredBlock,
         ...testPlanBlock,
@@ -4961,6 +6452,7 @@ function composeReviewBody(
         ...continuityBlock,
       ],
       notReviewedParts.length ||
+        ledgerDedupBlock.length ||
         deferredBlock.length ||
         testPlanBlock.length ||
         repositoryContextBlock.length ||
@@ -5076,27 +6568,39 @@ function composeReviewBody(
     // untagged, a merge of only these defaulted to the weakest, and the tail
     // cut spent "Review incomplete — unverified findings disclosed." before
     // it spent a single blocker.
+    // The granted stop takes its own opener AHEAD of the whole certifying
+    // chain: no review ran, so neither 'Reviewed — no blockers.' nor the
+    // bare 'Reviewed.' fallback may open the body — a cleared stop's
+    // COMMENT opened exactly that way, two paragraphs above its own 'no
+    // review agents ran this round' disclosure. The wording matches
+    // `stopRoundBlock`'s frame: this round re-ruled standing findings.
     clauses.push(
-      coverageOpener ??
-        (canCertify
-          ? {
-              keep: 1,
-              en: 'Reviewed — no blockers.',
-              zh: '已审查——无阻断问题。',
-            }
-          : findingsFileUnreadable
-            ? {
-                keep: 1,
-                en: 'Review incomplete — findings unavailable.',
-                zh: '审查未完成——发现不可用。',
-              }
-            : findingsUnverifiedAtCompose
+      stopReRuleGranted
+        ? {
+            keep: 1,
+            en: 'Re-rule of standing findings — no new review ran.',
+            zh: '对既有发现的重裁——本轮未运行新的审查。',
+          }
+        : (coverageOpener ??
+            (canCertify
               ? {
                   keep: 1,
-                  en: 'Review incomplete — unverified findings disclosed.',
-                  zh: '审查未完成——未验证的发现已披露。',
+                  en: 'Reviewed — no blockers.',
+                  zh: '已审查——无阻断问题。',
                 }
-              : { keep: 1, en: 'Reviewed.', zh: '已审查。' }),
+              : findingsFileUnreadable
+                ? {
+                    keep: 1,
+                    en: 'Review incomplete — findings unavailable.',
+                    zh: '审查未完成——发现不可用。',
+                  }
+                : findingsUnverifiedAtCompose
+                  ? {
+                      keep: 1,
+                      en: 'Review incomplete — unverified findings disclosed.',
+                      zh: '审查未完成——未验证的发现已披露。',
+                    }
+                  : { keep: 1, en: 'Reviewed.', zh: '已审查。' })),
     );
   }
 
@@ -5146,6 +6650,10 @@ function composeReviewBody(
   //     blocks; it renders on every event, RC included.
   clauses.push(...duplicatesBlock);
 
+  // 4b. Pre-verify carried-ledger dedup disclosure — same render-on-every-
+  //     event rule as 4a, whose posting-layer drop it front-runs.
+  clauses.push(...ledgerDedupBlock);
+
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
 
@@ -5155,6 +6663,10 @@ function composeReviewBody(
   // 6a. Verification outstanding at loop end — the findings file's surviving
   //     `— [unverified]` tags, machine-read.
   clauses.push(...unverifiedTagsBlock);
+
+  // 6b-. Round-kind disclosure (non-capping) — a decided-stop re-rule says
+  //      what kind of round this was, on its own line.
+  clauses.push(...stopRoundBlock);
 
   // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
   //     shell actionlint would lint but we do not yet trust.
@@ -5321,9 +6833,12 @@ export function describeChunkGap(
     }
   }
   if (allKnown && files.length <= 4) {
+    // Filenames are PR-controlled — git permits `<!--` in a path — so they
+    // ride mdField like every other body surface rendering one.
+    const named = files.map((f) => mdField(f));
     return {
-      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${files.join(', ')}`,
-      phraseZh: `涉及 ${files.join('、')} 的 diff 片段`,
+      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${named.join(', ')}`,
+      phraseZh: `涉及 ${named.join('、')} 的 diff 片段`,
       plural: uniq.length > 1,
     };
   }
@@ -5372,7 +6887,9 @@ interface Bi {
    * persistently-critical advisory (trim rank 0 — the maintainer has it
    * whole on the terminal line and in the composed JSON), then the display
    * of findings the review deliberately did NOT request (the deferral list,
-   * trim rank 1, kept whole in the findings artifact), then the disclosures
+   * trim rank 1, kept whole in the findings artifact), then the
+   * carried-ledger dedup disclosure (trim rank 1.5, kept whole in the dedup
+   * report on disk), then the disclosures
    * of what went unreviewed (trim rank 2, which have no other durable
    * copy), and the convergence observation last (trim rank 3 — see its own
    * block for why the cheapest paragraph is shed last). The blockers, the
@@ -5476,31 +6993,50 @@ export function withoutGateReposts(
   ownBodyCriticals: readonly string[],
   gateCriticals: readonly string[],
 ): string[] {
-  const locator = (entry: string): string => {
-    const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
-    const dash = claim.indexOf(' — ');
-    // Backticks stripped: the gate renders the path through `mdField`, and a
-    // re-post that types the locator plainly names the same finding.
-    return (dash === -1 ? claim : claim.slice(0, dash))
-      .replace(/`/g, '')
-      .trim();
-  };
-  const regenerated = new Set(gateCriticals.map(locator).filter((k) => k));
+  const regenerated = new Set(gateCriticals.map(claimLocator).filter((k) => k));
   if (regenerated.size === 0) return [...ownBodyCriticals];
-  return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
+  return ownBodyCriticals.filter((c) => !regenerated.has(claimLocator(c)));
+}
+
+/**
+ * A structurally valid script-lint report: a plain-object root, and every
+ * list field (`checked` / `skipped` / `errored` / `deferred`, plus the
+ * nested `checked[].findings`) either absent/nullish or an array of plain
+ * objects. The gate's loops dereference entries and iterate fields without
+ * per-shape guards, so anything outside this contract is a TypeError, not
+ * a report.
+ */
+function structurallyValidReport(report: unknown): boolean {
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isPlainObject(report)) return false;
+  for (const key of ['checked', 'skipped', 'errored', 'deferred'] as const) {
+    const v = report[key];
+    if (v === undefined || v === null) continue;
+    if (!Array.isArray(v) || v.some((e) => !isPlainObject(e))) return false;
+  }
+  for (const c of (report['checked'] ?? []) as Array<Record<string, unknown>>) {
+    const f = c['findings'];
+    if (f === undefined || f === null) continue;
+    if (!Array.isArray(f) || f.some((e) => !isPlainObject(e))) return false;
+  }
+  return true;
 }
 
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
-  disclosed: string[];
+  disclosed: Array<{ en: string; zh: string }>;
 } {
   const criticals: string[] = [];
   const unreviewed: string[] = [];
   // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
   // limitation, not a finding and not an unrun-checker gap — the reader is told a
   // workflow's embedded shell was not linted, but the verdict is not capped on it.
-  const disclosed: string[] = [];
+  // Bilingual, unlike the capping lists: these strings are machine-built from the
+  // report (no model prose), so the body's Chinese half can carry a real
+  // translation instead of the English line verbatim.
+  const disclosed: Array<{ en: string; zh: string }> = [];
   let plan: {
     prNumber?: unknown;
     files?: unknown;
@@ -5551,6 +7087,22 @@ export function scriptLintGate(planPath: string): {
     }
     return { criticals, unreviewed, disclosed };
   }
+  // A parsed-but-MALFORMED report fails closed too — before the diffHash
+  // check dereferences it. The JSON is a side file the review agent can
+  // rewrite, and the hash is readable out of that same file, so a "fresh"
+  // report proves nothing about provenance; a null entry, a non-array
+  // field, or a null root would throw a TypeError in the loops below and
+  // lose the whole round, blockers included. The decision is whole-report
+  // refusal rather than per-entry salvage — and string entries like
+  // `skipped: ["x"]` are deliberately IN that refusal: the linter writes
+  // object entries, so a non-object entry is the same untrusted channel,
+  // not a shape to render.
+  if (!structurallyValidReport(report)) {
+    unreviewed.push(
+      'the executable-script lint — the report is malformed; re-run `qwen review script-lint`',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
   // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
   // report carries a hash of the diff it ran against; we re-hash the plan's current
   // diff. A mismatch means it is not this review's report: a later PR commit
@@ -5582,23 +7134,36 @@ export function scriptLintGate(planPath: string): {
   // Each skipped entry carries its OWN reason (not installed, or an irregular file
   // like a symlink) — surface it, rather than hard-coding "not installed". A
   // deferred checker is NOT here: it is its own state, disclosed below without capping.
+  // The reason/tool fields are report prose headed for a machine-read body, so
+  // their comment grammar goes inert exactly as at every other prose exit — the
+  // report is a side file the review agent can rewrite, and a literal
+  // `<!-- qwen-review-… -->` there would otherwise post as a live marker.
   for (const s of report.skipped ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
+      `the executable-script lint — ${mdField(s.path)}: ${stripCommentGrammar(s.reason ?? `${s.tool} unavailable`)}`,
     );
   }
   for (const e of report.errored ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
+      `the executable-script lint — ${stripCommentGrammar(e.tool)} errored on ${mdField(e.path)}`,
     );
   }
   // A deferred checker (actionlint) is disclosed but does not cap — the reader is
   // told the workflow's embedded shell was not linted, without making every
   // workflow PR un-Approvable on a checker we deliberately decline to run.
+  // No "the executable-script lint —" prefix here: the body's own wrapper opens
+  // with "Not linted:", and naming the lint after that header rendered as
+  // "Not linted: the executable-script lint" — a sentence about not running a
+  // lint on a lint (#10567's posted body). The path and reason carry the facts.
   for (const d of report.deferred ?? []) {
-    disclosed.push(
-      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
-    );
+    const reason = stripCommentGrammar(d.reason ?? `${d.tool} deferred`);
+    disclosed.push({
+      en: `${mdField(d.path)} — ${reason}`,
+      // An older CLI's report has no `reasonZh`; English both halves beats a
+      // half-empty sentence. Its comment grammar goes inert like the reason's —
+      // the report is agent-rewritable prose either way.
+      zh: `${mdField(d.path)}——${d.reasonZh ? stripCommentGrammar(d.reasonZh) : reason}`,
+    });
   }
   return { criticals, unreviewed, disclosed };
 }
@@ -5975,8 +7540,19 @@ export const composeReviewCommand: CommandModule = {
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
     // archived report copies this line rather than re-deriving a lossy one.
+    // The parent's run stamp is echoed into the artifact, mirroring the stop
+    // sidecar's fence: `run.ts` accepts only a verdict stamped by ITS run,
+    // so a leftover artifact from a concurrent same-stem run — or a file
+    // written around this command — never reads as this round's verdict.
+    // Absent when no parent published one (an interactive compose), which
+    // is exactly when no gate is reading.
+    const composedRunId = process.env['QWEN_REVIEW_RUN_ID'];
     const json = JSON.stringify(
-      { ...result, verdictLine: verdictLine(result) },
+      {
+        ...result,
+        verdictLine: verdictLine(result),
+        ...(composedRunId ? { runId: composedRunId } : {}),
+      },
       null,
       2,
     );
@@ -6059,24 +7635,9 @@ export const composeReviewCommand: CommandModule = {
   },
 };
 
-/**
- * The fix-induced marking, read from the head of the CLAIM — after the id and
- * its separator, never inside the id grammar.
- *
- * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
- * `idFor`, so widening it to swallow a parenthetical would put the ledger's
- * carry on the same regex as a model-written adjective: a spelling or spacing
- * the wider grammar failed to anticipate (`R1-2(Fix-Induced):`) would stop
- * matching the id at all, and the finding would be silently renumbered — the
- * exact failure "one finding, one name" exists to prevent. Read here, the id
- * is already in hand and nothing about this token can cost it: an unrecognised
- * marking leaves the draft counted as a re-post, which is what every round did
- * before this existed.
- *
- * Case-insensitive, and tolerant of inner spacing, because it governs only
- * whether a comment counts as first-time work — never which finding it is.
- */
-const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+// The `(fix-induced)` marking's grammar (`FIX_INDUCED_READBACK`) and the
+// claim-head tokeniser that reads it live in lib/inline-counts.ts; the
+// placement rules are documented there.
 
 /**
  * The id a claim line carries, whether that id fronts a NEW defect, and the
@@ -6101,18 +7662,18 @@ function readClaim(rest: string): {
   fixInduced: boolean;
   title: string;
 } {
-  const line = rest.split('\n')[0].trim();
-  const carried = LEDGER_ID_READBACK.exec(line);
-  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
-  // Only ever a marking on a CARRIED id. On a fresh finding there is no
-  // entry for the defect to have been induced by, so the token would be
-  // decoration — and honouring it there would let a stray parenthetical add
-  // a first-time count the round already gets for that comment anyway.
-  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
+  // ONE reader for the claim's head slot (#10291): the id, the
+  // `(fix-induced)` marking and the axis tags are tokenised wherever the
+  // model placed them in the slot — a source tag between the id and the
+  // marking included — and the title is what is left past the slot, the
+  // source tag kept as the finding's own text. A second derivation here
+  // (an anchored readback over the stripped line) once disagreed with the
+  // tokeniser on exactly that placement.
+  const head = readClaimHead(rest.split('\n')[0].trim());
   return {
-    id: carried?.[1],
-    fixInduced: marked !== null,
-    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
+    ...(head.id === undefined ? {} : { id: head.id }),
+    fixInduced: head.fixInduced,
+    title: head.claim,
   };
 }
 
@@ -6135,11 +7696,13 @@ function ledgerClaimLine(body: unknown): string {
 }
 
 /**
- * Inline Suggestions the posting floor WOULD have deferred — every
- * Suggestion-severity draft whose claim line carries no deterministic tag.
+ * Inline findings the posting floor WOULD have deferred — every
+ * Suggestion-severity draft whose claim line carries no deterministic tag,
+ * and every Critical whose claim line carries the axis pair the floor
+ * defers (#10291).
  *
- * The posture excludes a `[build]`/`[test]`/`[probe]` finding by source at
- * any floor: it is pre-confirmed, and it stays inline whether or not the
+ * The posture excludes a `[build]`/`[test]`/`[probe]` Suggestion by source
+ * at any floor: it is pre-confirmed, and it stays inline whether or not the
  * floor engaged. Counting it as evidence that the floor failed to act reads
  * the posture working as specified as the posture failing — and the tag is
  * read off the CLAIM LINE only, the same window `floorEnforcedReroute` uses,
@@ -6148,13 +7711,16 @@ function ledgerClaimLine(body: unknown): string {
  * A pathless comment is excluded for the same reason by a different route:
  * it cannot become a deferral entry at all, so no floor could have moved it.
  */
-export function deferrableSuggestionsInline(drafted: unknown): number {
+export function deferrableFindingsInline(drafted: unknown): number {
   if (!Array.isArray(drafted)) return 0;
   let n = 0;
   for (const c of drafted as Array<{ body?: unknown; path?: unknown }>) {
-    if (severityOf(c) !== 'suggestion') continue;
+    const sev = severityOf(c);
+    if (sev === null) continue;
     const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
-    if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) continue;
+    if (sev === 'critical') {
+      if (!floorDefersCritical(axesOfClaim(claim))) continue;
+    } else if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) continue;
     // A pathless comment cannot become a deferral entry, so the floor leaves
     // it inline at any posture — the same structural exclusion the reroute
     // makes, and counting it would accuse the floor of failing to move
@@ -6219,6 +7785,13 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
   return out;
 }
 
+/** A body Critical with the axes its typed source entry settled. */
+export interface BodyCritical {
+  text: string;
+  direction?: Direction;
+  baseline?: Baseline;
+}
+
 /**
  * The next round's ledger: every finding this review is posting as its own —
  * the drafted inline comments plus the body Criticals. Low-confidence findings
@@ -6228,7 +7801,12 @@ export function draftedFindingsOf(drafted: unknown): DraftedFinding[] {
 export function buildLedger(
   round: number,
   drafted: Array<{ path?: unknown; line?: unknown; body?: unknown }>,
-  bodyCriticals: string[],
+  /**
+   * The body Criticals as posted — free text, or a relocated entry whose
+   * axes travel TYPED beside its rendered text (#10291): the rendered line
+   * wraps the claim in a code span, so nothing can be read back off it.
+   */
+  bodyCriticals: ReadonlyArray<string | BodyCritical>,
   /**
    * The previous round's work list, when this round recovered one, and
    * whether that list was COMPLETE.
@@ -6310,11 +7888,16 @@ export function buildLedger(
     // The ledger rides the posted body as an HTML comment the autofix grep
     // reads, and residue between the marker and a carried id would defeat the
     // id anchor and silently renumber the finding.
-    const { id: carried, title } = readClaim(ledgerClaimLine(c.body));
+    const claimLine = ledgerClaimLine(c.body);
+    const { id: carried, title } = readClaim(claimLine);
     const file = typeof c.path === 'string' ? c.path : LEDGER_UNKNOWN_FILE;
     findings.push({
       id: idFor(carried),
       sev: sev === 'critical' ? 'C' : 'S',
+      // The axes ride as fields and leave the title (#10291): the next
+      // round's routing reads them off the side file, and the title's job
+      // is to re-locate the claim, not to re-spell its classification.
+      ...(sev === 'critical' ? ledgerAxes(axesOfClaim(claimLine)) : {}),
       file,
       // The flag marks the EXCEPTION — a real path that happens to be spelled
       // like a stand-in — so the stand-ins themselves cost no marker bytes and
@@ -6337,21 +7920,34 @@ export function buildLedger(
       ),
     });
   }
-  for (const b of bodyCriticals) {
+  for (const entry of bodyCriticals) {
+    const b = typeof entry === 'string' ? entry : entry.text;
     // The title strips through the same fixpoint chain the visible list
     // uses — the ledger marker rides the posted body as an HTML comment,
     // and the autofix grep reads the whole body, comments included.
     // Leading render-nothing residue goes too, for the same reason as the
     // drafted-comment leg: residue between the marker and a carried id
     // would defeat the id anchor and silently renumber the finding.
-    const { id: carried, title } = readClaim(
-      stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, ''),
-    );
+    const head = stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, '');
+    const { id: carried, title } = readClaim(head);
     findings.push({
       id: idFor(carried),
       sev: 'C',
+      // A typed entry's axes as settled; a free-text entry's off its first
+      // line's head slot — the same window the drafted leg reads, since a
+      // body Critical's claim line is its first line too.
+      ...ledgerAxes(
+        typeof entry === 'string' ? axesOfClaim(head.split('\n')[0]) : entry,
+      ),
       file: LEDGER_BODY_FILE,
-      title: locatable(title, 'the review body'),
+      // The title is the visible item's text: the same neutralize-then-
+      // strip order, so a forged footer that rode in wrapped in comment
+      // grammar leaves the ledger exactly as it leaves the rendered list —
+      // the serializer only escapes `--`, and the autofix grep reads
+      // through the escape. The id was read BEFORE the grammar went inert,
+      // above: a leading comment is render-nothing residue the id anchor
+      // steps over, not prose to surface ahead of the carried id.
+      title: locatable(quotedProse(title, false), 'the review body'),
     });
   }
   return { v: 1, round, findings };
@@ -6408,7 +8004,13 @@ export function verdictLine(r: ComposeReviewResult): string {
   } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');
-    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+    // Empty reasons is a real state, not a gap: the decided-stop re-rule
+    // demotes a cleared round's APPROVE to COMMENT with no cap and no
+    // presubmit — joining an empty list printed a dangling colon there.
+    line += reasons.length
+      ? ` — an Approve was NOT available: ${reasons.join('; ')}`
+      : ' — a decided-stop re-rule reviews nothing new, so a cleared ' +
+        'round comments rather than approves';
   } else if (r.downgradedFrom === 'Request changes') {
     // The decisive case, and the one a review caught. A presubmit downgrade can
     // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to
@@ -6456,7 +8058,10 @@ export function verdictLine(r: ComposeReviewResult): string {
             ? ', truncated — the rest are counted in the run report'
             : ''
         }`;
-    line += ` — ${r.deferredCount} non-Critical finding(s) deferred under the convergence posture (${where})`;
+    // "finding(s)", not "non-Critical finding(s)": since #10291 the count
+    // can include a Critical the floor deferred by its axes, and the body's
+    // deferral header is where the reader learns which.
+    line += ` — ${r.deferredCount} finding(s) deferred under the convergence posture (${where})`;
   }
   // The enforcement is the CLI overriding what the drafted set was about to
   // post; the operator reading the terminal must see that the override

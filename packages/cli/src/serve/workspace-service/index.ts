@@ -48,7 +48,6 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import { resolveSkillSettings } from '../../config/skill-settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
@@ -70,10 +69,8 @@ import {
 } from '../workspace-skill-management.js';
 
 import {
-  mapWorkspaceSkillToggleError,
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
   WorkspaceSettingsPartialPersistError,
 } from './types.js';
 import type {
@@ -87,7 +84,6 @@ import type {
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
   WorkspaceSkillBatchToggleResult,
-  WorkspaceSkillToggleError,
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
   PersistDisabledSkillsBatchResult,
@@ -122,7 +118,6 @@ export type {
 export {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
   mapWorkspaceSkillToggleError,
 } from './types.js';
 
@@ -273,6 +268,16 @@ export function createDaemonWorkspaceService(
     });
   };
   const assertActiveGeneration = () => assertGenerationOpen?.();
+  const loggedPreheatFailures = new WeakSet<object>();
+  const logPreheatFailure = (err: unknown) => {
+    if (typeof err === 'object' && err !== null) {
+      if (loggedPreheatFailures.has(err)) return;
+      loggedPreheatFailures.add(err);
+    }
+    writeStderrLineSafe(
+      `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  };
 
   // Last skills status answered by a live ACP child, retained so
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
@@ -286,7 +291,6 @@ export function createDaemonWorkspaceService(
         promise: Promise<ServeWorkspaceSkillsStatus>;
       }
     | undefined;
-  let inFlightAcpPreheat: Promise<void> | undefined;
 
   const invalidateWorkspaceSkillsSnapshot = () => {
     workspaceSkillsGeneration += 1;
@@ -430,9 +434,9 @@ export function createDaemonWorkspaceService(
       // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
       // returns the idle placeholder (`initialized: false`, empty `skills`)
       // whenever no child channel is live — before the first session, after
-      // the child is reaped on session close (`--channel-idle-timeout-ms`
-      // defaults to an immediate kill), and when a cold-start preheat times
-      // out before the child ever answers. In those windows the Web Shell's
+      // the default immediate reap or a configured idle timeout stops it, and
+      // when a cold-start preheat times out before the child ever answers. In
+      // those windows the Web Shell's
       // pre-first-prompt slash-command list would otherwise drop every skill,
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
@@ -466,10 +470,10 @@ export function createDaemonWorkspaceService(
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
-      if (channelLive()) {
-        return finish({ ready: true, channelLive: true });
-      }
       if (!preheatAcpChildOnBridge) {
+        if (channelLive()) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
           ready: false,
           channelLive: false,
@@ -478,36 +482,10 @@ export function createDaemonWorkspaceService(
         });
       }
 
-      if (!inFlightAcpPreheat) {
-        const promise = Promise.resolve().then(preheatAcpChildOnBridge);
-        inFlightAcpPreheat = promise;
-        void promise.then(
-          () => {
-            if (inFlightAcpPreheat === promise) {
-              inFlightAcpPreheat = undefined;
-            }
-          },
-          (err) => {
-            try {
-              writeStderrLineSafe(
-                `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            } finally {
-              if (inFlightAcpPreheat === promise) {
-                inFlightAcpPreheat = undefined;
-              }
-            }
-          },
-        );
-      }
-
-      const sharedPreheat = inFlightAcpPreheat;
+      const preheat = Promise.resolve().then(() => preheatAcpChildOnBridge());
+      void preheat.catch(logPreheatFailure);
       try {
-        await withTimeout(
-          sharedPreheat,
-          opts?.timeoutMs ?? 5_000,
-          'ACP preheat',
-        );
+        await withTimeout(preheat, opts?.timeoutMs ?? 5_000, 'ACP preheat');
       } catch (err) {
         if (err instanceof TimeoutError) {
           writeStderrLineSafe(
@@ -840,43 +818,10 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillToggleResult> {
       assertActiveGeneration();
-      const normalizedName = requestedSkillName.trim().toLowerCase();
-      const status = await getWorkspaceSkillsStatus();
-      const skill = status.skills.find(
-        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
-      );
-      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
-      if (skill.userInvocable === false) {
-        throw new WorkspaceSkillNotToggleableError(
-          skill.name,
-          'not_user_invocable',
-        );
-      }
-
-      const needsLegacyInactiveCheck =
-        skill.level === 'extension' &&
-        skill.status === 'disabled' &&
-        skill.disabledReason === undefined;
-      const disabledBySettings =
-        needsLegacyInactiveCheck &&
-        resolveSkillSettings(loadBoundSettings(true)).disabledNames.has(
-          normalizedName,
-        );
-      if (
-        skill.level === 'extension' &&
-        skill.status === 'disabled' &&
-        (skill.disabledReason === 'inactive_extension' ||
-          (skill.disabledReason === undefined && !disabledBySettings))
-      ) {
-        throw new WorkspaceSkillNotToggleableError(
-          skill.name,
-          'inactive_extension',
-        );
-      }
-
+      const skillName = requestedSkillName.trim();
       const persisted = await persistDisabledSkills(
         boundWorkspace,
-        skill.name,
+        skillName,
         enabled,
         assertGenerationOpen,
       );
@@ -930,7 +875,7 @@ export function createDaemonWorkspaceService(
           },
         ];
         const mutation = createSkillToggleMutation({
-          skills: [{ name: skill.name, enabled }],
+          skills: [{ name: skillName, enabled }],
           activation,
           sessionsRefreshed,
           sessionsFailed,
@@ -950,7 +895,7 @@ export function createDaemonWorkspaceService(
       }
 
       return {
-        skillName: skill.name,
+        skillName,
         enabled,
         changed: persisted.changed,
         activation,
@@ -965,73 +910,12 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillBatchToggleResult> {
       assertActiveGeneration();
-      const status = await getWorkspaceSkillsStatus();
-      const skillsByName = new Map<
-        string,
-        ServeWorkspaceSkillsStatus['skills'][number]
-      >();
-      for (const skill of status.skills) {
-        const normalizedName = skill.name.trim().toLowerCase();
-        if (!skillsByName.has(normalizedName)) {
-          skillsByName.set(normalizedName, skill);
-        }
-      }
-      const disabledNames = resolveSkillSettings(
-        loadBoundSettings(true),
-      ).disabledNames;
-      const targets: Array<
-        | { requestedName: string; skillName: string }
-        | { requestedName: string; error: WorkspaceSkillToggleError }
-      > = [];
-
-      for (const requestedName of requestedSkillNames) {
-        const normalizedName = requestedName.trim().toLowerCase();
-        const skill = skillsByName.get(normalizedName);
-        if (!skill) {
-          targets.push({ requestedName, skillName: requestedName });
-          continue;
-        }
-        let domainError: unknown;
-        if (skill.userInvocable === false) {
-          domainError = new WorkspaceSkillNotToggleableError(
-            skill.name,
-            'not_user_invocable',
-          );
-        } else {
-          const legacyInactive =
-            skill.level === 'extension' &&
-            skill.status === 'disabled' &&
-            skill.disabledReason === undefined &&
-            !disabledNames.has(normalizedName);
-          if (
-            skill.level === 'extension' &&
-            skill.status === 'disabled' &&
-            (skill.disabledReason === 'inactive_extension' || legacyInactive)
-          ) {
-            domainError = new WorkspaceSkillNotToggleableError(
-              skill.name,
-              'inactive_extension',
-            );
-          }
-        }
-
-        if (domainError) {
-          const error = mapWorkspaceSkillToggleError(domainError);
-          if (!error) throw domainError;
-          targets.push({ requestedName, error });
-        } else {
-          targets.push({ requestedName, skillName: skill.name });
-        }
-      }
-
-      const validSkillNames = targets.flatMap((target) =>
-        'skillName' in target ? [target.skillName] : [],
-      );
+      const skillNames = requestedSkillNames.map((name) => name.trim());
       const persisted: PersistDisabledSkillsBatchResult =
-        validSkillNames.length > 0
+        skillNames.length > 0
           ? await persistDisabledSkillsBatch(
               boundWorkspace,
-              validSkillNames,
+              skillNames,
               enabled,
               assertGenerationOpen,
             )
@@ -1044,31 +928,18 @@ export function createDaemonWorkspaceService(
         ]),
       );
       const results: WorkspaceSkillBatchToggleResult['results'] = [];
-      const errors: WorkspaceSkillBatchToggleResult['errors'] = [];
-      for (const target of targets) {
-        if ('error' in target) {
-          errors.push(target.error);
-          continue;
-        }
-        const outcome = persistedByName.get(
-          target.skillName.trim().toLowerCase(),
-        );
+      for (const skillName of skillNames) {
+        const outcome = persistedByName.get(skillName.toLowerCase());
         if (!outcome) {
           throw new Error(
-            `Missing persisted Skill batch outcome: ${target.skillName}`,
+            `Missing persisted Skill batch outcome: ${skillName}`,
           );
         }
-        if ('error' in outcome) {
-          const error = mapWorkspaceSkillToggleError(outcome.error);
-          if (!error) throw outcome.error;
-          errors.push(error);
-        } else {
-          results.push({
-            skillName: outcome.skillName,
-            enabled,
-            changed: outcome.changed,
-          });
-        }
+        results.push({
+          skillName: outcome.skillName,
+          enabled,
+          changed: outcome.changed,
+        });
       }
 
       const changed = results.some((result) => result.changed);
@@ -1136,7 +1007,7 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsFailed,
         results,
-        errors,
+        errors: [],
       };
     },
 
@@ -1471,10 +1342,16 @@ export function createDaemonWorkspaceService(
 
     async reload(ctx: WorkspaceRequestContext) {
       assertActiveGeneration();
+      let runtimeEnvironmentApplied: boolean | undefined;
       if (deps.reloadDaemonEnv) {
         try {
-          await deps.reloadDaemonEnv(boundWorkspace, assertGenerationOpen);
+          const result = await deps.reloadDaemonEnv(
+            boundWorkspace,
+            assertGenerationOpen,
+          );
+          runtimeEnvironmentApplied = result.runtimeEnvironmentApplied;
         } catch (err) {
+          runtimeEnvironmentApplied = false;
           writeStderrLine(
             `qwen serve: daemon reload failed: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -1526,6 +1403,9 @@ export function createDaemonWorkspaceService(
           sessionsRefreshed,
           sessionsSkipped,
           childError,
+          ...(runtimeEnvironmentApplied === undefined
+            ? {}
+            : { runtimeEnvironmentApplied }),
         },
         originatorClientId: ctx.originatorClientId,
       });
@@ -1537,7 +1417,55 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsSkipped,
         childError,
+        ...(runtimeEnvironmentApplied === undefined
+          ? {}
+          : { runtimeEnvironmentApplied }),
       };
+    },
+
+    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      let failed = false;
+      const reloadModelProvidersDaemonEnv =
+        deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
+      if (reloadModelProvidersDaemonEnv) {
+        try {
+          const result = await reloadModelProvidersDaemonEnv(
+            boundWorkspace,
+            assertGenerationOpen,
+          );
+          failed = result.runtimeEnvironmentApplied === false;
+        } catch {
+          assertActiveGeneration();
+          failed = true;
+          writeStderrLine(
+            'qwen serve: model-provider parent environment sync failed',
+          );
+        }
+      }
+      assertActiveGeneration();
+
+      try {
+        const child = await invokeWorkspaceCommand<{
+          configsFailed?: number;
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: boundWorkspace },
+          { timeoutMs: 30_000 },
+        );
+        if ((child.configsFailed ?? 0) > 0) failed = true;
+        return { status: failed ? 'failed' : 'applied' };
+      } catch (err) {
+        assertActiveGeneration();
+        if (
+          err instanceof SessionNotFoundError ||
+          err instanceof BridgeChannelClosedError
+        ) {
+          return { status: failed ? 'failed' : 'deferred' };
+        }
+        writeStderrLine('qwen serve: model-provider ACP child sync failed');
+        return { status: 'failed' };
+      }
     },
 
     invalidateWorkspaceSkillsStatus() {

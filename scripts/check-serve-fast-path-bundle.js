@@ -62,10 +62,7 @@ const SDK_IMPL_ROOT = {
 const FORBIDDEN_SOURCE_INPUTS = [
   {
     label: 'Gemini runtime',
-    suffixes: [
-      'packages/cli/src/gemini.tsx',
-      'packages/cli/dist/src/gemini.js',
-    ],
+    suffixes: ['packages/cli/src/llm.tsx', 'packages/cli/dist/src/llm.js'],
   },
   {
     label: 'ACP agent runtime',
@@ -512,7 +509,7 @@ export function checkSdkImplProtocolBoundary({
  * `cli.ts` bootstraps only when it is the main module, comparing
  * `import.meta.url` against `process.argv[1]`. The bundle is built with
  * `splitting: true`, so a *static* `import ... from './cli.js'` in any module
- * the entry loads lazily (e.g. `gemini.tsx`) makes esbuild move the entry's
+ * the entry loads lazily (e.g. `llm.tsx`) makes esbuild move the entry's
  * body into a shared chunk and leave `dist/cli.js` as a re-export stub. Inside
  * a chunk that comparison can never hold, so the bundled CLI exits 0 without
  * running anything — with `tsc`, eslint and every src-based unit test still

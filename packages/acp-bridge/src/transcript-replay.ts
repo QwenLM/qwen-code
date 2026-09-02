@@ -141,6 +141,7 @@ export interface TranscriptTodoItem {
 
 export interface TranscriptTodoPlan {
   readonly planId?: string;
+  readonly sessionWorkflow?: boolean;
   readonly todos: TranscriptTodoItem[];
 }
 
@@ -392,13 +393,23 @@ export function createTranscriptToolCallResultUpdate(
       },
     }),
   };
-  if (
-    options.resultDisplay !== undefined &&
-    !isTruncatedSessionDiffDisplay(options.resultDisplay)
-  ) {
-    update['rawOutput'] = options.resultDisplay;
-  }
+  const rawOutput = getReplayRawOutput(options.resultDisplay);
+  if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
+}
+
+function getReplayRawOutput(resultDisplay: unknown): unknown {
+  if (!isTruncatedSessionDiffDisplay(resultDisplay)) return resultDisplay;
+  if (
+    resultDisplay['fileDiffTruncated'] === true ||
+    typeof resultDisplay['fileDiff'] !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    fileName: resultDisplay['fileName'],
+    fileDiff: resultDisplay['fileDiff'],
+  };
 }
 
 export function createTranscriptPlanUpdate(
@@ -893,6 +904,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             ...meta,
             planToolCallId: callId,
             todoPlanId: plan.planId,
+            ...(plan.sessionWorkflow
+              ? {
+                  extra: {
+                    ...meta.extra,
+                    qwenSessionWorkflow: true,
+                  },
+                }
+              : {}),
           }),
         );
       }
@@ -1462,7 +1481,9 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   };
 }
 
-function isTruncatedSessionDiffDisplay(value: unknown): boolean {
+function isTruncatedSessionDiffDisplay(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
   return (
     isObjectRecord(value) &&
     value['truncatedForSession'] === true &&
@@ -1522,6 +1543,9 @@ function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
           ...(typeof value['planId'] === 'string'
             ? { planId: value['planId'] }
             : {}),
+          ...(value['sessionWorkflow'] === true
+            ? { sessionWorkflow: true }
+            : {}),
           todos: normalizeTodos(value['todos']),
         }
       : null;
@@ -1535,6 +1559,9 @@ function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
       ? {
           ...(typeof parsed['planId'] === 'string'
             ? { planId: parsed['planId'] }
+            : {}),
+          ...(parsed['sessionWorkflow'] === true
+            ? { sessionWorkflow: true }
             : {}),
           todos: normalizeTodos(parsed['todos']),
         }

@@ -39,6 +39,17 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+describe('qwen pr review runner routing', () => {
+  it('isolates the long-running review job on the agent pool', () => {
+    const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
+
+    expect(runsOn).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+    expect(runsOn).not.toContain('ecs-qwen');
+  });
+});
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');
@@ -163,6 +174,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {
@@ -1390,15 +1406,64 @@ describe('capture-tools step wiring', () => {
     );
   });
 
-  it('passes the assets-repo variable into the review step', () => {
-    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
-    // script never names it, so only this assertion sees a dropped or
-    // misspelled wiring line.
+  it('keeps review evidence branches out of the project repository', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment. The workflow
+    // passes through only a dedicated external host, never this project repo.
     const doc = parse(workflow);
     expect(
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
-    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+    ).toBe(
+      "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}",
+    );
+  });
+
+  it('normalizes whitespace and case variants of the assets-repo designation', () => {
+    // The env-level guard compares the RAW variable, so padded or
+    // case-shifted self-references slip past it; the run body trims and
+    // re-checks before the CLI reads the value. Executed, not asserted as
+    // text: a dropped trim or a case-sensitive compare re-enables a
+    // self-targeting designation while every shape assertion stays green.
+    const run = runReviewStep();
+    const marker = '# Normalize the assets-repo designation';
+    const start = run.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const endMarker = 'export QWEN_REVIEW_ASSETS_REPO';
+    const end = run.indexOf(endMarker, start);
+    expect(end).toBeGreaterThan(-1);
+    const fragment = run.slice(start, end + endMarker.length);
+
+    function normalize(value) {
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'REPO="QwenLM/qwen-code"',
+            'QWEN_REVIEW_ASSETS_REPO="$DESIGNATION"',
+            fragment,
+            'printf "%s" "$QWEN_REVIEW_ASSETS_REPO"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DESIGNATION: value },
+        },
+      );
+    }
+
+    // Self-targeting in every disguise degrades to the empty designation.
+    expect(normalize('QwenLM/qwen-code')).toBe('');
+    expect(normalize(' QwenLM/qwen-code ')).toBe('');
+    expect(normalize('qwenlm/QWEN-CODE')).toBe('');
+    expect(normalize('\tQwenLM/qwen-code\n')).toBe('');
+    // An external host survives, trimmed.
+    expect(normalize('other-org/assets')).toBe('other-org/assets');
+    expect(normalize('  other-org/assets  ')).toBe('other-org/assets');
+    // Unset-ish values stay empty.
+    expect(normalize('')).toBe('');
+    expect(normalize('   ')).toBe('');
   });
 });
 
@@ -2299,6 +2364,133 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
   });
 });
 
+describe('review worktree prebuild (issue #10108)', () => {
+  // `fetch-pr` installs and builds the review worktree through Agent 7's own
+  // `build-test` before any agent starts, but only when this variable is set
+  // — a local review must not pay the blocking prefix. The switch is one
+  // literal on two sides: the CLI constant and this step's env. Read the
+  // constant out of the source rather than hardcoding it here, so a rename
+  // on either side reds this test instead of silently turning the prebuild
+  // off in CI.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/prebuild.ts',
+    'utf8',
+  );
+  const envName = source.match(
+    /export const PREBUILD_ENV = '([A-Z0-9_]+)'/,
+  )?.[1];
+  const budgetS = Number(
+    source.match(/export const PREBUILD_BUDGET_S = (\d+)/)?.[1],
+  );
+  const headroomS = Number(
+    source.match(/export const PREBUILD_COVER_HEADROOM_S = (\d+)/)?.[1],
+  );
+  const marginS = Number(
+    source.match(/export const PREBUILD_ATTEMPT_MARGIN_S = (\d+)/)?.[1],
+  );
+
+  it('sets the variable the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_PREBUILD');
+    expect(review.env[envName]).toBe('1');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+
+  it('covers the prebuild call with a session shell timeout carrying the budget', () => {
+    // The prebuild runs INSIDE fetch-pr, which the skill executes through
+    // the agent's shell tool: 120s built-in foreground default, 600s
+    // per-call ceiling (shell.ts) — neither holds the budget, so the step
+    // raises the session default in the per-run agent home's settings,
+    // gated on the same variable as the opt-in. A rename or a value below
+    // the budget reds this test instead of silently killing fetch-pr
+    // mid-`npm ci` on every CI review. Parse the JSON literal the loader
+    // reads instead of regexing the number: a mutation that keeps the
+    // number visible but drops the `tools` wrapper leaves the loader's
+    // read path (`settings.tools?.shell?.defaultTimeoutMs`, cli config.ts)
+    // undefined, and this assertion must catch it.
+    expect(budgetS).toBeGreaterThan(600);
+    // The cover clock starts at the fetch-pr spawn, the budget clock only
+    // inside runBuildTest: a cover exactly AT the budget expires first in
+    // the hang case it exists for, so the headroom must exist and be
+    // carried — removing either constant reds this test.
+    expect(headroomS).toBeGreaterThan(0);
+    const coverJson = review.run.match(
+      /'(\{[^']*"defaultTimeoutMs"[^']*})'/,
+    )?.[1];
+    expect(coverJson).toBeDefined();
+    const coverMs = JSON.parse(coverJson)?.tools?.shell?.defaultTimeoutMs;
+    expect(coverMs).toBeGreaterThanOrEqual((budgetS + headroomS) * 1000);
+    expect(review.run).toContain('"$QWEN_HOME/settings.json"');
+  });
+
+  it('gates the budget reconciliation and the cover on the literal the CLI accepts', () => {
+    // prebuildRequested accepts exactly '1' — the grammar both bash gates
+    // must compare, so a value the cover gate welds for can never run the
+    // prebuild without its cover (and vice versa). Two gates: the budget
+    // reconciliation and the cover write. Flipping either comparison reds
+    // this test instead of silently skipping the block it guards.
+    const gates =
+      review.run.match(new RegExp(`"\\$\\{${envName}:-\\}" = '1'`, 'g')) ?? [];
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('refuses the opt-in under an attempt budget that cannot carry it', () => {
+    // Worst case the prebuild consumes its whole budget, so an attempt
+    // that cannot carry the budget plus the deadline reserve plus the
+    // margin for the fetch prefix and the review itself unsets the
+    // variable — degrading to the pre-prebuild flow instead of dying
+    // mid-`npm ci` (GNU timeout, no retry). Removing the gate reds this
+    // test; so does any literal that drifts from lib/prebuild.ts.
+    const gate = review.run.match(
+      /\$\(\( attempt_s - reserve_s \)\) -lt \$\(\( (\d+) \+ (\d+) \)\)/,
+    );
+    expect(gate).not.toBeNull();
+    expect(Number(gate[1])).toBe(budgetS);
+    expect(Number(gate[2])).toBe(marginS);
+    // The reserve is subtracted from the attempt, never counted as
+    // available, and computed with the same shape run_review_once uses.
+    expect(review.run).toMatch(/reserve_s=\$\(\( attempt_s \/ 3 \)\)/);
+    expect(review.run).toContain(`unset ${envName}`);
+    // The gate sits after the budget is final (size-aware default and
+    // both halvings above), keyed here off the QWEN_TIMEOUT assignment
+    // that follows them.
+    const finalized = review.run.indexOf(
+      'QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"',
+    );
+    const gateIdx = review.run.indexOf(
+      'attempt_s=$(( EFFECTIVE_TIMEOUT_MINUTES * 60 ))',
+    );
+    expect(finalized).toBeGreaterThan(-1);
+    expect(gateIdx).toBeGreaterThan(finalized);
+  });
+
+  it('writes the cover before the agent starts', () => {
+    // The value enters the session once, at config load, so a write after
+    // the qwen process starts never reaches that session: the 120s
+    // built-in reasserts and fetch-pr dies mid-`npm ci` with no test red.
+    // Mirrors the toBeLessThan ordering pins this file already applies to
+    // the other writes whose position is load-bearing.
+    const coverWrite = review.run.indexOf('"$QWEN_HOME/settings.json"');
+    const agent = review.run.indexOf('timeout --kill-after=10s');
+    expect(coverWrite).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(coverWrite).toBeLessThan(agent);
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
@@ -2533,6 +2725,55 @@ describe('bot comment markers', () => {
     expect(ackLine).toBeDefined();
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
+  });
+
+  describe('queued ack placement', () => {
+    // One ack per PR, but it has to land under the command that asked for
+    // it. The in-place PATCH kept the count at one and left the notice at
+    // the position of the FIRST request — comment #2 of 15 on #10259 — so
+    // a requester reading from the bottom saw nothing start. Delete the
+    // stale ack(s), then post: same count, right position. Nothing keys on
+    // the comment id (autofix filters and the bypass audit match the
+    // marker), so recreating is safe.
+    const ackRun = parse(workflow).jobs['ack-review-request'].steps[0].run;
+
+    it('deletes stale acks and posts a fresh one instead of editing in place', () => {
+      expect(ackRun).not.toContain('--method PATCH');
+      expect(ackRun).toContain(
+        '--method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}"',
+      );
+      // Every stale ack, not just the last: a PATCH-era thread can carry
+      // several after a failed delete, and `last` would leave the rest.
+      expect(ackRun).not.toMatch(/\|\s*last\s*\|/);
+      // The post is unconditional — no `else` branch that skips it when a
+      // stale ack existed.
+      const postIndex = ackRun.indexOf('gh pr comment "$PR_NUMBER"');
+      expect(postIndex).toBeGreaterThan(ackRun.indexOf('--method DELETE'));
+      expect(ackRun.slice(0, postIndex)).not.toMatch(/^\s*else\s*$/m);
+    });
+
+    it('reacts 👀 to the triggering comment, best effort', () => {
+      expect(ackRun).toContain('-f content=eyes');
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions',
+      );
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions',
+      );
+      // A failed reaction must not abort the ack under `set -e`.
+      expect(ackRun).toMatch(/content=eyes[^\n]*\n\s*\|\| echo/);
+      expect(
+        parse(workflow).jobs['ack-review-request'].steps[0].env.COMMENT_ID,
+      ).toBe('${{ github.event.comment.id }}');
+    });
+
+    it('tells the requester the run is not a PR check', () => {
+      // A command-triggered run executes against the base branch, so its
+      // review-pr check never shows under the PR — the ack link is the only
+      // handle, and the copy has to say so or the requester keeps looking
+      // for a yellow dot.
+      expect(ackRun).toContain('not listed under the checks of this PR');
+    });
   });
 });
 
@@ -3008,10 +3249,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's body: the cross-job dedup
-    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
-    // paren — a body that rendered the URL differently would escape it.
-    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
+    // Same invariant for the fallback job's TWO bodies (failure and
+    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
+    // on the markdown link's closing paren — a body that rendered the URL
+    // differently would escape it.
+    expect(
+      step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(2);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3023,6 +3267,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
       ),
     ).toBeLessThan(inJobStep.run.indexOf('gh pr comment'));
+  });
+
+  it('wires the needs result the cancelled-body branch keys on (issue #10109)', () => {
+    // The step's bash runs under `set -u`, so dropping this env wiring
+    // fails the step loudly instead of silently reverting every cancelled
+    // run to the false "pipeline failed" body.
+    expect(step.env.REVIEW_PR_RESULT).toBe('${{ needs.review-pr.result }}');
+    expect(step.run).toContain(
+      'if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then',
+    );
   });
 
   it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
@@ -3281,6 +3535,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
+      reviewPrResult = 'failure',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3408,6 +3663,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               REVIEWS_JSON: reviews,
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
+              REVIEW_PR_RESULT: reviewPrResult,
             },
           },
         );
@@ -3432,6 +3688,33 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
     expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('posts the cancellation body, not the failure one, for a cancelled review-pr', () => {
+    // Issue #10109: a cancelled review-pr reaches the gate two ways — its
+    // own job-level timeout, and a run/job cancel landing after the
+    // upstream chain finished (run 32875478404) — and for neither is
+    // "pipeline failed / retried automatically" true. Silence would regress
+    // the timeout flavor, so the cancelled case gets its own body.
+    const cancelled = runFallbackStep('default', {
+      reviewPrResult: 'cancelled',
+    });
+    expect(cancelled.status).toBe(0);
+    expect(cancelled.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(cancelled.posted).toContain('cancelled');
+    // The claims the issue calls out must not ride a cancellation...
+    expect(cancelled.posted).not.toContain('did not complete successfully');
+    expect(cancelled.posted).not.toContain('The review pipeline failed');
+    expect(cancelled.posted).not.toContain(
+      'A transient error is retried automatically',
+    );
+    // ...while the `)`-anchored run URL the cross-job dedup matches and the
+    // retry instruction (the job-timeout flavor's reader needs it) stay.
+    expect(cancelled.posted).toContain('actions/runs/12345)');
+    expect(cancelled.posted).toContain('@qwen-code /review');
+    // The failure path keeps the original body.
+    const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
+    expect(failed.posted).toContain('did not complete successfully');
   });
 
   it('dedupes on the marker plus this run URL', () => {

@@ -5,8 +5,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { ServerGeminiStreamEvent } from '../core/turn.js';
-import { GeminiEventType } from '../core/turn.js';
+import type { Part } from '@google/genai';
+import type { ServerLlmStreamEvent } from '../core/turn.js';
+import { LlmEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
@@ -19,6 +20,11 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import {
+  FULL_OUTPUT_DIGEST_LABEL,
+  PREVIEW_SIZE_CHARS,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+} from '../tools/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
@@ -83,6 +89,21 @@ const PERIODIC_MIN_TRUNCATED_OCCURRENCES = 3;
 // the long-period path while still firing early for long repeated units
 // (~5th repetition for the ~300-char block in the report).
 const MIN_PERIODIC_REGION_LENGTH = 1000;
+
+// Tools whose identical arguments do NOT imply an identical result: they
+// read shared state that other agents can mutate between calls (issue
+// #9450 — a teammate polling `task_list` while peers keep completing tasks
+// was halted by the argument-only guards). For these tools the guards below
+// become result-aware: repetition only counts as a loop when the observed
+// results are unchanged too. Intentionally narrow — deterministic tools keep
+// the argument-only behavior, and other team tools (`send_message`,
+// `task_update`) have different mutation/delivery semantics and stay out.
+const STATEFUL_READ_TOOLS: ReadonlySet<string> = new Set(['task_list']);
+
+// Bound for the callId → request map used to pair tool results with their
+// requests (recordToolResultByCallId). Parallel tool batches are far smaller;
+// the cap only protects against unpaired entries accumulating.
+const MAX_TRACKED_TOOL_REQUESTS = 500;
 
 // Thought tracking
 const THOUGHT_REPEAT_THRESHOLD = 3;
@@ -170,6 +191,82 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
+// Producer shapes of the oversized-result stubs (see tools/truncation.ts).
+// Recognition is anchored on these LEADING prefixes: results like task_list
+// embed peer-authored text verbatim, and that text can quote stub markers —
+// honoring a marker found mid-string would let quoted content collapse or
+// vary the fingerprint, so only shapes that START with a producer prefix are
+// treated as stubs (issue #9450).
+const STUB_PRODUCER_PREFIXES: readonly string[] = [
+  '<persisted-output>',
+  'Output too large (',
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+];
+
+const STUB_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
+const STUB_TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
+
+/**
+ * Reads the sha256 digest a stub producer embedded for the FULL
+ * pre-truncation output: the label must START its line and be followed by
+ * exactly 64 hex chars ending the line. A mid-line mention of the label
+ * (quoted content) never matches (issue #9450).
+ */
+function extractAnchoredStubDigest(value: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index === -1) return null;
+    if (index === 0 || value[index - 1] === '\n') {
+      const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+      const digest = value.slice(digestStart, digestStart + 64);
+      const terminator = value[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + FULL_OUTPUT_DIGEST_LABEL.length;
+  }
+}
+
+/**
+ * Reduces an oversized-result stub to a stable fingerprint payload.
+ * Oversized tool results are rewritten into truncation stubs whose envelope
+ * embeds a per-call unique artifact path (`<toolResultsDir>/<callId>.txt`,
+ * a random temp file); hashing the envelope verbatim would fingerprint
+ * uniquely every poll — silently disabling every result-aware guard for
+ * exactly the largest results (a frozen board would read as "changed every
+ * time", issue #9450).
+ *
+ * Prefer the producers' sha256 of the full pre-truncation output
+ * (FULL_OUTPUT_DIGEST_LABEL): stable across calls for identical content and
+ * sensitive to mutations anywhere, including beyond the preview window.
+ * Stubs without a digest line fall back to their path-free visible payload
+ * (preview, or head+tail after the truncation marker). Non-stub text passes
+ * through unchanged.
+ */
+function stripPersistenceEnvelope(value: string): string {
+  if (!STUB_PRODUCER_PREFIXES.some((prefix) => value.startsWith(prefix))) {
+    return value;
+  }
+  const digest = extractAnchoredStubDigest(value);
+  if (digest !== null) {
+    return `<persisted-stub>sha256:${digest}`;
+  }
+  for (const marker of [STUB_PREVIEW_MARKER, STUB_TRUNCATED_PART_MARKER]) {
+    const payloadStart = value.indexOf(marker);
+    if (payloadStart !== -1) {
+      const payload = value.slice(payloadStart + marker.length);
+      const closeTag = payload.indexOf('</persisted-output>');
+      return `<persisted-stub>payload:${closeTag === -1 ? payload : payload.slice(0, closeTag)}`;
+    }
+  }
+  return `<persisted-stub>raw:${value}`;
+}
+
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -245,8 +342,45 @@ export class LoopDetectionService {
   // skipLoopDetection. capMaxKeyRepeat is the running max count of any single
   // (tool,args) key this turn — the stuck-repetition signal that decides
   // whether exceeding the soft cap halts (stuck) or is allowed (productive).
+  // Stateful read tools feed their consecutive identical-result count instead
+  // (recordToolResult), so changed-state polling never builds the signal.
   private capKeyCounts = new Map<string, number>();
   private capMaxKeyRepeat = 0;
+
+  // Result-aware tracking for stateful read tools (see STATEFUL_READ_TOOLS).
+  // Keyed by the (tool, args) repeat key. `resultsObserved` /
+  // `unchangedStreak` count results within the CURRENT consecutive-identical
+  // streak (restarted when the streak breaks); `lastFingerprint` survives
+  // streak breaks so a state change is still visible across interleaved
+  // calls (used by the action-stagnation reset).
+  private statefulRepeatState = new Map<
+    string,
+    {
+      resultsObserved: number;
+      unchangedStreak: number;
+      lastFingerprint: string | undefined;
+    }
+  >();
+
+  // Consecutive identical-result counts per repeat key for stateful read
+  // tools, recorded post-execution. Replaces the request-time
+  // global-duplicate counting and the cap's stuck-repetition counting for
+  // these tools: the same call returning changed state is productive and
+  // must not accumulate toward either halt. The count restarts at 1
+  // whenever the result differs from the key's predecessor, so a board
+  // oscillating between two byte-identical states is changed-state progress
+  // on every poll and never accumulates — even though the same
+  // (call, result) pair recurs across the turn — while a frozen board keeps
+  // accumulating even when other calls are interleaved.
+  private statefulConsecutiveResults = new Map<
+    string,
+    { fingerprint: string; count: number }
+  >();
+
+  // callId → request pairing so results can be matched to their calls when
+  // the runtime only has the response (populated on ToolCallRequest events,
+  // consumed by recordToolResultByCallId).
+  private requestByCallId = new Map<string, { name: string; args: object }>();
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -288,6 +422,151 @@ export class LoopDetectionService {
     );
   }
 
+  /**
+   * Records the executed result of a tool call so the guards can treat
+   * stateful read tools (see STATEFUL_READ_TOOLS) result-aware: identical
+   * arguments whose results keep changing are productive polling, not a
+   * loop (issue #9450). Call this once per executed call, after execution
+   * and before the model is re-prompted with the result. Runtime paths that
+   * only hold the response (no name/args) can use recordToolResultByCallId.
+   *
+   * Returns true when the recorded result itself trips a detector (the
+   * result-aware global-duplicate count); callers must then halt the turn
+   * the same way they do for an event-detected loop.
+   */
+  recordToolResult(
+    toolCall: { name: string; args: object },
+    responseParts: readonly Part[],
+  ): boolean {
+    if (this.loopDetected) return true;
+    if (this.disabledForSession) return false;
+    if (!this.isStatefulReadTool(toolCall.name)) return false;
+
+    const resultText = LoopDetectionService.extractResultText(responseParts);
+    if (resultText === null) return false;
+    const fingerprint = createHash('sha256').update(resultText).digest('hex');
+    const key = this.getToolCallKey(toolCall);
+
+    // Consecutive-streak evidence for the always-on guard. The state entry
+    // can predate the streak (lastFingerprint survives streak breaks), so
+    // create it lazily but only count results while a streak exists.
+    let state = this.statefulRepeatState.get(key);
+    if (!state) {
+      state = {
+        resultsObserved: 0,
+        unchangedStreak: 0,
+        lastFingerprint: undefined,
+      };
+      this.statefulRepeatState.set(key, state);
+    }
+    const firstResult = state.lastFingerprint === undefined;
+    const fingerprintChanged =
+      !firstResult && state.lastFingerprint !== fingerprint;
+    if (this.lastToolCallKey === key) {
+      state.resultsObserved++;
+      if (firstResult) {
+        state.lastFingerprint = fingerprint;
+      } else if (state.lastFingerprint === fingerprint) {
+        state.unchangedStreak++;
+      } else {
+        state.unchangedStreak = 0;
+        state.lastFingerprint = fingerprint;
+      }
+    } else {
+      state.lastFingerprint = fingerprint;
+    }
+
+    // A changed result is observable progress: restart the same-name streak
+    // so ACTION_STAGNATION does not fire on productive polling.
+    if (fingerprintChanged && this.lastSeenToolName === toolCall.name) {
+      this.sameNameStreak = 1;
+    }
+
+    // Consecutive identical-result counting: replaces the request-time
+    // global-duplicate and cap stuck-repetition counting for stateful
+    // tools. The count restarts at 1 whenever the result differs from the
+    // key's predecessor, so an oscillating board (changed state on every
+    // poll) never accumulates toward either halt while a frozen board —
+    // same result on every poll, even interleaved with other calls — does.
+    const prior = this.statefulConsecutiveResults.get(key);
+    const consecutiveCount =
+      prior && prior.fingerprint === fingerprint ? prior.count + 1 : 1;
+    this.statefulConsecutiveResults.set(key, {
+      fingerprint,
+      count: consecutiveCount,
+    });
+    if (consecutiveCount > this.capMaxKeyRepeat) {
+      this.capMaxKeyRepeat = consecutiveCount;
+    }
+
+    // The global-duplicate detector is gated (skipLoopDetection) exactly as
+    // its request-time counterpart in addAndCheckHeuristicLoops.
+    if (
+      !this.config.getSkipLoopDetection() &&
+      consecutiveCount >= GLOBAL_DUPLICATE_THRESHOLD
+    ) {
+      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          this.promptId,
+        ),
+      );
+      this.loopDetected = true;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Variant of recordToolResult for runtimes that only have the response:
+   * the request is resolved through the callId pairing populated on
+   * ToolCallRequest events. Unknown callIds (e.g. client-initiated calls
+   * that never streamed through this service) are ignored.
+   */
+  recordToolResultByCallId(
+    callId: string,
+    responseParts: readonly Part[],
+  ): boolean {
+    const request = this.requestByCallId.get(callId);
+    if (!request) return false;
+    this.requestByCallId.delete(callId);
+    return this.recordToolResult(
+      { name: request.name, args: request.args },
+      responseParts,
+    );
+  }
+
+  private isStatefulReadTool(toolName: string): boolean {
+    return STATEFUL_READ_TOOLS.has(toolName);
+  }
+
+  /**
+   * Reconstructs the model-visible result text from tool response parts.
+   * Only the fingerprint of this text is retained, never the text itself.
+   * Oversized results arrive as persistence stubs whose envelope embeds a
+   * per-call unique file path; each string value is reduced to its stable
+   * payload first (see stripPersistenceEnvelope) so identical underlying
+   * results fingerprint identically no matter where they were persisted.
+   * Returns null when the parts carry no functionResponse content.
+   */
+  private static extractResultText(
+    responseParts: readonly Part[],
+  ): string | null {
+    const chunks: string[] = [];
+    for (const part of responseParts) {
+      const functionResponse = part.functionResponse;
+      if (!functionResponse) continue;
+      chunks.push(
+        JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
+          typeof value === 'string' ? stripPersistenceEnvelope(value) : value,
+        ),
+      );
+    }
+    return chunks.length > 0 ? chunks.join('\n') : null;
+  }
+
   private getToolCallKey(toolCall: { name: string; args: object }): string {
     return getToolCallRepeatKey(toolCall.name, toolCall.args);
   }
@@ -304,7 +583,7 @@ export class LoopDetectionService {
    * @param event - The stream event to process
    * @returns true if any tier detects a loop, false otherwise
    */
-  addAndCheck(event: ServerGeminiStreamEvent): boolean {
+  addAndCheck(event: ServerLlmStreamEvent): boolean {
     if (this.checkAlwaysOnSafeties(event)) {
       return true;
     }
@@ -312,13 +591,13 @@ export class LoopDetectionService {
     return this.addAndCheckHeuristicLoops(event);
   }
 
-  addAndCheckHeuristicLoops(event: ServerGeminiStreamEvent): boolean {
+  addAndCheckHeuristicLoops(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
 
     switch (event.type) {
-      case GeminiEventType.ToolCallRequest: {
+      case LlmEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
@@ -329,7 +608,12 @@ export class LoopDetectionService {
 
         this.trackToolCall(event.value);
         const toolCallKey = this.getToolCallKey(event.value);
-        const globalDup = this.checkGlobalDuplicate(toolCallKey);
+        // Stateful read tools are counted post-execution in
+        // recordToolResult, on consecutive identical results instead of
+        // args alone (issue #9450).
+        const globalDup = this.isStatefulReadTool(event.value.name)
+          ? false
+          : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
@@ -338,7 +622,7 @@ export class LoopDetectionService {
           globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
-      case GeminiEventType.Retry: {
+      case LlmEventType.Retry: {
         // A retry replays the failed attempt's tool calls (Turn clears
         // pendingToolCalls on retry), so drop the heuristic duplicate counters
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
@@ -365,7 +649,7 @@ export class LoopDetectionService {
         }
         break;
       }
-      case GeminiEventType.ModelFallback: {
+      case LlmEventType.ModelFallback: {
         // The fallback model restarts the attempt from scratch: Turn clears
         // pending tool calls and stream consumers discard the failed model's
         // buffer, so the failed model's streamed content/thought text and
@@ -378,11 +662,11 @@ export class LoopDetectionService {
         this.thoughtHistory = [];
         break;
       }
-      case GeminiEventType.Content: {
+      case LlmEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
       }
-      case GeminiEventType.Thought: {
+      case LlmEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
         if (!this.loopDetected) {
@@ -419,7 +703,7 @@ export class LoopDetectionService {
    * explicit in-session disable; the cap is additionally tunable via the
    * `model.maxToolCallsPerTurn` setting.
    */
-  checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
+  checkAlwaysOnSafeties(event: ServerLlmStreamEvent): boolean {
     if (this.loopDetected) {
       return true;
     }
@@ -428,7 +712,7 @@ export class LoopDetectionService {
     // count as the rollback floor. The per-turn total accumulates across
     // ToolResult continuations, so the floor must track the last committed
     // round-trip rather than resetting to zero.
-    if (event.type === GeminiEventType.Finished) {
+    if (event.type === LlmEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
       return false;
     }
@@ -441,15 +725,24 @@ export class LoopDetectionService {
     // cleared (consistent with how the heuristic path clears
     // globalToolCallCounts on retry): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === GeminiEventType.Retry) {
+    if (event.type === LlmEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
       this.capMaxKeyRepeat = 0;
+      // A retry replays the failed attempt's tool calls; drop the stateful
+      // result evidence too so the replayed attempt is judged on its own
+      // results (consecutive counts re-accumulate as results land, consistent
+      // with the capKeyCounts/globalToolCallCounts clears).
+      this.statefulConsecutiveResults.clear();
+      for (const state of this.statefulRepeatState.values()) {
+        state.resultsObserved = 0;
+        state.unchangedStreak = 0;
+      }
       return false;
     }
 
-    if (event.type !== GeminiEventType.ToolCallRequest) {
+    if (event.type !== LlmEventType.ToolCallRequest) {
       return false;
     }
 
@@ -464,20 +757,42 @@ export class LoopDetectionService {
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
     const key = this.getToolCallKey(event.value);
+    const stateful = this.isStatefulReadTool(event.value.name);
+
+    // Pair requests with their later results (recordToolResultByCallId).
+    // Only stateful read tools participate: recordToolResult rejects every
+    // other tool, so tracking them would just accumulate full args objects
+    // (write_file args can carry whole file contents) until eviction.
+    if (event.value.callId && stateful) {
+      this.requestByCallId.set(event.value.callId, {
+        name: event.value.name,
+        args: event.value.args,
+      });
+      if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
+        const oldest = this.requestByCallId.keys().next().value;
+        if (oldest !== undefined) this.requestByCallId.delete(oldest);
+      }
+    }
 
     // Always-on stuck-repetition tracking for the adaptive cap (see
     // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
-    // one, regardless of skipLoopDetection.
-    this.trackCapKeyRepeat(key);
+    // one, regardless of skipLoopDetection. Stateful read tools are counted
+    // post-execution instead (recordToolResult): the same call returning
+    // changed state is productive and must not build the stuck signal.
+    if (!stateful) {
+      this.trackCapKeyRepeat(key);
+    }
 
     // Consecutive identical tool calls (same name AND identical args) are the
-    // one repetition signal precise enough to halt unconditionally — an
-    // identical call returns an identical result, so it is never productive.
-    // Promoted here from the opt-in tier so it protects every user regardless
-    // of the `skipLoopDetection` config default: the DashScope server rejects
-    // this pattern with a 400 (issue #5019) far below the per-turn cap, so
-    // the gated default left users unprotected.
-    if (this.checkToolCallLoop(key)) {
+    // one repetition signal precise enough to halt unconditionally — for
+    // deterministic tools an identical call returns an identical result, so
+    // it is never productive. Promoted here from the opt-in tier so it
+    // protects every user regardless of the `skipLoopDetection` config
+    // default: the DashScope server rejects this pattern with a 400 (issue
+    // #5019) far below the per-turn cap, so the gated default left users
+    // unprotected. For stateful read tools the guard additionally requires
+    // the observed results to be unchanged (issue #9450).
+    if (this.checkToolCallLoop(event.value, key)) {
       this.loopDetected = true;
       return true;
     }
@@ -494,14 +809,50 @@ export class LoopDetectionService {
     return false;
   }
 
-  private checkToolCallLoop(key: string): boolean {
+  private checkToolCallLoop(
+    toolCall: { name: string; args: object },
+    key: string,
+  ): boolean {
     if (this.lastToolCallKey === key) {
       this.toolCallRepetitionCount++;
     } else {
+      // The streak moved on: restart the result evidence for both the old
+      // and the new key so each consecutive streak is judged on the results
+      // observed within it.
+      for (const streakKey of [this.lastToolCallKey, key]) {
+        if (!streakKey) continue;
+        const state = this.statefulRepeatState.get(streakKey);
+        if (state) {
+          state.resultsObserved = 0;
+          state.unchangedStreak = 0;
+        }
+      }
       this.lastToolCallKey = key;
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
+      if (this.isStatefulReadTool(toolCall.name)) {
+        // Result-aware guard (issue #9450): identical arguments to a stateful
+        // read do not imply an identical result, so only halt when the
+        // executed results corroborate the loop. By the Nth identical request
+        // the prior N-1 results have been recorded; if they were ALL observed
+        // and unchanged, the repetition is genuinely unproductive. If some
+        // result changed, the model's re-poll was productive — restart the
+        // streak instead of halting. Missing result evidence (results never
+        // recorded for this streak) fails safe and keeps the pre-#9450
+        // behavior, so the DashScope protection (#5019) is never loosened by
+        // a wiring gap.
+        const state = this.statefulRepeatState.get(key);
+        const expectedResults = this.toolCallRepetitionCount - 1;
+        if (state && state.resultsObserved >= expectedResults) {
+          if (state.unchangedStreak < expectedResults - 1) {
+            this.toolCallRepetitionCount = 1;
+            state.resultsObserved = 0;
+            state.unchangedStreak = 0;
+            return false;
+          }
+        }
+      }
       this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
       logLoopDetected(
         this.config,
@@ -1324,6 +1675,9 @@ export class LoopDetectionService {
     this.turnToolCallTotalCommitted = 0;
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
+    this.statefulRepeatState.clear();
+    this.statefulConsecutiveResults.clear();
+    this.requestByCallId.clear();
   }
 
   private resetToolCallCount(): void {

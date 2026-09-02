@@ -64,6 +64,10 @@ export class DaemonDrainingError extends Error {
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
+  private readonly sharedDrains = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void }
+  >();
   private maintenanceSealed = false;
   private activeMaintenance = 0;
   private maintenanceDrain:
@@ -115,6 +119,43 @@ export class SessionArchiveCoordinator {
     }
   }
 
+  async runExclusiveAfterShared<T>(
+    rawSessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.maintenanceSealed) {
+      throw new DaemonDrainingError();
+    }
+    const sessionId = normalizeSessionIdForLookup(rawSessionId);
+    this.assertNotTransitioning(sessionId);
+    this.exclusive.add(sessionId);
+    this.activeMaintenance++;
+    try {
+      const sharedCount = this.shared.get(sessionId) ?? 0;
+      if (sharedCount > 0) {
+        let drain = this.sharedDrains.get(sessionId);
+        if (!drain) {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          drain = { promise, resolve };
+          this.sharedDrains.set(sessionId, drain);
+        }
+        await drain.promise;
+      }
+      return await fn();
+    } finally {
+      this.sharedDrains.delete(sessionId);
+      this.exclusive.delete(sessionId);
+      this.activeMaintenance--;
+      if (this.activeMaintenance === 0) {
+        this.maintenanceDrain?.resolve();
+        this.maintenanceDrain = undefined;
+      }
+    }
+  }
+
   sealMaintenanceAndWait(): Promise<void> {
     this.maintenanceSealed = true;
     if (this.activeMaintenance === 0) {
@@ -154,6 +195,8 @@ export class SessionArchiveCoordinator {
         const count = (this.shared.get(sessionId) ?? 1) - 1;
         if (count <= 0) {
           this.shared.delete(sessionId);
+          this.sharedDrains.get(sessionId)?.resolve();
+          this.sharedDrains.delete(sessionId);
         } else {
           this.shared.set(sessionId, count);
         }
@@ -182,6 +225,7 @@ async function runWithDaemonWriterLease<T>(params: {
   service: SessionService;
   mutate: (
     assertOwnedAndUnchanged: () => Promise<void>,
+    assertCleanupOwned: () => void,
   ) => Promise<{ value: T; mutationApplied: boolean }>;
   mutationAppliedAfterError: () => Promise<boolean>;
   afterMutationApplied: () => Promise<void>;
@@ -223,7 +267,10 @@ async function runWithDaemonWriterLease<T>(params: {
   let mutationApplied = false;
   let mutationError: unknown;
   try {
-    const mutation = await mutate(() => lease.assertOwnedAndUnchanged());
+    const mutation = await mutate(
+      () => lease.assertOwnedAndUnchanged(),
+      () => lease.assertCleanupOwned(),
+    );
     value = mutation.value;
     mutationApplied = mutation.mutationApplied;
   } catch (error) {
@@ -395,7 +442,7 @@ async function deletePersistedSessionWithLease(
     action: 'delete',
     sessionId,
     service,
-    mutate: async (assertOwnedAndUnchanged) => {
+    mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
       const lockedLocation = await classifySessionLocation(service, sessionId);
       if (lockedLocation === undefined) {
         return {
@@ -406,6 +453,7 @@ async function deletePersistedSessionWithLease(
       const removed = await service.removeSession(sessionId, {
         assertStorageUnchanged: assertOwnedAndUnchanged,
         assertCanMutate,
+        assertCleanupOwned,
       });
       return {
         value: removed ? ('removed' as const) : ('notFound' as const),
@@ -579,7 +627,10 @@ export async function deleteDaemonSessions(params: {
 export async function deleteDaemonSessionIfOrphan(params: {
   sessionId: string;
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'killSession' | 'markSessionCatalogChanged'>;
+  bridge: Pick<
+    AcpSessionBridge,
+    'killSession' | 'markSessionCatalogChanged' | 'deleteSessionAttachments'
+  >;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
   const { sessionId, service, bridge, coordinator } = params;
@@ -597,7 +648,14 @@ export async function deleteDaemonSessionIfOrphan(params: {
     if (!killed) {
       return undefined;
     }
-    return deletePersistedSessionWithLease(service, sessionId);
+    const removal = await deletePersistedSessionWithLease(service, sessionId);
+    if (removal.kind !== 'error') {
+      // Mirror deleteDaemonSessions: a reaped orphan is never looked up
+      // again, and close() on a persistent store deletes nothing — without
+      // this the attachment bytes leak from both storage roots.
+      await bridge.deleteSessionAttachments(sessionId);
+    }
+    return removal;
   });
   if (result === undefined) {
     return false;
@@ -815,31 +873,6 @@ export async function archiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'archived') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'archive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyArchived' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -852,7 +885,7 @@ export async function archiveDaemonSessions(params: {
             action: 'archive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -863,12 +896,6 @@ export async function archiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'archived') {
-                return {
-                  value: 'alreadyArchived' as const,
-                  mutationApplied: false,
-                };
-              }
               if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
@@ -876,6 +903,7 @@ export async function archiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.archived.length > 0) {
@@ -915,10 +943,30 @@ export async function archiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyArchived') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'archive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld
@@ -1012,31 +1060,6 @@ export async function unarchiveDaemonSessions(params: {
           if (initialLocation === undefined) {
             return { kind: 'notFound' as const, mutationApplied: false };
           }
-          if (initialLocation === 'active') {
-            let maintenanceError: unknown;
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'unarchive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-            return {
-              kind: 'alreadyActive' as const,
-              mutationApplied: false,
-              maintenanceError,
-            };
-          }
           if (initialLocation === 'conflict' && !resolveConflicts) {
             return {
               kind: 'error' as const,
@@ -1049,7 +1072,7 @@ export async function unarchiveDaemonSessions(params: {
             action: 'unarchive',
             sessionId,
             service,
-            mutate: async (assertOwnedAndUnchanged) => {
+            mutate: async (assertOwnedAndUnchanged, assertCleanupOwned) => {
               const lockedLocation = await classifySessionLocation(
                 service,
                 sessionId,
@@ -1060,12 +1083,6 @@ export async function unarchiveDaemonSessions(params: {
                   mutationApplied: false,
                 };
               }
-              if (lockedLocation === 'active') {
-                return {
-                  value: 'alreadyActive' as const,
-                  mutationApplied: false,
-                };
-              }
               if (lockedLocation === 'conflict' && !resolveConflicts) {
                 throw sessionLocationError(sessionId);
               }
@@ -1073,6 +1090,7 @@ export async function unarchiveDaemonSessions(params: {
                 resolveConflicts,
                 assertStorageUnchanged: assertOwnedAndUnchanged,
                 assertCanMutate,
+                assertCleanupOwned,
               });
               if (result.errors[0]) throw result.errors[0].error;
               if (result.unarchived.length > 0) {
@@ -1111,10 +1129,30 @@ export async function unarchiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
+          let maintenanceError = mutation.maintenanceError;
+          if (mutation.value === 'alreadyActive') {
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+                assertCanMutate,
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError: mutation.maintenanceError,
+            maintenanceError,
           };
         };
         return await (coordinatorLockHeld

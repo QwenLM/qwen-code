@@ -5,12 +5,13 @@
  */
 
 import { constants } from 'node:fs';
-import { open, unlink } from 'node:fs/promises';
+import { lstat, open, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
+  escapeJsonTagCharacters,
   Kind,
   type PermissionDecision,
   type ToolInvocation,
@@ -52,6 +53,11 @@ function resolvePrivatePngPath(path: string, captureDirectory: string): string {
 }
 
 async function readPrivatePng(path: string): Promise<Buffer> {
+  // Windows silently ignores O_NOFOLLOW, so a symlinked screenshot path
+  // would be followed and read on win32. Probe the link itself first.
+  if ((await lstat(path)).isSymbolicLink()) {
+    throw new Error('Host returned a symbolic link screenshot path.');
+  }
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
@@ -113,11 +119,13 @@ class CaptureScreenContextInvocation extends BaseToolInvocation<
       signal.throwIfAborted();
       const screenshot = await readPrivatePng(screenshotPath);
       signal.throwIfAborted();
-      const serializedContext = JSON.stringify({
-        appName: result.appName,
-        ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
-        accessibilityText: result.accessibilityText,
-      }).replace(/</gu, '\\u003c');
+      const serializedContext = escapeJsonTagCharacters(
+        JSON.stringify({
+          appName: result.appName,
+          ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
+          accessibilityText: result.accessibilityText,
+        }),
+      );
       return {
         llmContent: [
           {

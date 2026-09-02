@@ -2,13 +2,14 @@ import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
+  DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   type DaemonSessionActions,
   type DaemonScheduledTask,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';
@@ -17,6 +18,8 @@ import {
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
+  GaugeIcon,
+  GitBranchIcon,
   ImageIcon,
   Maximize2Icon,
   MessageCirclePlusIcon,
@@ -38,6 +41,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { DiffView } from '../messages/tools/DiffView';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
@@ -63,6 +67,7 @@ import {
   artifactKindLabel,
   downloadWorkspaceFile,
   formatArtifactSize,
+  getArtifactFreshnessKey,
   getArtifactLocation,
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
@@ -87,6 +92,9 @@ import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
+import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import { TerminalPanel } from '../terminal/TerminalPanel';
+import { TokenUsagePanel } from './TokenUsagePanel';
 import {
   useArtifactWorkspaceTarget,
   type ArtifactWorkspaceActions,
@@ -116,6 +124,11 @@ const rejectMissingSideTaskCreate = () =>
   Promise.reject(new Error('Side-task session creation is unavailable'));
 
 export type ArtifactPanelTab =
+  | {
+      id: string;
+      kind: 'workflow';
+      title: string;
+    }
   | {
       id: string;
       kind: 'review';
@@ -196,6 +209,20 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       nameFromFirstPrompt?: boolean;
       initialPrompt?: string;
+    }
+  | {
+      id: string;
+      kind: 'terminal';
+      title: string;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'token_usage';
+      title: string;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -251,6 +278,8 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
+  /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
+  onOpenTerminal?: () => void;
   items?: readonly WebShellRightPanelItem[];
   sideTaskAvailable?: boolean;
   sideTasks?: readonly SideTaskListItem[];
@@ -275,6 +304,18 @@ interface ArtifactPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  workflow?: {
+    todos: readonly TodoItem[];
+    tools: readonly ACPToolCall[];
+    tasks: readonly DaemonSessionTaskStatus[];
+    artifacts: readonly DaemonSessionArtifact[];
+    selectedTodoId?: string;
+    onSelectedTodoIdChange: (todoId: string | undefined) => void;
+    onExpandGraph: () => void;
+    onOpenSubagent: (tool: ACPToolCall) => void;
+    onOpenArtifact?: (artifactId: string) => void;
+    canvasMode?: boolean;
+  };
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   deferSubagentMount?: boolean;
   onClose: () => void;
@@ -298,6 +339,7 @@ export function ArtifactPanel({
   onOpenFilePreview,
   latestReviewAvailable = false,
   onOpenLatestReview,
+  onOpenTerminal,
   items = DEFAULT_RIGHT_PANEL_ITEMS,
   sideTaskAvailable = false,
   sideTasks = [],
@@ -311,6 +353,7 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
   onClose,
@@ -368,8 +411,10 @@ export function ArtifactPanel({
     items.includes('sideTask') &&
     sideTaskAvailable &&
     Boolean(onCreateSideTask);
+  const showTerminalMenuItem = Boolean(onOpenTerminal);
   const showAddMenu =
-    Boolean(activeTab) && (showReviewMenuItem || showSideTaskMenuItems);
+    Boolean(activeTab) &&
+    (showReviewMenuItem || showSideTaskMenuItems || showTerminalMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -419,6 +464,11 @@ export function ArtifactPanel({
                   <span className={styles.tabIcon} aria-hidden="true">
                     {tab.kind === 'review' ? (
                       <TabReviewIcon />
+                    ) : tab.kind === 'workflow' ? (
+                      <GitBranchIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : tab.kind === 'file' ? (
                       <FileTypeIcon
                         name={tab.workspacePath}
@@ -444,8 +494,18 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'terminal' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : tab.kind === 'image' ? (
                       <ImageIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'token_usage' ? (
+                      <GaugeIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -511,6 +571,22 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
+                {showTerminalMenuItem &&
+                  (showReviewMenuItem || showSideTaskMenuItems) && (
+                    <DropdownMenuSeparator />
+                  )}
+                {showTerminalMenuItem && (
+                  <DropdownMenuItem onSelect={() => onOpenTerminal?.()}>
+                    <SquareTerminalIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('terminal.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
@@ -551,6 +627,23 @@ export function ArtifactPanel({
           activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
         }`.trim()}
       >
+        {tabs
+          .filter((tab) => tab.kind === 'terminal')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className={`${styles.terminalPane} ${
+                tab.id === activeTab?.id ? '' : styles.terminalPaneHidden
+              }`.trim()}
+              aria-hidden={tab.id === activeTab?.id ? undefined : true}
+            >
+              <TerminalPanel
+                terminalId={tab.id}
+                cwd={tab.workspaceCwd ?? workspaceCwd}
+                active={tab.id === activeTab?.id}
+              />
+            </div>
+          ))}
         {canPreviewAttachment && (
           <button
             type="button"
@@ -579,7 +672,7 @@ export function ArtifactPanel({
             )}
           </button>
         )}
-        {!activeTab ? (
+        {activeTab?.kind === 'terminal' ? null : !activeTab ? (
           <div
             className={styles.emptyActions}
             data-testid="right-panel-empty-actions"
@@ -701,7 +794,35 @@ export function ArtifactPanel({
                   </DropdownMenuContent>
                 </DropdownMenu>
               ))}
+            {onOpenTerminal && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={() => onOpenTerminal()}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <SquareTerminalIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('terminal.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('terminal.open')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
           </div>
+        ) : activeTab.kind === 'workflow' ? (
+          workflow ? (
+            <SessionWorkflowInspector {...workflow} />
+          ) : (
+            <div className={styles.empty}>{t('workflow.empty.title')}</div>
+          )
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
@@ -825,6 +946,12 @@ export function ArtifactPanel({
               <DownloadIcon size={16} strokeWidth={1.8} />
             </a>
           </div>
+        ) : activeTab.kind === 'token_usage' ? (
+          <TokenUsagePanel
+            key={activeTab.id}
+            sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
@@ -1950,13 +2077,17 @@ function DiffPreview({ change }: { change: TurnOutputFileChange }) {
   const diffs = getDisplayDiffs(change.diffs);
   return (
     <div className={styles.diffPreview}>
-      {diffs.map((diff, index) => (
-        <CodeMirrorDiff
-          key={index}
-          oldText={diff.oldText}
-          newText={diff.newText}
-        />
-      ))}
+      {diffs.map((diff, index) =>
+        diff.fileDiff && !diff.fullContent ? (
+          <DiffView key={index} diff={diff.fileDiff} />
+        ) : (
+          <CodeMirrorDiff
+            key={index}
+            oldText={diff.oldText}
+            newText={diff.newText}
+          />
+        ),
+      )}
     </div>
   );
 }
@@ -2422,7 +2553,7 @@ function ArtifactDetail({
     return (
       <CodeReviewArtifactDetail
         workspacePath={artifact.workspacePath}
-        artifactVersion={`${artifact.status}:${artifact.updatedAt}`}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
       />
     );
@@ -2440,7 +2571,7 @@ function ArtifactDetail({
     return (
       <WorkspaceFilePreview
         workspacePath={artifact.workspacePath}
-        artifactVersion={artifact.updatedAt}
+        artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         imageMimeType={imageMimeType}

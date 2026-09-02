@@ -70,6 +70,10 @@
           "description": "The preferred editor to open files in.",
           "type": "string"
         },
+        "outputStyle": {
+          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style. Change it with /output-style.",
+          "type": "string"
+        },
         "vimMode": {
           "description": "Enable Vim keybindings",
           "type": "boolean",
@@ -184,11 +188,6 @@
           "type": "string",
           "default": "auto"
         },
-        "dynamicCommandTranslation": {
-          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
-          "type": "boolean",
-          "default": false
-        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",
@@ -241,7 +240,7 @@
           "default": "off"
         },
         "effort": {
-          "description": "Default effort for /review when --effort is not given. \"auto\" keeps the built-in rule (high for PRs, medium for local changes). An explicit --effort still wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, low, medium, high",
+          "description": "Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. \"auto\" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, low, medium, high",
           "enum": [
             "auto",
             "low",
@@ -325,7 +324,7 @@
           "default": false
         },
         "statusLine": {
-          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (model, git branch, context usage, current dir) is shown automatically; set to `null` to explicitly disable the status line.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.",
           "type": "object",
           "additionalProperties": true
         },
@@ -692,14 +691,16 @@
           "type": "string"
         },
         "reasoningEffort": {
-          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default. Options: low, medium, high, xhigh, max",
+          "type": "string",
           "enum": [
+            "none",
             "low",
             "medium",
             "high",
             "xhigh",
             "max"
-          ]
+          ],
+          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default."
         },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
@@ -710,6 +711,10 @@
           "description": "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).",
           "type": "number",
           "default": -1
+        },
+        "goalTokenBudget": {
+          "description": "Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.",
+          "type": "integer"
         },
         "maxToolCalls": {
           "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
@@ -779,7 +784,7 @@
               "type": "number"
             },
             "streamIdleTimeoutMs": {
-              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
+              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
               "type": "integer",
               "minimum": 0,
               "maximum": 2147483647
@@ -1191,6 +1196,17 @@
               "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
               "type": "boolean",
               "default": false
+            },
+            "mcp": {
+              "description": "AUTO classifier controls for third-party MCP tools.",
+              "type": "object",
+              "properties": {
+                "forwardArguments": {
+                  "description": "Forward MCP tool arguments (bounded and truncated) to the AUTO classifier so it can judge what the agent is about to send to the server. When false the classifier sees only the tool name, which usually results in a conservative block.",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
             }
           }
         }
@@ -1249,7 +1265,7 @@
               "minimum": 0,
               "maximum": 100,
               "default": 10,
-              "description": "Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand."
+              "description": "Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand."
             }
           }
         },
@@ -1297,7 +1313,7 @@
           }
         },
         "core": {
-          "description": "Deprecated. Use permissions.allow instead.",
+          "description": "Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1326,6 +1342,13 @@
         },
         "visible": {
           "description": "Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "eager": {
+          "description": "Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1481,7 +1504,7 @@
           }
         },
         "allowedHttpHookUrls": {
-          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
+          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.",
           "type": "array",
           "items": {
             "description": "URL pattern (supports * wildcard)",
@@ -1541,6 +1564,20 @@
         }
       }
     },
+    "goals": {
+      "description": "Settings for session Goals (/goal).",
+      "type": "object",
+      "properties": {
+        "modelProposed": {
+          "description": "Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. \"alwaysAsk\" (default) shows every proposal in an approval dialog and nothing is set until you accept it; \"disabled\" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored. Options: alwaysAsk, disabled",
+          "enum": [
+            "alwaysAsk",
+            "disabled"
+          ],
+          "default": "alwaysAsk"
+        }
+      }
+    },
     "agents": {
       "description": "Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).",
       "type": "object",
@@ -1555,6 +1592,19 @@
               "default": "inherit"
             }
           }
+        },
+        "crossSessionMessaging": {
+          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.",
+          "type": "boolean",
+          "default": false
+        },
+        "crossSessionInbound": {
+          "description": "What happens to messages other sessions send this one. \"accept\" delivers them; \"hold\" parks them for your review without letting the model act; \"refuse\" opts this session out. Unset means approval-mode parity: a message auto-delivers only when this session reviews every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review. Options: accept, hold, refuse",
+          "enum": [
+            "accept",
+            "hold",
+            "refuse"
+          ]
         },
         "modelGrades": {
           "type": "object",

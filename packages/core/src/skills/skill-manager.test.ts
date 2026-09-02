@@ -880,6 +880,43 @@ Body`);
       expect(badSkill?.priority).toBe(0);
     });
 
+    it('uses the canonical extension name for extension-owned skills', async () => {
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'database-suite',
+          name: 'alibabacloud-database-suite',
+          displayName: 'Alibaba Cloud Database Suite',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extension',
+          config: {
+            name: 'alibabacloud-database-suite',
+            version: '1.0.0',
+          },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'database-review',
+              description: 'Review database changes',
+              body: 'Body',
+              filePath: '/extension/skills/database-review/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      expect(skills[0]?.extensionName).toBe('alibabacloud-database-suite');
+      expect(skills[0]?.extensionDisplayName).toBe(
+        'Alibaba Cloud Database Suite',
+      );
+    });
+
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
       // Override readdir to return the same skill name from both .qwen and .agents dirs
       vi.mocked(fs.readdir).mockReset();
@@ -1360,6 +1397,32 @@ Review content`;
       expect(sibling).toHaveBeenCalled();
     });
 
+    it.each(['level', 'listener'])(
+      'reports %s failures only for strict skill refreshes while still awaiting siblings',
+      async (failure) => {
+        vi.mocked(fs.readdir).mockResolvedValue(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+        if (failure === 'level') {
+          vi.spyOn(mockConfig, 'getActiveExtensions').mockImplementation(() => {
+            throw new Error('extension cache unavailable');
+          });
+        } else {
+          manager.addChangeListener(() =>
+            Promise.reject(new Error('listener failed')),
+          );
+        }
+        const sibling = vi.fn();
+        manager.addChangeListener(sibling);
+        await expect(
+          manager.refreshCache({ throwOnError: true }),
+        ).rejects.toThrow('Skill cache refresh failed');
+        expect(sibling).toHaveBeenCalledExactlyOnceWith({ throwOnError: true });
+        await expect(manager.refreshCache()).resolves.toBeUndefined();
+        expect(sibling).toHaveBeenLastCalledWith();
+      },
+    );
+
     it('clears the per-listener timeout once the race settles', async () => {
       // Regression: the 30s timeout was previously only `unref`d, leaving
       // a pending timer on every fast-resolving listener. Under
@@ -1513,7 +1576,7 @@ Body.
       // Regression for /review: when a single tool call yields multiple
       // candidate paths (e.g. ripGrep `paths: [a, b, c]`), the per-path
       // listener fire was triggering N successive SkillTool.refreshSkills /
-      // geminiClient.setTools() round-trips. The batch API should fire
+      // llmClient.setTools() round-trips. The batch API should fire
       // listeners once with the union of activations.
       vi.mocked(fs.readdir).mockResolvedValue([
         {
