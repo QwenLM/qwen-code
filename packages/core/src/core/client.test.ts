@@ -2881,12 +2881,12 @@ describe('Gemini Client (client.ts)', () => {
       warnSpy.mockRestore();
     });
 
-    it('does not call a history-revealed eager tool unreachable', async () => {
+    it('does not report a history-revealed eager tool as bridge-hidden', async () => {
       // The history-reveal pass runs before the unreachable warning at both
       // call sites and re-exposes resume-referenced tools even when
       // tools.eager demoted them: the model must be able to repeat a call it
       // already made in the transcript. That tool's schema IS sent in the
-      // declarations, so the "unreachable until restart" warning must not
+      // declarations, so the incomplete-bridge warning must not
       // name it — warning anyway would be false for this session.
       const reg = getRegistryMock();
       reg.getTool.mockReturnValue(null); // ToolSearch absent.

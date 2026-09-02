@@ -514,6 +514,11 @@ describe('AgentCore approval response deduplication', () => {
       callId: 'call-bridge',
       name: 'mcp__docs__read',
       args: { path: 'README.md' },
+      modelFacingName: ToolNames.TOOL_CALL,
+      modelFacingArgs: {
+        name: 'mcp__docs__read',
+        arguments: { path: 'README.md' },
+      },
       isClientInitiated: true,
       prompt_id: 'prompt-bridge',
     };
@@ -554,6 +559,11 @@ describe('AgentCore approval response deduplication', () => {
         callId: targetRequest.callId,
         name: targetRequest.name,
         args: targetRequest.args,
+        modelFacingName: ToolNames.TOOL_CALL,
+        modelFacingArgs: {
+          name: targetRequest.name,
+          arguments: targetRequest.args,
+        },
       });
     } finally {
       abortController.abort();

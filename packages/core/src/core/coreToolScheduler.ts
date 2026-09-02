@@ -911,6 +911,7 @@ const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
 type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
   modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
   bridgeResolutionError?: {
     error: Error;
     type: ToolErrorType;
@@ -2376,6 +2377,7 @@ export class CoreToolScheduler {
       name: resolution.tool.name,
       args: resolution.arguments,
       modelFacingName: request.name,
+      modelFacingArgs: request.args,
     };
   }
 

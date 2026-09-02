@@ -529,8 +529,8 @@ export function attachJsonlTranscriptWriter(
           {
             functionCall: {
               id: event.callId,
-              name: event.name,
-              args: event.args,
+              name: event.modelFacingName ?? event.name,
+              args: event.modelFacingArgs ?? event.args,
             },
           },
         ],

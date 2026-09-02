@@ -1756,12 +1756,22 @@ export class AgentCore {
     };
     const emitToolCallStart = (request: ToolCallRequestInfo) => {
       const { callId, name: toolName, args } = request;
+      const modelFacingRequest = request as ToolCallRequestInfo & {
+        modelFacingName?: string;
+        modelFacingArgs?: Record<string, unknown>;
+      };
       this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
         subagentId: this.subagentId,
         round: currentRound,
         callId,
         name: toolName,
         args,
+        ...(modelFacingRequest.modelFacingName
+          ? {
+              modelFacingName: modelFacingRequest.modelFacingName,
+              modelFacingArgs: modelFacingRequest.modelFacingArgs ?? args,
+            }
+          : {}),
         description: this.getToolDescription(toolName, args),
         isOutputMarkdown: this.getToolIsOutputMarkdown(toolName),
         timestamp: Date.now(),

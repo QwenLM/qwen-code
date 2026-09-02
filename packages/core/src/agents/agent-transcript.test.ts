@@ -596,6 +596,37 @@ describe('agent-transcript', () => {
       });
     });
 
+    it('persists the model-facing identity for bridged tool calls', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'c1',
+        name: 'mcp__docs__read',
+        args: { path: 'README.md' },
+        modelFacingName: 'tool_call',
+        modelFacingArgs: {
+          name: 'mcp__docs__read',
+          arguments: { path: 'README.md' },
+        },
+        description: 'read docs',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const call = readJsonl(jsonlPath)[0]?.message?.parts?.[0]?.functionCall;
+      expect(call).toEqual({
+        id: 'c1',
+        name: 'tool_call',
+        args: {
+          name: 'mcp__docs__read',
+          arguments: { path: 'README.md' },
+        },
+      });
+    });
+
     it('does not persist provisional TOOL_RESULT response parts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);

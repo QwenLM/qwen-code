@@ -1756,7 +1756,8 @@ export class LlmClient {
           console.warn(
             `tools.eager is holding back ${withheld.length} tool(s) in a session where the ` +
               `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
-              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
+              `so they are not offered to the model and cannot be loaded through the bridge until restart; ` +
+              `they remain registered and direct calls by name still use normal approval: ${withheld.join(', ')}. ` +
               `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
               `tool_search/tool_call deny rule, --exclude-tools entry, or tools.disabled entry to keep them loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,

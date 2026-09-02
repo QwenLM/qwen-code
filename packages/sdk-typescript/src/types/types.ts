@@ -416,8 +416,11 @@ export interface QueryOptions {
    * registered; when either is unregistered (`tools.toolSearch.enabled: false`
    * denies both; a `tool_search` or `tool_call` deny rule, or a
    * `tools.disabled` entry removes one) the
-   * demoted tools that remain hidden are out of reach for that session and a
-   * warning is logged — except tools also listed in `tools.visible`, which
+   * demoted tools that remain hidden are not offered to the model and cannot
+   * be reached through the bridge for that session, and a warning is logged;
+   * they stay registered, so a direct call by their own name is still
+   * evaluated and approved normally — except tools also listed in
+   * `tools.visible`, which
    * are declared upfront, and resumed sessions, which re-declare demoted
    * tools referenced by direct calls in the transcript.
    * Tools already deferred by default remain
@@ -473,8 +476,11 @@ export interface QueryOptions {
    *   when either is unregistered (`tools.toolSearch.enabled: false` denies
    *   both; a `tool_search` or `tool_call` deny rule, or a
    *   `tools.disabled` entry removes one) the
-   *   demoted tools that remain hidden are out of reach for that session and
-   *   a warning is logged — except tools also listed in `tools.visible`,
+   *   demoted tools that remain hidden are not offered to the model and cannot
+   *   be reached through the bridge for that session, and a warning is logged;
+   *   they stay registered, so a direct call by their own name is still
+   *   evaluated and approved normally — except tools also listed in
+   *   `tools.visible`,
    *   which are declared upfront, and resumed sessions, which re-declare
    *   demoted tools referenced by direct calls in the transcript (#9827)
    *

@@ -1625,6 +1625,12 @@ describe('CoreToolScheduler', () => {
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
     expect(completed.status).toBe('cancelled');
+    expect(completed.request).toMatchObject({
+      name: deferred.name,
+      args: {},
+      modelFacingName: ToolNames.TOOL_CALL,
+      modelFacingArgs: { name: deferred.name, arguments: {} },
+    });
     expect(
       completed.status === 'cancelled'
         ? completed.response.responseParts[0]?.functionResponse?.name
