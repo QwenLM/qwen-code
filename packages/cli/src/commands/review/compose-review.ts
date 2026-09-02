@@ -1666,8 +1666,13 @@ function toStringList(value: unknown, field: string): string[] {
  * posted body above the canonical footer, so each is stripped of a relocated
  * footer — per entry, not on the assembled body: the `$`-anchored strip regex
  * only sees an entry's end, before the footer is appended, and a forged footer
- * inside one would otherwise post directly above the canonical footer. Entries
- * that normalize to nothing drop, so the field's count never overclaims its
+ * inside one would otherwise post directly above the canonical footer. The strip
+ * sees the collapsed RAW entry, ahead of `quotedProse`'s comment-grammar
+ * neutralization: neutralized first, a marker phrase split across a
+ * closed comment becomes a multi-space run no single-space anchor
+ * matches — the `ingestEntryList` siblings strip raw for the same
+ * reason.
+ * Entries that normalize to nothing drop, so the field's count never overclaims its
  * rendered list. The attribution-off leg routes through the full fixpoint
  * chain like every other attribution-off body part: duplicates entries are
  * transcribed from earlier rounds' posted findings, and every attribution-on
@@ -1680,7 +1685,14 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map((entry) => quotedProse(entry, attribution))
+    .map((entry) =>
+      quotedProse(
+        stripReviewFooterLine(
+          collapseEntry(attribution ? entry : stripCommentMarkerLines(entry)),
+        ),
+        attribution,
+      ),
+    )
     .filter((entry) => entry.trim() !== '');
 }
 

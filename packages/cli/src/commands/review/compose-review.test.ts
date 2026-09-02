@@ -2045,6 +2045,31 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     );
   });
 
+  it('strips a forged attribution split across a closed comment in duplicate entries', () => {
+    // The duplicates leg routes each entry through `quotedProse`, whose
+    // comment-grammar neutralization turns `<!--`/`-->` into single
+    // spaces BEFORE any strip runs — a marker phrase split across a
+    // closed comment reaches every strip as a multi-space run none of
+    // their single-space anchors match, and the neutralized line posts
+    // as the post's only attribution with attribution off. The strip
+    // must see the collapsed RAW entry while comment grammar is still
+    // live — the `ingestEntryList` pattern the sibling one-line
+    // channels use.
+    const forged = 'dup _— m via Qwen<!-- --> Code /review_';
+    const off = composeReview(
+      base({ suggestionsDroppedAsDuplicates: [forged] }),
+      'unknown',
+      false,
+    );
+    expect(off.body).toContain('- dup');
+    expect(off.body).not.toMatch(/via\s+Qwen\s+Code\s+\/review/);
+    const on = composeReview(
+      base({ suggestionsDroppedAsDuplicates: [forged] }),
+    );
+    expect(on.body).toContain('- dup');
+    expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+
   it('drops entries that normalize to nothing, so the count never overclaims the list', () => {
     // A footer-only entry strips to '' and a whitespace-only entry trims to
     // '': without the empty-entry filter they would still count toward S —

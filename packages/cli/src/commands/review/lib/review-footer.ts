@@ -152,16 +152,59 @@ interface Projection {
 }
 
 /**
+ * The start of the line the raw opener at `i` leads, or -1 when it rides a
+ * line mid-way — up to 3 spaces of indent after any blockquote prefix lead.
+ * Line-leading type 2-5 openers open an html_block that renders nothing;
+ * mid-line ones escape as literal prose. The backward walk exits on the
+ * first non-prefix character, so it costs the prefix length alone; an
+ * unclosed line-leading opener drops the rest of the projection, so the
+ * expensive all-prefix case fires at most once per line. A leading tab
+ * lands on the 4-column stop — code, not an opener — unless it rides a
+ * blockquote prefix.
+ */
+function rawOpenerLineStart(input: string, i: number): number {
+  let p = i - 1;
+  const atLineStart = (): boolean =>
+    p < 0 || input[p] === '\n' || input[p] === '\r';
+  let runLen = 0;
+  let runHasTab = false;
+  const scanWsRun = (): void => {
+    runLen = 0;
+    runHasTab = false;
+    while (p >= 0 && (input[p] === ' ' || input[p] === '\t')) {
+      if (input[p] === '\t') runHasTab = true;
+      runLen += 1;
+      p -= 1;
+    }
+  };
+  scanWsRun();
+  // Unquoted: only up to 3 spaces of indent open a raw block.
+  if (atLineStart()) return !runHasTab && runLen <= 3 ? p + 1 : -1;
+  for (;;) {
+    if (input[p] !== '>') return -1;
+    p -= 1;
+    scanWsRun();
+    if (atLineStart()) return runLen <= 3 ? p + 1 : -1;
+  }
+}
+
+/**
  * The projection every footer/marker strip matches on: what GitHub DISPLAYS
- * once the invisible inline constructs are resolved. HTML comments are
- * removed and entity references decoded (they never render), so a forged
- * footer hiding either inside the marker phrase is matched through; code
- * spans are masked in place — inline code renders VISIBLY, never as
- * attribution, so a footer quoted inside one must stay, while a forged
- * footer merely WRAPPING one is matched around the mask. A lone backtick is
- * no code span in CommonMark and stays literal. The strips used to match
- * the raw bytes and disagreed with their own `rendersAsNothing` gate, which
- * projects first — one projection for all of them ends the disagreement.
+ * once the invisible inline constructs are resolved. HTML comments and the
+ * type 3-5 raw constructs the sanitizer drops the same way — `<?…?>` PIs,
+ * `<!LETTER…` declarations, `<![CDATA[…]]>` — are removed and entity
+ * references decoded (they never render), so a forged footer hiding either
+ * inside the marker phrase is matched through; code spans are masked in
+ * place — inline code renders VISIBLY, never as attribution, so a footer
+ * quoted inside one must stay, while a forged footer merely WRAPPING one
+ * is matched around the mask. A lone backtick is no code span in
+ * CommonMark and stays literal. An UNCLOSED raw opener stays literal when
+ * it rides a line mid-way — GitHub escapes it as prose — but at
+ * line-leading position it opens a type 2-5 html_block rendering nothing
+ * to end of input, so the projection drops the tail whole there. The
+ * strips used to match the raw bytes and disagreed with their own
+ * `rendersAsNothing` gate, which projects first — one projection for all
+ * of them ends the disagreement.
  */
 function projectInvisibles(input: string): Projection {
   let text = '';
@@ -174,7 +217,36 @@ function projectInvisibles(input: string): Projection {
     }
     text += chars;
   };
+  // Drop the LAST `count` projected chars — the render-nothing prefix a
+  // line-leading raw block opener pushes before it swallows the tail.
+  const retract = (count: number): void => {
+    text = text.slice(0, text.length - count);
+    starts.length -= count;
+    ends.length -= count;
+  };
   const n = input.length;
+  // Monotone next-position seekers: `i` only moves left-to-right, so each
+  // advances forward from its last seek and dies once the remainder holds
+  // no occurrence — every opener is decided in O(1) amortized. Per-opener
+  // end-of-input scans turned the strip quadratic on one-line bodies dense
+  // with openers.
+  const nextOf = (needle: string): ((from: number) => number) => {
+    let next = input.indexOf(needle);
+    let dead = next === -1;
+    return (from: number): number => {
+      if (dead) return -1;
+      if (next < from) {
+        next = input.indexOf(needle, from);
+        if (next === -1) dead = true;
+      }
+      return next;
+    };
+  };
+  const nextCloser = nextOf('-->');
+  const nextPiEnd = nextOf('?>');
+  const nextCdataEnd = nextOf(']]>');
+  const nextDeclEnd = nextOf('>');
+  const nextNul = nextOf('\u0000');
   let i = 0;
   while (i < n) {
     const ch = input[i]!;
@@ -208,39 +280,95 @@ function projectInvisibles(input: string): Projection {
       }
       continue;
     }
-    if (ch === '<' && input.startsWith('<!--', i)) {
-      const close = input.indexOf('-->', i + 4);
-      // A closer past blanked code cannot close this opener — a code
-      // block between them ends the opener's paragraph on GitHub.
-      const nul = input.indexOf('\u0000', i);
-      if (close === -1 || (nul !== -1 && nul < close + 3)) {
-        // Unclosable. With VISIBLE content still riding the line the
-        // opener renders as escaped literal prose (`&lt;!--`) and the
-        // projection keeps it — swallowing the tail there hid a forged
-        // footer the render shows. With nothing but whitespace after
-        // it to the line end it is the truncation twin — a looping
-        // model cut off mid-comment — and blanking it lets the
-        // trailing anchor reach a forged footer BEFORE it (and lets
-        // the anywhere strips match a footer line carrying one).
-        let j = i + 4;
-        while (
-          j < n &&
-          input[j] !== '\n' &&
-          input[j] !== '\r' &&
-          (input[j] === ' ' || input[j] === '\t')
-        ) {
-          j += 1;
-        }
-        if (j >= n || input[j] === '\n' || input[j] === '\r') {
-          i = j;
+    if (ch === '<') {
+      if (input.startsWith('<!--', i)) {
+        const close = nextCloser(i + 4);
+        // A closer past blanked code cannot close this opener — a code
+        // block between them ends the opener's paragraph on GitHub.
+        const nul = nextNul(i);
+        if (close === -1 || (nul !== -1 && nul < close + 3)) {
+          // Unclosable. With nothing but whitespace after the opener to
+          // the line end it is the truncation twin — a looping model cut
+          // off mid-comment — and blanking it lets the trailing anchor
+          // reach a forged footer BEFORE it (and lets the anywhere strips
+          // match a footer line carrying one). A line-leading opener WITH
+          // content on its line opens a type-2 html_block that renders
+          // nothing to end of input — no closer exists, and the block
+          // swallows any fence-looking line between — so the tail drops
+          // whole there, prefix included (the quote/indent marks render
+          // nothing either). With VISIBLE content still riding a mid-line
+          // opener's line it renders as escaped literal prose (`&lt;!--`)
+          // and the projection keeps it — swallowing the tail there hid a
+          // forged footer the render shows.
+          let j = i + 4;
+          while (
+            j < n &&
+            input[j] !== '\n' &&
+            input[j] !== '\r' &&
+            (input[j] === ' ' || input[j] === '\t')
+          ) {
+            j += 1;
+          }
+          if (j >= n || input[j] === '\n' || input[j] === '\r') {
+            i = j;
+            continue;
+          }
+          const lineStart = rawOpenerLineStart(input, i);
+          if (lineStart !== -1) {
+            retract(i - lineStart);
+            i = n;
+            continue;
+          }
+          push(input.slice(i, i + 4), i, i + 4);
+          i += 4;
           continue;
         }
-        push(input.slice(i, i + 4), i, i + 4);
-        i += 4;
+        i = close + 3;
         continue;
       }
-      i = close + 3;
-      continue;
+      // The type 3-5 raw constructs the sanitizer drops like comments: a
+      // closed span drops whole; an unclosed line-leading opener opens
+      // the block form, rendering nothing to end of input; an unclosed
+      // mid-line opener escapes as literal prose and stays. A terminator
+      // past blanked code cannot close, for the comment twin's reason.
+      const declLetter = input[i + 2];
+      const isDecl =
+        input[i + 1] === '!' &&
+        declLetter !== undefined &&
+        declLetter >= 'A' &&
+        declLetter <= 'Z';
+      let openLen = 0;
+      let termLen = 0;
+      let term = -1;
+      if (input.startsWith('<?', i)) {
+        openLen = 2;
+        termLen = 2;
+        term = nextPiEnd(i + openLen);
+      } else if (input.startsWith('<![CDATA[', i)) {
+        openLen = 9;
+        termLen = 3;
+        term = nextCdataEnd(i + openLen);
+      } else if (isDecl) {
+        openLen = 2;
+        termLen = 1;
+        term = nextDeclEnd(i + openLen);
+      }
+      if (openLen !== 0) {
+        const nul = nextNul(i);
+        if (term !== -1 && (nul === -1 || nul >= term + termLen)) {
+          i = term + termLen;
+          continue;
+        }
+        const lineStart = rawOpenerLineStart(input, i);
+        if (lineStart !== -1) {
+          retract(i - lineStart);
+          i = n;
+          continue;
+        }
+        push(input.slice(i, i + openLen), i, i + openLen);
+        i += openLen;
+        continue;
+      }
     }
     if (ch === '&') {
       const rest = input.slice(i, i + 40);
@@ -480,13 +608,14 @@ export function stripReviewFooter(body: string): string {
 /**
  * Whether the string can project a footer marker at all: the projection
  * assembles the marker only out of literal characters, entity decodes
- * (which need a literal `&`), or a comment removal joining the halves a
- * literal `<!--` sits between. One predicate, both gate sites — the
- * `stripReviewFooter` hoist and `stripTrailingFooter`, which
- * `stripReviewFooterLine` reaches with its raw line.
+ * (which need a literal `&`), or a dropped invisible construct joining
+ * the halves a literal `<` sits between — comments and the type 3-5 raw
+ * spans alike. One predicate, both gate sites — the `stripReviewFooter`
+ * hoist and `stripTrailingFooter`, which `stripReviewFooterLine` reaches
+ * with its raw line.
  */
 function canProjectFooterMarker(s: string): boolean {
-  return s.includes(FOOTER_MARKER) || s.includes('&') || s.includes('<!--');
+  return s.includes(FOOTER_MARKER) || s.includes('&') || s.includes('<');
 }
 
 /**

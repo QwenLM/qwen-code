@@ -362,6 +362,21 @@ describe('the review footer and the regex that strips it', () => {
       expect(performance.now() - start).toBeLessThan(1000);
     }, 20_000);
 
+    it('a one-line body dense with unclosed openers stays linear — no per-opener end scan', () => {
+      // The unclosable branch classified each opener with an
+      // end-of-input `indexOf('-->')` plus an `indexOf('\u0000')`
+      // remainder scan — O(k·n) in the opener count (probe-measured ~4×
+      // per doubling at 14 k / 28 k / 56 k chars), where the merge base
+      // was flat. Precomputed next positions decide each opener in O(1);
+      // the output assertion alone has no teeth (the unclosable openers
+      // stay literal either way), so bound the wall time.
+      const opener = 'x <!-- y ';
+      const body = `${opener.repeat(30_000)}_— m via Qwen Code /review_`;
+      const start = performance.now();
+      expect(stripFooterSpans(body)).toBe(opener.repeat(30_000).trimEnd());
+      expect(performance.now() - start).toBeLessThan(2000);
+    }, 30_000);
+
     it('classifies code versus prose with a CommonMark parser, not a hand model', () => {
       // The hand-built block scan disagreed with the renderers on lazy
       // continuation, list content indents, fence-closer bounds, quote
@@ -491,6 +506,68 @@ describe('the review footer and the regex that strips it', () => {
       // The attribution-off anywhere strip reads the same projection.
       expect(stripForgedFooterLines('_— m via Qwen Code /review_ <!--')).toBe(
         '',
+      );
+    });
+
+    it('a line-leading unclosed opener opens a raw block that renders nothing — the footer BEFORE it strips', () => {
+      // A line-leading unclosed `<!--` — up to 3 leading spaces, at any
+      // blockquote depth — opens a CommonMark type-2 html_block GitHub
+      // renders as nothing to end of input, unlike a mid-line opener,
+      // which renders as escaped literal prose. Keeping the line-leading
+      // one literal defeated the `$` anchor and kept the forged footer
+      // BEFORE it (the merge base swallowed the tail and stripped this
+      // shape). The trigger is a looping model's truncated copy of the
+      // invisible marker this codebase appends.
+      expect(
+        stripReviewFooter(
+          'x\n\n_— m via Qwen Code /review_\n<!-- qwen-review suggestion',
+        ),
+      ).toBe('x');
+      expect(
+        stripReviewFooter('x\n\n_— m via Qwen Code /review_\n   <!-- y'),
+      ).toBe('x');
+      expect(
+        stripReviewFooter('x\n\n_— m via Qwen Code /review_\n> <!-- y'),
+      ).toBe('x');
+      // A 4-space indent is code, not an opener — the blanking keeps the
+      // quotation and the trailing footer after it still strips.
+      expect(
+        stripReviewFooter('x\n\n    <!-- y\n\n_— m via Qwen Code /review_'),
+      ).toBe('x\n\n    <!-- y');
+    });
+
+    it('strips through sanitizer-dropped raw HTML trailing the footer — types 3-5', () => {
+      // `<?…?>` PIs, `<!LETTER…` declarations, and `<![CDATA[…]]>`
+      // render nothing on GitHub exactly like comments — trailing the
+      // footer they defeat the `$` anchor while GitHub displays the
+      // footer alone. Closed spans drop like closed comments; a
+      // line-leading unclosed opener opens the block form, rendering
+      // nothing to end of input.
+      for (const tail of [
+        '<?xml version="1.0"?>',
+        '<? note',
+        '<!DOCTYPE html>',
+        '<![CDATA[x]]>',
+      ]) {
+        expect(stripReviewFooter(`_— m via Qwen Code /review_\n${tail}`)).toBe(
+          '',
+        );
+      }
+      // The one-line channel carries the same closure.
+      expect(
+        stripReviewFooterLine(
+          '_— m via Qwen Code /review_ <?xml version="1.0"?>',
+        ),
+      ).toBe('');
+    });
+
+    it('the marker gate opens on a raw construct the projection drops', () => {
+      // Dropping `<?…?>` spans lets the marker assemble across a dropped
+      // span — `Qwen<?x?> Code /review` — with no literal marker, `&`,
+      // or `<!--` in the raw line; without a `<` arm the gate never
+      // admits it and the hole reopens.
+      expect(stripReviewFooterLine('x _— m via Qwen<?x?> Code /review_')).toBe(
+        'x',
       );
     });
   });
