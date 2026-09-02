@@ -11,12 +11,19 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render as renderDom, waitFor } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
 const registerCleanup = vi.hoisted(() => vi.fn());
+const inkRender = vi.hoisted(() => vi.fn());
+const lastPeerInboxFailure = vi.hoisted(() => ({ value: null as unknown }));
+const observedPeerInboxFailure = vi.hoisted(() => ({
+  value: null as unknown,
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -24,12 +31,82 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     registerSession: (...args: unknown[]) => registerSession(...args),
+    getLastPeerInboxFailure: () => lastPeerInboxFailure.value,
   };
 });
 
 vi.mock('ink', () => ({
-  render: vi.fn(() => ({ unmount: vi.fn() })),
+  render: (element: ReactElement) => {
+    inkRender(element);
+    return { unmount: vi.fn() };
+  },
 }));
+
+vi.mock('./AppContainer.js', async () => {
+  const React = await import('react');
+  const { usePeerInboxFailure } = await import(
+    '../peerMessaging/PeerMessagingContext.js'
+  );
+  return {
+    AppContainer: () => {
+      observedPeerInboxFailure.value = usePeerInboxFailure();
+      return React.createElement('div');
+    },
+  };
+});
+
+vi.mock('./contexts/KeypressContext.js', async () => {
+  const React = await import('react');
+  return {
+    KeypressProvider: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+  };
+});
+
+vi.mock('./contexts/SessionContext.js', async () => {
+  const React = await import('react');
+  return {
+    SessionStatsProvider: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+  };
+});
+
+vi.mock('./contexts/VimModeContext.js', async () => {
+  const React = await import('react');
+  return {
+    VimModeProvider: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+  };
+});
+
+vi.mock('./contexts/AgentViewContext.js', async () => {
+  const React = await import('react');
+  return {
+    AgentViewProvider: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+  };
+});
+
+vi.mock('./contexts/BackgroundTaskViewContext.js', async () => {
+  const React = await import('react');
+  return {
+    BackgroundTaskViewProvider: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+  };
+});
+
+vi.mock('./hooks/useKittyKeyboardProtocol.js', () => ({
+  useKittyKeyboardProtocol: () => ({ enabled: false }),
+}));
+
+vi.mock('./components/shared/ErrorBoundary.js', async () => {
+  const React = await import('react');
+  return {
+    ErrorBoundary: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
+    consumeLastRenderError: () => null,
+  };
+});
 
 vi.mock('../utils/cleanup.js', () => ({
   registerCleanup: (...args: unknown[]) => registerCleanup(...args),
@@ -169,6 +246,8 @@ describe('startInteractiveUI cross-session messaging', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    lastPeerInboxFailure.value = null;
+    observedPeerInboxFailure.value = null;
     registerSession.mockResolvedValue(true);
     peerMessagingStart.mockResolvedValue({
       close: vi.fn().mockResolvedValue(undefined),
@@ -289,6 +368,30 @@ describe('startInteractiveUI cross-session messaging', () => {
     );
 
     expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  it('provides the recorded bind failure when inbox startup fails', async () => {
+    const failure = {
+      cause: 'permission',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'EACCES',
+      hint: 'Choose a directory you own.',
+      attempts: 3,
+    };
+    lastPeerInboxFailure.value = failure;
+    peerMessagingStart.mockResolvedValue(null);
+
+    await start(makeConfig(), enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
+    const mounted = renderDom(appTree);
+    try {
+      await waitFor(() =>
+        expect(observedPeerInboxFailure.value).toEqual(failure),
+      );
+    } finally {
+      mounted.unmount();
+    }
   });
 
   it('closes the inbox from exit cleanup', async () => {

@@ -87,7 +87,7 @@ describe.skipIf(isWindows)('probePeerSocket', () => {
     expect(connectCalls).toHaveLength(0);
   });
 
-  it('counts a full listen backlog as alive, and every other errno as dead', async () => {
+  it('keeps sockets when the listener is busy or the probe runs out of descriptors', async () => {
     const probeWithError = async (code: string) => {
       const socket = scriptedSocket();
       connectImpl = () => {
@@ -100,6 +100,8 @@ describe.skipIf(isWindows)('probePeerSocket', () => {
     };
     expect(await probeWithError('EAGAIN')).toBe(true);
     expect(await probeWithError('EBUSY')).toBe(true);
+    expect(await probeWithError('EMFILE')).toBe(true);
+    expect(await probeWithError('ENFILE')).toBe(true);
     expect(await probeWithError('ECONNREFUSED')).toBe(false);
     expect(await probeWithError('ENOENT')).toBe(false);
     expect(await probeWithError('EACCES')).toBe(false);

@@ -830,6 +830,20 @@ applies actions without per-action review; otherwise it is held for
 review. Held messages are listed and released with `/peers` in the
 receiving session.
 
+If the session cannot bind its inbox — the runtime directory is missing,
+owned by another user, or read-only, as it can be inside a container —
+it first tries a private directory under the temp directory, and only
+if that fails too does it start without one. When that happens the
+session says so at startup, and `/peers` repeats the reason and what to
+change (usually `XDG_RUNTIME_DIR` or `TMPDIR`).
+
+Two sessions can also resolve the same inbox address, because the address
+is keyed by process id and process ids repeat across containers that share
+a runtime directory. The session starting second takes a neighbouring
+address instead of taking over the one in use, so neither becomes
+unreachable. Peers are unaffected: they read a session's address from the
+session registry rather than deriving it.
+
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
 declined, expired, or misaddressed (the address changed hands — list the

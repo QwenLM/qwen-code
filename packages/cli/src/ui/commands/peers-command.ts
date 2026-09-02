@@ -17,7 +17,9 @@
 import {
   canonicalizeMsgId,
   describeHoldCause,
+  describePeerInboxFailure,
   flattenPeerLabel,
+  getLastPeerInboxFailure,
   type HeldMessage,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
@@ -140,12 +142,15 @@ export const peersCommand: SlashCommand = {
       const enabled =
         context.services.settings?.merged?.agents?.crossSessionMessaging ===
         true;
+      const failure = enabled ? getLastPeerInboxFailure() : null;
       return {
         type: 'message',
         messageType: enabled ? 'error' : 'info',
-        content: enabled
-          ? 'Cross-session messaging is on, but this session has no inbox: it either failed to register in the session registry or failed to bind its socket. Re-run with DEBUG=1 to see the bind error.'
-          : 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.',
+        content: !enabled
+          ? 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.'
+          : failure
+            ? `Cross-session messaging is on, but this session has no inbox — it failed to bind its socket: ${describePeerInboxFailure(failure)}`
+            : 'Cross-session messaging is on, but this session has no inbox: it failed to register in the session registry, or the inbox is still starting. Re-run with DEBUG=1 to see the registration error.',
       };
     }
 

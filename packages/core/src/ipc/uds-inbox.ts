@@ -26,24 +26,45 @@
  * content is not from its user.
  */
 
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 import {
   MAX_FRAME_BYTES,
   parsePeerAuthLine,
   parsePeerFrame,
   type PeerFrame,
 } from './peer-frames.js';
-import { isLocalIpcPath, resolvePeerSocketPath } from './socket-path.js';
+import {
+  isLocalIpcPath,
+  MAX_SOCKET_PATH_BYTES,
+  resolvePeerSocketCandidates,
+  SOCKET_DIR_NAME,
+} from './socket-path.js';
+import { probePeerSocket } from './uds-client.js';
 
 const debugLogger = createDebugLogger('PEER_IPC');
 
 const SOCKET_DIR_MODE = 0o700;
 const SOCKET_MODE = 0o600;
+
+// An empty fallback directory may be between mkdir and listen in another
+// session. A normal bind takes milliseconds; a minute keeps that window safe
+// while still letting later sessions collect directories left by a crash.
+const EMPTY_FALLBACK_DIR_GRACE_MS = 60_000;
+
+/**
+ * How many sweep probes run at once. Each one holds a file descriptor
+ * until it connects or times out, so this is an fd-pressure knob, not a
+ * correctness bound: every batch runs, however many there are. Exported
+ * so tests can size their fixtures to span more than one batch whatever
+ * this is tuned to.
+ */
+export const SWEEP_BATCH_SIZE = 16;
 
 /**
  * Most peers connected at once.
@@ -56,17 +77,207 @@ const SOCKET_MODE = 0o600;
 export const MAX_PEER_CONNECTIONS = 64;
 
 /**
- * How long a connection may sit without traffic before it is dropped.
+ * How long a connection may go without completing a line before it is
+ * dropped.
  *
- * The 1 MiB cap only fires on a peer that keeps *writing* without a
- * newline. A peer that connects, writes nothing, and never hangs up costs
- * nothing to create and would otherwise hold a descriptor for the life of
- * the session.
+ * Measured from connect to the first complete line, and then from each
+ * complete line to the next — never reset by a lone byte. An idle timer
+ * that any byte resets can be held open forever by a peer dribbling one
+ * byte at a time under the 1 MiB cap; a deadline that only a whole
+ * frame satisfies cannot. A sender writes its frame and hangs up, so a
+ * legitimate connection never comes near this.
  */
-export const CONNECTION_IDLE_TIMEOUT_MS = 30_000;
+export const LINE_DEADLINE_MS = 30_000;
+
+/**
+ * Why the inbox could not bind, in terms a user can act on.
+ *
+ * - `non_local`: the configured path is not an absolute local path.
+ * - `unsupported_platform`: automatic inbox paths are unavailable here.
+ * - `not_directory`: something that is not a directory (a file, a
+ *   symlink) sits where the socket directory should be.
+ * - `foreign_owner`: the socket directory belongs to another uid.
+ * - `permission`: this user cannot create, enter or lock down the socket
+ *   directory.
+ * - `missing_ancestor`: a parent of the socket directory does not exist.
+ * - `path_too_long`: the path exceeds what `sun_path` can hold.
+ * - `bind_failed`: `listen()` failed for another reason (the errno is in
+ *   `detail`).
+ * - `chmod_failed`: the socket could not be restricted to 0600.
+ * - `unknown`: anything else; `detail` carries the error.
+ */
+export type PeerInboxFailureCause =
+  | 'non_local'
+  | 'unsupported_platform'
+  | 'not_directory'
+  | 'foreign_owner'
+  | 'permission'
+  | 'missing_ancestor'
+  | 'path_too_long'
+  | 'bind_failed'
+  | 'chmod_failed'
+  | 'unknown';
+
+export interface PeerInboxStartFailure {
+  cause: PeerInboxFailureCause;
+  /** The last path tried. */
+  socketPath: string;
+  /** The underlying error, for logs. */
+  detail: string;
+  /** What the user can do about it. */
+  hint: string;
+  /** How many candidate paths were tried before giving up. */
+  attempts: number;
+}
+
+/**
+ * The failure that turned messaging off for this session, if any.
+ *
+ * A session that cannot bind its inbox is not broken — it carries on —
+ * but it is unreachable, and the only symptom of that is peers reporting
+ * it absent. So the failure is kept where the UI can show it at startup
+ * and where `/peers` can repeat it, instead of living only in a debug
+ * log nobody has on. Cleared by a successful bind.
+ */
+let lastStartFailure: PeerInboxStartFailure | null = null;
+
+export function getLastPeerInboxFailure(): PeerInboxStartFailure | null {
+  return lastStartFailure;
+}
+
+/** One line for a human: what failed, where, and what to do. */
+export function describePeerInboxFailure(
+  failure: PeerInboxStartFailure,
+): string {
+  const where = path.dirname(failure.socketPath);
+  const attempts =
+    failure.attempts > 1 ? ` Tried ${failure.attempts} candidate paths.` : '';
+  switch (failure.cause) {
+    case 'non_local':
+      return `the socket path "${failure.socketPath}" is not an absolute local path. ${failure.hint}${attempts}`;
+    case 'unsupported_platform':
+      return `cross-session messaging is not available on this platform. ${failure.hint}${attempts}`;
+    case 'not_directory':
+      return `"${where}" could not be created or is not a plain directory (${failure.detail}). ${failure.hint}${attempts}`;
+    case 'foreign_owner':
+      return `"${where}" belongs to another user. ${failure.hint}${attempts}`;
+    case 'permission':
+      return `this user cannot create or lock down "${where}" (${failure.detail}). ${failure.hint}${attempts}`;
+    case 'missing_ancestor':
+      return `a parent of "${where}" does not exist. ${failure.hint}${attempts}`;
+    case 'path_too_long':
+      return `"${failure.socketPath}" is longer than the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
+    case 'bind_failed':
+      return `the socket could not be bound at "${failure.socketPath}" (${failure.detail}). ${failure.hint}${attempts}`;
+    case 'chmod_failed':
+      return `the socket at "${failure.socketPath}" could not be restricted to this user (${failure.detail}). ${failure.hint}${attempts}`;
+    default:
+      return `${failure.detail} (at "${failure.socketPath}"). ${failure.hint}${attempts}`;
+  }
+}
+
+const HINT_RUNTIME_DIR =
+  'Set XDG_RUNTIME_DIR (or TMPDIR) to a directory you own, then restart.';
+
+class InboxSetupError extends Error {
+  constructor(
+    readonly failureCause: PeerInboxFailureCause,
+    message: string,
+    readonly hint: string = HINT_RUNTIME_DIR,
+  ) {
+    super(message);
+    this.name = 'InboxSetupError';
+  }
+}
+
+/** Map an errno from mkdir/lstat/chmod/listen onto a cause and a hint. */
+function classify(error: unknown, socketPath: string): PeerInboxStartFailure {
+  if (error instanceof InboxSetupError) {
+    return {
+      cause: error.failureCause,
+      socketPath,
+      detail: error.message,
+      hint: error.hint,
+      attempts: 1,
+    };
+  }
+  const code = (error as NodeJS.ErrnoException)?.code;
+  const detail = describe(error);
+  const base = { socketPath, detail, attempts: 1 };
+  switch (code) {
+    case 'EACCES':
+    case 'EPERM':
+    case 'EROFS':
+      return { ...base, cause: 'permission', hint: HINT_RUNTIME_DIR };
+    case 'ENOENT':
+      return { ...base, cause: 'missing_ancestor', hint: HINT_RUNTIME_DIR };
+    // mkdir(recursive) reports a file in the way as EEXIST, not ENOTDIR.
+    case 'EEXIST':
+    case 'ENOTDIR':
+    case 'ELOOP':
+      return {
+        ...base,
+        cause: 'not_directory',
+        hint: 'Remove it, or set XDG_RUNTIME_DIR to a directory you own, then restart.',
+      };
+    case 'ENAMETOOLONG':
+      return {
+        ...base,
+        cause: 'path_too_long',
+        hint: 'Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory, then restart.',
+      };
+    default:
+      return { ...base, cause: 'unknown', hint: HINT_RUNTIME_DIR };
+  }
+}
+
+/**
+ * Only `<digits>.sock`, or the `<digits>-<8 hex>.sock` sibling a PID
+ * collision forces, is a socket this code created.
+ *
+ * Same strictness as the session registry's filename guard, for the same
+ * reason: a lenient match would let the sweep delete a file it never
+ * wrote. The optional suffix is matched exactly so the sweep reaps a
+ * sibling left by a crash the same way it reaps a plain one.
+ */
+const SOCKET_FILENAME = /^\d+(-[0-9a-f]{8})?\.sock$/;
+
+/** The PID a socket filename is keyed by, or null if it is not ours. */
+function pidOfSocketFilename(name: string): number | null {
+  if (!SOCKET_FILENAME.test(name)) return null;
+  const pid = Number.parseInt(name.split(/[-.]/)[0]!, 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * A sibling path for `socketPath`, keyed by the same PID but distinct.
+ *
+ * Used when the PID-keyed path is already held by a *live* listener,
+ * which happens when two PID namespaces share a runtime directory (a
+ * container bind-mounting the host's, most often) and both sessions get
+ * the same PID. Returns null when the sibling would not fit in
+ * `sun_path`, so the caller falls through to the next candidate rather
+ * than binding something that cannot work.
+ */
+function siblingSocketPath(socketPath: string): string | null {
+  const dir = path.dirname(socketPath);
+  const base = path.basename(socketPath, '.sock').split('-')[0]!;
+  const sibling = path.join(
+    dir,
+    `${base}-${randomBytes(4).toString('hex')}.sock`,
+  );
+  return Buffer.byteLength(sibling) <= MAX_SOCKET_PATH_BYTES ? sibling : null;
+}
+
+/** The fallback directories `resolvePeerSocketCandidates` mints. */
+const NONCE_DIRNAME = new RegExp(`^${SOCKET_DIR_NAME}-[0-9a-f]{16}$`);
 
 export interface PeerInboxOptions {
-  /** Defaults to this process's resolved socket path. */
+  /**
+   * Bind exactly here instead of trying this process's candidate paths
+   * in order. Tests use it; production leaves it unset so an unusable
+   * runtime directory falls back instead of turning messaging off.
+   */
   socketPath?: string;
   /**
    * When set, a connection's first line must be an auth line presenting
@@ -88,6 +299,8 @@ export interface PeerInboxOptions {
    * none.
    */
   onFrame: (frame: PeerFrame, auth?: PeerConnectionAuth) => void;
+  /** Override for tests; production uses {@link LINE_DEADLINE_MS}. */
+  lineDeadlineMs?: number;
 }
 
 /**
@@ -134,52 +347,278 @@ function createLineReader(
 }
 
 /**
+ * Delete `<pid>.sock` files in `dir` left behind by sessions that are gone.
+ *
+ * A session that exits cleanly unlinks its own socket; one that is killed
+ * cannot, and nothing else removes them, so without this the shared
+ * runtime directory grows by one dead file per crash. Sweeping happens at
+ * bind time rather than on a timer: the directory only accumulates when a
+ * session dies, and a new session starting is the natural moment to
+ * notice.
+ *
+ * Conservative by construction: a file goes only when its PID is
+ * *provably* dead. A live PID is left alone even though it may have been
+ * recycled onto some unrelated process — a leftover file costs a few
+ * bytes, and deleting a live session's socket would make it silently
+ * unreachable.
+ */
+export async function sweepOrphanSockets(
+  dir: string,
+  selfSocketPath: string,
+): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return 0;
+  }
+  let swept = 0;
+  for (let offset = 0; offset < entries.length; offset += SWEEP_BATCH_SIZE) {
+    await Promise.all(
+      entries.slice(offset, offset + SWEEP_BATCH_SIZE).map(async (name) => {
+        const pid = pidOfSocketFilename(name);
+        if (pid === null) return;
+        const fullPath = path.join(dir, name);
+        if (fullPath === selfSocketPath) return;
+        if (isPidAlive(pid)) return;
+        if (await probePeerSocket(fullPath)) return;
+        try {
+          await fs.unlink(fullPath);
+          swept += 1;
+        } catch {
+          // Raced with another session's sweep, or not ours to remove.
+        }
+      }),
+    );
+  }
+  if (swept > 0) {
+    debugLogger.debug(`swept ${swept} orphaned peer socket(s) from ${dir}`);
+  }
+  return swept;
+}
+
+/**
+ * Remove whole fallback directories (`qwen-socks-<nonce>/`) in `parent`
+ * whose every socket belongs to a dead process.
+ *
+ * Each session that falls back to a shared temp directory mints its own
+ * nonce-named directory, so a killed session leaves a directory behind,
+ * not just a file. Only directories this uid owns, matching the exact
+ * name shape, and holding nothing but provably dead sockets are removed;
+ * anything else is not ours to reason about.
+ */
+export async function sweepOrphanSocketDirs(
+  parent: string,
+  selfDir: string,
+): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(parent);
+  } catch {
+    return 0;
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  let swept = 0;
+  for (let offset = 0; offset < entries.length; offset += SWEEP_BATCH_SIZE) {
+    await Promise.all(
+      entries.slice(offset, offset + SWEEP_BATCH_SIZE).map(async (name) => {
+        if (!NONCE_DIRNAME.test(name)) return;
+        const dir = path.join(parent, name);
+        if (dir === selfDir) return;
+        try {
+          const stat = await fs.lstat(dir);
+          if (!stat.isDirectory()) return;
+          if (uid !== null && stat.uid !== uid) return;
+          const files = await fs.readdir(dir);
+          if (
+            files.length === 0 &&
+            Date.now() - stat.mtimeMs < EMPTY_FALLBACK_DIR_GRACE_MS
+          ) {
+            return;
+          }
+          for (const file of files) {
+            const pid = pidOfSocketFilename(file);
+            if (pid === null || isPidAlive(pid)) return;
+            if (await probePeerSocket(path.join(dir, file))) return;
+          }
+          for (const file of files) await fs.unlink(path.join(dir, file));
+          await fs.rmdir(dir);
+          swept += 1;
+        } catch {
+          // Raced, or not ours.
+        }
+      }),
+    );
+  }
+  if (swept > 0) {
+    debugLogger.debug(
+      `swept ${swept} orphaned peer socket director${swept === 1 ? 'y' : 'ies'} from ${parent}`,
+    );
+  }
+  return swept;
+}
+
+function sweepAround(socketPath: string): Promise<number> {
+  const dir = path.dirname(socketPath);
+  const base = path.basename(dir);
+  if (base === SOCKET_DIR_NAME) return sweepOrphanSockets(dir, socketPath);
+  if (NONCE_DIRNAME.test(base)) {
+    return sweepOrphanSocketDirs(path.dirname(dir), dir);
+  }
+  return Promise.resolve(0);
+}
+
+/**
  * Bind this session's inbox.
  *
- * Returns null instead of throwing when the socket cannot be bound: a
- * session that cannot be messaged is a degraded session, not a broken
- * one, and the caller has nothing useful to do with the failure beyond
- * carrying on.
+ * Tries each candidate path in order (see `resolvePeerSocketCandidates`)
+ * and returns null only when every one failed. The failure is then kept
+ * for {@link getLastPeerInboxFailure}: a session that cannot be messaged
+ * is a degraded session, not a broken one, but its user has to be told
+ * why or they will never know it is unreachable.
  */
 export async function startPeerInbox(
   options: PeerInboxOptions,
 ): Promise<PeerInbox | null> {
-  const socketPath = options.socketPath ?? resolvePeerSocketPath();
+  const candidates =
+    options.socketPath !== undefined
+      ? [options.socketPath]
+      : resolvePeerSocketCandidates();
 
+  let failure: PeerInboxStartFailure | null = null;
+  for (const [index, candidate] of candidates.entries()) {
+    const result = await bindAt(
+      candidate,
+      options,
+      options.socketPath === undefined,
+    );
+    if ('inbox' in result) {
+      lastStartFailure = null;
+      if (index > 0) {
+        debugLogger.warn(
+          `peer inbox bound at fallback path ${candidate} after ${index} unusable candidate(s)`,
+        );
+      }
+      // Fire-and-forget: a sweep is housekeeping, and nothing about this
+      // session's own inbox depends on it.
+      void sweepAround(candidate).catch(() => {});
+      return result.inbox;
+    }
+    failure = { ...result.failure, attempts: index + 1 };
+    debugLogger.warn(
+      `peer inbox could not bind at ${candidate} (${failure.cause}): ${failure.detail}`,
+    );
+    // A non-local or over-long path is a property of that candidate, not
+    // of the machine; the next candidate is worth trying. A bind that
+    // failed for another reason usually is too. Only an explicit path
+    // has no next.
+  }
+
+  if (failure) {
+    lastStartFailure = failure;
+    debugLogger.error(
+      `cross-session messaging is OFF for this session: ${describePeerInboxFailure(failure)}`,
+    );
+  }
+  return null;
+}
+
+async function bindAt(
+  requestedPath: string,
+  options: PeerInboxOptions,
+  automaticPath: boolean,
+): Promise<{ inbox: PeerInbox } | { failure: PeerInboxStartFailure }> {
+  // Moves to a sibling name when a live listener already holds the
+  // PID-keyed path; everything below binds and reports the bound path.
+  let socketPath = requestedPath;
   if (!isLocalIpcPath(socketPath)) {
-    debugLogger.error(`refusing to bind a non-local IPC path: ${socketPath}`);
-    return null;
+    const unsupportedPlatform = automaticPath && process.platform === 'win32';
+    return {
+      failure: classify(
+        new InboxSetupError(
+          unsupportedPlatform ? 'unsupported_platform' : 'non_local',
+          unsupportedPlatform
+            ? 'automatic peer inbox paths are not supported on Windows'
+            : `refusing to bind a non-local IPC path: ${socketPath}`,
+          unsupportedPlatform
+            ? 'Disable cross-session messaging for this session.'
+            : 'Use an absolute local path.',
+        ),
+        socketPath,
+      ),
+    };
+  }
+  if (Buffer.byteLength(socketPath) > MAX_SOCKET_PATH_BYTES) {
+    return {
+      failure: classify(
+        Object.assign(new Error(`${socketPath} exceeds sun_path`), {
+          code: 'ENAMETOOLONG',
+        }),
+        socketPath,
+      ),
+    };
   }
 
   try {
     const dir = path.dirname(socketPath);
     await fs.mkdir(dir, { recursive: true, mode: SOCKET_DIR_MODE });
     // Both mkdir(recursive) and chmod succeed straight through a symlink,
-    // and the `/tmp` fallback directory sits in a world-writable place
-    // where another user can create it first. If they point it at a
-    // directory of ours, the chmod below silently retargets that
-    // directory and the socket lands inside it. Insist on a real
-    // directory we own; anything else means someone got there first.
+    // and a shared temp directory is a place where another user can
+    // create our directory first. If they point it at a directory of
+    // ours, the chmod below silently retargets that directory and the
+    // socket lands inside it. Insist on a real directory we own; anything
+    // else means someone got there first.
     const dirStat = await fs.lstat(dir);
     const uid = typeof process.getuid === 'function' ? process.getuid() : null;
     if (!dirStat.isDirectory()) {
-      throw new Error(`${dir} is not a directory`);
+      throw new InboxSetupError(
+        'not_directory',
+        `${dir} is not a directory`,
+        'Remove it, or set XDG_RUNTIME_DIR to a directory you own, then restart.',
+      );
     }
     if (uid !== null && dirStat.uid !== uid) {
-      throw new Error(`${dir} belongs to uid ${dirStat.uid}, not ${uid}`);
+      throw new InboxSetupError(
+        'foreign_owner',
+        `${dir} belongs to uid ${dirStat.uid}, not ${uid}`,
+      );
     }
     // mkdir's mode is masked by the umask and ignored outright when the
     // directory already exists, so chmod is what actually enforces 0700.
     await fs.chmod(dir, SOCKET_DIR_MODE);
   } catch (error) {
-    debugLogger.error(`peer inbox directory unusable: ${describe(error)}`);
-    return null;
+    return { failure: classify(error, socketPath) };
   }
 
   // A socket file left behind by a crashed session would make bind() fail
-  // with EADDRINUSE forever. Unlinking is safe because the path is keyed
-  // by our own PID: if a live process were listening there, it would be
-  // this one.
+  // with EADDRINUSE forever, so the path has to be cleared first — but
+  // only when nothing is listening on it. The path is keyed by PID, and a
+  // PID is unique only within its namespace: where two namespaces share a
+  // runtime directory (a container bind-mounting the host's is the usual
+  // way), two live sessions can resolve the same path. Unlinking there
+  // would leave the other session listening on an inode no peer can reach
+  // — silently unreachable, which is the failure this whole path exists
+  // to prevent. So a live socket is left alone and we take a sibling name
+  // instead; only a dead one is removed.
+  if (await probePeerSocket(socketPath)) {
+    const sibling = siblingSocketPath(socketPath);
+    if (sibling === null) {
+      return {
+        failure: classify(
+          new InboxSetupError(
+            'path_too_long',
+            `${socketPath} is held by a live session and a sibling name would exceed sun_path`,
+            'Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory, then restart.',
+          ),
+          socketPath,
+        ),
+      };
+    }
+    debugLogger.debug(
+      `${socketPath} is held by a live session (a PID collision across namespaces); binding at ${sibling}`,
+    );
+    socketPath = sibling;
+  }
   try {
     await fs.unlink(socketPath);
   } catch {
@@ -187,6 +626,7 @@ export async function startPeerInbox(
   }
 
   const connections = new Set<net.Socket>();
+  const lineDeadlineMs = options.lineDeadlineMs ?? LINE_DEADLINE_MS;
 
   const server = net.createServer({ allowHalfOpen: true }, (socket) => {
     connections.add(socket);
@@ -195,10 +635,23 @@ export async function startPeerInbox(
     // without this one idle peer would pin the process open — exactly what
     // the server.unref() below is meant to prevent.
     socket.unref();
-    socket.setTimeout(CONNECTION_IDLE_TIMEOUT_MS, () => {
-      debugLogger.debug('dropping an idle peer connection');
-      socket.destroy();
-    });
+
+    // A deadline, not an idle timer: it is satisfied only by a complete
+    // line, and re-armed from that line, so a peer that keeps the
+    // connection alive with lone bytes still loses it on time.
+    let deadline: NodeJS.Timeout | null = null;
+    const arm = () => {
+      if (deadline) clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        deadline = null;
+        debugLogger.debug(
+          `closing a peer connection that sent no complete line within ${lineDeadlineMs} ms`,
+        );
+        socket.destroy();
+      }, lineDeadlineMs);
+      deadline.unref();
+    };
+    arm();
 
     let authed = options.requiredToken === undefined;
     let auth: PeerConnectionAuth | undefined;
@@ -209,6 +662,9 @@ export async function startPeerInbox(
     const read = createLineReader(
       (line) => {
         if (refused) return;
+        // Any complete line — the auth line included — is what re-arms
+        // the deadline; a refused connection is already on its way out.
+        arm();
         if (!authed) {
           const presented = parsePeerAuthLine(line);
           if (presented !== null) {
@@ -257,6 +713,8 @@ export async function startPeerInbox(
       debugLogger.debug(`peer connection error: ${error.message}`);
     });
     socket.on('close', () => {
+      if (deadline) clearTimeout(deadline);
+      deadline = null;
       connections.delete(socket);
     });
   });
@@ -267,26 +725,49 @@ export async function startPeerInbox(
     debugLogger.error(`peer inbox server error: ${describe(error)}`);
   });
 
-  try {
-    await new Promise<void>((resolve, reject) => {
+  const listenAt = (target: string) =>
+    new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(socketPath, () => {
+      server.listen(target, () => {
         server.removeListener('error', reject);
         resolve();
       });
     });
+
+  try {
+    await listenAt(socketPath);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === 'ENAMETOOLONG') {
-      debugLogger.error(
-        `peer inbox socket path is too long to bind (${Buffer.byteLength(
-          socketPath,
-        )} bytes): ${socketPath}. Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory.`,
-      );
-    } else {
-      debugLogger.error(`peer inbox failed to bind: ${describe(error)}`);
+    // EADDRINUSE here means the path was taken between the probe above
+    // and this listen — the same cross-namespace PID collision, just
+    // raced. One retry at a sibling name settles it; a second failure is
+    // a real bind failure and is reported as one.
+    const sibling =
+      (error as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
+        ? siblingSocketPath(socketPath)
+        : null;
+    let raced = error;
+    if (sibling !== null) {
+      try {
+        await listenAt(sibling);
+        socketPath = sibling;
+        raced = null;
+      } catch (retryError) {
+        raced = retryError;
+      }
     }
-    return null;
+    if (raced !== null) {
+      const classified = classify(raced, socketPath);
+      return {
+        failure:
+          classified.cause === 'unknown'
+            ? {
+                ...classified,
+                cause: 'bind_failed',
+                hint: 'If another process holds the path, restart after it exits; otherwise set XDG_RUNTIME_DIR to a directory you own.',
+              }
+            : classified,
+      };
+    }
   }
 
   try {
@@ -294,16 +775,18 @@ export async function startPeerInbox(
   } catch (error) {
     // A socket we cannot lock down is worse than no socket at all: the
     // permission bits are the entire access-control story here.
-    debugLogger.error(
-      `peer inbox socket could not be restricted to 0600, refusing to listen: ${describe(error)}`,
-    );
     server.close();
     try {
       fsSync.unlinkSync(socketPath);
     } catch {
       // Best effort.
     }
-    return null;
+    return {
+      failure: {
+        ...classify(error, socketPath),
+        cause: 'chmod_failed',
+      },
+    };
   }
 
   // Never hold the event loop open on the inbox alone — a session waiting
@@ -316,19 +799,21 @@ export async function startPeerInbox(
 
   let closed = false;
   return {
-    socketPath,
-    async close() {
-      if (closed) return;
-      closed = true;
-      for (const socket of connections) socket.destroy();
-      connections.clear();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      try {
-        await fs.unlink(socketPath);
-      } catch {
-        // Already gone.
-      }
-      debugLogger.debug(`peer inbox closed: ${socketPath}`);
+    inbox: {
+      socketPath,
+      async close() {
+        if (closed) return;
+        closed = true;
+        for (const socket of connections) socket.destroy();
+        connections.clear();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        try {
+          await fs.unlink(socketPath);
+        } catch {
+          // Already gone.
+        }
+        debugLogger.debug(`peer inbox closed: ${socketPath}`);
+      },
     },
   };
 }

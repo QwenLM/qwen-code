@@ -173,6 +173,7 @@ async function flushConfigInitialization() {
 // value swappable without wrapping every render in a provider.
 const peerMessagingHolder = vi.hoisted(() => ({
   current: null as unknown,
+  failure: null as unknown,
 }));
 vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   const actual =
@@ -182,6 +183,7 @@ vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   return {
     ...actual,
     usePeerMessaging: () => peerMessagingHolder.current,
+    usePeerInboxFailure: () => peerMessagingHolder.failure,
   };
 });
 
@@ -7494,6 +7496,48 @@ describe('AppContainer State Management', () => {
       });
 
       expect(addPeerMessage).not.toHaveBeenCalled();
+    });
+
+    it('announces once, with the cause, when the inbox could not bind', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const failure = {
+        cause: 'foreign_owner',
+        socketPath: '/run/user/1000/qwen-socks/1.sock',
+        detail: 'belongs to uid 65534, not 1000',
+        hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+        attempts: 3,
+      };
+      peerMessagingHolder.failure = failure;
+      try {
+        const { rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        peerMessagingHolder.failure = { ...failure };
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const notices = addItem.mock.calls
+          .map((call) => call[0] as { type?: string; text?: string })
+          .filter((item) =>
+            item.text?.includes('Cross-session messaging is OFF'),
+          );
+        expect(notices).toHaveLength(1);
+        expect(notices[0]?.type).toBe(MessageType.ERROR);
+        expect(notices[0]?.text).toContain('belongs to another user');
+        expect(notices[0]?.text).toContain('XDG_RUNTIME_DIR');
+      } finally {
+        peerMessagingHolder.failure = null;
+      }
     });
 
     it('announces held and denied receipts, and delivery only after a hold', () => {
