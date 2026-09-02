@@ -180,6 +180,7 @@ export default {
   'toolDisplayName.TodoList': '任务清单',
   'toolDisplayName.Goal': '目标',
   'toolDisplayName.UpdateGoal': '更新目标',
+  'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
@@ -1546,6 +1547,12 @@ export default {
     '聊天历史压缩未能减小大小。这可能表明压缩提示存在问题。',
   'Could not compress chat history due to a token counting error.':
     '由于 token 计数错误，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由于压缩摘要为空，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由于压缩摘要被截断，无法压缩聊天历史。',
+  'Could not compress chat history due to an API error.':
+    '由于 API 错误，无法压缩聊天历史。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -2226,6 +2233,8 @@ export default {
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
+  'Choose the output style that shapes how responses are written ({{styles}}).':
+    '选择用于塑造回答表达方式的输出风格（{{styles}}）。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',

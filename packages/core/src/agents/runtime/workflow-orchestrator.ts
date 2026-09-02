@@ -11,6 +11,7 @@ import {
   deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
+  installSessionWorkflowRevisionWriteThrough,
   type Config,
 } from '../../config/config.js';
 import {
@@ -124,15 +125,17 @@ export const HARD_MAX_CONCURRENCY_CEILING = 64;
 
 /**
  * Maximum agents in flight at once within a single run, shared across all
- * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
- * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
- * produce a deadlocking limit. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides
- * the computed value with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`;
- * an invalid override falls back to the cpu-derived default with a debug
- * warning, and an over-ceiling override is clamped.
+ * `parallel()` / `pipeline()` calls. `min(16, availableParallelism()-2)`
+ * mirrors upstream; `max(2, …)` floors small machines at 2 — a window of 1
+ * would serialize every `parallel()` and silently defeat the point of a
+ * fan-out. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides the computed value
+ * with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`; an invalid
+ * override falls back to the cpu-derived default with a debug warning, and an
+ * over-ceiling override is clamped.
  */
 export function resolveConcurrencyLimit(
   env: Record<string, string | undefined> = process.env,
+  availableParallelism: () => number = os.availableParallelism,
 ): number {
   const raw = env[MAX_WORKFLOW_CONCURRENCY_ENV];
   if (raw !== undefined && raw.trim() !== '') {
@@ -154,7 +157,12 @@ export function resolveConcurrencyLimit(
         `using cpu-derived default`,
     );
   }
-  return Math.max(1, Math.min(16, os.cpus().length - 2));
+  // `availableParallelism()` honours the process's CPU affinity mask and
+  // container CPU limits; `os.cpus()` reports the host and can return an
+  // empty array in some sandboxes, which used to make every run serial.
+  // Floor of 2: a window of 1 turns `parallel()` into a sequence and
+  // silently defeats the point of a fan-out on a small machine.
+  return Math.max(2, Math.min(16, availableParallelism() - 2));
 }
 
 /**
@@ -962,6 +970,10 @@ async function runOverridePath(
     effectiveContext = deriveWorktreeConfig(config, worktreeIsolation.path, {
       customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
     });
+    // Session-global Session Workflow revision state must not shadow on
+    // the dir-scoped wrapper (see
+    // installSessionWorkflowRevisionWriteThrough).
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
   } else if (opts.workingDir !== undefined) {
     if (
       typeof opts.workingDir !== 'string' ||
@@ -992,6 +1004,7 @@ async function runOverridePath(
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {
       customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
     });
+    installSessionWorkflowRevisionWriteThrough(effectiveContext, config);
   }
 
   if (effectiveContext !== config) {
@@ -1581,6 +1594,12 @@ async function createSchemaConfigOverride(
   schema: Record<string, unknown>,
 ): Promise<Config> {
   const override = deriveConfig(base);
+  // Same session-global revision contract as the dir-scoped dispatch
+  // wrappers — the schema wrapper is the outermost layer when both
+  // apply, so its write-through must also reach the wrapped Config
+  // (which may itself be a wrapper; the chain bottoms out at the
+  // root Config).
+  installSessionWorkflowRevisionWriteThrough(override, base);
   await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));

@@ -142,6 +142,18 @@ export interface SessionRegistryRecord {
    * fine.
    */
   ipcPath?: string;
+  /**
+   * Token a connection to `ipcPath` must present on its first line before
+   * any frame is read. Published here because the record is 0600: being
+   * able to read the token is the same capability as being able to
+   * discover the socket at all, so senders get both in one read. Absent
+   * on records written before the field existed: such an inbox requires
+   * no token and admits every connection, so a newer sender reaches it by
+   * simply not leading with an auth line. The reverse direction is the
+   * lossy one — a pre-token sender never authenticates, so a token-
+   * requiring inbox drops what it sends.
+   */
+  ipcToken?: string;
 }
 
 export interface RegisterSessionFields {
@@ -447,6 +459,35 @@ export async function unregisterSession(): Promise<void> {
 }
 
 /**
+ * This process's own record, as the registry currently holds it.
+ *
+ * Null when this session never registered, when its record is not
+ * readable, or when the record at this PID's path was written by another
+ * incarnation of the PID (another namespace, another boot, or a dead
+ * predecessor whose token no longer matches) — the same tests
+ * `patchSessionRecord` applies before it will merge into a record, so a
+ * caller never reads back a record that a patch would have refused to
+ * touch. Never throws.
+ */
+export async function readOwnSessionRecord(): Promise<SessionRegistryRecord | null> {
+  try {
+    const existing = await readRecord(thisProcessRecordPath());
+    if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
+      return null;
+    }
+    const record = existing.record;
+    const currentToken = readProcStartToken(process.pid);
+    if (record.procStart !== null && record.procStart !== currentToken) {
+      return null;
+    }
+    return record;
+  } catch (error) {
+    debugLogger.debug(`readOwnSessionRecord failed: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
  * Enumerate live sessions, newest first, sweeping records whose process
  * is provably gone.
  *
@@ -687,6 +728,7 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
   const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
   const ipcPath = value['ipcPath'];
+  const ipcToken = value['ipcToken'];
 
   return {
     status: 'ok',
@@ -704,6 +746,9 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
       // messageable", and a record written before this field existed must
       // read back identically to one written after it.
       ...(typeof ipcPath === 'string' && ipcPath.length > 0 ? { ipcPath } : {}),
+      ...(typeof ipcToken === 'string' && ipcToken.length > 0
+        ? { ipcToken }
+        : {}),
     },
   };
 }

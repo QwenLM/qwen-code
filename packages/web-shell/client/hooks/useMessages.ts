@@ -10,12 +10,14 @@ import {
   useConnection,
   useTranscriptBlocks,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import type { Message } from '../adapters/types';
 import {
   isActiveToolStatus,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
+  projectTerminalBackgroundAgentTool,
 } from '../adapters/toolClassification';
 
 type Translator = (
@@ -247,15 +249,6 @@ export function projectStreamingTailMessages(
   return messages;
 }
 
-function isTerminalBackgroundAgentStatus(status: string): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'canceled'
-  );
-}
-
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -361,30 +354,18 @@ export function reconcileBackgroundAgentResolutions(
       ) {
         return tool;
       }
+      const endTime =
+        tool.startTime !== undefined
+          ? tool.startTime + (resolution.durationMs ?? 0)
+          : undefined;
+      const reconciledTool = projectTerminalBackgroundAgentTool(
+        tool,
+        resolution.status,
+        endTime,
+      );
+      if (reconciledTool === tool) return tool;
       toolsChanged = true;
-      const cancelled =
-        resolution.status === 'cancelled' || resolution.status === 'canceled';
-      const status: typeof tool.status =
-        resolution.status === 'failed' ? 'failed' : 'completed';
-      return {
-        ...tool,
-        status,
-        ...(tool.startTime !== undefined
-          ? { endTime: tool.startTime + (resolution.durationMs ?? 0) }
-          : {}),
-        ...(cancelled
-          ? {
-              rawOutput: {
-                ...(typeof tool.rawOutput === 'object' &&
-                tool.rawOutput !== null &&
-                !Array.isArray(tool.rawOutput)
-                  ? tool.rawOutput
-                  : {}),
-                status: 'cancelled',
-              },
-            }
-          : {}),
-      };
+      return reconciledTool;
     });
     if (!toolsChanged) return message;
     changed = true;

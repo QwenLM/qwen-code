@@ -43,7 +43,17 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 export type PeerMessagePriority = 'now' | 'next';
 
 /** Terminal states a sent message can reach on the receiving side. */
-export type PeerDeliveryStatus = 'held' | 'denied' | 'expired' | 'delivered';
+export type PeerDeliveryStatus =
+  | 'held'
+  | 'denied'
+  | 'expired'
+  | 'delivered'
+  /**
+   * The frame named a session id the receiver does not hold: the sender's
+   * directory was stale (the address changed hands, or the peer ran
+   * /clear). Distinct from `denied` — nobody decided anything.
+   */
+  | 'misaddressed';
 
 export interface PeerUserFrame {
   msgV: number;
@@ -51,6 +61,15 @@ export interface PeerUserFrame {
   type: 'user';
   /** Reply address: the sender's own socket path, or absent if it has none. */
   from?: string;
+  /**
+   * Auth token for the sender's own inbox at `from`, so the receiver can
+   * authenticate its delivery receipts. Carried in the frame rather than
+   * looked up from the registry per receipt: a peer this session accepted
+   * a message from could read the token from the sender's 0600 record
+   * anyway, so nothing new is exposed. Untrusted like every field here —
+   * a wrong value just makes the best-effort receipt bounce.
+   */
+  replyToken?: string;
   /** Sender's display name, for the envelope shown to the model. */
   fromName?: string;
   /**
@@ -59,6 +78,14 @@ export interface PeerUserFrame {
    * treats as the cautious case rather than as a match.
    */
   fromMode?: 'bypass' | 'prompting';
+  /**
+   * Session id of the intended recipient. The address a sender dials is
+   * keyed by PID, and PIDs get reused, so a receiver whose session id
+   * differs refuses the frame: it was written for whoever held this
+   * address when the sender last looked, not for the session holding it
+   * now. Absent means the sender did not say, which older senders don't.
+   */
+  toSessionId?: string;
   priority: PeerMessagePriority;
   message: { role: 'user'; content: string };
 }
@@ -147,15 +174,19 @@ export function parsePeerFrame(line: string): PeerFrame | null {
 
     const priority = parsed['priority'];
     const fromMode = parsed['fromMode'];
+    const toSessionId = optionalString(parsed['toSessionId']);
+    const replyToken = optionalString(parsed['replyToken']);
     return {
       msgV,
       msgId,
       type: 'user',
       from: optionalString(parsed['from']),
+      ...(replyToken !== undefined ? { replyToken } : {}),
       fromName: optionalString(parsed['fromName']),
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }
         : {}),
+      ...(toSessionId !== undefined ? { toSessionId } : {}),
       priority: priority === 'now' ? 'now' : 'next',
       message: { role: 'user', content },
     };
@@ -168,7 +199,8 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       status !== 'held' &&
       status !== 'denied' &&
       status !== 'expired' &&
-      status !== 'delivered'
+      status !== 'delivered' &&
+      status !== 'misaddressed'
     ) {
       return null;
     }
@@ -198,8 +230,10 @@ export function encodePeerFrame(frame: PeerFrame): string {
 export interface BuildUserFrameFields {
   content: string;
   from?: string;
+  replyToken?: string;
   fromName?: string;
   fromMode?: 'bypass' | 'prompting';
+  toSessionId?: string;
   priority?: PeerMessagePriority;
 }
 
@@ -209,8 +243,14 @@ export function buildUserFrame(fields: BuildUserFrameFields): PeerUserFrame {
     msgId: randomUUID(),
     type: 'user',
     ...(fields.from !== undefined ? { from: fields.from } : {}),
+    ...(fields.replyToken !== undefined
+      ? { replyToken: fields.replyToken }
+      : {}),
     ...(fields.fromName !== undefined ? { fromName: fields.fromName } : {}),
     ...(fields.fromMode !== undefined ? { fromMode: fields.fromMode } : {}),
+    ...(fields.toSessionId !== undefined
+      ? { toSessionId: fields.toSessionId }
+      : {}),
     priority: fields.priority ?? 'next',
     message: { role: 'user', content: fields.content },
   };
@@ -231,11 +271,44 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':
       return 'Your message was released to the recipient session.';
+    case 'misaddressed':
+      return 'That address now belongs to a different session than the one you addressed; it was not delivered. List the agents again before re-sending.';
     default: {
       const exhaustive: never = status;
       return exhaustive;
     }
   }
+}
+
+/**
+ * The connection-level admission line, not a member of {@link PeerFrame}:
+ * an inbox that requires a token reads it off the first line of a
+ * connection before any frame is parsed, and it never reaches `onFrame`.
+ *
+ * Shaped like a frame (`msgV` + `type`) so an inbox that does NOT require
+ * a token — an older build — sees an unknown `type` in `parsePeerFrame`,
+ * skips the line, and reads the frames after it: a sender can therefore
+ * always lead with the auth line when it has the peer's token, without
+ * knowing which side of the upgrade the peer is on.
+ */
+export function buildAuthLine(token: string): string {
+  return `${JSON.stringify({ msgV: PEER_FRAME_VERSION, type: 'auth', token })}\n`;
+}
+
+/** The token an auth line presents, or null if the line is not one. */
+export function parsePeerAuthLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const msgV = parsed['msgV'];
+  if (typeof msgV !== 'number' || msgV > PEER_FRAME_VERSION) return null;
+  if (parsed['type'] !== 'auth') return null;
+  const token = parsed['token'];
+  return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
 export function buildDeliveryStatusFrame(fields: {

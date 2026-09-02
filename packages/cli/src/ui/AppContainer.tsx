@@ -41,6 +41,7 @@ import {
   IdeClient,
   ideContextStore,
   createDebugLogger,
+  describeDeliveryStatus,
   describeHoldCause,
   getErrorMessage,
   getAllMemoryFilenames,
@@ -136,6 +137,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useEffortCommand } from './hooks/use-effort-command.js';
+import { useOutputStyleCommand } from './hooks/use-output-style-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -251,7 +253,10 @@ import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
-import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  type PeerMessaging,
+} from '../peerMessaging/peer-messaging.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -370,6 +375,7 @@ export function useQueuedSubmissionDrain({
   submitQuery,
   submissionInFlightRef,
   submissionSettledRevision,
+  peerMessaging,
 }: {
   config: Config;
   isConfigInitialized: boolean;
@@ -386,6 +392,7 @@ export function useQueuedSubmissionDrain({
   submitQuery: ReturnType<typeof useLlmStream>['submitQuery'];
   submissionInFlightRef: RefObject<boolean>;
   submissionSettledRevision: number;
+  peerMessaging?: PeerMessaging | null;
 }) {
   const goalRuntimeSessionId = config.getSessionId();
   const [goalQueueRevision, setGoalQueueRevision] = useState(0);
@@ -456,6 +463,13 @@ export function useQueuedSubmissionDrain({
     }
     const submission = popNextSubmission(goalControlMode);
     if (submission === null) return;
+    if (
+      submission.kind === 'peer' &&
+      peerMessaging?.drainQueuedFrame(submission.delivery) === false
+    ) {
+      setQueueDrainNonce((nonce) => nonce + 1);
+      return;
+    }
 
     queueDrainingRef.current = true;
     let admissionFailed = false;
@@ -511,6 +525,7 @@ export function useQueuedSubmissionDrain({
               submission.modelText,
               submission.displayText,
               true,
+              submission.delivery,
             );
             markAdmissionFailed();
           },
@@ -519,6 +534,7 @@ export function useQueuedSubmissionDrain({
               submission.modelText,
               submission.displayText,
               true,
+              submission.delivery,
             );
             markAdmissionFailed();
           },
@@ -569,6 +585,7 @@ export function useQueuedSubmissionDrain({
     isConfigInitialized,
     isProcessing,
     pendingSubmissionCount,
+    peerMessaging,
     popNextSubmission,
     queueDrainNonce,
     restoreMessages,
@@ -1574,6 +1591,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
 
+  const {
+    isOutputStyleDialogOpen,
+    openOutputStyleDialog,
+    handleOutputStyleSelect,
+  } = useOutputStyleCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1923,6 +1946,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
         try {
           cancelOngoingRequestRef.current();
@@ -1973,6 +1997,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openPermissionsDialog,
       openApprovalModeDialog,
       openEffortDialog,
+      openOutputStyleDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -2520,14 +2545,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const peerMessaging = usePeerMessaging();
   useEffect(() => {
     if (!peerMessaging) return;
-    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      // Refuse once the queue's pending backlog reaches the cap: peer
-      // frames arrive at socket speed but drain at one per turn, and the
-      // queue must not grow unboundedly for a busy session.
-      if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
-      addPeerMessage(modelText, displayText);
-      return true;
-    });
+    peerMessaging.setSubmitFn(
+      (modelText: string, displayText: string, delivery) => {
+        // Refuse once the queue's pending backlog reaches the cap: peer
+        // frames arrive at socket speed but drain at one per turn, and the
+        // queue must not grow unboundedly for a busy session.
+        if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
+        addPeerMessage(modelText, displayText, delivery);
+        return true;
+      },
+    );
     // close() settles whatever is still queued with a corrective receipt;
     // it needs the current depth to tell consumed entries from queued ones.
     peerMessaging.setQueuedPeerCount(getQueuedPeerCount);
@@ -2570,6 +2597,43 @@ export const AppContainer = (props: AppContainerProps) => {
           text:
             `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // Surface what became of messages this session sent. A 'held' or
+  // 'denied' receipt is the only way to learn that a peer's user is
+  // sitting on — or threw away — a message the model was told was sent;
+  // without it the sender reads silence as delivery. 'delivered' is the
+  // expected outcome and is only worth a line when it ends a hold the
+  // user already saw announced. Receipts for ids this session never sent,
+  // and receipts that repeat a state, are dropped before they reach here
+  // — so neither a stranger nor a chatty peer can fill the history with
+  // them, and nothing here needs to remember what was announced.
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onReceipt(({ status, address, previous }) => {
+      if (status === 'delivered' && previous !== 'held') return;
+      // The wire text for `expired` speaks of a held message, which is
+      // only right when the message was held. A delivery corrected to
+      // expired means the session exited with it unread; an expiry with
+      // no delivery at all means the gate could not queue it (its accept
+      // backlog was full) or the session went away — the peer may well be
+      // alive, so the notice must not claim it exited.
+      const detail =
+        status !== 'expired'
+          ? describeDeliveryStatus(status)
+          : previous === 'delivered'
+            ? 'That session exited before it read your message; it was not delivered.'
+            : previous === 'held'
+              ? describeDeliveryStatus(status)
+              : 'Your message expired without being delivered; that session was too busy to queue it, or has exited. Retry once it is idle.';
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: `Message to ${address}: ${detail}`,
         },
         Date.now(),
       );
@@ -3619,6 +3683,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isEffortDialogOpen ||
+    isOutputStyleDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -4183,6 +4248,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
     isEffortDialogOpen,
     handleEffortSelect,
+    isOutputStyleDialogOpen,
+    handleOutputStyleSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -4628,6 +4695,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     submissionInFlightRef,
     submissionSettledRevision,
+    peerMessaging,
   });
 
   const nightly = props.version.includes('nightly');
@@ -4663,6 +4731,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4809,6 +4878,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
+      isOutputStyleDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4943,6 +5013,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -5035,6 +5106,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeHighlight,
       handleApprovalModeSelect,
       handleEffortSelect,
+      handleOutputStyleSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

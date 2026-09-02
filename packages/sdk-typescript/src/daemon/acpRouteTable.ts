@@ -12,9 +12,18 @@
 // prevents route inconsistencies between the two transport variants.
 // ---------------------------------------------------------------------------
 
-import { isRecord } from './acpTransportUtils.js';
-
 const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+
+// Kept local (instead of reusing `isRecord` from `acpTransportUtils.ts`):
+// acpTransportUtils imports this module's ROUTE_TABLE, so re-importing the
+// predicate from there would silently restore the
+// acpRouteTable -> acpTransportUtils -> acpRouteTable runtime cycle this
+// change exists to break. ESM cycles compile and test green, so the guard is
+// this comment — do not consolidate without breaking the cycle some other
+// way first.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export interface RouteMapping {
   method: string;
@@ -431,7 +440,36 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/tasks$/,
     mapping: {
       method: '_qwen/session/tasks',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
+      extractParams: (segs, _body, _method, query) => ({
+        sessionId: segs[0],
+        ...boolParam(query, 'includeWorkflows'),
+      }),
+    },
+  },
+  // POST /session/:id/tasks/:taskId/cancel → _qwen/session/tasks/cancel
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/cancel$/,
+    mapping: {
+      method: '_qwen/session/tasks/cancel',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+        taskId: segs[1],
+      }),
+    },
+  },
+  // POST /session/:id/tasks/:taskId/workflow-action → _qwen/session/tasks/workflow_action
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/workflow-action$/,
+    mapping: {
+      method: '_qwen/session/tasks/workflow_action',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+        taskId: segs[1],
+      }),
     },
   },
   // GET /session/:id/lsp -> _qwen/session/lsp

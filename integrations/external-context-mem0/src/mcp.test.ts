@@ -214,8 +214,8 @@ async function connect(
     InMemoryTransport.createLinkedPair();
   const server = createMem0McpServer({
     instance: parseInstanceConfig({
-      schemaVersion: 1,
-      preset: 'synthetic-v1',
+      schemaVersion: 2,
+      dialectPath: '/administrator/synthetic-v1.dialect.json',
       endpoint: { origin: 'https://memory.example.com' },
       credentialEnv: 'SYNTHETIC_MEMORY_TOKEN',
       scope: {},

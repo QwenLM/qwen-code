@@ -51,6 +51,17 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
@@ -168,6 +179,61 @@ describe('bundled review skill', () => {
     // without the manifest's required agents.
     expect(body).toContain(
       '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
     );
   });
 
@@ -1629,6 +1695,92 @@ describe('bundled review skill', () => {
     // The anti-drift clause that makes the examples non-authoritative.
     expect(section).toContain(
       'The examples are the set as written, not the gate',
+    );
+  });
+});
+
+describe('bundled review skill — the decided-stop composed verdict (#9908)', () => {
+  it('routes every ledger-bearing stop through compose-review', () => {
+    // A decided stop used to complete with event: null, so `--fail-on
+    // request-changes` passed over standing blockers — the R8-1/R13-3
+    // residual. Each stop now composes a real verdict when open Criticals
+    // exist, and the dispositions channel is machine-checked by the CLI.
+    const body = skillBody();
+    // The two incremental stops DEDUCE dispositions (byte-identical state /
+    // the supersededPaths split); clean-tree JUDGES them (no anchor).
+    expect(body).toContain(
+      '**When open Criticals exist, compose the stop verdict before stopping**',
+    );
+    expect(body).toContain('stopReRule: { dispositions: [...] }');
+    expect(body).toContain(
+      'compose the stop verdict before stopping, exactly as that bullet prescribes',
+    );
+    expect(body).toContain(
+      '`superseded` for a Critical whose cited file is in `supersededPaths`',
+    );
+    expect(body).toContain(
+      'the dispositions are judged, not deduced: no anchor certifies what moved',
+    );
+    // Criticals only — Suggestions never enter dispositions, and a
+    // cleared stop comments rather than approves.
+    expect(body).toContain(
+      'Criticals only — Suggestions never enter dispositions',
+    );
+    expect(body).toContain('composes a Comment, never an Approve');
+  });
+
+  it('keys the unchanged bullet’s nothing-open branch on open CRITICALS, like its siblings', () => {
+    // "No open findings" left a Suggestions-only ledger in NEITHER branch:
+    // the model stopped without composing, run.ts read a decided stop with
+    // no composed artifact, and the round exited 1 ("Review did not
+    // complete") on every unchanged re-run — a standing wedge with nothing
+    // open to fix. The scope-emptied and clean-tree bullets already key
+    // this branch on "no open Criticals".
+    const body = skillBody();
+    expect(body).toContain(
+      'When the cached ledger holds no open Criticals — open Suggestions alone block nothing',
+    );
+    expect(body).not.toContain('When the cached ledger has no open findings');
+  });
+});
+
+describe('the worktree prebuild (issue #10108)', () => {
+  // The fetch report's `dependencies` field and the workflow switch that
+  // produces it are named in two places the reader acts on: the Step 1 field
+  // list, and the "do not install here" rule, which must keep standing on a
+  // prebuilt tree (a hand-run `npm ci` there reinstalls what is already
+  // installed). The env literal mirrors `PREBUILD_ENV` in
+  // packages/cli/src/commands/review/lib/prebuild.ts.
+  it('names the report field and the switch, and keeps the no-hand-install rule', () => {
+    const body = coreBody();
+    expect(body).toContain(
+      '`dependencies` (present only when the fetch ran the **prebuild**',
+    );
+    expect(body).toContain('QWEN_REVIEW_PREBUILD=1');
+    expect(body).toContain(
+      "never install by hand, and on a prebuilt tree `build-test`'s own install gate makes Agent 7's install a no-op",
+    );
+    // The no-op claim is scoped to the install half: Agent 7's build
+    // recompiles the closure (the per-package build script pre-cleans
+    // `dist`), so the field text must not promise a build no-op.
+    expect(body).toContain(
+      "Agent 7's install is a no-op on such a tree (its build recompiles",
+    );
+    expect(body).not.toContain('install and build are no-ops');
+  });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
     );
   });
 });

@@ -39,6 +39,17 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+describe('qwen pr review runner routing', () => {
+  it('isolates the long-running review job on the agent pool', () => {
+    const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
+
+    expect(runsOn).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+    expect(runsOn).not.toContain('ecs-qwen');
+  });
+});
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');
@@ -1395,15 +1406,64 @@ describe('capture-tools step wiring', () => {
     );
   });
 
-  it('passes the assets-repo variable into the review step', () => {
-    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
-    // script never names it, so only this assertion sees a dropped or
-    // misspelled wiring line.
+  it('keeps review evidence branches out of the project repository', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment. The workflow
+    // passes through only a dedicated external host, never this project repo.
     const doc = parse(workflow);
     expect(
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
-    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+    ).toBe(
+      "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}",
+    );
+  });
+
+  it('normalizes whitespace and case variants of the assets-repo designation', () => {
+    // The env-level guard compares the RAW variable, so padded or
+    // case-shifted self-references slip past it; the run body trims and
+    // re-checks before the CLI reads the value. Executed, not asserted as
+    // text: a dropped trim or a case-sensitive compare re-enables a
+    // self-targeting designation while every shape assertion stays green.
+    const run = runReviewStep();
+    const marker = '# Normalize the assets-repo designation';
+    const start = run.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const endMarker = 'export QWEN_REVIEW_ASSETS_REPO';
+    const end = run.indexOf(endMarker, start);
+    expect(end).toBeGreaterThan(-1);
+    const fragment = run.slice(start, end + endMarker.length);
+
+    function normalize(value) {
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'REPO="QwenLM/qwen-code"',
+            'QWEN_REVIEW_ASSETS_REPO="$DESIGNATION"',
+            fragment,
+            'printf "%s" "$QWEN_REVIEW_ASSETS_REPO"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DESIGNATION: value },
+        },
+      );
+    }
+
+    // Self-targeting in every disguise degrades to the empty designation.
+    expect(normalize('QwenLM/qwen-code')).toBe('');
+    expect(normalize(' QwenLM/qwen-code ')).toBe('');
+    expect(normalize('qwenlm/QWEN-CODE')).toBe('');
+    expect(normalize('\tQwenLM/qwen-code\n')).toBe('');
+    // An external host survives, trimmed.
+    expect(normalize('other-org/assets')).toBe('other-org/assets');
+    expect(normalize('  other-org/assets  ')).toBe('other-org/assets');
+    // Unset-ish values stay empty.
+    expect(normalize('')).toBe('');
+    expect(normalize('   ')).toBe('');
   });
 });
 
@@ -2301,6 +2361,133 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
     expect(Number(env.QWEN_STREAM_MAX_LIFETIME_MS)).toBeGreaterThan(
       Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS),
     );
+  });
+});
+
+describe('review worktree prebuild (issue #10108)', () => {
+  // `fetch-pr` installs and builds the review worktree through Agent 7's own
+  // `build-test` before any agent starts, but only when this variable is set
+  // — a local review must not pay the blocking prefix. The switch is one
+  // literal on two sides: the CLI constant and this step's env. Read the
+  // constant out of the source rather than hardcoding it here, so a rename
+  // on either side reds this test instead of silently turning the prebuild
+  // off in CI.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/prebuild.ts',
+    'utf8',
+  );
+  const envName = source.match(
+    /export const PREBUILD_ENV = '([A-Z0-9_]+)'/,
+  )?.[1];
+  const budgetS = Number(
+    source.match(/export const PREBUILD_BUDGET_S = (\d+)/)?.[1],
+  );
+  const headroomS = Number(
+    source.match(/export const PREBUILD_COVER_HEADROOM_S = (\d+)/)?.[1],
+  );
+  const marginS = Number(
+    source.match(/export const PREBUILD_ATTEMPT_MARGIN_S = (\d+)/)?.[1],
+  );
+
+  it('sets the variable the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_PREBUILD');
+    expect(review.env[envName]).toBe('1');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+
+  it('covers the prebuild call with a session shell timeout carrying the budget', () => {
+    // The prebuild runs INSIDE fetch-pr, which the skill executes through
+    // the agent's shell tool: 120s built-in foreground default, 600s
+    // per-call ceiling (shell.ts) — neither holds the budget, so the step
+    // raises the session default in the per-run agent home's settings,
+    // gated on the same variable as the opt-in. A rename or a value below
+    // the budget reds this test instead of silently killing fetch-pr
+    // mid-`npm ci` on every CI review. Parse the JSON literal the loader
+    // reads instead of regexing the number: a mutation that keeps the
+    // number visible but drops the `tools` wrapper leaves the loader's
+    // read path (`settings.tools?.shell?.defaultTimeoutMs`, cli config.ts)
+    // undefined, and this assertion must catch it.
+    expect(budgetS).toBeGreaterThan(600);
+    // The cover clock starts at the fetch-pr spawn, the budget clock only
+    // inside runBuildTest: a cover exactly AT the budget expires first in
+    // the hang case it exists for, so the headroom must exist and be
+    // carried — removing either constant reds this test.
+    expect(headroomS).toBeGreaterThan(0);
+    const coverJson = review.run.match(
+      /'(\{[^']*"defaultTimeoutMs"[^']*})'/,
+    )?.[1];
+    expect(coverJson).toBeDefined();
+    const coverMs = JSON.parse(coverJson)?.tools?.shell?.defaultTimeoutMs;
+    expect(coverMs).toBeGreaterThanOrEqual((budgetS + headroomS) * 1000);
+    expect(review.run).toContain('"$QWEN_HOME/settings.json"');
+  });
+
+  it('gates the budget reconciliation and the cover on the literal the CLI accepts', () => {
+    // prebuildRequested accepts exactly '1' — the grammar both bash gates
+    // must compare, so a value the cover gate welds for can never run the
+    // prebuild without its cover (and vice versa). Two gates: the budget
+    // reconciliation and the cover write. Flipping either comparison reds
+    // this test instead of silently skipping the block it guards.
+    const gates =
+      review.run.match(new RegExp(`"\\$\\{${envName}:-\\}" = '1'`, 'g')) ?? [];
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('refuses the opt-in under an attempt budget that cannot carry it', () => {
+    // Worst case the prebuild consumes its whole budget, so an attempt
+    // that cannot carry the budget plus the deadline reserve plus the
+    // margin for the fetch prefix and the review itself unsets the
+    // variable — degrading to the pre-prebuild flow instead of dying
+    // mid-`npm ci` (GNU timeout, no retry). Removing the gate reds this
+    // test; so does any literal that drifts from lib/prebuild.ts.
+    const gate = review.run.match(
+      /\$\(\( attempt_s - reserve_s \)\) -lt \$\(\( (\d+) \+ (\d+) \)\)/,
+    );
+    expect(gate).not.toBeNull();
+    expect(Number(gate[1])).toBe(budgetS);
+    expect(Number(gate[2])).toBe(marginS);
+    // The reserve is subtracted from the attempt, never counted as
+    // available, and computed with the same shape run_review_once uses.
+    expect(review.run).toMatch(/reserve_s=\$\(\( attempt_s \/ 3 \)\)/);
+    expect(review.run).toContain(`unset ${envName}`);
+    // The gate sits after the budget is final (size-aware default and
+    // both halvings above), keyed here off the QWEN_TIMEOUT assignment
+    // that follows them.
+    const finalized = review.run.indexOf(
+      'QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"',
+    );
+    const gateIdx = review.run.indexOf(
+      'attempt_s=$(( EFFECTIVE_TIMEOUT_MINUTES * 60 ))',
+    );
+    expect(finalized).toBeGreaterThan(-1);
+    expect(gateIdx).toBeGreaterThan(finalized);
+  });
+
+  it('writes the cover before the agent starts', () => {
+    // The value enters the session once, at config load, so a write after
+    // the qwen process starts never reaches that session: the 120s
+    // built-in reasserts and fetch-pr dies mid-`npm ci` with no test red.
+    // Mirrors the toBeLessThan ordering pins this file already applies to
+    // the other writes whose position is load-bearing.
+    const coverWrite = review.run.indexOf('"$QWEN_HOME/settings.json"');
+    const agent = review.run.indexOf('timeout --kill-after=10s');
+    expect(coverWrite).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(coverWrite).toBeLessThan(agent);
   });
 });
 

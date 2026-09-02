@@ -8,6 +8,10 @@ on:
       - 'packages/cli/src/serve/conversations/**'
       - 'packages/cli/src/serve/live/**'
       - 'packages/live-host/**'
+      # The protocol parity test couples the qwen-live host copies into
+      # this lane; without the path filter a qwen-live-only PR skips it
+      # and the first red lands in the merge queue instead.
+      - 'packages/qwen-live/src/host/**'
       - 'packages/sdk-typescript/src/daemon/types.ts'
   merge_group:
   workflow_dispatch:
