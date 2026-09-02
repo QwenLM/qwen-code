@@ -19,7 +19,6 @@ import {
   APPROVAL_MODES,
   BUILT_IN_OUTPUT_STYLES,
   REASONING_EFFORT_TIERS,
-  resolveMainSessionOutputStyle,
   type ApprovalMode,
   type OutputStyleDefinition,
   type ReasoningEffort,
@@ -227,19 +226,17 @@ export function OpenTuiEffortDialog(props: {
 
 const DEFAULT_STYLE_DESC = 'The standard prompt, with no extra style';
 
-export function OpenTuiOutputStyleDialog(props: {
-  config: Config;
-  settings: LoadedSettings;
-  onClose: () => void;
-  notify: (text: string) => void;
-}) {
-  const { config, settings, onClose, notify } = props;
-  const items: Array<{
-    key: string;
-    label: string;
-    desc: string;
-    style: OutputStyleDefinition | undefined;
-  }> = [
+export interface OutputStyleItem {
+  key: string;
+  label: string;
+  desc: string;
+  /** The style to apply; `undefined` is the default (no style). */
+  style: OutputStyleDefinition | undefined;
+}
+
+/** The picker rows: `default` first, then the built-ins (ink parity). */
+export function buildOutputStyleItems(): OutputStyleItem[] {
+  return [
     {
       key: 'default',
       label: 'default',
@@ -253,16 +250,48 @@ export function OpenTuiOutputStyleDialog(props: {
       style,
     })),
   ];
-  // Unlike /effort, "no style configured" genuinely is the first entry
-  // (default), so pre-selecting index 0 in that case tells the truth (ink
-  // OutputStyleDialog parity).
-  const current = resolveMainSessionOutputStyle(config)?.name;
-  const [sel, setSel] = useState(
-    Math.max(
-      0,
-      items.findIndex((item) => item.key === current),
-    ),
+}
+
+/**
+ * Row to pre-select: the CONFIGURED style, exactly what ink's DialogManager
+ * passes (`config.getOutputStyle()?.name`) — not the session-effective one.
+ * `--system-prompt` and QWEN_SYSTEM_MD suppress the effective style, so
+ * resolving through the session would land the cursor on `default` for a user
+ * who still has one configured, and Enter on that row clears it.
+ *
+ * Unlike /effort, "no style configured" genuinely IS the first entry
+ * (default), so falling back to index 0 tells the truth.
+ */
+export function outputStyleInitialIndex(
+  items: readonly OutputStyleItem[],
+  config: Config,
+): number {
+  const configured = config.getOutputStyle?.()?.name;
+  return Math.max(
+    0,
+    items.findIndex((item) => item.key === configured),
   );
+}
+
+/**
+ * The in-chat failure text, naming the setting that failed the way ink's
+ * handleOutputStyleSelect does: a bare provider/permission message does not
+ * say what was being written.
+ */
+export function formatOutputStyleError(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `Failed to set "general.outputStyle": ${detail}`;
+}
+
+export function OpenTuiOutputStyleDialog(props: {
+  config: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  notify: (text: string) => void;
+}) {
+  const { config, settings, onClose, notify } = props;
+  const items = buildOutputStyleItems();
+  const [sel, setSel] = useState(() => outputStyleInitialIndex(items, config));
   useEsc(onClose);
   const pick = () => {
     const item = items[sel];
@@ -272,8 +301,7 @@ export function OpenTuiOutputStyleDialog(props: {
     onClose();
     void applyOutputStyleSelection(config, settings, item.style).then(
       (message) => notify(message),
-      (error: unknown) =>
-        notify(error instanceof Error ? error.message : String(error)),
+      (error: unknown) => notify(formatOutputStyleError(error)),
     );
   };
   return (
