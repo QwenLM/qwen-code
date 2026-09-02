@@ -35,6 +35,7 @@ beforeAll(async () => {
     );
     await execFileAsync(nodeGyp, ['rebuild'], {
       cwd: fixtureDir,
+      timeout: 110_000,
     });
     const candidate = path.join(
       fixtureDir,
