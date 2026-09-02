@@ -10,6 +10,7 @@ import {
   isTerminalTaskLifecycleType,
   PollingChannelBase,
   sanitizeLogText,
+  stripMessagePrefix,
   truncateCodePoints,
   type ChannelAgentBridge,
   type ChannelBaseOptions,
@@ -62,7 +63,6 @@ const TODO_CHAT_PREFIX = 'todo:';
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
-  messagePrefix?: unknown;
   startReaction?: unknown;
   endReaction?: unknown;
   watchTodos?: unknown;
@@ -177,25 +177,6 @@ function configuredBoolean(
     throw new Error(`DWS channel field ${field} must be a boolean.`);
   }
   return value;
-}
-
-function filterByMessagePrefix(
-  text: string,
-  prefix: string | undefined,
-): string | undefined {
-  if (!prefix) return text;
-  let command = text;
-  if (!command.startsWith(prefix)) {
-    while (command.startsWith('@')) {
-      const mention = command.match(/^@[^@\s]+\s+/u)?.[0];
-      if (!mention) return undefined;
-      command = command.slice(mention.length);
-    }
-  }
-  if (!command.startsWith(prefix)) return undefined;
-  const suffix = command.slice(prefix.length);
-  if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
-  return suffix.trim();
 }
 
 function parseDocumentMentionNotification(
@@ -525,7 +506,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly userInstructions?: string;
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
-  private readonly messagePrefix?: string;
+  private readonly dwsMessagePrefix?: string;
   private readonly startReactionName: string;
   private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
@@ -616,7 +597,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }));
     this.startReactionName = startReactionName;
     this.endReactionName = endReactionName;
-    this.messagePrefix = messagePrefix;
+    this.dwsMessagePrefix = messagePrefix;
     this.watchTodos = watchTodos;
   }
 
@@ -1342,6 +1323,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       messageId: `todo-${fingerprint}`,
       text: `Process this DingTalk todo:\n${truncateCodePoints(title, MAX_COMMENT_CHARS)}`,
       displayText: title,
+      bypassMessagePrefix: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1619,8 +1601,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     key: string,
   ): Promise<void> {
     const rawText = message.content.trim();
-    const text = filterByMessagePrefix(rawText, this.messagePrefix);
-    if (this.messagePrefix && !text) {
+    const text = stripMessagePrefix(rawText, this.dwsMessagePrefix);
+    if (this.dwsMessagePrefix && !text) {
       this.markProcessedMessage(key);
       this.saveCursor();
       return;
@@ -1660,6 +1642,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       chatName: message.conversationId,
       messageId: message.messageId,
       text,
+      bypassMessagePrefix: true,
       ...(message.referencedText
         ? { referencedText: message.referencedText }
         : {}),
@@ -1871,6 +1854,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         threadId: notification.commentKey,
         messageId: message.messageId,
         text: truncateCodePoints(notification.request, MAX_COMMENT_CHARS),
+        bypassMessagePrefix: true,
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,

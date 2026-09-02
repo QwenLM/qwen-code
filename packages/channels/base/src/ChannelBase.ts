@@ -70,6 +70,7 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import { applyMessagePrefix } from './message-prefix.js';
 import {
   buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
@@ -415,6 +416,9 @@ export abstract class ChannelBase {
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefix?: string;
+  private readonly messagePrefixCheckedEnvelopes = new WeakSet<Envelope>();
+  private readonly messagePrefixRejectedEnvelopes = new WeakSet<Envelope>();
   private instructedSessions: Set<string> = new Set();
   private unattendedMemorySessions: Set<string> = new Set();
   private channelMemoryReads = new Map<string, ChannelMemoryReadState>();
@@ -958,8 +962,17 @@ export abstract class ChannelBase {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
+    if (
+      config.messagePrefix !== undefined &&
+      typeof config.messagePrefix !== 'string'
+    ) {
+      throw new Error(
+        `Channel "${name}" field "messagePrefix" must be a string.`,
+      );
+    }
     this.name = name;
     this.config = config;
+    this.messagePrefix = config.messagePrefix?.trim() || undefined;
     this.bridge = bridge;
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
@@ -2869,13 +2882,13 @@ export abstract class ChannelBase {
       ? { approve: '          ', always: '   ', deny: '             ' }
       : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      `${this.prefixedCommand(`/approve${requestSuffix}`)}${replyPadding.approve}${approveLabel}`,
       ...(alwaysOption
         ? [
-            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+            `${this.prefixedCommand(`/approve-always${requestSuffix}`)}${replyPadding.always}${alwaysOption.label}`,
           ]
         : []),
-      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
+      `${this.prefixedCommand(`/deny${requestSuffix}`)}${replyPadding.deny}${denyLabel}`,
     ];
     return [
       'Permission required to run a tool',
@@ -2888,6 +2901,14 @@ export abstract class ChannelBase {
       'Reply with:',
       ...replies,
     ].join('\n');
+  }
+
+  private prefixedCommand(command: string): string {
+    return this.messagePrefix ? `${this.messagePrefix} ${command}` : command;
+  }
+
+  protected configuredMessagePrefix(): string | undefined {
+    return this.messagePrefix;
   }
 
   private permissionTitle(
@@ -3114,7 +3135,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+        `Submit this question through its interactive card, or use ${this.prefixedCommand('/deny [request-id]')} to cancel it.`,
         pending.sourceLabel,
       );
       return true;
@@ -3738,19 +3759,19 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        '/help — Show this help',
+        `${this.prefixedCommand('/help')} — Show this help`,
         this.isSharedSession(envelope)
-          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
-          : '/clear — Clear your session (aliases: /reset, /new)',
-        '/who — Show current session & workspace',
-        '/status — Show session info',
-        '/approve [request-id] — Approve a pending permission request',
-        '/approve-always [request-id] — Always approve a pending permission request',
-        '/deny [request-id] — Deny a pending permission request',
+          ? `${this.prefixedCommand('/clear confirm')} — Clear the shared session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`
+          : `${this.prefixedCommand('/clear')} — Clear your session (aliases: ${this.prefixedCommand('/reset')}, ${this.prefixedCommand('/new')})`,
+        `${this.prefixedCommand('/who')} — Show current session & workspace`,
+        `${this.prefixedCommand('/status')} — Show session info`,
+        `${this.prefixedCommand('/approve [request-id]')} — Approve a pending permission request`,
+        `${this.prefixedCommand('/approve-always [request-id]')} — Always approve a pending permission request`,
+        `${this.prefixedCommand('/deny [request-id]')} — Deny a pending permission request`,
         ...(this.namedSessions
           ? [
-              '/sessions [all] — List your named tasks',
-              '/session current|new|use|close|cancel — Manage your named tasks',
+              `${this.prefixedCommand('/sessions [all]')} — List your named tasks`,
+              `${this.prefixedCommand('/session current|new|use|close|cancel')} — Manage your named tasks`,
             ]
           : []),
       ];
@@ -3777,7 +3798,7 @@ export abstract class ChannelBase {
       );
       if (platformCmds.length > 0) {
         for (const cmd of platformCmds) {
-          lines.push(`/${cmd}`);
+          lines.push(this.prefixedCommand(`/${cmd}`));
         }
       }
 
@@ -3788,11 +3809,18 @@ export abstract class ChannelBase {
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
-          lines.push(`/${cmd.name} — ${cmd.description}`);
+          lines.push(
+            `${this.prefixedCommand(`/${cmd.name}`)} — ${cmd.description}`,
+          );
         }
       }
 
-      lines.push('', 'Send any text to chat with the agent.');
+      lines.push(
+        '',
+        this.messagePrefix
+          ? `Start each message with ${this.messagePrefix} to chat with the agent.`
+          : 'Send any text to chat with the agent.',
+      );
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -5517,6 +5545,16 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    if (this.messagePrefixRejectedEnvelopes.has(envelope)) return false;
+    if (!this.messagePrefixCheckedEnvelopes.has(envelope)) {
+      this.messagePrefixCheckedEnvelopes.add(envelope);
+      if (!applyMessagePrefix(envelope, this.messagePrefix)) {
+        this.messagePrefixRejectedEnvelopes.add(envelope);
+        this.logPreflightRejected('message_prefix_mismatch');
+        return false;
+      }
+    }
+
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -5609,6 +5647,10 @@ export abstract class ChannelBase {
         80,
       )}\n`,
     );
+  }
+
+  protected wasMessagePrefixRejected(envelope: Envelope): boolean {
+    return this.messagePrefixRejectedEnvelopes.has(envelope);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {

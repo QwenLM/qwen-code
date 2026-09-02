@@ -1133,6 +1133,35 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('filters a document notification before reading it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ messagePrefix: '/review' }),
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'document-with-prefix',
+        `/review ${documentMentionCard('doc-prefixed')}`,
+      ),
+    );
+
+    expect(client.readDocument).toHaveBeenCalledWith(
+      'doc-prefixed',
+      expect.any(AbortSignal),
+    );
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-prefixed',
+        threadId: '1786589783750e2a797d2c2c141c295519dbcb07f2274',
+        bypassMessagePrefix: true,
+      }),
+    ]);
+  });
+
   it('lets polling recover a stale replayed document notification', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -2254,7 +2283,7 @@ describe('DwsChannel', () => {
     client.todoTasks = [todoTask('task-existing', 'Historical task')];
     const channel = await readyChannel(
       client,
-      makeConfig({ watchTodos: true }),
+      makeConfig({ watchTodos: true, messagePrefix: '/review' }),
     );
 
     await channel.poll();
@@ -2273,6 +2302,7 @@ describe('DwsChannel', () => {
         senderId: 'alice',
         displayText: 'Investigate the new failure',
         text: expect.stringContaining('Investigate the new failure'),
+        bypassMessagePrefix: true,
         metadata: expect.stringContaining('DWS native todo ID: task-new'),
       }),
     ]);

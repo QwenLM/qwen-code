@@ -18,7 +18,6 @@ describe('DWS channel plugin', () => {
       'groupPolicy',
       'senderPolicy',
       'allowedUsers',
-      'messagePrefix',
       'watchTodos',
       'startReaction',
       'endReaction',
@@ -71,19 +70,6 @@ describe('DWS channel plugin', () => {
     expect(
       plugin.management?.validateConfig?.({ endReaction: false }),
     ).toContain('endReaction must be a string');
-  });
-
-  it('exposes a configurable message prefix', () => {
-    expect(
-      plugin.management?.fields.find((field) => field.key === 'messagePrefix')
-        ?.default,
-    ).toBeUndefined();
-    expect(
-      plugin.management?.validateConfig?.({ messagePrefix: '/review' }),
-    ).toBeUndefined();
-    expect(
-      plugin.management?.validateConfig?.({ messagePrefix: false }),
-    ).toContain('messagePrefix must be a string');
   });
 
   it('ignores removed source settings', () => {

@@ -399,6 +399,7 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain(
         'Full issue description',
       );
+      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBe(true);
       expect(mockApi.Issues.show).toHaveBeenCalled();
     });
 

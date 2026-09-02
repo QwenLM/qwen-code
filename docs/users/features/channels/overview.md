@@ -63,6 +63,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
 | `multiSession`           | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
+| `messagePrefix`          | No               | Only dispatch user messages that begin with this exact, case-sensitive prefix after any leading `@mentions`; the prefix and following whitespace are removed before dispatch                                            |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -75,6 +76,8 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                         |
 | `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
 | `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
+
+When `messagePrefix` is set, every user-authored message must contain the prefix and a non-empty payload, for example `/review inspect #123`. Shared, platform, and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Attachments therefore need a matching caption. Native todos, webhooks, and provider-generated assignment or review-request events continue to run without a prefix because they are system events rather than chat messages.
 
 ### Sender Policy
 

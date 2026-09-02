@@ -785,6 +785,12 @@ describe('channel registry', () => {
     );
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
       expect(
         fields
           ?.find((field) => field.key === 'senderPolicy')
@@ -820,6 +826,12 @@ describe('channel registry', () => {
     }
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
       expect(
         fields?.filter((field) => field.key === 'senderPolicy'),
       ).toHaveLength(1);

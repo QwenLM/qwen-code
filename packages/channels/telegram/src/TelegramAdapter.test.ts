@@ -374,6 +374,41 @@ describe('TelegramChannel', () => {
     expect(processOnceSpy).toHaveBeenCalled();
   });
 
+  it('does not restore a stripped prefix while preparing a document', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    expect(handler).toBeDefined();
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: '/review inspect this',
+        document: {
+          file_id: 'file-1',
+          file_name: 'input.txt',
+          mime_type: 'text/plain',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    preparation.envelope.text = 'inspect this';
+
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe(
+      'inspect this\n\n(User sent a file "input.txt" but download failed)',
+    );
+  });
+
   it('continues startup when Telegram command menu registration fails', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);

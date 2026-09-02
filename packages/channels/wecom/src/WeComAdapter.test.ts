@@ -1954,6 +1954,42 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('consumes prefix mismatches without repeatedly reconsidering them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = makeBridge();
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-prefix-mismatch',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[Channel:bot] preflight rejected reason=message_prefix_mismatch\n',
+      ),
+    );
+    client.emit('message.text', payload);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] dropping duplicate message msg-prefix-mismatch (already seen).\n',
+      ),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
   it('allows messages interrupted during attachment download to be retried', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')

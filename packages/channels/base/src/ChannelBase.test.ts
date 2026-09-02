@@ -626,6 +626,62 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
+    it('filters and strips configured message prefixes before dispatch', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      await ch.handleInbound(envelope({ text: '@Qwen /review inspect this' }));
+
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        'inspect this',
+        expect.any(Object),
+      );
+    });
+
+    it('checks a prepared envelope once and rejects before preparation', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+      const prepare = vi.fn(async () => {});
+      const rejected = envelope({ text: 'hello' });
+
+      await ch.handlePreparedInbound(rejected, prepare);
+      await ch.handlePreparedInbound(rejected, prepare);
+      expect(prepare).not.toHaveBeenCalled();
+
+      await ch.handlePreparedInbound(
+        envelope({ text: '/review inspect this' }),
+        prepare,
+      );
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        'inspect this',
+        expect.any(Object),
+      );
+    });
+
+    it('documents the prefix on shared command replies', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(envelope({ text: '/review /help' }));
+
+      expect(ch.sent[0]?.text).toContain('/review /help — Show this help');
+      expect(ch.sent[0]?.text).toContain(
+        '/review /approve [request-id] — Approve a pending permission request',
+      );
+    });
+
+    it('allows explicitly marked system envelopes through', async () => {
+      const ch = createChannel({ messagePrefix: '/review' });
+
+      await ch.handleInbound(
+        envelope({ text: 'system event', bypassMessagePrefix: true }),
+      );
+
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('silently drops group messages when groupPolicy=disabled', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ isGroup: true }));

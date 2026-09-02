@@ -1461,6 +1461,7 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
+        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -1483,7 +1484,7 @@ describe('GithubChannel', () => {
           makeComment({
             id: 1002,
             node_id: 'C_1002',
-            body: '@test-bot check this review note',
+            body: '@test-bot /review check this review note',
             created_at: '2026-07-04T09:30:00.000Z',
             user: { login: 'bob' },
           }),
@@ -1507,11 +1508,12 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
+        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: ' check this review note',
+        text: 'check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1718,6 +1720,36 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it('filters each aggregated comment and consumes unmatched comments', async () => {
+      await initWithoutLoop({ messagePrefix: '/review' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ignore this' }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            body: '/review inspect this',
+            user: { login: 'bob' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        displayText: '- @bob: inspect this',
+        bypassMessagePrefix: true,
+      });
+      expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
+    });
 
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({

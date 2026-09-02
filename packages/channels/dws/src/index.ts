@@ -80,13 +80,6 @@ export const plugin: ChannelPlugin = {
         description: 'DingTalk IDs used by Allowlist and Pairing policies',
       },
       {
-        key: 'messagePrefix',
-        label: 'Message Prefix',
-        kind: 'string',
-        description:
-          'Only dispatch IM messages that start with this prefix after any leading @mentions. The prefix is removed before the task runs',
-      },
-      {
         key: 'watchTodos',
         label: 'Watch Native Todos',
         kind: 'boolean',
@@ -131,11 +124,7 @@ export const plugin: ChannelPlugin = {
       ) {
         return 'DWS watchTodos must be a boolean.';
       }
-      for (const field of [
-        'messagePrefix',
-        'startReaction',
-        'endReaction',
-      ] as const) {
+      for (const field of ['startReaction', 'endReaction'] as const) {
         if (config[field] !== undefined && typeof config[field] !== 'string') {
           return `DWS ${field} must be a string.`;
         }

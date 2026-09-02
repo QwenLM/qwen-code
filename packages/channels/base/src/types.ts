@@ -66,6 +66,8 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  /** Only dispatch user messages beginning with this exact prefix. */
+  messagePrefix?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
@@ -111,6 +113,8 @@ export interface Envelope {
   text: string;
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
+  /** System event, or adapter input whose prefix was already checked. */
+  bypassMessagePrefix?: true;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;

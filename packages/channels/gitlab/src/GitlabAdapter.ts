@@ -353,6 +353,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       ),
       true,
     );
+    if (!isNoteMention) envelope.bypassMessagePrefix = true;
 
     if (isNoteMention) {
       this.reactions.set(messageId, {

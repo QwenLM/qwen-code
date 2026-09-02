@@ -196,7 +196,9 @@ export class TelegramChannel extends ChannelBase {
           );
           writeFileSync(filePath, buf);
 
-          envelope.text = msg.caption || '';
+          if (!this.configuredMessagePrefix()) {
+            envelope.text = msg.caption || '';
+          }
           envelope.attachments = [
             {
               type: 'file',
@@ -209,9 +211,10 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
           );
-          envelope.text =
-            (msg.caption || '') +
-            `\n\n(User sent a file "${fileName}" but download failed)`;
+          const promptText = this.configuredMessagePrefix()
+            ? envelope.text
+            : msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
@@ -246,7 +249,9 @@ export class TelegramChannel extends ChannelBase {
           const filePath = join(dir, fileName);
           writeFileSync(filePath, buf);
 
-          envelope.text = msg.caption || '';
+          if (!this.configuredMessagePrefix()) {
+            envelope.text = msg.caption || '';
+          }
           envelope.attachments = [
             {
               type: 'audio',
@@ -259,9 +264,10 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
           );
-          envelope.text =
-            (msg.caption || '') +
-            `\n\n(User sent a voice message but download failed)`;
+          const promptText = this.configuredMessagePrefix()
+            ? envelope.text
+            : msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
