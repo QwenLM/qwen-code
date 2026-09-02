@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
 import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
+import { runEpochMs } from './lib/prompt-record.js';
 import type { BuildTestReport } from './build-test.js';
 
 const okBuild = {
@@ -69,13 +70,19 @@ describe('runBaseTree', () => {
     return p;
   };
 
+  // Captured ONCE per test, the way `fetch-pr` captures it once per run: the
+  // reuse marker is fenced on the plan's epoch, so a helper that re-captured on
+  // every call would simulate a new run each time and the fast path — the
+  // concurrent-shard guard the reuse test below pins — could never speak.
+  let planPath = '';
   const run = (
     over: { plan?: Record<string, unknown>; worktree?: string } = {},
     build: (w: string) => BuildTestReport = () => okBuild,
   ): BaseTreeReport => {
     const { plan: planOver, ...rest } = over;
+    if (planOver !== undefined || !planPath) planPath = writePlan(planOver);
     return runBaseTree({
-      plan: writePlan(planOver),
+      plan: planPath,
       worktree,
       timeout: 60,
       install: false,
@@ -85,6 +92,7 @@ describe('runBaseTree', () => {
   };
 
   beforeEach(() => {
+    planPath = '';
     repo = mkdtempSync(join(tmpdir(), 'qwen-base-tree-'));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
@@ -138,6 +146,45 @@ describe('runBaseTree', () => {
       });
       expect(rebuilds).toEqual([tree]);
       expect(second.note).not.toContain('reusing it');
+    },
+  );
+
+  itWhereContainmentExists(
+    'does not REUSE a base tree an EARLIER RUN built, whose untracked plants the dirt check cannot see',
+    () => {
+      // `cleanStale` releases the review worktree and its branch but never
+      // `-base`, so this tree stands into the next round with a whole
+      // containerized build/test phase in between — and inside the mount the
+      // reviewed code writes where it likes. What it can drop there is
+      // untracked executable content, `dist/cli.js` and `node_modules/.bin/`
+      // being exactly what a host-side A/B measurement runs, and
+      // `--untracked-files=no` cannot see it: a blanket untracked refusal
+      // would disable every correctly-built tree's reuse and bring back the
+      // concurrent-shard clobber the fast path exists to prevent. So the
+      // marker carries the run that built it, and a stamp from another run is
+      // not a tree this run may certify.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      mkdirSync(join(tree, 'dist'), { recursive: true });
+      writeFileSync(
+        join(tree, 'dist', 'cli.js'),
+        'planted by the reviewed build',
+      );
+
+      // The next run captures its own plan, and the plan's mtime IS the epoch.
+      const later = new Date(Date.now() + 60_000);
+      utimesSync(planPath, later, later);
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]);
+      // The plant went with the tree it was standing in.
+      expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
     },
   );
 
@@ -208,8 +255,13 @@ describe('runBaseTree', () => {
     expect(second.path).toBe(first.path);
     expect(second.note).toContain('reusing');
     expect(builds).toHaveLength(1); // one install+build, not two
-    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut.
-    writeFileSync(join(first.path!, '.qwen-review-base-ok'), 'f'.repeat(40));
+    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut —
+    // stamped with this run's epoch, so the sha arm is what answers and not the
+    // epoch fence standing in front of it.
+    writeFileSync(
+      join(first.path!, '.qwen-review-base-ok'),
+      `${'f'.repeat(40)}\n${runEpochMs(planPath)}\n`,
+    );
     expect(run({}, build).note).not.toContain('reusing');
   });
 

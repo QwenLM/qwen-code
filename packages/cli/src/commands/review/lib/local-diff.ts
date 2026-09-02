@@ -26,7 +26,13 @@
 
 import { lstatSync, statSync, type Stats } from 'node:fs';
 import { join, sep } from 'node:path';
-import { repoRelativeOf } from './paths.js';
+import {
+  REVIEW_CACHE_DIR,
+  REVIEW_LEASE_DIR,
+  REVIEW_TMP_DIR,
+  REVIEWS_DIR,
+  repoRelativeOf,
+} from './paths.js';
 import { parseDiff, sliceDiffByLines } from './diff-plan.js';
 import {
   LITERAL_PATHSPECS,
@@ -299,8 +305,8 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
 /**
  * Is this repo-relative path the review's own plumbing?
  *
- * Segment-exact at ANY depth, not anchored to the cwd. The three constants in
- * `paths.ts` are cwd-relative for every invocation, so a round started from
+ * Segment-exact at ANY depth, not anchored to the cwd. The `paths.ts`
+ * constants are cwd-relative for every invocation, so a round started from
  * `sub/` writes `sub/.qwen/…` — which a filter built from THIS invocation's
  * cwd does not match. A repo that does not ignore `.qwen` then lets the next
  * root-invoked round capture the previous round's cache, reports, and args
@@ -311,11 +317,28 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
  *
  * Segment-exact matters for the same reason `toRepoPathspec` records: a
  * directory named `.qwen-notes` or `tmpfiles` is the user's, not ours.
+ *
+ * Built from the constants rather than spelled out beside them: the lease
+ * directory moved once already — out of `.qwen/tmp`, which the review sandbox
+ * mounts read-write — and a hand-written alternation stayed behind, so a
+ * checkout holding a lease captured that churned lease JSON as the user's
+ * untracked change, and an incremental round could never again report "no
+ * changes". `sep` becomes `/` because git spells every path with forward
+ * slashes on every platform, which is the spelling `repoRelPath` arrives in.
  */
+const REVIEW_PLUMBING = new RegExp(
+  `(?:^|/)(?:${[REVIEW_TMP_DIR, REVIEW_CACHE_DIR, REVIEWS_DIR, REVIEW_LEASE_DIR]
+    .map((dir) =>
+      dir
+        .split(sep)
+        .join('/')
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    )
+    .join('|')})(?:/|$)`,
+);
+
 export function isReviewPlumbing(repoRelPath: string): boolean {
-  return /(?:^|\/)\.qwen\/(?:tmp|review-cache|reviews)(?:\/|$)/.test(
-    repoRelPath,
-  );
+  return REVIEW_PLUMBING.test(repoRelPath);
 }
 
 /**

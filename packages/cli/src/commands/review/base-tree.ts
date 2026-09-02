@@ -62,6 +62,7 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
+import { runEpochMs } from './lib/prompt-record.js';
 
 export interface BaseTreeReport {
   /**
@@ -176,10 +177,23 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // rebase between runs — falls through to the rebuild below.)
   const marker = () => join(tree, '.qwen-review-base-ok');
   const failedMarker = () => join(tree, '.qwen-review-base-failed');
+  // The run's epoch, the fence the deadline stamps and the session ledger
+  // already key on. A run captures its plan once, so this is stable for the
+  // whole run and different between two.
+  const runEpoch = String(runEpochMs(args.plan));
   try {
+    const stamp = readFileSync(marker(), 'utf8').trim().split('\n');
     if (
       existsSync(tree) &&
-      readFileSync(marker(), 'utf8').trim() === baseSha &&
+      stamp[0] === baseSha &&
+      // ...and THIS run built it. `cleanStale` never releases `-base`, so an
+      // earlier round's tree stands into this one with a whole containerized
+      // build/test phase in between — long enough for the reviewed code to drop
+      // untracked executables in here, and `dist/cli.js` is what a host-side A/B
+      // runs. `--untracked-files=no` below cannot see them, and refusing any
+      // untracked file at all would disable every legitimate reuse; the stamp is
+      // the provenance that separates the two.
+      stamp[1] === runEpoch &&
       // The reuse path RETURNS, so the gate below the rebuild never runs for
       // it — and both facts it reuses on come from inside the mount: the
       // marker is a file in the base tree, and `rev-parse HEAD` resolves
@@ -377,9 +391,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     }
 
     // The marker is what the fast path above trusts, so it is written only after
-    // a build that succeeded, and it records the SHA it vouches for.
+    // a build that succeeded, and it records the SHA and the run it vouches for.
     try {
-      writeFileSync(marker(), `${baseSha}\n`);
+      writeFileSync(marker(), `${baseSha}\n${runEpoch}\n`);
     } catch {
       // The tree may be too broken to hold a marker; the next shard rebuilds.
     }

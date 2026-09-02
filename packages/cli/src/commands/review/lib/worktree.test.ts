@@ -267,10 +267,21 @@ describe('worktreeResidue', () => {
     const got = worktreeResidue(tree);
 
     expect(got.paths).toEqual([]);
-    // The shape with NO admin entry gets its own reason: a main checkout has
-    // no `gitdir` file to "not point back", and the triager hunting one is
-    // the confusion the distinct message exists to spare.
-    expect(got.unmeasured).toContain('no admin entry');
+    // Inside a mount the common-dir gate answers this shape first, and with
+    // the more useful reason: it says what the pointer IS (the repository's
+    // own common dir) rather than what the entry behind it lacks.
+    expect(got.unmeasured).toContain('common dir');
+
+    // ...and the identity gate's own reason is still what answers where the
+    // location gates say nothing — outside a mount, where the same swap is a
+    // stale pointer rather than a plantable one. A main checkout has no
+    // `gitdir` file to "not point back", and the triager hunting one is the
+    // confusion the distinct message exists to spare.
+    const outside = join(repo, 'wt-outside');
+    gitRepo('worktree', 'add', '--detach', '-q', outside, 'HEAD');
+    gitRepo('config', 'core.worktree', outside);
+    overwriteGitfile(join(outside, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+    expect(worktreeResidue(outside).unmeasured).toContain('no admin entry');
   });
 
   it('says UNMEASURED for a forged admin entry when the caller pins the expected head', () => {
@@ -2070,6 +2081,28 @@ describe('untrustedGitfile', () => {
       } finally {
         holder.native = saved;
       }
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a gitfile rewritten to the repository own common dir',
+    () => {
+      // The shape the location question cannot see: `gitdir: <repo>/.git`
+      // resolves OUTSIDE the mount, so every gate that asked only where the
+      // answer lives admitted it and then acted on the MAIN repository
+      // through it. Measured at this head: `status` rewrote the main index and
+      // `rev-parse HEAD` answered the main head, so the reads a review treats
+      // as fact came from a tree nobody verified. No `worktree add` writes
+      // that pointer — a linked worktree's admin entry is always
+      // `<common>/worktrees/<id>` — which is what makes it answerable.
+      const { repo, tree, mount } = pipelineTree();
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+
+      expect(untrustedGitfile(tree, mount)).toContain('common dir');
+      expect(untrustedRepositoryFrom(tree, mount)).toContain('common dir');
+      // The residue probe is the route that was measured rewriting the main
+      // index: `status` refreshes it, and a refresh runs the clean filter.
+      expect(worktreeResidue(tree, 12).unmeasured).toContain('common dir');
     },
   );
 

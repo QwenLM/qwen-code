@@ -141,7 +141,11 @@ const GIT_ENV_EXEC = [
 export function mountRootFor(cwd: string): string | null {
   const resolved = resolve(cwd);
   const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.lastIndexOf(marker);
+  // `+ sep` so a process standing AT the review temp dir is judged inside it.
+  // The marker ends in a separator, so the root itself matched no temp dir:
+  // the launch-directory question went unpolicied there, and the negative was
+  // memoized as trusted.
+  const at = (resolved + sep).lastIndexOf(marker);
   if (at < 0) return null;
   const root = resolved.slice(0, at + marker.length - 1);
   // A LEXICAL root is not a safe mount target. `resolve` never touches the
@@ -214,6 +218,28 @@ export function mountRootFor(cwd: string): string | null {
  * resolver that decides has to receive git's answer unedited.
  */
 function resolvedGitDir(cwd: string): string | null {
+  return revParse(cwd, '--absolute-git-dir');
+}
+
+/**
+ * The common dir of the repository `cwd` resolves to, or null when git does
+ * not answer.
+ *
+ * One value per invocation, like every other `rev-parse` in this file: a
+ * combined answer would have to be split on a newline, and a POSIX path may
+ * carry one.
+ */
+function resolvedCommonDir(cwd: string): string | null {
+  return revParse(cwd, '--path-format=absolute', '--git-common-dir');
+}
+
+/**
+ * The sanitized single-value `rev-parse` both location questions share.
+ *
+ * Strips git's terminal record delimiter and NOTHING else — never `.trim()`,
+ * for the reason `resolvedGitDir` gives.
+ */
+function revParse(cwd: string, ...flags: string[]): string | null {
   const resolved = spawnSync(
     'git',
     [
@@ -222,12 +248,56 @@ function resolvedGitDir(cwd: string): string | null {
       '-c',
       'core.fsmonitor=',
       'rev-parse',
-      '--absolute-git-dir',
+      ...flags,
     ],
     { cwd, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
   );
   if (resolved.error || resolved.status !== 0 || !resolved.stdout) return null;
   return resolved.stdout.replace(/\r?\n$/, '');
+}
+
+/**
+ * Why a `.git` pointer is not one a host-side command may act through, or null
+ * when it is.
+ *
+ * Two questions, because a rewritten gitfile has two shapes and the first
+ * cannot see the second:
+ *
+ * - WHERE the admin entry lives — `adminEntryInsideReviewTmp`, the surface the
+ *   reviewed code can write;
+ * - WHETHER it is an admin entry at all. `gitdir: <repo>/.git` names the
+ *   repository's OWN common dir, which resolves outside the mount and so
+ *   passes the location question, while every command through it acts on the
+ *   MAIN repository: measured, `status` rewrote the main index and `rev-parse
+ *   HEAD` answered the main head, so the reads a review treats as fact came
+ *   from a tree nobody verified. No `worktree add` writes that pointer — a
+ *   linked worktree's admin entry is always `<common>/worktrees/<id>` — which
+ *   is why `resetScratchTree` already refuses the same equality.
+ *
+ * git not answering the second question is not a refusal: it answered the
+ * first one from the same directory with the same sanitized environment, and
+ * the location question has already spoken. The realistic case is a git too old
+ * for `--path-format`, and this pipeline's scratch and residue routes already
+ * require it — so that host has no working review inside a mount either way.
+ */
+function untrustedPointer(
+  dir: string,
+  gitDir: string,
+  mountRoot: (cwd: string) => string | null,
+): string | null {
+  if (mountRoot(dir) === null) return null;
+  if (adminEntryInsideReviewTmp(gitDir, mountRoot, dir)) {
+    return 'resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it';
+  }
+  const common = resolvedCommonDir(dir);
+  if (common !== null && common === gitDir) {
+    return (
+      "resolves to the repository's own common dir rather than a linked " +
+      "worktree's admin entry, so every command through it acts on the main " +
+      'repository instead of this tree'
+    );
+  }
+  return null;
 }
 
 /**
@@ -257,10 +327,8 @@ export function untrustedRepositoryFrom(
     // that, and refusing would answer a question nobody asked.
     return null;
   }
-  if (adminEntryInsideReviewTmp(target, mountRoot, cwd)) {
-    return `${cwd} resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it`;
-  }
-  return null;
+  const why = untrustedPointer(cwd, target, mountRoot);
+  return why === null ? null : `${cwd} ${why}`;
 }
 
 /**
@@ -335,10 +403,8 @@ export function untrustedGitfile(
   if (target === null) {
     return `${tree}: git could not resolve its own git dir`;
   }
-  if (adminEntryInsideReviewTmp(target, mountRoot, tree)) {
-    return `${tree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
-  }
-  return null;
+  const why = untrustedPointer(tree, target, mountRoot);
+  return why === null ? null : `${tree} ${why}`;
 }
 
 /**
@@ -1065,18 +1131,13 @@ export function worktreeResidue(
   // ordinary checkout never pays for the extra spawn.
   if (mountRootFor(cwd) !== null) {
     const target = resolvedGitDir(cwd);
-    if (
-      target !== null &&
-      adminEntryInsideReviewTmp(target, mountRootFor, cwd)
-    ) {
+    const why =
+      target === null ? null : untrustedPointer(cwd, target, mountRootFor);
+    if (why !== null) {
       return {
         paths: [],
         total: 0,
-        unmeasured:
-          'the .git gitfile resolves to an admin entry inside the review ' +
-          'temp dir, where the reviewed code can rewrite it — the status ' +
-          'below would measure whichever repository it names, and refresh ' +
-          'that index through whatever filters it configures',
+        unmeasured: `the .git gitfile ${why} — the status below would measure whichever repository it names, and refresh that index through whatever filters it configures`,
       };
     }
   }

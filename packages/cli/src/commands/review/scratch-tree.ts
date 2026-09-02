@@ -559,6 +559,13 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   if (
     existsSync(tree) &&
     untrustedGitfile(tree) === null &&
+    // ...and of the REVIEW worktree's pointer, which is what `headSha` and
+    // every comparison inside the reset resolve through. Rewritten to the
+    // repository's own common dir, the route answered `available: true` with
+    // the MAIN head and reset this tree to the user's own commit. Suspicion
+    // falls through to the rebuild, whose gate refuses — not a refusal here:
+    // an unusable leftover is what the rebuild exists for.
+    untrustedGitfile(worktree) === null &&
     resetScratchTree(tree, headSha, worktree)
   ) {
     // The reset clears the ignored state too, so the farm went with it: this

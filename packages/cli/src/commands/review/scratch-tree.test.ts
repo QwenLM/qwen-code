@@ -177,6 +177,46 @@ describe('runScratchTree', () => {
     },
   );
 
+  itWhereContainmentExists(
+    'does not REUSE a scratch tree through a review-worktree gitfile rewritten to the common dir',
+    () => {
+      // The reuse route asked the location question of the SCRATCH pointer
+      // only, never of the review worktree's — which is what `headSha` and
+      // every comparison inside the reset resolve through. Rewritten to the
+      // repository's own common dir it resolves OUTSIDE the mount, so the
+      // location question admitted it, and an unpinned run answered
+      // `available: true, reused: true` with the MAIN head and reset the
+      // verifier's tree to the user's own commit: a wrong verdict carrying a
+      // deterministic source tag.
+      const first = run();
+      expect(first.available).toBe(true);
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+
+      // Main moves on, so the head a rewritten pointer answers is
+      // distinguishable from the one this review is pinned to.
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 999;\n');
+      git(repo, 'commit', '-qam', 'main moved on');
+      const mainHead = git(repo, 'rev-parse', 'HEAD');
+      rmSync(join(worktree, '.git'), { force: true });
+      writeFileSync(join(worktree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+
+      const second = run();
+      expect(second.available).toBe(false);
+      expect(second.reused).toBe(false);
+      expect(second.headSha).toBeUndefined();
+      expect(JSON.stringify(second)).toContain('common dir');
+      // The fixture really does distinguish the two heads, so the verdict
+      // above is about the rewrite and not about a no-op commit.
+      expect(mainHead).not.toBe(headSha);
+      // Swept for a rebuild the gate then refused is the expected outcome; if
+      // a tree does survive, it is still at the reviewed head, not the user's.
+      if (existsSync(tree)) {
+        expect(git(tree, 'rev-parse', 'HEAD')).toBe(headSha);
+      }
+    },
+  );
+
   it('stands up a sibling tree at the commit under review', () => {
     const r = run();
     expect(r.available).toBe(true);
