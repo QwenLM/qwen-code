@@ -13,20 +13,22 @@ If the user asks how to install zg, explain the commands without running them.
 Only perform the installation when the user explicitly asks you to install or
 set up zg.
 
-1. Check whether `zg` is available on `PATH`.
-2. If it is unavailable, install it:
+1. If the `zvec_grep` MCP server is already registered in Qwen Code, tell the
+   user and stop.
+2. Check whether `zg` is available on `PATH`.
+3. If it is unavailable, install it:
 
    ```bash
    npm install -g @zvec/zvec-grep
    ```
 
-3. Connect zg to Qwen Code:
+4. Connect zg to Qwen Code:
 
    ```bash
    zg install --target qwen --yes
    ```
 
-4. Tell the user to start a new Qwen Code session, then stop.
+5. Tell the user to start a new Qwen Code session, then stop.
 
 Do not edit Qwen Code configuration or instruction files manually. After the
 installer succeeds, do not run additional zg commands.
