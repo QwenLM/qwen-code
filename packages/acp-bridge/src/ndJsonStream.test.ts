@@ -567,9 +567,26 @@ describe('ndJsonStream', () => {
         done: false,
       });
     }
+
+    const nextFrames = [
+      message('fourth', { text: 'a'.repeat(120) }),
+      message('fifth', { text: 'b'.repeat(120) }),
+    ];
+    inputController.enqueue(
+      encoder.encode(
+        nextFrames.map((frame) => `${JSON.stringify(frame)}\n`).join(''),
+      ),
+    );
+    await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledTimes(2));
+    for (const frame of nextFrames) {
+      await expect(reader.read()).resolves.toMatchObject({
+        value: frame,
+        done: false,
+      });
+    }
     inputController.close();
     await expect(reader.read()).resolves.toMatchObject({ done: true });
-    expect(onQueueSaturated).toHaveBeenCalledOnce();
+    expect(onQueueSaturated).toHaveBeenCalledTimes(2);
     expect(onTransportError).not.toHaveBeenCalled();
     reader.releaseLock();
   });
@@ -602,10 +619,46 @@ describe('ndJsonStream', () => {
     await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledOnce());
 
     await stream.readable.cancel();
-    // Outlast the grace window: a pump that missed the cancel wake would expire
-    // the wait and fail closed on the cancelled stream.
+    await vi.waitFor(() => expect(input.locked).toBe(false), { timeout: 100 });
+    // Keep checking past the grace window for a late transport error.
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(onTransportError).not.toHaveBeenCalled();
+  });
+
+  it('caps the queue-space timer at the Node timeout maximum', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const onQueueSaturated = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onQueueSaturated },
+      limits({
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        queueSaturationGraceMs: 2_147_483_648,
+      }),
+    );
+    const first = message('first', { text: 'x'.repeat(120) });
+    const second = message('second', { text: 'y'.repeat(120) });
+    inputController.enqueue(
+      encoder.encode(`${JSON.stringify(first)}\n${JSON.stringify(second)}\n`),
+    );
+
+    try {
+      await vi.waitFor(() => expect(onQueueSaturated).toHaveBeenCalledOnce());
+      expect(setTimeoutSpy.mock.calls.map((call) => call[1])).toContain(
+        2_147_483_647,
+      );
+    } finally {
+      await stream.readable.cancel();
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('fails immediately for a frame that can never fit, without the saturation warning', async () => {

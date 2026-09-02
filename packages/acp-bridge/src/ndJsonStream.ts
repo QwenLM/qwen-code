@@ -256,7 +256,10 @@ function createBoundedReadable(
   let wakeQueueWaiter: (() => void) | undefined;
   const waitForQueueSpace = (timeoutMs: number): Promise<void> =>
     new Promise<void>((resolve) => {
-      const timer = setTimeout(finish, Math.max(0, timeoutMs));
+      const timer = setTimeout(
+        finish,
+        Math.min(Math.max(0, timeoutMs), 2_147_483_647),
+      );
       function finish() {
         clearTimeout(timer);
         wakeQueueWaiter = undefined;
