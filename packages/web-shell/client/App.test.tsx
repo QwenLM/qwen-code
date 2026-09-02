@@ -11342,7 +11342,8 @@ describe('App session callbacks', () => {
   });
 
   it('reports the primary workspace, not the stale connection workspace, when the selection is unset', async () => {
-    // The common new-chat path (sidebar "New task", /clear, /new) leaves
+    // A new chat with no explicit context (a cold draft, or a global new
+    // session on a daemon without the standalone capability) leaves
     // selectedWorkspaceCwd undefined — that is how "primary" is spelled. The
     // report must fall back to the primary workspace, not the stale
     // connection.workspaceCwd left over from the previous session.
