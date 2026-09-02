@@ -51,6 +51,7 @@ import {
 } from './lib/worktree.js';
 import { makeGitProbe } from './comment-status.js';
 import { captureLocalDiff } from './lib/local-diff.js';
+import { git, gitOpt, resetLaunchDirVerdictForTest } from './lib/git.js';
 import { runBaseTree } from './base-tree.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
@@ -71,8 +72,10 @@ describe('a planted repository reaches no host-side execution', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
+    resetLaunchDirVerdictForTest();
   });
   afterEach(() => {
+    resetLaunchDirVerdictForTest();
     for (const dir of made.splice(0))
       rmSync(dir, { recursive: true, force: true });
     gitIsolation.dispose();
@@ -238,6 +241,31 @@ describe('a planted repository reaches no host-side execution', () => {
         touchedBy: [],
         touchedByTotal: 0,
       });
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'every wrapper in lib/git refuses to run from a poisoned launch directory',
+    () => {
+      // The launch-directory half, closed where all of it goes through rather
+      // than at each command that happens to run git: `load-rules` reading this
+      // review's own rules with `show <base>:<path>`, `submit` reading where a
+      // submission goes, `match-remote` choosing the remote, `cleanup` pruning
+      // — none of them knows it is asking this question, and none of them
+      // should have to.
+      const { tree, canary } = poisoned();
+      const saved = process.cwd();
+      try {
+        process.chdir(tree);
+        // The throwing wrapper throws...
+        expect(() => git('rev-parse', 'HEAD')).toThrow(/review temp dir/);
+        // ...and the probing wrapper answers its own "could not run" value,
+        // which every caller already handles, rather than the plant's answer.
+        expect(gitOpt('remote', 'get-url', 'origin')).toBeNull();
+      } finally {
+        process.chdir(saved);
+      }
       expect(existsSync(canary)).toBe(false);
     },
   );

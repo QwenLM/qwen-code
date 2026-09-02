@@ -9,7 +9,12 @@
 // across platforms.
 
 import { execFileSync } from 'node:child_process';
-import { redirectedAncestor, sanitizedGitEnv } from './worktree.js';
+import {
+  mountRootFor,
+  redirectedAncestor,
+  sanitizedGitEnv,
+  untrustedRepositoryFrom,
+} from './worktree.js';
 import { existsSync, lstatSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -45,8 +50,61 @@ function gitOpts() {
   };
 }
 
+/**
+ * The launch directory, judged once per directory this process runs git from.
+ *
+ * Every wrapper below runs git with NO `cwd`, so each one discovers its
+ * repository from `process.cwd()` — and in the nested geometry `mountRootFor`
+ * documents, that directory is a review worktree inside the OUTER review's
+ * read-write mount, where the reviewed code can rewrite the `.git` pointer git
+ * follows. What the individual commands then do through it is not a short list:
+ * `fetch` loads the plant's transport config, `diff` refreshes the index and
+ * honours `diff.<driver>.command`, `show <base>:<path>` hands back the plant's
+ * content as this review's own rules, `remote get-url` names where a submission
+ * goes. Gating those command by command is how this class kept re-opening, so
+ * the question is asked HERE, at the four functions every one of them goes
+ * through.
+ *
+ * A `-C <tree>` argument does not change the answer's relevance: that scopes
+ * the command to another tree, and THAT tree's pointer is the subject of
+ * `untrustedGitfile`, which its callers ask separately. This one is only ever
+ * about where the process stands.
+ *
+ * Memoized per directory. The cache is not a weakening: a pointer rewritten
+ * after any gate answers is the TOCTOU residual this whole design documents and
+ * does not close (`scratch-tree` states it, and `fetch-pr` asks twice to narrow
+ * rather than to close it). Outside a review temp dir the answer costs no
+ * syscall at all — `mountRootFor` returns null on a string scan — so the
+ * ordinary checkout never pays for this.
+ */
+let launchDirVerdict: { cwd: string; refusal: string | null } | null = null;
+
+function assertTrustedLaunchDir(): void {
+  const cwd = process.cwd();
+  if (launchDirVerdict === null || launchDirVerdict.cwd !== cwd) {
+    launchDirVerdict = {
+      cwd,
+      refusal: untrustedRepositoryFrom(cwd, mountRootFor),
+    };
+  }
+  if (launchDirVerdict.refusal !== null) {
+    throw new Error(
+      `refusing to run git from this directory: ${launchDirVerdict.refusal}. ` +
+        `The command would resolve through that pointer and act on whatever ` +
+        `repository it names. Run the review from a checkout outside the ` +
+        `review temp dir.`,
+    );
+  }
+}
+
+/** Test seam: forget the memoized verdict, for a fixture that re-plants. */
+export function resetLaunchDirVerdictForTest(): void {
+  launchDirVerdict = null;
+}
+
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
@@ -78,6 +136,7 @@ export function gitWithInput(input: Buffer, args: string[]): string {
  * identity exists to track goes invisible.
  */
 export function gitWithInputRaw(input: Buffer, args: string[]): string {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, {
     ...gitOpts(),
     encoding: 'utf8',
@@ -128,6 +187,13 @@ export function gitProbe(...args: string[]): {
   status: number | null;
 } {
   try {
+    // Inside the try on purpose: for a PROBE, a launch directory this process
+    // must not resolve through is the `status: null` case this function already
+    // defines — "the command could not be run at all". Every caller of `gitOpt`
+    // handles that; making the probe throw where its whole contract is not to
+    // would turn a refusal into an unhandled failure at dozens of call sites.
+    // The command does not run either way, which is the part that matters.
+    assertTrustedLaunchDir();
     return {
       out: execFileSync('git', args, {
         ...gitOpts(),
@@ -316,6 +382,7 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
  * ENOBUFS rather than returning a short read. Diff capture uses this instead.
  */
 export function gitRaw(...args: string[]): Buffer {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, {
     ...gitOpts(),
     maxBuffer: 512 * 1024 * 1024,

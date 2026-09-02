@@ -842,6 +842,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // `worktree add` at step 4 left every command before it resolving through
   // exactly the pointer the gate exists to distrust.
   //
+  // Kept at this call site even though `lib/git`'s wrappers now ask the same
+  // question (see `assertTrustedLaunchDir`), because this command changes
+  // state that is NOT a git call before it makes one: the lease read and the
+  // lease write both land before `cleanStale`, and a run that registers a
+  // lease and then dies at the first git command has taken the lock for
+  // nothing. The ordering test pins exactly that — no lease read, no sweep,
+  // no git call.
+  //
   // A throw, not a refusal-to-fresh like the `--resume` gate's: that one can
   // fall back because the fresh path is the safe one, and here the fresh path
   // is what has been poisoned. There is no command left to run in a
