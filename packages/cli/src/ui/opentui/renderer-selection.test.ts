@@ -38,6 +38,14 @@ describe('compareVersions', () => {
     expect(compareVersions('1.3', '1.3.0')).toBe(0);
     expect(compareVersions('26', '26.4.0')).toBe(-1);
   });
+
+  it('sorts a pre-release below its numerically equal release', () => {
+    expect(compareVersions('1.3.0-beta', '1.3.0')).toBe(-1);
+    expect(compareVersions('1.3.0', '1.3.0-beta')).toBe(1);
+    expect(compareVersions('1.3.0-rc.1', '1.3.0-rc.1')).toBe(0);
+    // The floor gate therefore rejects a pre-release of the floor itself.
+    expect(isOpenTuiRuntimeSupported({ bun: '1.3.0-beta' })).toBe(false);
+  });
 });
 
 describe('isOpenTuiRuntimeSupported', () => {

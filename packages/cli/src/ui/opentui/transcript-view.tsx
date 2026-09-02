@@ -244,10 +244,10 @@ function ToolCard({
         </text>
         {description ? (
           <text fg={C.dim} {...selectionProps()}>
-            {` ${description}`}
+            {` ${sanitizeTerminalText(description)}`}
           </text>
         ) : null}
-        {suffix ? <text fg={C.dim}>{suffix}</text> : null}
+        {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
       </box>
       {item.confirm === 'pending' && !item.done ? (
         <text fg={C.yellow}> (awaiting approval)</text>

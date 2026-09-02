@@ -260,7 +260,36 @@ describe('OpenTuiApp shell wiring', () => {
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/rewind apply');
-    expect(onSubmitPrompt).toHaveBeenCalledWith('rewind to checkpoint');
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'rewind to checkpoint',
+      undefined,
+      {
+        modelOverride: undefined,
+        onComplete: undefined,
+        refreshContextFilesOnWrite: undefined,
+      },
+    );
+  });
+
+  it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
+    const onSubmitPrompt = vi.fn();
+    const onComplete = async () => {};
+    renderApp({ onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'submit_prompt',
+      content: 'summarize',
+      modelOverride: 'qwen3-max',
+      refreshContextFilesOnWrite: true,
+      onComplete,
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/model summarize');
+    expect(onSubmitPrompt).toHaveBeenCalledWith('summarize', undefined, {
+      modelOverride: 'qwen3-max',
+      refreshContextFilesOnWrite: true,
+      onComplete,
+    });
   });
 
   it('reaches the entry seam on a quit outcome', async () => {

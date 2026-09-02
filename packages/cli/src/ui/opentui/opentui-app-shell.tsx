@@ -51,6 +51,7 @@ import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import type { WaitingCallInfo } from './live-session.js';
+import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { OpenTuiSlashGateway } from './slash-gateway.js';
 import {
@@ -85,11 +86,13 @@ export interface OpenTuiAppProps {
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
    * argument: turning them into image parts (ink: attachments) belongs to the
-   * entry layer, so the shell must not flatten them into the prompt text.
+   * entry layer, so the shell must not flatten them into the prompt text. A
+   * `submit_prompt` outcome's per-turn options travel in the third argument.
    */
   onSubmitPrompt?: (
     content: PartListUnion,
     imagePaths?: readonly string[],
+    options?: OpenTuiSubmitOptions,
   ) => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
@@ -334,7 +337,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           setDialog(outcome.request);
           return;
         case 'submit_prompt':
-          if (onSubmitPrompt) onSubmitPrompt(outcome.content);
+          if (onSubmitPrompt)
+            onSubmitPrompt(outcome.content, undefined, {
+              modelOverride: outcome.modelOverride,
+              refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
+              onComplete: outcome.onComplete,
+            });
           else notify('The live prompt turn is not wired in this shell.');
           return;
         case 'schedule_tool':

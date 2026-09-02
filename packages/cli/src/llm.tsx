@@ -1200,30 +1200,43 @@ export async function main() {
       await themeAutoDetectionComplete;
       // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
       // selects the experimental backend only on a runtime that can drive it;
-      // every other case — including a failed renderer probe inside the entry —
-      // falls through to ink, which stays the default renderer.
+      // every other case — including a failed load or boot of the entry —
+      // falls through to ink, which stays the default renderer. The try/catch
+      // is load-bearing: importing the entry evaluates opentui modules whose
+      // module scope touches the native FFI, which can still throw on a
+      // runtime that passed the version gate.
       const { selectTuiRenderer } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      if (selectTuiRenderer().renderer === 'opentui') {
-        const { startOpenTuiUI } = await import(
-          './ui/opentui/start-opentui-ui.js'
-        );
-        const started = await startOpenTuiUI(
-          config,
-          settings,
-          startupWarnings,
-          process.cwd(),
-          initializationResult!,
-          {
-            postRenderConnectIde: deferIdeConnection,
-            extensionRefreshState,
-          },
-        );
-        if (started) {
-          clearCorruptionEnvVars();
-          return;
+      const selection = selectTuiRenderer();
+      if (selection.renderer === 'opentui') {
+        try {
+          const { startOpenTuiUI } = await import(
+            './ui/opentui/start-opentui-ui.js'
+          );
+          const started = await startOpenTuiUI(
+            config,
+            settings,
+            startupWarnings,
+            process.cwd(),
+            initializationResult!,
+            {
+              postRenderConnectIde: deferIdeConnection,
+              extensionRefreshState,
+            },
+          );
+          if (started) {
+            clearCorruptionEnvVars();
+            return;
+          }
+        } catch (err) {
+          debugLogger.error('OpenTUI boot failed; falling back to ink:', err);
+          writeStderrLine(
+            `Warning: OpenTUI failed to start — ${err instanceof Error ? err.message : String(err)} (falling back to ink)`,
+          );
         }
+      } else {
+        debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(

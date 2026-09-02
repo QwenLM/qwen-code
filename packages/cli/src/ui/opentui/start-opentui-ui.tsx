@@ -41,6 +41,7 @@ import {
   isDebugLogFileEnabled,
   registerSession,
   SessionEndReason,
+  ToolConfirmationOutcome,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -69,7 +70,7 @@ import type { UpdateObject } from '../utils/updateCheck.js';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
-import { useOpenTuiLiveTurn } from './live-turn.js';
+import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
@@ -109,7 +110,8 @@ function OpenTuiEntryApp({
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
   const live = useOpenTuiLiveTurn({ config });
-  const { applyEvent, submit, interrupt, resetTranscript } = live;
+  const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
+    live;
 
   const statsRef = useRef(stats);
   useEffect(() => {
@@ -178,9 +180,23 @@ function OpenTuiEntryApp({
   useEffect(() => {
     streamingRef.current = live.streaming;
   }, [live.streaming]);
+  const waitingCallsRef = useRef(live.waitingCalls);
+  useEffect(() => {
+    waitingCallsRef.current = live.waitingCalls;
+  }, [live.waitingCalls]);
   useKeyboard((key: KeyEvent) => {
     if (!key.ctrl || (key.name !== 'c' && key.name !== 'd')) return;
-    // ink: Ctrl+C while a turn is in flight interrupts, it never exits.
+    // ink handleExit cascade parity: a parked confirmation closes first
+    // (settled as Cancel), then an in-flight turn interrupts, and only a
+    // fully idle session arms the two-press exit window.
+    const parked = waitingCallsRef.current[0];
+    if (parked) {
+      void parked.confirmationDetails
+        .onConfirm(ToolConfirmationOutcome.Cancel)
+        .catch(() => {});
+      settleWaitingCall(parked.callId);
+      return;
+    }
     if (streamingRef.current) {
       interrupt();
       return;
@@ -225,8 +241,11 @@ function OpenTuiEntryApp({
   );
 
   const handleSubmitPrompt = useCallback(
-    (content: PartListUnion, imagePaths?: readonly string[]) =>
-      submit(content, imagePaths),
+    (
+      content: PartListUnion,
+      imagePaths?: readonly string[],
+      options?: OpenTuiSubmitOptions,
+    ) => submit(content, imagePaths, options),
     [submit],
   );
 
@@ -263,9 +282,9 @@ function OpenTuiEntryApp({
 }
 
 /**
- * Boots the OpenTUI backend. Returns `false` when the native renderer cannot
- * be created (bad terminal, unsupported runtime) so the caller falls back to
- * ink — startup must never die here.
+ * Boots the OpenTUI backend. Returns `false` when the OpenTUI boot cannot
+ * complete (renderer creation, runtime sidecar, or first render) so the
+ * caller falls back to ink — startup must never die here.
  */
 export async function startOpenTuiUI(
   config: Config,
@@ -286,108 +305,130 @@ export async function startOpenTuiUI(
     return false;
   }
 
-  const version = await getCliVersion();
-  if (
-    !settings.merged.ui?.hideWindowTitle &&
-    settings.merged.ui?.showStatusInTitle !== false
-  ) {
-    writeTerminalTitle(
-      (value) => process.stdout.write(value),
-      computeWindowTitle(basename(workspaceRoot)),
-    );
-  }
-
-  const runtime = OpenTuiRuntime.create({ config, version });
-  await runtime.writeRuntimeSidecar();
-  runtime.startPressureMonitor();
-
-  // Drain the early-captured input exactly once, before the renderer takes
-  // over stdin; the decoded text is injected into the composer after mount.
-  const capturedText = drainCapturedInputAsText();
-
+  // Everything past renderer creation is also fallible (sidecar I/O, render,
+  // prefetch wiring); a rejection must tear the renderer down and fall back
+  // to ink instead of crashing the process (B2).
   const root = createRoot(renderer);
-  root.render(
-    // children must sit in the props object: the provider declares it as a
-    // required prop, which createElement's rest-children overloads can't fill.
-    // eslint-disable-next-line react/no-children-prop
-    createElement(SessionStatsProvider, {
-      sessionId: config.getSessionId(),
-      children: (
-        <OpenTuiEntryApp
-          config={config}
-          settings={settings}
-          runtime={runtime}
-          startupWarnings={startupWarnings}
-          extensionRefreshState={options.extensionRefreshState}
-          capturedText={capturedText}
-        />
-      ),
-    }),
-  );
-  profileCheckpoint('first_paint');
-
-  startPostRenderPrefetches(config, settings, {
-    connectIde: options.postRenderConnectIde ?? false,
-    initializeTelemetry:
-      options.postRenderInitializeTelemetry ??
-      config.isTelemetryInitializationDeferred(),
-  });
-
-  registerCleanup(async () => {
-    root.unmount();
-    renderer.destroy();
-    await runtime.shutdown();
-    // If the error boundary caught a render crash, echo it now that the
-    // renderer is torn down (ink startInteractiveUI parity).
-    const renderError = consumeLastRenderError();
-    if (renderError) {
-      const loggedHint = isDebugLogFileEnabled()
-        ? ' (logged to debug file)'
-        : '';
-      writeStderrLine(
-        `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
+  let runtime: OpenTuiRuntime | null = null;
+  try {
+    const version = await getCliVersion();
+    if (
+      !settings.merged.ui?.hideWindowTitle &&
+      settings.merged.ui?.showStatusInTitle !== false
+    ) {
+      writeTerminalTitle(
+        (value) => process.stdout.write(value),
+        computeWindowTitle(basename(workspaceRoot)),
       );
     }
-    // The resume hint survives exit only on the main screen; the alt-screen
-    // transcript is discarded with the renderer. Mirrors the ink echo,
-    // including the sessionId-shape and non-empty-transcript gates.
-    try {
-      if (process.stdout.isTTY && config.getChatRecordingService()) {
-        const sessionId = config.getSessionId();
-        const sessionFile = config.getTranscriptPath();
-        if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
-          writeStdoutLine(
-            `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
-          );
-        }
+
+    runtime = OpenTuiRuntime.create({ config, version });
+    await runtime.writeRuntimeSidecar();
+    runtime.startPressureMonitor();
+
+    // Drain the early-captured input exactly once, before the renderer takes
+    // over stdin; the decoded text is injected into the composer after mount.
+    const capturedText = drainCapturedInputAsText();
+
+    root.render(
+      // children must sit in the props object: the provider declares it as a
+      // required prop, which createElement's rest-children overloads can't fill.
+      // eslint-disable-next-line react/no-children-prop
+      createElement(SessionStatsProvider, {
+        sessionId: config.getSessionId(),
+        children: (
+          <OpenTuiEntryApp
+            config={config}
+            settings={settings}
+            runtime={runtime}
+            startupWarnings={startupWarnings}
+            extensionRefreshState={options.extensionRefreshState}
+            capturedText={capturedText}
+          />
+        ),
+      }),
+    );
+    profileCheckpoint('first_paint');
+
+    startPostRenderPrefetches(config, settings, {
+      connectIde: options.postRenderConnectIde ?? false,
+      initializeTelemetry:
+        options.postRenderInitializeTelemetry ??
+        config.isTelemetryInitializationDeferred(),
+    });
+
+    registerCleanup(async () => {
+      root.unmount();
+      renderer.destroy();
+      await runtime!.shutdown();
+      // If the error boundary caught a render crash, echo it now that the
+      // renderer is torn down (ink startInteractiveUI parity).
+      const renderError = consumeLastRenderError();
+      if (renderError) {
+        const loggedHint = isDebugLogFileEnabled()
+          ? ' (logged to debug file)'
+          : '';
+        writeStderrLine(
+          `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
+        );
       }
-    } catch {
-      // Best-effort: a hint must never block or break exit.
-    }
-  });
+      // The resume hint survives exit only on the main screen; the alt-screen
+      // transcript is discarded with the renderer. Mirrors the ink echo,
+      // including the sessionId-shape and non-empty-transcript gates.
+      try {
+        if (process.stdout.isTTY && config.getChatRecordingService()) {
+          const sessionId = config.getSessionId();
+          const sessionFile = config.getTranscriptPath();
+          if (
+            isValidSessionId(sessionId) &&
+            (await stat(sessionFile)).size > 0
+          ) {
+            writeStdoutLine(
+              `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
+            );
+          }
+        }
+      } catch {
+        // Best-effort: a hint must never block or break exit.
+      }
+    });
 
-  // SessionEnd hook parity (ink AppContainer registers the same cleanup):
-  // user-configured SessionEnd hooks must fire on exit from this entry too.
-  registerCleanup(async () => {
+    // SessionEnd hook parity (ink AppContainer registers the same cleanup):
+    // user-configured SessionEnd hooks must fire on exit from this entry too.
+    registerCleanup(async () => {
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionEndEvent(SessionEndReason.PromptInputExit);
+      } catch (err) {
+        debugLogger.error(`SessionEnd hook failed: ${err}`);
+      }
+    });
+
+    // Announce this session only after the teardown cleanup above is armed
+    // (ink startInteractiveUI ordering).
+    config.trackSessionRegistration(
+      registerSession({
+        sessionId: config.getSessionId(),
+        cwd: config.getTargetDir(),
+        qwenVersion: version,
+      }),
+    );
+    registerCleanup(() => config.unregisterSessionRegistry());
+
+    return true;
+  } catch (err) {
+    debugLogger.error('OpenTUI startup failed; falling back to ink:', err);
+    writeStderrLine(
+      `Warning: OpenTUI startup failed — ${err instanceof Error ? err.message : String(err)} (falling back to ink)`,
+    );
     try {
-      await config
-        .getHookSystem()
-        ?.fireSessionEndEvent(SessionEndReason.PromptInputExit);
-    } catch (err) {
-      debugLogger.error(`SessionEnd hook failed: ${err}`);
+      root.unmount();
+      renderer.destroy();
+      if (runtime) await runtime.shutdown();
+    } catch {
+      // Best-effort teardown; ink takes over from here.
     }
-  });
-
-  // Announce this session only after the teardown cleanup above is armed
-  // (ink startInteractiveUI ordering).
-  config.trackSessionRegistration(
-    registerSession({
-      sessionId: config.getSessionId(),
-      cwd: config.getTargetDir(),
-      qwenVersion: version,
-    }),
-  );
-  registerCleanup(() => config.unregisterSessionRegistry());
-
-  return true;
+    return false;
+  }
 }

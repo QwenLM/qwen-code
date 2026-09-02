@@ -414,12 +414,15 @@ function AskUserQuestionFlow(props: {
     }
   });
 
-  // Defensive: an empty question list has nothing to answer; settle as cancel
-  // (from an effect — settling during render would update the parent
-  // mid-render) so the waiting call never hangs.
+  // Defensive: an empty question list, or a question with no options, has
+  // nothing to answer; settle as cancel (from an effect — settling during
+  // render would update the parent mid-render) so the waiting call never
+  // hangs.
   useEffect(() => {
-    if (details.questions.length === 0) onAnswered(null);
-  }, [details.questions.length, onAnswered]);
+    if (details.questions.length === 0 || !question?.options?.length) {
+      onAnswered(null);
+    }
+  }, [details.questions.length, question, onAnswered]);
 
   if (!question) return null;
 

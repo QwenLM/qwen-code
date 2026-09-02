@@ -20,7 +20,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { readFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { collectText, normalizeParts } from '@qwen-code/qwen-code-core';
+import {
+  collectText,
+  normalizeParts,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   foldLiveEvent,
@@ -77,6 +81,17 @@ export interface UseOpenTuiLiveTurnOptions {
   config: Config;
 }
 
+/**
+ * Options a `submit_prompt` dispatcher outcome carries into the turn
+ * (ink SubmitPromptResult parity): per-turn model override, context-file
+ * memory refresh, and the post-turn callback.
+ */
+export interface OpenTuiSubmitOptions {
+  modelOverride?: string;
+  refreshContextFilesOnWrite?: boolean;
+  onComplete?: () => Promise<void>;
+}
+
 export interface OpenTuiLiveTurn {
   items: readonly LiveHistoryItem[];
   streaming: boolean;
@@ -86,8 +101,15 @@ export interface OpenTuiLiveTurn {
   queueLength: number;
   /** Pops the whole queue back into the composer (Esc parity). */
   popQueue(): string | null;
-  /** Submits a prompt (or queues it when a turn is in flight). */
-  submit(content: PartListUnion, imagePaths?: readonly string[]): void;
+  /**
+   * Submits a prompt (or queues it when a turn is in flight). A
+   * `submit_prompt` outcome's per-turn options travel in `options`.
+   */
+  submit(
+    content: PartListUnion,
+    imagePaths?: readonly string[],
+    options?: OpenTuiSubmitOptions,
+  ): void;
   /** Aborts the in-flight turn (Esc). */
   interrupt(): void;
   /** Replaces the transcript from a replay batch (session switch/resume). */
@@ -121,6 +143,13 @@ export function useOpenTuiLiveTurn(
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
+  // Generation counter: resetTranscript invalidates the in-flight turn so
+  // its late events, settles, and queue resubmits cannot touch the fresh
+  // transcript (P2-2).
+  const turnSeqRef = useRef(0);
+  // Render-synced mirror: resetTranscript reads parked calls synchronously.
+  const waitingCallsRef = useRef<readonly WaitingCallInfo[]>([]);
+  waitingCallsRef.current = waitingCalls;
 
   const setBusy = useCallback((busy: boolean) => {
     if (streamingRef.current === busy) return;
@@ -145,15 +174,23 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const runTurn = useCallback(
-    async (prompt: PartListUnion, promptId: string) => {
+    async (
+      prompt: PartListUnion,
+      promptId: string,
+      turnOptions?: OpenTuiSubmitOptions,
+    ) => {
+      const seq = ++turnSeqRef.current;
       const abort = new AbortController();
       abortRef.current = abort;
       setBusy(true);
       try {
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          modelOverride: turnOptions?.modelOverride,
+          refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           onWaitingCall: (call) => {
+            if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
               prev.some((c) => c.callId === call.callId)
                 ? prev
@@ -161,9 +198,16 @@ export function useOpenTuiLiveTurn(
             );
           },
         })) {
+          if (seq !== turnSeqRef.current) return;
           apply(ev);
         }
+        // ink parity (use-llm-stream submitPromptOnCompleteRef): fired once
+        // after the turn completes successfully, never on error/abort.
+        if (seq === turnSeqRef.current) {
+          void turnOptions?.onComplete?.().catch(() => {});
+        }
       } catch (error) {
+        if (seq !== turnSeqRef.current) return;
         if (abort.signal.aborted) {
           // Esc: ink settles every open tool as interrupted.
           setItems((prev) => settleOpenTools([...prev], 'interrupted'));
@@ -174,15 +218,18 @@ export function useOpenTuiLiveTurn(
           });
         }
       } finally {
-        abortRef.current = null;
-        setBusy(false);
-        // Whatever survived the tool-boundary drain becomes the next turn.
-        const rest = queueRef.current;
-        if (rest.length > 0) {
-          const text = drainQueue().join('\n');
-          if (text.trim()) {
-            apply({ type: 'user', text });
-            void runTurn(text, nextLivePromptId(config));
+        // A stale turn must not clear a successor's controller.
+        if (abortRef.current === abort) abortRef.current = null;
+        if (seq === turnSeqRef.current) {
+          setBusy(false);
+          // Whatever survived the tool-boundary drain becomes the next turn.
+          const rest = queueRef.current;
+          if (rest.length > 0) {
+            const text = drainQueue().join('\n');
+            if (text.trim()) {
+              apply({ type: 'user', text });
+              void runTurn(text, nextLivePromptId(config));
+            }
           }
         }
       }
@@ -191,14 +238,19 @@ export function useOpenTuiLiveTurn(
   );
 
   const submit = useCallback(
-    (content: PartListUnion, imagePaths?: readonly string[]) => {
+    (
+      content: PartListUnion,
+      imagePaths?: readonly string[],
+      options?: OpenTuiSubmitOptions,
+    ) => {
       const text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
       if (streamingRef.current) {
         // The steering queue is text-only; say so instead of losing the
-        // attachments without a trace.
+        // attachments without a trace. Per-turn options ride on the queued
+        // text's own submit_prompt, never on the steering drain.
         if (imagePaths && imagePaths.length > 0) {
           apply({
             type: 'warning',
@@ -214,7 +266,7 @@ export function useOpenTuiLiveTurn(
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
       apply({ type: 'user', text, promptId, sentToModel: true });
-      void runTurn(prompt, promptId);
+      void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],
   );
@@ -225,10 +277,31 @@ export function useOpenTuiLiveTurn(
 
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
-      setItems(foldBatch(events));
+      // Invalidate the in-flight generation first: its late events and
+      // settles are dead on arrival (P2-2).
+      turnSeqRef.current += 1;
+      const abort = abortRef.current;
+      abortRef.current = null;
+      // Settle parked confirmations as Cancel so the scheduler's queue wakes
+      // and its completion callback fires — otherwise the generator parks
+      // forever (P2-3). Post-abort answers are treated as Cancel anyway
+      // (coreToolScheduler handleConfirmationResponse).
+      for (const call of waitingCallsRef.current) {
+        void call.confirmationDetails
+          .onConfirm(ToolConfirmationOutcome.Cancel)
+          .catch(() => {});
+      }
+      abort?.abort();
+      queueRef.current = [];
+      setQueueLength(0);
+      waitingCallsRef.current = [];
       setWaitingCalls([]);
+      // Synchronous: a submit right after the reset must start a fresh turn,
+      // not land in the dying one's queue.
+      setBusy(false);
+      setItems(foldBatch(events));
     },
-    [],
+    [setBusy],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {

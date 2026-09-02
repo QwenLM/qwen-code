@@ -54,7 +54,11 @@ export function parseVersion(version: string): number[] {
   return segments;
 }
 
-/** Returns -1 when a < b, 0 when equal, 1 when a > b. */
+/**
+ * Returns -1 when a < b, 0 when equal, 1 when a > b. Numerically equal
+ * versions break the tie semver-style: a pre-release sorts below its release
+ * (`1.3.0-beta < 1.3.0`), so a floor of `1.3.0` rejects `1.3.0-beta`.
+ */
 export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   const as = parseVersion(a);
   const bs = parseVersion(b);
@@ -64,6 +68,9 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
     const right = bs[i] ?? 0;
     if (left !== right) return left < right ? -1 : 1;
   }
+  const aPre = a.includes('-');
+  const bPre = b.includes('-');
+  if (aPre !== bPre) return aPre ? -1 : 1;
   return 0;
 }
 
