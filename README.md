@@ -143,7 +143,7 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 | ------------- | ----- |
 | Dataset | `princeton-nlp/SWE-bench_Verified`, 500 cases |
 | Runs | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions |
-| Model | `Qwen 3.8 Max` |
+| Model | `Qwen 3.7 Max` |
 | Sampling | `temperature=1`, `top_p=0.95` |
 | Thinking / Reasoning | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high` |
 | Context / Output Limits | `context_1m=true`, `model_context_length=1,000,000`, `max_tokens=64,000`, `model_max_tokens=65,535` |

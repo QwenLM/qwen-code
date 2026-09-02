@@ -1,16 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520">
-<rect width="100%" height="100%" fill="#FFFFFF"/>
-<text x="78" y="34" font-family="Arial, PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#16324F">Qwen Code 版本核验分数趋势</text>
-<text x="1082" y="34" text-anchor="end" font-family="Arial, PingFang SC, sans-serif" font-size="14" fill="#667085">SWE-bench Verified · Qwen 3.8 Max · 500 Case × 3 trials</text>
-<g font-family="Arial, PingFang SC, sans-serif"><line x1="78" y1="436" x2="1082" y2="436" stroke="#D8E0EA" stroke-width="1"/><text x="64" y="441" text-anchor="end" font-size="14" fill="#52606D">76.0%</text>
-<line x1="78" y1="352.3636363636365" x2="1082" y2="352.3636363636365" stroke="#D8E0EA" stroke-width="1"/><text x="64" y="357.3636363636365" text-anchor="end" font-size="14" fill="#52606D">76.5%</text>
-<line x1="78" y1="268.727272727273" x2="1082" y2="268.727272727273" stroke="#D8E0EA" stroke-width="1"/><text x="64" y="273.727272727273" text-anchor="end" font-size="14" fill="#52606D">77.0%</text>
-<line x1="78" y1="185.0909090909094" x2="1082" y2="185.0909090909094" stroke="#D8E0EA" stroke-width="1"/><text x="64" y="190.0909090909094" text-anchor="end" font-size="14" fill="#52606D">77.5%</text>
-<line x1="78" y1="101.4545454545459" x2="1082" y2="101.4545454545459" stroke="#D8E0EA" stroke-width="1"/><text x="64" y="106.4545454545459" text-anchor="end" font-size="14" fill="#52606D">78.0%</text><line x1="78" y1="436" x2="1082" y2="436" stroke="#98A2B3" stroke-width="1.2"/><path d="M 78.0 134.9 L 245.3 313.9 L 412.7 335.6 L 580.0 357.4 L 747.3 156.7 L 914.7 369.1 L 1082.0 213.5" fill="none" stroke="#1F6FEB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="78" cy="134.9090909090918" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="78" y="118.90909090909179" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.80%</text><text x="78" y="478" text-anchor="middle" font-size="14" fill="#344054">0.0.14</text>
-<circle cx="245.33333333333334" cy="313.89090909090856" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="245.33333333333334" y="297.89090909090856" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.73%</text><text x="245.33333333333334" y="478" text-anchor="middle" font-size="14" fill="#344054">0.1.0</text>
-<circle cx="412.6666666666667" cy="335.6363636363647" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="412.6666666666667" y="319.6363636363647" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.60%</text><text x="412.6666666666667" y="478" text-anchor="middle" font-size="14" fill="#344054">0.5.0</text>
-<circle cx="580" cy="357.38181818181846" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="580" y="341.38181818181846" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.47%</text><text x="580" y="478" text-anchor="middle" font-size="14" fill="#344054">0.10.0</text>
-<circle cx="747.3333333333334" cy="156.65454545454554" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="747.3333333333334" y="140.65454545454554" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.67%</text><text x="747.3333333333334" y="478" text-anchor="middle" font-size="14" fill="#344054">0.15.0</text>
-<circle cx="914.6666666666666" cy="369.0909090909082" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="914.6666666666666" y="353.0909090909082" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.40%</text><text x="914.6666666666666" y="478" text-anchor="middle" font-size="14" fill="#344054">0.19.0</text>
-<circle cx="1082" cy="213.5272727272733" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/><text x="1082" y="197.5272727272733" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.33%</text><text x="1082" y="478" text-anchor="middle" font-size="14" fill="#344054">0.22.0</text></g>
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430">
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <g font-family="Arial, sans-serif">
+    <line x1="70" y1="368" x2="1082" y2="368" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="373" text-anchor="end" font-size="14" fill="#52606D">76.0%</text>
+    <line x1="70" y1="285.5" x2="1082" y2="285.5" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="290.5" text-anchor="end" font-size="14" fill="#52606D">76.5%</text>
+    <line x1="70" y1="203" x2="1082" y2="203" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="208" text-anchor="end" font-size="14" fill="#52606D">77.0%</text>
+    <line x1="70" y1="120.5" x2="1082" y2="120.5" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="125.5" text-anchor="end" font-size="14" fill="#52606D">77.5%</text>
+    <line x1="70" y1="38" x2="1082" y2="38" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="43" text-anchor="end" font-size="14" fill="#52606D">78.0%</text>
+    <path d="M 70 71 L 238.7 247.6 L 407.3 269 L 576 290.5 L 744.7 92.5 L 913.3 302 L 1082 148.6" fill="none" stroke="#1F6FEB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="70" cy="71" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="70" y="55" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.80%</text>
+    <text x="70" y="407" text-anchor="middle" font-size="14" fill="#344054">0.0.14</text>
+    <circle cx="238.7" cy="247.6" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="238.7" y="231.6" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.73%</text>
+    <text x="238.7" y="407" text-anchor="middle" font-size="14" fill="#344054">0.1.0</text>
+    <circle cx="407.3" cy="269" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="407.3" y="253" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.60%</text>
+    <text x="407.3" y="407" text-anchor="middle" font-size="14" fill="#344054">0.5.0</text>
+    <circle cx="576" cy="290.5" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="576" y="274.5" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.47%</text>
+    <text x="576" y="407" text-anchor="middle" font-size="14" fill="#344054">0.10.0</text>
+    <circle cx="744.7" cy="92.5" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="744.7" y="76.5" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.67%</text>
+    <text x="744.7" y="407" text-anchor="middle" font-size="14" fill="#344054">0.15.0</text>
+    <circle cx="913.3" cy="302" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="913.3" y="286" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.40%</text>
+    <text x="913.3" y="407" text-anchor="middle" font-size="14" fill="#344054">0.19.0</text>
+    <circle cx="1082" cy="148.6" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="1082" y="132.6" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.33%</text>
+    <text x="1082" y="407" text-anchor="middle" font-size="14" fill="#344054">0.22.0</text>
+  </g>
 </svg>
