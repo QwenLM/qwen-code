@@ -650,11 +650,15 @@ export abstract class ChannelBase {
         sourceLabel,
       );
     } catch (error) {
-      this.cancelBtw(sessionId);
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
       throw error;
     }
     if (!this.isBtwCurrent(sessionId, request)) {
-      this.cancelBtw(sessionId);
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
       return;
     }
     void this.deliverBtw(sessionId, question, request).catch((error) => {
@@ -717,10 +721,12 @@ export abstract class ChannelBase {
     }
     const currentTarget = this.router.getTarget(sessionId);
     // Compare owner + thread only: SessionRouter.promoteTargetToGroup flips
-    // the live target's isGroup whenever any group envelope resolves the same
-    // routing key, which changes neither the conversation nor the delivery
-    // destination, so it must not void an acknowledged answer. The named-task
-    // branch below keeps the stricter sameSessionTarget comparison.
+    // the live target's isGroup whenever any group envelope or loop/webhook
+    // target resolves the same routing key, which changes neither the
+    // conversation nor the delivery destination, so it must not void an
+    // acknowledged answer. The named-task branch applies the same tolerance to
+    // the registry's creation-time snapshot, which keeps the pre-promotion
+    // isGroup value.
     if (
       !currentTarget ||
       !this.sameTaskOwner(request.target, currentTarget) ||
@@ -733,7 +739,8 @@ export abstract class ChannelBase {
     return (
       reference?.status === 'open' &&
       reference.taskName === request.taskName &&
-      this.sameSessionTarget(currentTarget, reference.target)
+      this.sameTaskOwner(currentTarget, reference.target) &&
+      currentTarget.threadId === reference.target.threadId
     );
   }
 
@@ -5948,14 +5955,6 @@ export abstract class ChannelBase {
       a.channelName === b.channelName &&
       a.chatId === b.chatId &&
       a.senderId === b.senderId
-    );
-  }
-
-  private sameSessionTarget(a: SessionTarget, b: SessionTarget): boolean {
-    return (
-      this.sameTaskOwner(a, b) &&
-      a.threadId === b.threadId &&
-      a.isGroup === b.isGroup
     );
   }
 

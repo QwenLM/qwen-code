@@ -16361,6 +16361,98 @@ describe('ChannelBase', () => {
       ).toBe(0);
     });
 
+    it('does not cancel a newer side question when a stale acknowledgement settles', async () => {
+      let releaseAck!: () => void;
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      let gated = false;
+      ch.sendMessage = async (chatId, text) => {
+        await sendMessage(chatId, text);
+        if (!gated && text.includes('received')) {
+          gated = true;
+          await ackGate;
+        }
+      };
+
+      const first = ch.handleInbound(envelope({ text: '/btw first' }));
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+
+      // Crash recovery keeps the session id; the retry registers a successor
+      // under it while the stale acknowledgement is still in flight.
+      const nextBridge = createBridge();
+      let resolveSecond!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      (nextBridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+      );
+      ch.setBridge(nextBridge);
+
+      await ch.handleInbound(envelope({ text: '/btw second' }));
+      await vi.waitFor(() => expect(nextBridge.btw).toHaveBeenCalledOnce());
+
+      releaseAck();
+      await first;
+
+      resolveSecond({ sessionId: 's-1', answer: 'second answer' });
+      await vi.waitFor(() =>
+        expect(ch.sent.some(({ text }) => text.includes('second answer'))).toBe(
+          true,
+        ),
+      );
+    });
+
+    it('does not cancel a newer side question when a stale acknowledgement fails', async () => {
+      let failAck!: (error: Error) => void;
+      const ackGate = new Promise<void>((_, reject) => {
+        failAck = reject;
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      let gated = false;
+      ch.sendMessage = async (chatId, text) => {
+        await sendMessage(chatId, text);
+        if (!gated && text.includes('received')) {
+          gated = true;
+          await ackGate;
+        }
+      };
+
+      const first = ch.handleInbound(envelope({ text: '/btw first' }));
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+
+      const nextBridge = createBridge();
+      let resolveSecond!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      (nextBridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+      );
+      ch.setBridge(nextBridge);
+
+      await ch.handleInbound(envelope({ text: '/btw second' }));
+      await vi.waitFor(() => expect(nextBridge.btw).toHaveBeenCalledOnce());
+
+      failAck(new Error('transient send failure'));
+      await expect(first).rejects.toThrow('transient send failure');
+
+      resolveSecond({ sessionId: 's-1', answer: 'second answer' });
+      await vi.waitFor(() =>
+        expect(ch.sent.some(({ text }) => text.includes('second answer'))).toBe(
+          true,
+        ),
+      );
+    });
+
     it('suppresses a late result after the session dies', async () => {
       let resolveBtw!: (result: {
         sessionId: string;
@@ -16466,6 +16558,49 @@ describe('ChannelBase', () => {
           true,
         ),
       );
+    });
+
+    it('still delivers a named-task answer when the session target is promoted to a group mid-flight', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-btw-'));
+      let resolveBtw!: (result: {
+        sessionId: string;
+        answer: string | null;
+      }) => void;
+      (bridge.btw as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveBtw = resolve;
+        }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+
+        await ch.handleInbound(envelope({ text: '/btw question' }));
+        await vi.waitFor(() => expect(bridge.btw).toHaveBeenCalledOnce());
+
+        // Named turns resolve through the named-session registry, so only a
+        // loop/webhook target with isGroup: true reaches router.resolve on the
+        // owner's routing key mid-flight (as runLoopJob/runWebhookTask do).
+        await (ch as unknown as { router: SessionRouter }).router.resolve(
+          'test-chan',
+          'user1',
+          'chat1',
+          undefined,
+          '/tmp',
+          true,
+        );
+
+        resolveBtw({ sessionId: 's-1', answer: 'side answer' });
+
+        await vi.waitFor(() =>
+          expect(ch.sent.some(({ text }) => text.includes('side answer'))).toBe(
+            true,
+          ),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
     });
 
     it('rejects a response that belongs to a different session', async () => {
