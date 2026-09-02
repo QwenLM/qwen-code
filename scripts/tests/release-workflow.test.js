@@ -538,7 +538,10 @@ describe('release workflow', () => {
       (step) => step.name === 'Run Workspace Tests',
     );
     expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests',
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"',
+    );
+    expect(testStep.env.VITEST_RETRY).toBe(
+      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -1557,7 +1560,7 @@ describe('Live Host feed contract', () => {
 
 describe('release lane runner routing', () => {
   const ecsRunsOn =
-    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
+    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
 
   it('routes validation jobs to ECS with a hosted emergency fallback', () => {
     const validationJobs = [
@@ -1575,6 +1578,28 @@ describe('release lane runner routing', () => {
       expect(job, `job missing from release.yml: ${name}`).toBeTruthy();
       expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(ecsRunsOn);
     }
+  });
+
+  it('classifies each schedule cron by the exact string it fires with', () => {
+    // prepare tells nightly from preview by comparing github.event.schedule
+    // against the cron text; a cron edited here without its comparison
+    // silently turns that schedule into a no-op run.
+    const crons = releaseYaml.on.schedule.map((entry) => entry.cron);
+    expect(crons).toHaveLength(2);
+    const vars = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'vars',
+    );
+    for (const cron of crons) {
+      expect(vars.run).toContain(`"\${CRON}" == "${cron}"`);
+    }
+  });
+
+  it('serializes scheduled release validation without coupling manual runs', () => {
+    expect(releaseYaml.concurrency).toEqual({
+      group:
+        "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}",
+      'cancel-in-progress': false,
+    });
   });
 
   it('passes the runner environment to integration test configuration', () => {

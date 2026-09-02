@@ -54,11 +54,7 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import {
-  mergeSessionPrLists,
-  readSessionPrs,
-  writeSessionPrs,
-} from './session-pr-service.js';
+import { moveSessionPrSidecar } from './session-pr-service.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -824,6 +820,10 @@ export class SessionService {
   private readonly projectRoot: string;
   private readonly onWarning: ((message: string) => void) | undefined;
   private readonly transcriptReader: SessionTranscriptReader;
+  private sessionPrBoundCallback?: (
+    sessionId: string,
+    pr: { number: number; url: string },
+  ) => void;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
@@ -1026,6 +1026,36 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Fires when the shell tool persists a `gh pr create` binding for a
+   * session (agent process). The serve host wires this to mark the session
+   * catalog so clients refetch the binding; unwired it is a no-op.
+   */
+  setSessionPrBoundCallback(
+    callback:
+      | ((sessionId: string, pr: { number: number; url: string }) => void)
+      | undefined,
+  ): void {
+    this.sessionPrBoundCallback = callback;
+  }
+
+  /**
+   * Exposes the registered callback so `Config.relocateWorkingDirectory`
+   * can carry it onto the replacement service when it resets this one.
+   */
+  getSessionPrBoundCallback():
+    | ((sessionId: string, pr: { number: number; url: string }) => void)
+    | undefined {
+    return this.sessionPrBoundCallback;
+  }
+
+  emitSessionPrBound(
+    sessionId: string,
+    pr: { number: number; url: string },
+  ): void {
+    this.sessionPrBoundCallback?.(sessionId, pr);
   }
 
   /**
@@ -1779,46 +1809,6 @@ export class SessionService {
     fs.unlinkSync(sourcePath);
   }
 
-  /**
-   * Move a PR sidecar across archive states. Same policy as
-   * {@link moveLedgerSidecar}: the sidecar is the append-only binding
-   * history, so when both halves of a split pair exist (a crash between
-   * the transcript rename and the sidecar move, or an orphaned write)
-   * they are merged by PR number instead of wedging the pair forever —
-   * no transition would ever reunite them otherwise. Throws propagate to
-   * the caller, which owns the warn-only policy.
-   */
-  private async movePrSidecar(
-    sourcePath: string,
-    destinationPath: string,
-    assertCanMutate?: () => void,
-  ): Promise<void> {
-    if (!fs.existsSync(sourcePath)) {
-      return;
-    }
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    if (!fs.existsSync(destinationPath)) {
-      assertCanMutate?.();
-      fs.renameSync(sourcePath, destinationPath);
-      return;
-    }
-    const merged = mergeSessionPrLists(
-      (await readSessionPrs(destinationPath)) ?? [],
-      (await readSessionPrs(sourcePath)) ?? [],
-    );
-    if (merged.length > 0) {
-      if (assertCanMutate) {
-        await writeSessionPrs(destinationPath, merged, {
-          assertCanCommit: assertCanMutate,
-        });
-      } else {
-        await writeSessionPrs(destinationPath, merged);
-      }
-    }
-    assertCanMutate?.();
-    fs.unlinkSync(sourcePath);
-  }
-
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -1843,7 +1833,12 @@ export class SessionService {
       );
     }
     try {
-      await this.movePrSidecar(
+      // The move runs under the sidecar lock covering both endpoints: the
+      // session child's shell binder may hold a pending write on either
+      // half, and an unlocked move would clobber and unlink it. The
+      // ownership fence runs inside the lock at each mutation, and a
+      // split pair is merged there (see moveSessionPrSidecar).
+      await moveSessionPrSidecar(
         this.getPrSessionPathForState(sessionId, sourceState),
         this.getPrSessionPathForState(sessionId, destinationState),
         assertCleanupOwned,
@@ -2823,12 +2818,12 @@ export class SessionService {
 
   /**
    * Enumerates every persisted session id of this project for one archive
-   * state by reading the chats dir directly. Unlike {@link listSessions}
-   * there is no mtime cursor and no page size: an exhaustive sweep paged
-   * by the strict `mtime < cursor` filter would silently skip sessions
-   * that share an mtime with a page's last entry, on every run. Same
-   * disk-walk shape as {@link countSessionsInState} — first-record read
-   * for project membership only, no title/prompt hydration.
+   * state by reading the chats dir directly, in deterministic filename
+   * order. Unlike {@link listSessions} there is no mtime cursor and no
+   * page size: an exhaustive sweep paged by the strict `mtime < cursor`
+   * filter would silently skip sessions that share an mtime with a page's
+   * last entry, on every run. Membership is checked the same way as
+   * {@link listSessions}.
    */
   async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
@@ -2841,9 +2836,13 @@ export class SessionService {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
+    fileNames.sort();
     const sessionIds: string[] = [];
+    let filesProcessed = 0;
     for (const name of fileNames) {
       if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed += 1;
       const filePath = path.join(chatsDir, name);
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
@@ -3373,7 +3372,7 @@ export class SessionService {
           this.removeFileIfExists(active.filePath);
           try {
             options.assertCleanupOwned?.();
-            await this.movePrSidecar(
+            await moveSessionPrSidecar(
               this.getPrSessionPathForState(sessionId, 'active'),
               this.getPrSessionPathForState(sessionId, 'archived'),
               options.assertCleanupOwned,
@@ -3511,7 +3510,7 @@ export class SessionService {
           this.removeFileIfExists(archived.filePath);
           try {
             options.assertCleanupOwned?.();
-            await this.movePrSidecar(
+            await moveSessionPrSidecar(
               this.getPrSessionPathForState(sessionId, 'archived'),
               this.getPrSessionPathForState(sessionId, 'active'),
               options.assertCleanupOwned,

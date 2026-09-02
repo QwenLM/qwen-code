@@ -20,7 +20,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 96 * 1024 * 1024;
+// The docker-sandbox E2E leg builds its image by running this script, so an
+// over-budget package turns main's E2E run red as well as blocking publishing.
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 112 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [

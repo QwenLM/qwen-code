@@ -154,6 +154,18 @@ describe('qwen sessions ps', () => {
     expect(stdout[0]).not.toContain('\n');
   });
 
+  it('strips the inbox auth token from the JSON output', async () => {
+    listLiveSessions.mockResolvedValue([
+      record({ ipcPath: '/tmp/a.sock', ipcToken: 'secret-token' }),
+    ]);
+    await run({ json: true });
+
+    const emitted = JSON.parse(stdout[0]);
+    expect(emitted.ipcPath).toBe('/tmp/a.sock');
+    expect(emitted).not.toHaveProperty('ipcToken');
+    expect(stdout[0]).not.toContain('secret-token');
+  });
+
   it('prints nothing on stdout for an empty JSON listing', async () => {
     listLiveSessions.mockResolvedValue([]);
     await run({ json: true });

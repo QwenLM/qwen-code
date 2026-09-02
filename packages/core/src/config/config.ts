@@ -4671,11 +4671,12 @@ export class Config {
   /** Serialize the peer inbox address with every other registry patch. */
   async updateSessionRegistryIpcPath(
     ipcPath: string | undefined,
+    ipcToken?: string,
   ): Promise<void> {
     if (!this.sessionRegistryActive) return;
     let applied = false;
     this.queueSessionRegistryWrite(async () => {
-      applied = await patchSessionRecord({ ipcPath });
+      applied = await patchSessionRecord({ ipcPath, ipcToken });
       if (ipcPath === undefined || applied) return;
       // The advertise is one-shot: no later patch re-asserts ipcPath, and
       // every skip is transient (the fd-pressure window on this process's
@@ -4684,7 +4685,7 @@ export class Config {
       // session would keep a live inbox no peer can ever discover.
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord({ ipcPath });
+        applied = await patchSessionRecord({ ipcPath, ipcToken });
       }
       if (!applied) {
         this.debugLogger.warn(
@@ -5806,7 +5807,17 @@ export class Config {
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
+    // The pr-bound callback is registered once at session init; relocation
+    // resets the service, so carry it onto the replacement instance — a
+    // later `gh pr create` in this session must still reach the bridge.
+    const sessionPrBoundCallback =
+      this.sessionService?.getSessionPrBoundCallback();
     this.sessionService = undefined;
+    if (sessionPrBoundCallback) {
+      this.getSessionService().setSessionPrBoundCallback(
+        sessionPrBoundCallback,
+      );
+    }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 

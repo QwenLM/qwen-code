@@ -868,6 +868,167 @@ describe('WorkspaceSection label', () => {
 });
 
 describe('WorkspaceSection session loading', () => {
+  it('groups scheduled-task runs without a session-organization capability', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'run-2',
+        displayName: 'Review PRs · 08-31 08:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'ordinary',
+        displayName: 'Ordinary session',
+        sourceType: 'default',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+
+    const taskGroup = container.querySelector(
+      'section[aria-label="Review PRs"]',
+    );
+    expect(taskGroup).not.toBeNull();
+    expect(
+      taskGroup?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(taskGroup?.textContent).toContain('Review PRs · 08-31 09:30');
+    expect(taskGroup?.textContent).toContain('Review PRs · 08-31 08:30');
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]')?.textContent,
+    ).toContain('Ordinary session');
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]')?.textContent,
+    ).not.toContain('Review PRs ·');
+  });
+
+  it('forms the scheduled-task section while organization is enabled', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+      {
+        sessionId: 'ordinary',
+        displayName: 'Ordinary session',
+        sourceType: 'default',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      organizationEnabled: true,
+    });
+    await flush();
+
+    const taskGroup = container.querySelector(
+      'section[aria-label="Review PRs"]',
+    );
+    expect(taskGroup).not.toBeNull();
+    expect(
+      taskGroup?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]')?.textContent,
+    ).toContain('Ordinary session');
+  });
+
+  it('keeps a manually grouped scheduled-task run under its manual group', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        groupId: 'manual-1',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [{ id: 'manual-1', name: 'My group', color: 'blue' }],
+        }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      organizationEnabled: true,
+    });
+    await flush();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="My group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(manualGroup?.textContent).toContain('Review PRs · 08-31 09:30');
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).toBeNull();
+  });
+
+  it('keeps scheduled-task runs read-only in an untrusted workspace', async () => {
+    const sessions = [
+      {
+        sessionId: 'run-1',
+        displayName: 'Review PRs · 08-31 09:30',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ] as DaemonSessionSummary[];
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      workspace: untrustedWorkspace,
+      expanded: true,
+      sourceType: 'default',
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).toBeNull();
+    const note = container.querySelector<HTMLElement>('[role="note"]');
+    expect(note).not.toBeNull();
+    expect(note?.getAttribute('aria-label')).toContain('Trust to open');
+  });
+
   it('shows five sessions and resets Show all after the workspace closes', async () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,
