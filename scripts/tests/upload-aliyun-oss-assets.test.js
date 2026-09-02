@@ -196,10 +196,12 @@ describe('uploadAssets (integration)', () => {
       // Without the bound this test would sit in the shim's 60s hang; the
       // kill turns the stall into an ordinary failed attempt, so all three
       // attempts happen and the uploader fails loudly instead of hanging.
-      // The bound stays well above worst-case child-spawn latency on the
-      // shared runners: a SIGKILL before the shim's first appendFileSync
-      // loses that attempt's log line and the count below reads short even
-      // though all three attempts ran.
+      // The bound must stay above worst-case child-spawn latency: a SIGKILL
+      // landing before the shim's first appendFileSync loses that attempt's
+      // log line, so the count below reads short (or the log is never
+      // created at all) even though all three attempts ran. 400ms did
+      // exactly that under CPU contention; 2000ms keeps the worst case of
+      // three kills plus 6s of backoff inside this test's 30s budget.
       expect(() =>
         uploadAssets(
           {

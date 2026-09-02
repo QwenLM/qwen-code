@@ -152,6 +152,9 @@ type ChatEditorTestProps = {
   workspaceFeaturesEnabled?: boolean;
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (cwd: string | undefined) => void;
+  standaloneTargetSupported?: boolean;
+  selectedStandaloneTarget?: boolean;
+  onSelectStandaloneTarget?: () => void;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
@@ -11091,6 +11094,93 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('keeps the sidebar New task on the primary workspace on a capable daemon', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('workspace prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      }),
+    );
+    expect(mockSessionActions.createSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('creates a standalone session from the composer no-workspace target', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.standaloneTargetSupported).toBe(
+      true,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectStandaloneTarget?.();
+      await Promise.resolve();
+    });
+    expect(testState.latestChatEditorProps?.selectedStandaloneTarget).toBe(
+      true,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('hides the composer no-workspace target without the capability', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.standaloneTargetSupported,
+    ).toBeFalsy();
+  });
+
   it('retries failed capabilities before routing a global new session', async () => {
     mockWorkspace.status = 'error';
     mockWorkspace.capabilities =
@@ -11245,7 +11335,8 @@ describe('App session callbacks', () => {
   });
 
   it('reports the primary workspace, not the stale connection workspace, when the selection is unset', async () => {
-    // The common new-chat path (sidebar "New task", /clear, /new) leaves
+    // A new chat with no explicit context (a cold draft, or a global new
+    // session on a daemon without the standalone capability) leaves
     // selectedWorkspaceCwd undefined — that is how "primary" is spelled. The
     // report must fall back to the primary workspace, not the stale
     // connection.workspaceCwd left over from the previous session.

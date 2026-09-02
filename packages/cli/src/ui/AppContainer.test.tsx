@@ -6772,6 +6772,11 @@ describe('AppContainer State Management', () => {
     });
 
     it('surfaces unexpected outer errors through history', async () => {
+      // Scoped stub: the throwing getGeminiClient spy below would otherwise
+      // also be hit by the mount init effect's un-awaited initialize() IIFE
+      // (AgentTool.refreshSubagents calls getGeminiClient in its finally),
+      // surfacing as an unhandled rejection.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       const harness = renderRewindHarness();
       vi.spyOn(mockConfig, 'getLlmClient').mockImplementation(() => {
         throw new Error('client exploded');
@@ -7629,6 +7634,24 @@ describe('AppContainer State Management', () => {
         peer.emitHeld([heldMessage('a'), heldMessage('c')]);
       });
       expect(noticeCount()).toBe(2);
+    });
+
+    it("identifies a held message from the session's own process", () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.emitHeld([{ ...heldMessage('a'), selfSent: true }]);
+      });
+
+      const notice = String(
+        (addItem.mock.calls.at(-1)?.[0] as { text?: string })?.text ?? '',
+      );
+      expect(notice).toContain(
+        'Held a message from a process this session started',
+      );
+      expect(notice).not.toContain('another session');
     });
 
     it('does not announce arrivals that only replace an evicted entry', () => {

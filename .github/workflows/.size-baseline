@@ -25,7 +25,7 @@
 31677 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
-16534 e2e.yml
+21437 e2e.yml
 11394 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
@@ -59,6 +59,7 @@
 10920 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
 10138 sync-release-to-oss.yml
+2508 tui-parity.yml
 7187 update-ecs-runner-qwen.yml
 2307 web-shell-visuals-cleanup.yml
 20047 web-shell-visuals-publish.yml

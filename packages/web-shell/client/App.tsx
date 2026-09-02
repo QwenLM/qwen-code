@@ -2711,6 +2711,11 @@ export function App({
     [pendingSessionContext, settledSessionContext],
   );
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  // The composer picker chooses the target of the next session, so a
+  // projectless draft keeps it enabled: that is where "no workspace" is
+  // chosen. An attached projectless session hides it again.
+  const composerWorkspaceSelectEnabled =
+    workspaceContextActive || connection.sessionId === undefined;
   const pendingNonWorkspaceNavigation =
     pendingSessionContext !== undefined &&
     pendingSessionContext.kind !== 'workspace' &&
@@ -9782,6 +9787,9 @@ export function App({
     },
     [switchWorkspace],
   );
+  const handleSelectComposerStandalone = useCallback(() => {
+    void createNewSession({ kind: 'global' });
+  }, [createNewSession]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -14062,15 +14070,16 @@ export function App({
                       );
                     }
                   }}
+                  // A cwd-less New task inherits the current context: a
+                  // workspace chat stays in its workspace and a cold draft
+                  // lands on the primary one. Projectless targets are chosen
+                  // in the composer's workspace picker instead.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                        : { kind: 'inherit' },
                     )
-                  }
-                  globalNewSessionUsesStandalone={
-                    standaloneSessionsSupported && !lockedWorkspaceCwd
                   }
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
@@ -15705,7 +15714,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
                           }
@@ -15720,7 +15729,9 @@ export function App({
                                 : selectedWorkspaceCwd
                               : undefined
                           }
-                          workspaceSelectionDisabled={!workspaceContextActive}
+                          workspaceSelectionDisabled={
+                            !composerWorkspaceSelectEnabled
+                          }
                           atWorkspaceCwd={
                             workspaceContextActive
                               ? (ordinaryWorkspaces.find(
@@ -15740,8 +15751,21 @@ export function App({
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
                           onSelectWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          standaloneTargetSupported={
+                            composerWorkspaceSelectEnabled &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                          }
+                          selectedStandaloneTarget={
+                            effectiveSessionContext?.kind === 'standalone'
+                          }
+                          onSelectStandaloneTarget={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectComposerStandalone
                               : undefined
                           }
                           scratchWorkspaceSupported={
