@@ -26,7 +26,7 @@ vi.mock('./utils.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core/extension/extensionSettings.js', () => ({
   ExtensionSettingScope: {
     USER: 'user',
     WORKSPACE: 'workspace',
