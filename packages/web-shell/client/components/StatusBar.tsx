@@ -5,7 +5,7 @@ import {
   useRef,
   type KeyboardEvent,
 } from 'react';
-import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { isComposerTask } from '../utils/composerTasks';
@@ -46,7 +46,7 @@ interface StatusBarProps {
   onOpenSettings: () => void;
   onOpenTasks?: () => void;
   onReturnToInput?: (text?: string) => void;
-  tasks: readonly DaemonSessionTaskStatus[];
+  tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
@@ -86,18 +86,24 @@ function formatCount(
 }
 
 export function getTaskPillLabel(
-  tasks: readonly DaemonSessionTaskStatus[],
+  tasks: readonly DaemonSessionTaskWithWorkflowStatus[],
   t: ReturnType<typeof useI18n>['t'],
 ): string {
   const composerTasks = tasks.filter(isComposerTask);
   if (composerTasks.length === 0) return '';
 
-  const running = composerTasks.filter((task) => task.status === 'running');
+  const running = composerTasks.filter(
+    (task) =>
+      task.status === 'running' ||
+      task.status === 'pausing' ||
+      task.status === 'paused',
+  );
   if (running.length > 0) {
-    const counts = { shell: 0, monitor: 0 };
+    const counts = { shell: 0, monitor: 0, workflow: 0 };
     for (const task of running) {
       if (task.kind === 'shell') counts.shell += 1;
       if (task.kind === 'monitor') counts.monitor += 1;
+      if (task.kind === 'workflow') counts.workflow += 1;
     }
     const parts: string[] = [];
     if (counts.shell > 0) {
@@ -111,6 +117,16 @@ export function getTaskPillLabel(
           counts.monitor,
           'tasks.pill.monitor',
           'tasks.pill.monitors',
+          t,
+        ),
+      );
+    }
+    if (counts.workflow > 0) {
+      parts.push(
+        formatCount(
+          counts.workflow,
+          'tasks.pill.workflow',
+          'tasks.pill.workflows',
           t,
         ),
       );
