@@ -510,12 +510,9 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # A shard's runtime is set by how busy the reserved host is, not by the
-    # suite: the same third measured 6.7 minutes on a quiet host and 36 on a
-    # contended one. 45 was chosen against the quiet end and has since killed
-    # shards at the boundary with every executed suite green (run 33713579913,
-    # both attempts, 45.4 min). Operators retune it against what the host is
-    # actually doing, without a PR and without a release.yml code-owner review.
+    # Set by how busy the reserved host is, not by the suite: the same third
+    # ran 6.7 min quiet and 36 contended, and 45 killed shards at the boundary
+    # with every suite green (run 33713579913). Retunable without a PR.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"
     needs:
       - 'prepare'
@@ -566,13 +563,11 @@ jobs:
           if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
-          # Through `tee` so the annotation can say WHICH failure this is. The
-          # job stays red either way — the child's status is re-raised
-          # untouched — but a shard that died on Vitest's own worker RPC
-          # timing out reads identically to a real break otherwise, and this
-          # release lost two attempts to that before anyone could tell them
-          # apart (run 33713579913). `-o pipefail` is the step's default, so
-          # `$?` is npm's status, not tee's.
+          # `tee` so the annotation can name WHICH failure this is: a shard
+          # killed by Vitest's own worker RPC timing out reads identically to
+          # a real break, and this release lost two attempts to that
+          # (run 33713579913). The status is re-raised untouched either way;
+          # `-o pipefail` is the step default, so `$?` is npm's.
           log="${RUNNER_TEMP:-/tmp}/workspace-tests-${{ matrix.shard }}.log"
           npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" 2>&1 | tee "${log}" || {
             status=$?
