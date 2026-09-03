@@ -42,6 +42,7 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  parseHeldExpiry,
   describeHoldCause,
   getErrorMessage,
   getAllMemoryFilenames,
@@ -2713,6 +2714,24 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     peerMessaging?.reevaluate('approval-mode-changed');
   }, [approvalModeForPeers, peerMessaging]);
+
+  // Both settings reload live (`requiresRestart: false`), and both change
+  // what the gate would decide for messages already parked. Nothing else
+  // re-runs it: parking under `never` arms no timer at all, so a later
+  // edit to `1m` would otherwise leave the backlog held until session
+  // exit while `/peers` counted down from the new value.
+  //
+  // Keyed on the parsed lifetime and the policy rather than on any
+  // settings edit, because `reevaluate` also settles a parked backlog as
+  // `denied` under a refuse policy -- an unrelated key edit must not
+  // discard the user's backlog.
+  const heldExpiryForPeers = parseHeldExpiry(
+    settings.merged.agents?.crossSessionHeldExpiry,
+  );
+  const inboundPolicyForPeers = settings.merged.agents?.crossSessionInbound;
+  useEffect(() => {
+    peerMessaging?.reevaluate('held-expiry-changed');
+  }, [heldExpiryForPeers, inboundPolicyForPeers, peerMessaging]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
