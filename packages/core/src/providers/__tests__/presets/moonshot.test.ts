@@ -96,29 +96,28 @@ describe('moonshotProvider', () => {
       name: '[Kimi] kimi-k2.7-code',
       generationConfig: {
         contextWindowSize: 262144,
-        extra_body: { enable_thinking: true },
+        thinkingMandatory: true,
         modalities: { image: true, video: true },
       },
     });
-    expect(models?.[1]?.generationConfig?.thinkingMandatory).toBeUndefined();
+    expect(models?.[1]?.generationConfig?.thinkingMandatory).toBe(true);
 
     expect(models?.[2]).toMatchObject({
       id: 'kimi-k2.7-code-highspeed',
       name: '[Kimi] kimi-k2.7-code-highspeed',
       generationConfig: {
         contextWindowSize: 262144,
-        extra_body: { enable_thinking: true },
+        thinkingMandatory: true,
         modalities: { image: true, video: true },
       },
     });
-    expect(models?.[2]?.generationConfig?.thinkingMandatory).toBeUndefined();
+    expect(models?.[2]?.generationConfig?.thinkingMandatory).toBe(true);
 
     expect(models?.[3]).toMatchObject({
       id: 'kimi-k2.6',
       name: '[Kimi] kimi-k2.6',
       generationConfig: {
         contextWindowSize: 262144,
-        extra_body: { enable_thinking: true },
         modalities: { image: true, video: true },
       },
     });

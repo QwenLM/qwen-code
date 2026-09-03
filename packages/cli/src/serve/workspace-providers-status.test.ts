@@ -307,17 +307,33 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
-      model: { name: 'qwen3.8-max' },
+      model: {
+        name: 'qwen3.8-max',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
       modelProviders: {
         openai: [
           {
             id: 'qwen3.8-max',
             name: 'Qwen 3.8 Max',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
             generationConfig: { thinkingMandatory: true },
           },
-          { id: 'qwen3.8-max-preview', name: 'Qwen 3.8 Max Preview' },
-          { id: 'qwen3.8-max-latest', name: 'Qwen 3.8 Max Alias' },
-          { id: 'qwen-plus', name: 'Qwen Plus' },
+          {
+            id: 'qwen3.8-max-preview',
+            name: 'Qwen 3.8 Max Preview',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'qwen3.8-max-latest',
+            name: 'Qwen 3.8 Max Alias',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'qwen-plus',
+            name: 'Qwen Plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
         ],
       },
     });
@@ -334,7 +350,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',
-            thinkingMandatory: true,
+            canDisable: false,
           },
         },
       },
@@ -373,12 +389,17 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       const provider = createWorkspaceProvidersStatusProvider({ env: {} });
       await writeUserSettings({
         security: { auth: { selectedType: 'openai' } },
-        model: { name: 'qwen3.8-max', reasoningEffort: persisted },
+        model: {
+          name: 'qwen3.8-max',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoningEffort: persisted,
+        },
         modelProviders: {
           openai: [
             {
               id: 'qwen3.8-max',
               name: 'Qwen 3.8 Max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
               generationConfig: { thinkingMandatory },
             },
           ],
@@ -434,6 +455,48 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(
       routeModels.every((model) => model.configOptions === undefined),
     ).toBe(true);
+  });
+
+  it('projects same-name models from their exact endpoint routes', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'glm-5.2',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'glm-5.2',
+            name: 'GLM Standard',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'glm-5.2',
+            name: 'GLM Token Plan',
+            baseUrl:
+              'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    const standard = models.find((model) => model.name === 'GLM Standard');
+    const tokenPlan = models.find((model) => model.name === 'GLM Token Plan');
+
+    expect(standard?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(standard?.configOptions?.[0]).toMatchObject({
+      currentValue: 'high',
+      options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+    });
+    expect(tokenPlan?.modelId).toMatch(/^qwen-route:v1:/);
+    expect(tokenPlan?.configOptions?.[0]).toMatchObject({
+      currentValue: 'default',
+      options: [{ value: 'none' }, { value: 'default' }],
+    });
   });
 
   it('reports custom providerProtocol models under their resolved auth type', async () => {

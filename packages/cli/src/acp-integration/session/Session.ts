@@ -10514,10 +10514,22 @@ export class Session implements SessionContext {
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
     const thinkingMandatory = generation?.thinkingMandatory === true;
+    const reasoningRoute = {
+      modelId,
+      authType: generation?.authType ?? this.config.getAuthType?.(),
+      baseUrl:
+        generation?.baseUrl ??
+        this.config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    };
     let supported =
       selection !== undefined &&
       selection !== REASONING_EFFORT_DEFAULT &&
-      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+      isReasoningSelectionSupported(
+        reasoningRoute,
+        selection,
+        thinkingMandatory,
+      );
 
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
@@ -10528,7 +10540,11 @@ export class Session implements SessionContext {
       supported =
         selection !== undefined &&
         selection !== REASONING_EFFORT_DEFAULT &&
-        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+        isReasoningSelectionSupported(
+          reasoningRoute,
+          selection,
+          thinkingMandatory,
+        );
     }
     if (
       !hasSessionSelection &&
@@ -10546,7 +10562,7 @@ export class Session implements SessionContext {
         );
       }
     }
-    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
+    const modelReasoning = getModelConfiguration(reasoningRoute)?.reasoning;
     if (
       supported &&
       generation &&

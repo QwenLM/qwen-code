@@ -27,7 +27,6 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
-  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -166,20 +165,23 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
-      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-        ? undefined
-        : buildModelReasoningConfigPreview(
+      const reasoningRoute = {
+        modelId: model.id,
+        authType: model.authType,
+        baseUrl: model.registryBaseUrl ?? model.baseUrl,
+      };
+      const configOptions = buildModelReasoningConfigPreview(
+        reasoningRoute,
+        resolvePersistedReasoningConfigState(
+          reasoningRoute,
+          settings.model?.reasoningEffort,
+          modelsConfig.getResolvedModel(
+            model.authType,
             model.id,
-            resolvePersistedReasoningConfigState(
-              model.id,
-              settings.model?.reasoningEffort,
-              modelsConfig.getResolvedModel(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )?.generationConfig.thinkingMandatory === true,
-            ),
-          );
+            model.registryBaseUrl ?? model.baseUrl,
+          )?.generationConfig.thinkingMandatory === true,
+        ),
+      );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),

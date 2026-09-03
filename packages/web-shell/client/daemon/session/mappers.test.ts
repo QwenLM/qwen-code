@@ -196,7 +196,7 @@ describe('mapReasoningControls', () => {
           _meta: {
             'qwenCode/reasoning': {
               defaultEffort: 'xhigh',
-              thinkingMandatory: true,
+              canDisable: false,
             },
           },
         },

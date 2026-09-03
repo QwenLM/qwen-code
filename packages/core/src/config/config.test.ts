@@ -72,6 +72,7 @@ import {
   setDebugLogSession,
 } from '../utils/debugLogger.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
+import { settingsSource } from '../utils/configResolver.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -6274,7 +6275,7 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
         config: {
           apiKey: 'test-key',
-          model: 'qwen3-coder-plus',
+          model: 'gemini-a',
           authType,
         } as ContentGeneratorConfig,
         sources: {},
@@ -6344,6 +6345,103 @@ describe('Server Config (config.ts)', () => {
       // Effort survives the switch (previously silently dropped to undefined).
       expect(config.getContentGeneratorConfig().model).toBe('gemini-b');
       expect(config.getReasoningEffort()).toBe('high');
+    });
+
+    it('drops a persisted tier after switching to an incompatible endpoint', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'glm-5.2',
+        generationConfig: {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'high' },
+        },
+        generationConfigSources: {
+          reasoning: settingsSource('model.reasoningEffort'),
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'glm-5.2',
+          authType: AuthType.USE_OPENAI,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getReasoningEffort()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
+    it('drops a persisted disable for a mandatory model before the request', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'kimi-k2.6',
+        generationConfig: {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.moonshot.ai/v1',
+          reasoning: false,
+        },
+        generationConfigSources: {
+          reasoning: settingsSource('model.reasoningEffort'),
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'kimi-k3',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.moonshot.ai/v1',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
+    it('accepts only native effort tiers on a registered route', () => {
+      const config = new Config({ ...baseParams });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      };
+
+      config.setReasoningEffort('high');
+      expect(config.getReasoningEffort()).toBeUndefined();
+      config.setReasoningEffort('medium');
+      expect(config.getReasoningEffort()).toBe('medium');
+    });
+
+    it('clears a stale disable when the resolved model requires thinking', () => {
+      const config = new Config({ ...baseParams });
+      const generation: ContentGeneratorConfig = {
+        model: 'kimi-k3',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.moonshot.ai/v1',
+        reasoning: false,
+      };
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = generation;
+
+      config.setReasoningDisabled(true);
+
+      expect(generation.reasoning).toBeUndefined();
     });
 
     it('should fire auth_success notification hook when hooks are enabled', async () => {

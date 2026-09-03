@@ -7,9 +7,9 @@
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
+import { resolveModelReasoningConfiguration } from '../../model-reasoning-config.js';
 
 const debugLogger = createDebugLogger('ZAI');
 
@@ -57,25 +57,6 @@ export function isZaiProvider(
   return model.toLowerCase().startsWith('glm-');
 }
 
-/**
- * True for GLM model ids at 5.2 or newer, the family Z.ai documents as taking
- * the tiered `reasoning_effort` (including `max`). Older GLM ids do not, so a
- * blanket `glm-*` check would claim a tier the endpoint can reject.
- * See https://docs.z.ai/guides/capabilities/thinking.
- */
-export function isGlmTieredEffortModel(model: string | undefined): boolean {
-  if (!model) {
-    return false;
-  }
-  const parsed = /^glm-(\d+)(?:\.(\d+))?/.exec(model.toLowerCase());
-  if (!parsed) {
-    return false;
-  }
-  const major = Number(parsed[1]);
-  const minor = Number(parsed[2] ?? 0);
-  return major > 5 || (major === 5 && minor >= 2);
-}
-
 export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isZaiProvider = isZaiProvider;
   static isZaiHostname = isZaiHostname;
@@ -83,20 +64,17 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
   // Latch so the skipped-flatten warning fires once per provider lifetime.
   private nonZaiHostnameFlattenWarned = false;
 
-  /**
-   * The full ladder, including `max`, only on a verified Z.ai host running a
-   * GLM-5.2+ model. Both halves matter: `isZaiProvider` also routes here on a
-   * bare `glm-*` model name, which says nothing about what an arbitrary
-   * self-hosted backend accepts, and older GLM ids predate the tiered field.
-   * Anything else keeps the generic ceiling, matching the hostname gate the
-   * wire reshape below already uses.
-   */
+  /** The registered route's native ladder; otherwise the generic ceiling. */
   protected override supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return isZaiHostname(this.contentGeneratorConfig) &&
-      isGlmTieredEffortModel(model ?? this.contentGeneratorConfig.model)
-      ? REASONING_EFFORT_TIERS
+    const configuration = resolveModelReasoningConfiguration({
+      modelId: model ?? this.contentGeneratorConfig.model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    return configuration && !configuration.toggleOnly
+      ? configuration.efforts
       : super.supportedReasoningEffortsFor(model);
   }
 
@@ -105,16 +83,16 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
-    if (isZaiHostname(this.contentGeneratorConfig)) {
+    const configuration = resolveModelReasoningConfiguration({
+      modelId: request.model || this.contentGeneratorConfig.model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    if (configuration?.endpointFamily === 'zai') {
       return flattenReasoningEffort(baseRequest);
     }
-    // A `glm-*` model on a non-z.ai/non-bigmodel.cn hostname (e.g. a
-    // self-hosted GLM) still routes through this provider via the model-name
-    // fallback in `isZaiProvider`, but the GLM-specific `reasoning_effort`
-    // reshape stays hostname-gated so we don't push GLM's flat field at an
-    // arbitrary OpenAI-compatible backend that may not understand it. Warn once
-    // when this leaves a nested `reasoning: { effort }` unflattened so the gap
-    // is discoverable in debug logs rather than silent.
+    // Model-name routing also reaches self-hosted and unregistered GLM models.
+    // Keep their generic nested shape and make the skipped reshape observable.
     const reasoning = (baseRequest as unknown as Record<string, unknown>)[
       'reasoning'
     ] as { effort?: unknown } | undefined;
@@ -128,9 +106,8 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
       debugLogger.warn(
         `GLM model '${
           this.contentGeneratorConfig.model ?? 'unknown'
-        }' on a non-Z.ai hostname; leaving nested reasoning.effort='${String(
-          reasoning.effort,
-        )}' unflattened (reasoning_effort reshape is hostname-gated).`,
+        }' is not registered for the Z.AI reasoning reshape; leaving nested ` +
+          `reasoning.effort='${String(reasoning.effort)}' unflattened.`,
       );
       this.nonZaiHostnameFlattenWarned = true;
     }
@@ -139,13 +116,8 @@ export class ZaiOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider
 }
 
 /**
- * Move the unified nested `reasoning: { effort }` onto GLM's flat
- * `reasoning_effort` field, verbatim. Unlike DeepSeek (whose API only accepts
- * high/max, so its adapter remaps low/medium → high), GLM-5.2 accepts the full
- * ladder (low/medium/high/xhigh/max) and groups low/medium → high and
- * xhigh → max server-side, so we keep the raw tier for fidelity and
- * observability. A user-set top-level `reasoning_effort` (via
- * samplingParams/extra_body) wins and is left untouched.
+ * Move the normalized nested effort onto GLM's flat `reasoning_effort` field.
+ * A user-set top-level value wins and is left untouched.
  */
 function flattenReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,

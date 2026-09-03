@@ -34,6 +34,19 @@ describe('EffortDialog', () => {
     expect(frame).toContain('Use Enter to select, Esc to cancel');
   });
 
+  it('renders only tiers supported by the active route', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog onSelect={vi.fn()} efforts={['low', 'medium', 'xhigh']} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('low');
+    expect(frame).toContain('medium');
+    expect(frame).toContain('xhigh');
+    expect(frame).not.toContain('Maximum reasoning');
+    expect(frame).not.toContain('Default — strong reasoning');
+  });
+
   it('shows the "no effort configured" hint when currentEffort is unset', () => {
     const { lastFrame } = renderWithProviders(
       <EffortDialog onSelect={vi.fn()} />,

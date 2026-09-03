@@ -8,7 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type OpenAI from 'openai';
 import { ZaiOpenAICompatibleProvider } from './zai.js';
 import { determineProvider } from '../index.js';
-import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+} from '../../contentGenerator.js';
 import type { Config } from '../../../config/config.js';
 
 vi.mock('openai', () => ({
@@ -24,6 +27,7 @@ function makeProvider(
     apiKey: 'test-api-key',
     baseUrl: 'https://api.z.ai/api/paas/v4',
     model: 'glm-5.2',
+    authType: AuthType.USE_OPENAI,
     ...overrides,
   } as ContentGeneratorConfig;
   const cliConfig = {
@@ -54,8 +58,8 @@ describe('ZaiOpenAICompatibleProvider', () => {
 
     it('caps max for an older GLM on a Z.ai host', () => {
       expect(
-        build('https://api.z.ai/api/paas/v4', 'glm-4.6')['reasoning_effort'],
-      ).toBe('xhigh');
+        build('https://api.z.ai/api/paas/v4', 'glm-4.6')['reasoning'],
+      ).toEqual({ effort: 'xhigh' });
     });
 
     it('answers for the request model, not the configured one', () => {
@@ -75,7 +79,8 @@ describe('ZaiOpenAICompatibleProvider', () => {
         userPromptId,
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+      expect(result['reasoning_effort']).toBeUndefined();
     });
 
     it('caps max for a glm-named model on an unverified host', () => {
@@ -169,7 +174,7 @@ describe('ZaiOpenAICompatibleProvider', () => {
   });
 
   describe('buildRequest', () => {
-    it('flattens nested reasoning.effort to a verbatim reasoning_effort (no remap)', () => {
+    it('normalizes xhigh to the registered max tier', () => {
       const provider = makeProvider();
       const request = {
         model: 'glm-5.2',
@@ -181,12 +186,11 @@ describe('ZaiOpenAICompatibleProvider', () => {
         request,
         userPromptId,
       ) as unknown as Record<string, unknown>;
-      // Unlike DeepSeek (which remaps xhigh -> max), GLM keeps the raw tier.
-      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning_effort']).toBe('max');
       expect(result['reasoning']).toBeUndefined();
     });
 
-    it('keeps medium verbatim rather than collapsing to high', () => {
+    it('normalizes medium to the registered high tier', () => {
       const provider = makeProvider();
       const request = {
         model: 'glm-5.2',
@@ -198,7 +202,7 @@ describe('ZaiOpenAICompatibleProvider', () => {
         request,
         userPromptId,
       ) as unknown as Record<string, unknown>;
-      expect(result['reasoning_effort']).toBe('medium');
+      expect(result['reasoning_effort']).toBe('high');
     });
 
     it('does not clobber a user-set top-level reasoning_effort', () => {

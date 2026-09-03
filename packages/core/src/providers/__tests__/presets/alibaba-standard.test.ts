@@ -36,14 +36,23 @@ describe('alibabaStandardProvider', () => {
     );
   });
 
-  it('includes qwen3.7 models in default model IDs', () => {
+  it('includes the current documented reasoning models', () => {
     expect(getDefaultModelIds(alibabaStandardProvider)).toEqual([
+      'qwen3.8-max',
+      'qwen3.8-max-0902',
+      'qwen3.8-flash',
       'qwen3.6-plus',
       'qwen3.7-plus',
       'qwen3.7-max',
       'glm-5.1',
+      'glm-5.2',
+      'ZHIPU/GLM-5.3',
+      'ZHIPU/GLM-5.3-Flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
+      'deepseek-v4-pro-0813',
+      'deepseek-v4-flash-0731',
+      'kimi-k3',
     ]);
   });
 

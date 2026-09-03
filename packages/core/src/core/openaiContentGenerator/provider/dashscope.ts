@@ -21,19 +21,16 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  isDashScopeModelStudioHostname,
+} from '../../model-reasoning-config.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
-/**
- * Tiers the qwen3.8-max family accepts in `reasoning_effort`. This family's
- * ladder stops at `xhigh`, and a `max` above it is rejected with a 400 that
- * then repeats on every later request in the session. Declaring the supported
- * subset lets `clampReasoningEffort` cap the tier the same way the Anthropic
- * generator caps tiers its model lacks.
- */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'low',
   'medium',
@@ -167,11 +164,7 @@ function withoutNullishThinkingKnobs(
  * domain of the endpoint hostname). Shared with the WebSearch side channel's
  * endpoint gate (tools/web-search.ts) so a new region is added in one place.
  */
-export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
-  'dashscope.aliyuncs.com',
-  'dashscope-intl.aliyuncs.com',
-  'dashscope-us.aliyuncs.com',
-];
+export { DASHSCOPE_REGIONAL_HOSTS };
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -215,17 +208,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname = null;
     }
 
-    // Matches an official regional host or any subdomain of one.
-    const isDashscopeOrigin =
-      hostname !== null &&
-      DASHSCOPE_REGIONAL_HOSTS.some(
-        (host) => hostname === host || hostname.endsWith('.' + host),
-      );
-
-    const isTokenPlanOrigin =
-      hostname !== null &&
-      hostname.startsWith('token-plan.') &&
-      hostname.endsWith('.maas.aliyuncs.com');
+    const isModelStudioOrigin =
+      hostname !== null && isDashScopeModelStudioHostname(hostname);
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -251,8 +235,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     if (
       normalizedProxyUrl &&
-      !isDashscopeOrigin &&
-      !isTokenPlanOrigin &&
+      !isModelStudioOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -275,8 +258,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
 
     return (
-      isDashscopeOrigin ||
-      isTokenPlanOrigin ||
+      isModelStudioOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
@@ -554,15 +536,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return {};
   }
 
-  /**
-   * Cap a configured tier at what the qwen3.8-max family actually accepts.
-   * This family does not take `max`, and the rejection is a 400 on every
-   * subsequent request rather than a one-off, so the tier is clamped to the
-   * strongest supported tier and reported once. Only the
-   * configured `reasoning.effort` passes through here: an explicit
-   * `extra_body` / `samplingParams` `reasoning_effort` is a documented
-   * verbatim override and is merged after this, so it still ships unchanged.
-   */
   private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
     const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
     if (clamped !== effort && !this.effortClampWarned) {

@@ -8,7 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type OpenAI from 'openai';
 import { DeepSeekOpenAICompatibleProvider } from './deepseek.js';
 import { determineProvider } from '../index.js';
-import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+} from '../../contentGenerator.js';
 import type { Config } from '../../../config/config.js';
 
 // Mock OpenAI client to avoid real network calls
@@ -30,6 +33,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       apiKey: 'test-api-key',
       baseUrl: 'https://api.deepseek.com/v1',
       model: 'deepseek-chat',
+      authType: AuthType.USE_OPENAI,
     } as ContentGeneratorConfig;
 
     mockCliConfig = {
@@ -116,14 +120,14 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
         {
           ...mockContentGeneratorConfig,
           baseUrl: 'https://api.deepseek.com/v1',
-          model: 'deepseek-reasoner',
+          model: 'deepseek-v4-pro',
         } as ContentGeneratorConfig,
         mockCliConfig,
       );
 
       const result = generator.buildRequest(
         {
-          model: 'deepseek-reasoner',
+          model: 'deepseek-v4-pro',
           messages: [{ role: 'user', content: 'hi' }],
           reasoning: { effort: 'max' },
         } as unknown as Parameters<typeof generator.buildRequest>[0],

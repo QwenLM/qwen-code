@@ -1074,11 +1074,7 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.tool_choice).toBe('required');
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` writes the tier into config, so a raw pass-through
-      // 400s on this request and on every later one in the session. Drive
-      // the real provider through pipeline.execute and assert on the wire
-      // body the SDK is handed: the tier must arrive capped at xhigh.
+    it('falls back from a stale max tier to the DashScope model default', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -1123,8 +1119,7 @@ describe('ContentGenerationPipeline', () => {
 
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
-      expect(apiCall.reasoning_effort).toBe('xhigh');
-      // The tier ships alone — no competing nested knob.
+      expect(apiCall.reasoning_effort).toBeUndefined();
       expect(apiCall.reasoning).toBeUndefined();
     });
 
@@ -1342,6 +1337,49 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('learns required thinking from a rejected thinking.type disable', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-v4-pro',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      const requiredThinkingError = Object.assign(
+        new Error('thinking.type disabled is not supported'),
+        { status: 400 },
+      );
+      (mockClient.chat.completions.create as Mock)
+        .mockRejectedValueOnce(requiredThinkingError)
+        .mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+      const request: GenerateContentParameters = {
+        model: 'deepseek-v4-pro',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      await pipeline.execute(request, 'main');
+      await pipeline.execute(request, 'main');
+
+      const calls = (mockClient.chat.completions.create as Mock).mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[0][0].thinking).toEqual({ type: 'disabled' });
+      expect(calls[1][0].thinking).toBeUndefined();
+      expect(calls[2][0].thinking).toBeUndefined();
+    });
+
     it.each([
       {
         name: 'preserving unrelated chat_template_kwargs',
@@ -1436,6 +1474,90 @@ describe('ContentGenerationPipeline', () => {
         expect(mockErrorHandler.handle).not.toHaveBeenCalled();
       },
     );
+
+    it('normalizes a legacy Moonshot thinking switch to thinking.type', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'kimi-k2.6',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        extra_body: { enable_thinking: true, seed: 7 },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        ...mockContentGeneratorConfig.extra_body,
+      }));
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'kimi-k2.6',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        },
+        'main',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.thinking).toEqual({ type: 'enabled' });
+      expect(apiCall.seed).toBe(7);
+    });
+
+    it('does not leave a legacy on-switch beside a Moonshot disable', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'kimi-k2.6',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        reasoning: false,
+        extra_body: { enable_thinking: true },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        ...mockContentGeneratorConfig.extra_body,
+      }));
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'kimi-k2.6',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        },
+        'main',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
 
     it('handles the retry error when required-thinking retry fails', async () => {
       mockContentGeneratorConfig = {
@@ -1574,7 +1696,7 @@ describe('ContentGenerationPipeline', () => {
       }));
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'deepseek-v4-pro',
         contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -1650,7 +1772,7 @@ describe('ContentGenerationPipeline', () => {
       }));
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'deepseek-v4-pro',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
         // No thinkingConfig — normal request
       };
@@ -1699,7 +1821,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'deepseek-v4-pro',
         contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -1738,7 +1860,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'deepseek-v4-pro',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
@@ -1758,6 +1880,326 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
+
+    it.each([
+      {
+        name: 'Qwen 3.8 on Alibaba',
+        model: 'qwen3.8-flash',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        effort: 'medium',
+      },
+      {
+        name: 'DeepSeek stable on its first-party API',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com',
+        effort: 'max',
+      },
+      {
+        name: 'DeepSeek snapshot on Alibaba Token Plan',
+        model: 'deepseek-v4-pro-0813',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        effort: 'low',
+      },
+      {
+        name: 'GLM 5.2 on Z.AI',
+        model: 'GLM-5.2',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        effort: 'max',
+      },
+      {
+        name: 'Kimi K3 on Moonshot',
+        model: 'kimi-k3',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        effort: 'low',
+      },
+      {
+        name: 'GLM 5.3 on Alibaba Standard',
+        model: 'ZHIPU/GLM-5.3',
+        baseUrl:
+          'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        effort: 'high',
+      },
+    ] as const)(
+      'emits a top-level effort for $name',
+      async ({ model, baseUrl, effort }) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          model,
+          baseUrl,
+          samplingParams: undefined,
+          reasoning: { effort },
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
+
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Hello' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(
+          {
+            model,
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          },
+          'main',
+        );
+
+        const apiCall = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0];
+        expect(apiCall.reasoning_effort).toBe(effort);
+        expect(apiCall.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each([
+      {
+        name: 'Qwen toggle',
+        model: 'qwen3.7-max',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        expected: { enable_thinking: false },
+      },
+      {
+        name: 'Qwen 3.8 effort',
+        model: 'qwen3.8-max-0902',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        expected: { reasoning_effort: 'none' },
+      },
+      {
+        name: 'Alibaba third-party model',
+        model: 'deepseek-v4-flash-0731',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        expected: { enable_thinking: false },
+      },
+      {
+        name: 'DeepSeek first-party model',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com',
+        expected: { thinking: { type: 'disabled' } },
+      },
+      {
+        name: 'Moonshot hybrid model',
+        model: 'kimi-k2.6',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        expected: { thinking: { type: 'disabled' } },
+      },
+      {
+        name: 'Z.AI hybrid model',
+        model: 'GLM-5.2',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        expected: { thinking: { type: 'disabled' } },
+      },
+    ] as const)(
+      'uses the resolved disable shape for $name',
+      async ({ model, baseUrl, expected }) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          model,
+          baseUrl,
+          reasoning: false,
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
+
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Hello' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(
+          {
+            model,
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          },
+          'main',
+        );
+
+        expect(
+          (mockClient.chat.completions.create as Mock).mock.calls[0][0],
+        ).toMatchObject(expected);
+      },
+    );
+
+    it.each([
+      ['kimi-k3', 'https://api.moonshot.ai/v1'],
+      [
+        'ZHIPU/GLM-5.3-Flash',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ],
+    ])(
+      'does not send a disable field for mandatory %s',
+      async (model, baseUrl) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          model,
+          baseUrl,
+          reasoning: false,
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Hello' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(
+          {
+            model,
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          },
+          'main',
+        );
+
+        const apiCall = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0];
+        expect(apiCall.enable_thinking).toBeUndefined();
+        expect(apiCall.reasoning_effort).toBeUndefined();
+        expect(apiCall.thinking).toBeUndefined();
+      },
+    );
+
+    it('uses request.model to resolve the effort wire shape', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        samplingParams: undefined,
+        reasoning: { effort: 'low' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'qwen3.8-flash',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        },
+        'main',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.model).toBe('qwen3.8-flash');
+      expect(apiCall.reasoning_effort).toBe('low');
+    });
+
+    it('drops thinking_budget when Qwen 3.8 sends a resolved effort', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'qwen3.8-max',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        samplingParams: { thinking_budget: 4096 },
+        reasoning: { effort: 'medium' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'qwen3.8-max',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        },
+        'main',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning_effort).toBe('medium');
+      expect(apiCall.thinking_budget).toBeUndefined();
+    });
+
+    it('does not inject provider fields on an unknown endpoint', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://llm.example/v1',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'deepseek-v4-pro',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        },
+        'main',
+      );
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBeUndefined();
+      expect(apiCall.thinking).toBeUndefined();
     });
 
     it('does NOT emit thinking:disabled on a non-DeepSeek hostname', async () => {

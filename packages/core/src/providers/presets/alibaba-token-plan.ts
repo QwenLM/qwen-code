@@ -36,14 +36,18 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     id: 'qwen3.8-max',
     contextWindowSize: 1000000,
     enableThinking: true,
-    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.8-max-preview',
     contextWindowSize: 1000000,
     enableThinking: true,
-    thinkingMandatory: true,
+    modalities: { image: true, video: true },
+  },
+  {
+    id: 'qwen3.8-flash',
+    contextWindowSize: 1000000,
+    enableThinking: true,
     modalities: { image: true, video: true },
   },
   {
@@ -52,12 +56,14 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
   },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
+  { id: 'deepseek-v4-pro-0813', contextWindowSize: 1000000 },
   { id: 'deepseek-v4-flash-0731', contextWindowSize: 1000000 },
   { id: 'deepseek-v3.2', contextWindowSize: 131072 },
   {
     id: 'kimi-k2.7-code',
     contextWindowSize: 262144,
     enableThinking: true,
+    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {

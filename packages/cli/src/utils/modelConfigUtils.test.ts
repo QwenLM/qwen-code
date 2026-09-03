@@ -252,6 +252,122 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('falls back from an unsupported Qwen 3.8 tier', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          apiKey: '',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'high' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBeUndefined();
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('using the provider default'),
+        ]),
+      );
+    });
+
+    it('does not infer reasoning controls for an unregistered Qwen alias', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max-preview',
+          apiKey: '',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: {
+            name: 'qwen3.8-max-preview',
+            reasoningEffort: 'xhigh',
+          },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBeUndefined();
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('using the provider default'),
+        ]),
+      );
+    });
+
+    it('falls back from a persisted disable on mandatory Kimi K3', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'kimi-k3',
+          apiKey: '',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          reasoning: { effort: 'max' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'kimi-k3', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({ effort: 'max' });
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('using the provider default'),
+        ]),
+      );
+    });
+
+    it('accepts a snapshot tier supported by the resolved endpoint', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'deepseek-v4-pro-0813',
+          apiKey: '',
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: false,
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: {
+            name: 'deepseek-v4-pro-0813',
+            reasoningEffort: 'low',
+          },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({ effort: 'low' });
+      expect(result.sources['reasoning']).toMatchObject({
+        kind: 'settings',
+        settingsPath: 'model.reasoningEffort',
+      });
+    });
+
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
         model: 'argv-model',

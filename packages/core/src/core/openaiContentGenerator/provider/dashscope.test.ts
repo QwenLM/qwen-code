@@ -311,7 +311,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
@@ -324,6 +323,16 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         } as ContentGeneratorConfig);
         expect(result).toBe(false);
       });
+    });
+
+    it('should return true for workspace-specific Model Studio domains', () => {
+      const result = DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig);
+
+      expect(result).toBe(true);
     });
 
     it('should return false for non-DashScope configurations', () => {

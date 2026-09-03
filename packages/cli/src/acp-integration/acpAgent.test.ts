@@ -345,6 +345,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  resolveModelReasoningConfiguration: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelReasoningConfiguration,
+  supportsGenericReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).supportsGenericReasoningEffort,
   // The real enum: the reload approval-mode fold reaches beyond YOLO
   // (ApprovalMode.AUTO), and a partial shape leaves the other members
   // undefined at runtime.
@@ -4258,7 +4264,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       setReasoningEffort: vi.fn(),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getAuthType: vi.fn().mockReturnValue('openai'),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({
@@ -8650,11 +8656,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
-      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getAuthType: vi.fn().mockReturnValue('qwen-oauth'),
       getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockReturnValue('qwen3.8-max'),
       getResolvedModelConfig: vi.fn((authType: string, modelId: string) =>
-        authType === 'qwen' && modelId === 'qwen3.8-max'
+        authType === 'qwen-oauth' && modelId === 'qwen3.8-max'
           ? { generationConfig: { thinkingMandatory: true } }
           : undefined,
       ),
@@ -8662,12 +8668,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         {
           id: 'qwen3.8-max',
           label: 'Qwen 3.8 Max',
-          authType: 'qwen',
+          authType: 'qwen-oauth',
         },
         {
           id: 'qwen3.8-max-preview',
           label: 'Qwen 3.8 Max Preview',
-          authType: 'qwen',
+          authType: 'qwen-oauth',
         },
         {
           id: 'qwen3.8-max',
@@ -8730,7 +8736,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',
-            thinkingMandatory: true,
+            canDisable: false,
           },
         },
       },
@@ -9130,7 +9136,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     try {
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
       await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
-      expect(switchModel).toHaveBeenCalledWith('api-key', 'qwen3.7-plus');
+      expect(switchModel).toHaveBeenCalledWith('openai', 'qwen3.7-plus');
       expect(lastSessionMock!.reloadReasoningSelection).toHaveBeenCalledOnce();
       expect(
         lastSessionMock!.reloadReasoningSelection.mock.invocationCallOrder[0],
@@ -9603,6 +9609,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('keeps reasoning controls for a registered opaque route', async () => {
+    const sessionId = 'registered-opaque-reasoning';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const standard = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    innerConfig.getModel = vi.fn().mockReturnValue('glm-5.2');
+    innerConfig.getAuthType = vi.fn().mockReturnValue('openai');
+    innerConfig.getCurrentModelRegistryBaseUrl = vi
+      .fn()
+      .mockReturnValue(standard);
+    innerConfig.getContentGeneratorConfig = vi.fn().mockReturnValue({
+      model: 'glm-5.2',
+      authType: 'openai',
+      baseUrl: standard,
+    });
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'glm-5.2',
+        label: 'GLM Standard',
+        authType: 'openai',
+        baseUrl: standard,
+        registryBaseUrl: standard,
+      },
+      {
+        id: 'glm-5.2',
+        label: 'GLM Token Plan',
+        authType: 'openai',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        registryBaseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      },
+    ]);
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as SetSessionConfigOptionResponse;
+
+      expect(
+        session.configOptions.find((option) => option.id === 'model')
+          ?.currentValue,
+      ).toMatch(/^qwen-route:v1:/);
+      expect(
+        session.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        ),
+      ).toMatchObject({
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects toggle-only Qwen reasoning without effort tiers', async () => {
     const sessionId = 'qwen37-toggle-reasoning-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -9711,7 +9774,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: {
           'qwenCode/reasoning': {
             defaultEffort: 'xhigh',
-            thinkingMandatory: true,
+            canDisable: false,
           },
         },
       });
@@ -10045,6 +10108,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000);
     Object.assign(innerConfig, {
+      getAuthType: vi.fn().mockReturnValue('api-key'),
       getWorkflowRunRegistry: vi.fn().mockReturnValue({
         list: vi.fn().mockReturnValue([]),
       }),

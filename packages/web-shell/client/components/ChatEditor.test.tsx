@@ -1763,6 +1763,44 @@ describe('ChatEditor toolbar popovers', () => {
     ).toBe(true);
   });
 
+  it('keeps mandatory thinking on while preserving effort choices', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'kimi-k3',
+      availableModels: [{ id: 'kimi-k3', label: 'Kimi K3' }],
+      reasoning: {
+        enabled: true,
+        effort: 'max',
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'max',
+        canDisable: false,
+      },
+      onSelectReasoningEffort: vi.fn(),
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    expect(
+      document.querySelectorAll('[data-web-shell-model-reasoning]'),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-thinking-toggle]',
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      document.querySelector<HTMLButtonElement>('[data-web-shell-effort="low"]')
+        ?.disabled,
+    ).toBe(false);
+    expect(
+      document.querySelector('[data-web-shell-model-reasoning]')?.textContent,
+    ).not.toContain('Thinking Off');
+  });
+
   it('displays the model label instead of an opaque route id', () => {
     const routeId = 'qwen-route:v1:abcdefghijklmnop';
     const container = renderChatEditor({

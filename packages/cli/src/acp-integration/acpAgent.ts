@@ -303,7 +303,6 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
-  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -7211,21 +7210,25 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? undefined
-            : buildModelReasoningConfigPreview(
-                model.id,
-                resolvePersistedReasoningConfigState(
+        const reasoningRoute = {
+          modelId: model.id,
+          authType: model.authType,
+          baseUrl: model.registryBaseUrl ?? model.baseUrl,
+        };
+        const configOptions = model.isRuntimeModel
+          ? undefined
+          : buildModelReasoningConfigPreview(
+              reasoningRoute,
+              resolvePersistedReasoningConfigState(
+                reasoningRoute,
+                this.settings.merged.model?.reasoningEffort,
+                config.getResolvedModelConfig?.(
+                  model.authType,
                   model.id,
-                  this.settings.merged.model?.reasoningEffort,
-                  config.getResolvedModelConfig?.(
-                    model.authType,
-                    model.id,
-                    model.registryBaseUrl ?? model.baseUrl,
-                  )?.generationConfig.thinkingMandatory === true,
-                ),
-              );
+                  model.registryBaseUrl ?? model.baseUrl,
+                )?.generationConfig.thinkingMandatory === true,
+              ),
+            );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -13585,9 +13588,17 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
+    const reasoningRoute = {
+      modelId,
+      authType: generation?.authType ?? config.getAuthType?.(),
+      baseUrl:
+        generation?.baseUrl ??
+        config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    };
     if (
       !isReasoningSelectionSupported(
-        modelId,
+        reasoningRoute,
         selection,
         generation?.thinkingMandatory === true,
       )
@@ -14144,25 +14155,31 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    const generation = config.getContentGeneratorConfig?.();
+    const reasoningRoute = {
+      modelId: rawCurrentModelId,
+      authType: generation?.authType ?? currentAuthType,
+      baseUrl:
+        generation?.baseUrl ??
+        config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    };
+
     if (
       activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
       !isReasoningSelectionSupported(
-        rawCurrentModelId,
+        reasoningRoute,
         REASONING_EFFORT_DEFAULT,
+        generation?.thinkingMandatory === true,
       )
     ) {
       return [modeConfigOption, modelConfigOption];
     }
 
-    const generation = config.getContentGeneratorConfig?.();
     if (!generation) {
       return [modeConfigOption, modelConfigOption];
     }
-    const modelReasoning = this.getModelReasoningConfiguration(
-      config,
-      currentModelId,
-    );
+    const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
     const reasoningOverride = config.getReasoningEffortOverride?.();
     const reasoningOverrideValue = reasoningOverride
@@ -14216,7 +14233,7 @@ class QwenAgent implements Agent {
       (!reasoningOverride || !overrideDisablesReasoning);
     const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
-      ? buildModelReasoningConfigOption(rawCurrentModelId, {
+      ? buildModelReasoningConfigOption(reasoningRoute, {
           enabled: reasoningEnabled,
           effort: effectiveModelEffort,
           thinkingMandatory: generation.thinkingMandatory === true,
@@ -14260,23 +14277,19 @@ class QwenAgent implements Agent {
 
   private getModelReasoningConfiguration(
     config: Config,
-    currentAcpModelId?: string,
   ): ModelReasoningConfiguration | undefined {
     if (config.getActiveRuntimeModelSnapshot?.()) {
       return undefined;
     }
-    const completeModelId =
-      currentAcpModelId ??
-      getCurrentAcpModelId(
-        this.buildSelectableModelOptions(config),
-        (config.getModel() || '').trim(),
-        config.getAuthType?.(),
-        config.getCurrentModelRegistryBaseUrl?.(),
-      );
-    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
-      return undefined;
-    }
-    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
+    const generation = config.getContentGeneratorConfig?.();
+    const reasoning = getModelConfiguration({
+      modelId: config.getModel(),
+      authType: generation?.authType ?? config.getAuthType?.(),
+      baseUrl:
+        generation?.baseUrl ??
+        config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    })?.reasoning;
     return reasoning?.thinking ? reasoning : undefined;
   }
 

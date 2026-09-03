@@ -138,7 +138,7 @@ export function isQwenFamilyWireModel(model: string | undefined): boolean {
 }
 
 /**
- * True for the qwen3.8-max wire model family — the only family that
+ * True for the Qwen 3.8 wire model families that
  * reads the tiered `reasoning_effort` field directly. Prefix-matched so
  * dated snapshots and `-latest` aliases are covered, consistent with the
  * family pattern in MODALITY_PATTERNS above. Older qwen hybrids expose
@@ -148,5 +148,9 @@ export function isTieredEffortWireModel(model: string | undefined): boolean {
   if (!model) {
     return false;
   }
-  return model.toLowerCase().startsWith('qwen3.8-max');
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith('qwen3.8-max') ||
+    normalized.startsWith('qwen3.8-flash')
+  );
 }

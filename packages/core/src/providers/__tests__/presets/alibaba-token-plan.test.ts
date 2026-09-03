@@ -42,8 +42,10 @@ describe('token plan provider', () => {
       'qwen3.7-max',
       'qwen3.8-max',
       'qwen3.8-max-preview',
+      'qwen3.8-flash',
       'qwen3.6-flash',
       'deepseek-v4-pro',
+      'deepseek-v4-pro-0813',
       'deepseek-v4-flash-0731',
       'deepseek-v3.2',
       'kimi-k2.7-code',
@@ -79,7 +81,6 @@ describe('token plan provider', () => {
       template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
     ).toEqual({
       extra_body: { enable_thinking: true },
-      thinkingMandatory: true,
       contextWindowSize: 1000000,
       modalities: { image: true, video: true },
     });

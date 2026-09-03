@@ -39,19 +39,18 @@ export const moonshotProvider: ProviderConfig = {
     {
       id: 'kimi-k2.7-code',
       contextWindowSize: 262144,
-      enableThinking: true,
+      thinkingMandatory: true,
       modalities: { image: true, video: true },
     },
     {
       id: 'kimi-k2.7-code-highspeed',
       contextWindowSize: 262144,
-      enableThinking: true,
+      thinkingMandatory: true,
       modalities: { image: true, video: true },
     },
     {
       id: 'kimi-k2.6',
       contextWindowSize: 262144,
-      enableThinking: true,
       modalities: { image: true, video: true },
     },
   ],

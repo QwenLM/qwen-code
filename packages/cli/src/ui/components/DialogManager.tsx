@@ -38,7 +38,10 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { AuthState } from '../types.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  resolveModelReasoningConfiguration,
+} from '@qwen-code/qwen-code-core';
 import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
@@ -354,10 +357,22 @@ export const DialogManager = ({
     );
   }
   if (uiState.isEffortDialogOpen) {
+    const generation = config.getContentGeneratorConfig?.();
+    const reasoning = resolveModelReasoningConfiguration({
+      modelId: config.getModel?.(),
+      authType: generation?.authType ?? config.getAuthType?.(),
+      baseUrl:
+        generation?.baseUrl ??
+        config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    });
     return (
       <Box flexDirection="column">
         <EffortDialog
           currentEffort={config.getReasoningEffort()}
+          efforts={
+            reasoning && !reasoning.toggleOnly ? reasoning.efforts : undefined
+          }
           onSelect={uiActions.handleEffortSelect}
         />
       </Box>

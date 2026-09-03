@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useEffortCommand } from './use-effort-command.js';
 
@@ -23,6 +23,7 @@ describe('useEffortCommand', () => {
     getReasoningEffort = vi.fn();
     setValue = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('gpt-5'),
       setReasoningEffort,
       getReasoningEffort,
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
@@ -58,6 +59,25 @@ describe('useEffortCommand', () => {
     expect(result.current.isEffortDialogOpen).toBe(false);
   });
 
+  it('ignores a tier the active route does not support', () => {
+    config = {
+      ...config,
+      getModel: () => 'qwen3.8-max',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getContentGeneratorConfig: () => ({
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useEffortCommand(settings, config));
+
+    act(() => result.current.handleEffortSelect('high'));
+
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('cancels without mutating config or settings on undefined', () => {
     const { result } = renderHook(() => useEffortCommand(settings, config));
     act(() => result.current.openEffortDialog());
@@ -73,6 +93,7 @@ describe('useEffortCommand', () => {
     const addItem = vi.fn();
     const recordSlashCommand = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('gpt-5'),
       setReasoningEffort,
       getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
@@ -99,6 +120,7 @@ describe('useEffortCommand', () => {
   it('warns in-chat when thinking is disabled (tier did not take effect)', () => {
     const addItem = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('gpt-5'),
       setReasoningEffort,
       // Thinking disabled: setReasoningEffort is a no-op, so the read-back
       // returns something other than the requested tier.
@@ -120,6 +142,7 @@ describe('useEffortCommand', () => {
   it('warns in-chat when a static thinking knob overrides the tier', () => {
     const addItem = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('gpt-5'),
       setReasoningEffort,
       getReasoningEffort: vi.fn().mockReturnValue('max'),
       getReasoningEffortOverride: vi.fn().mockReturnValue({

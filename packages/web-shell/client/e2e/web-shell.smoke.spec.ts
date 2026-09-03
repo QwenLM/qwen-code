@@ -59,7 +59,7 @@ const qwen38MandatoryReasoningConfigOptions = (currentValue = 'xhigh') => [
     _meta: {
       'qwenCode/reasoning': {
         defaultEffort: 'xhigh',
-        thinkingMandatory: true,
+        canDisable: false,
       },
     },
   },

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { effortCommand } from './effort-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
@@ -33,6 +33,7 @@ describe('effortCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
+          getModel: vi.fn().mockReturnValue('gpt-5'),
           getReasoningEffort,
           setReasoningEffort,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
@@ -73,6 +74,58 @@ describe('effortCommand', () => {
       'high',
     );
     expect(res).toMatchObject({ messageType: 'info' });
+  });
+
+  it('rejects a non-native Qwen 3.8 tier', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'qwen3.8-max',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getContentGeneratorConfig: () => ({
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    });
+
+    const rejected = await effortCommand.action!(context, 'high');
+    expect(rejected).toMatchObject({ messageType: 'error' });
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+
+    const accepted = await effortCommand.action!(context, 'xhigh');
+    expect(accepted).toMatchObject({ messageType: 'info' });
+    expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+  });
+
+  it('does not offer effort tiers for a toggle-only route', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'qwen3.7-max',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getContentGeneratorConfig: () => ({
+        model: 'qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    });
+
+    const result = await effortCommand.action!(context, 'high');
+    expect(result).toMatchObject({ messageType: 'error' });
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('does not infer effort tiers for an unregistered Qwen alias', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'qwen3.8-max-preview',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getContentGeneratorConfig: () => ({
+        model: 'qwen3.8-max-preview',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }),
+    });
+
+    const result = await effortCommand.action!(context, 'xhigh');
+    expect(result).toMatchObject({ messageType: 'error' });
+    expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
   it('keeps a valid tier session-local when persistence is disabled', async () => {

@@ -17,6 +17,9 @@ import {
   applyReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
+  resolveModelReasoningConfiguration,
+  supportsGenericReasoningEffort,
+  usesMandatoryReasoningDefaultOnly,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
 
@@ -54,6 +57,50 @@ export const effortCommand: SlashCommand = {
     }
 
     const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const generation = config.getContentGeneratorConfig?.();
+    const reasoning = resolveModelReasoningConfiguration({
+      modelId: config.getModel?.(),
+      authType: generation?.authType ?? config.getAuthType?.(),
+      baseUrl:
+        generation?.baseUrl ??
+        config.getCurrentModelRegistryBaseUrl?.() ??
+        undefined,
+    });
+    if (
+      generation &&
+      usesMandatoryReasoningDefaultOnly({
+        modelId: config.getModel?.(),
+        authType: generation.authType,
+        baseUrl: generation.baseUrl,
+        thinkingMandatory: generation.thinkingMandatory,
+      })
+    ) {
+      return {
+        type: 'message',
+        messageType: args ? 'error' : 'info',
+        content: t(
+          'The active model always uses the provider reasoning default and does not expose effort tiers.',
+        ),
+      };
+    }
+    if (reasoning?.toggleOnly) {
+      return {
+        type: 'message',
+        messageType: args ? 'error' : 'info',
+        content: t(
+          'The active model supports a thinking switch but does not expose effort tiers.',
+        ),
+      };
+    }
+    if (!reasoning && !supportsGenericReasoningEffort(config.getModel?.())) {
+      return {
+        type: 'message',
+        messageType: args ? 'error' : 'info',
+        content: t('Reasoning effort is not supported by the active model.'),
+      };
+    }
+    const tiers = reasoning?.efforts ?? REASONING_EFFORT_TIERS;
+    const tierList = tiers.join(', ');
 
     // No argument: open the interactive picker, or (non-interactive/ACP) report
     // the current tier and the available options.
@@ -68,23 +115,23 @@ export const effortCommand: SlashCommand = {
         content: current
           ? t(
               'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
-              { current, tiers: TIER_LIST },
+              { current, tiers: tierList },
             )
           : t(
               'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
-              { tiers: TIER_LIST },
+              { tiers: tierList },
             ),
       };
     }
 
     const tier = normalizeReasoningEffort(args);
-    if (!tier) {
+    if (!tier || !tiers.includes(tier)) {
       return {
         type: 'message',
         messageType: 'error',
         content: t(
           'Unknown reasoning effort "{{value}}". Choose one of: {{tiers}}.',
-          { value: args, tiers: TIER_LIST },
+          { value: args, tiers: tierList },
         ),
       };
     }

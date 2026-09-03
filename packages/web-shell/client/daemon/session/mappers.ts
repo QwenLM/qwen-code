@@ -172,13 +172,15 @@ export function mapReasoningControls(
   });
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
-  const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
-  if (!thinkingMandatory && !values.includes('none')) return undefined;
+  const canDisable =
+    reasoningMeta?.['canDisable'] !== false &&
+    reasoningMeta?.['thinkingMandatory'] !== true;
+  if (canDisable && !values.includes('none')) return undefined;
   const currentValue = parseReasoningSelection(
     getString(option, 'currentValue'),
   );
   if (!currentValue || !values.includes(currentValue)) return undefined;
-  if (thinkingMandatory && currentValue === 'none') return undefined;
+  if (!canDisable && currentValue === 'none') return undefined;
   const effortValues = values.filter(
     (value) => value !== 'none' && value !== 'default',
   );
@@ -188,7 +190,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: 'default',
       efforts: [],
-      ...(thinkingMandatory ? { canDisable: false } : {}),
+      ...(canDisable ? {} : { canDisable: false }),
     };
   }
   if (effortValues.length === 0) return undefined;
@@ -204,7 +206,7 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
-    ...(thinkingMandatory ? { canDisable: false } : {}),
+    ...(canDisable ? {} : { canDisable: false }),
   };
 }
 

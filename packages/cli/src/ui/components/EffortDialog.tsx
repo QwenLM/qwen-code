@@ -22,6 +22,9 @@ interface EffortDialogProps {
 
   /** The currently active effort, used to pre-select the list. */
   currentEffort?: ReasoningEffort;
+
+  /** Effort tiers accepted by the active model route. */
+  efforts?: readonly ReasoningEffort[];
 }
 
 const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -35,8 +38,9 @@ const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
 export function EffortDialog({
   onSelect,
   currentEffort,
+  efforts = REASONING_EFFORT_TIERS,
 }: EffortDialogProps): React.JSX.Element {
-  const items = REASONING_EFFORT_TIERS.map((tier) => ({
+  const items = efforts.map((tier) => ({
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
     value: tier,
     key: tier,
@@ -47,7 +51,7 @@ export function EffortDialog({
   // which would mislead the user into thinking 'high' is their current setting
   // when in fact the model/provider default applies.
   const initialIndex = currentEffort
-    ? Math.max(0, REASONING_EFFORT_TIERS.indexOf(currentEffort))
+    ? Math.max(0, efforts.indexOf(currentEffort))
     : 0;
 
   const handleSelect = useCallback(

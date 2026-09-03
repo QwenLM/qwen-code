@@ -8,7 +8,7 @@ import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
+import { resolveModelReasoningConfiguration } from '../../model-reasoning-config.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -84,19 +84,17 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekProvider = isDeepSeekProvider;
   static isDeepSeekHostname = isDeepSeekHostname;
 
-  /**
-   * The full ladder, including `max`, only on a verified DeepSeek host.
-   * `isDeepSeekProvider` also routes here on a `deepseek` substring in the
-   * model name, which says nothing about what the endpoint accepts, so the
-   * capability follows the rule the module comment above already states: a
-   * decision about the wire shape DeepSeek's own API exposes uses
-   * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
-   */
+  /** The registered route's native ladder; otherwise the generic ceiling. */
   protected override supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return isDeepSeekHostname(this.contentGeneratorConfig)
-      ? REASONING_EFFORT_TIERS
+    const configuration = resolveModelReasoningConfiguration({
+      modelId: model ?? this.contentGeneratorConfig.model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    return configuration && !configuration.toggleOnly
+      ? configuration.efforts
       : super.supportedReasoningEffortsFor(model);
   }
 
@@ -109,9 +107,8 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
    * or raising mid-conversation. Models that explicitly declare image input
    * retain multipart content for compatible gateways. Also translate the
    * standard `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
-   * body parameter — but only on actual DeepSeek hostnames, since the model-name
-   * fallback above can match self-hosted/strict OpenAI-compat backends that
-   * don't accept the DeepSeek extension.
+   * body parameter — but only for exact registered models on the official
+   * route, since the model-name fallback above can match self-hosted backends.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -119,9 +116,15 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const reshaped = isDeepSeekHostname(this.contentGeneratorConfig)
-      ? translateReasoningEffort(baseRequest)
-      : baseRequest;
+    const configuration = resolveModelReasoningConfiguration({
+      modelId: request.model || this.contentGeneratorConfig.model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    const reshaped =
+      configuration?.endpointFamily === 'deepseek'
+        ? translateReasoningEffort(baseRequest)
+        : baseRequest;
     if (!reshaped.messages?.length) {
       return reshaped;
     }

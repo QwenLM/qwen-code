@@ -19,7 +19,6 @@ import {
   applyOfficialOpenAIPromptCaching,
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
-import { isDeepSeekHostname } from './provider/deepseek.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -33,6 +32,12 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
+import {
+  normalizeModelReasoningEffort,
+  resolveModelReasoningConfiguration,
+  type ModelReasoningConfiguration,
+} from '../model-reasoning-config.js';
+import { REASONING_EFFORT_TIERS } from '../reasoning-effort.js';
 import {
   resolveStreamIdleTimeoutMs,
   resolveStreamMaxLifetimeMs,
@@ -79,6 +84,92 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function applyResolvedReasoningEffort(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  configuration: ModelReasoningConfiguration | undefined,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (!configuration) return request;
+  const loose = request as unknown as Record<string, unknown>;
+  const reasoning = asObject(loose['reasoning']);
+  if (!reasoning || !('effort' in reasoning)) return request;
+
+  const effort = REASONING_EFFORT_TIERS.find(
+    (candidate) => candidate === reasoning['effort'],
+  );
+  const normalized = normalizeModelReasoningEffort(configuration, effort);
+  const next = { ...loose };
+  const { effort: _drop, ...rest } = reasoning;
+  if (Object.keys(rest).length === 0) {
+    delete next['reasoning'];
+  } else {
+    next['reasoning'] = rest;
+  }
+  if (
+    normalized &&
+    (typeof next['reasoning_effort'] !== 'string' ||
+      next['reasoning_effort'].length === 0)
+  ) {
+    next['reasoning_effort'] = normalized;
+  }
+  if (normalized && configuration.wireShape === 'qwen-effort') {
+    delete next['thinking_budget'];
+  }
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+}
+
+function normalizeResolvedThinkingSwitch(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  configuration: ModelReasoningConfiguration | undefined,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (
+    configuration?.wireShape !== 'thinking-toggle' &&
+    configuration?.wireShape !== 'thinking-effort'
+  ) {
+    return request;
+  }
+  const loose = request as unknown as Record<string, unknown>;
+  const enabled = loose['enable_thinking'];
+  if (typeof enabled !== 'boolean') return request;
+
+  const next = { ...loose };
+  const thinking = asObject(next['thinking']);
+  if (thinking?.['type'] !== 'enabled' && thinking?.['type'] !== 'disabled') {
+    next['thinking'] = {
+      ...thinking,
+      type: enabled ? 'enabled' : 'disabled',
+    };
+  }
+  delete next['enable_thinking'];
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+}
+
+function dropIncompatibleConfiguredEffort(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  configuration: ModelReasoningConfiguration | undefined,
+  contentGeneratorConfig: ContentGeneratorConfig,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (!configuration || configuration.toggleOnly) return request;
+  if (
+    contentGeneratorConfig.extra_body?.['reasoning_effort'] !== undefined ||
+    contentGeneratorConfig.samplingParams?.['reasoning_effort'] !== undefined
+  ) {
+    return request;
+  }
+  const reasoning = contentGeneratorConfig.reasoning;
+  const configuredEffort = reasoning && reasoning.effort;
+  if (
+    !configuredEffort ||
+    normalizeModelReasoningEffort(configuration, configuredEffort)
+  ) {
+    return request;
+  }
+  const loose = request as unknown as Record<string, unknown>;
+  if (loose['reasoning_effort'] === undefined) return request;
+  const next = { ...loose };
+  delete next['reasoning_effort'];
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }
 
 function normalizeSchemaType(value: unknown): string | undefined {
@@ -157,10 +248,17 @@ function isRequiredThinkingError(error: unknown): boolean {
   if (getErrorStatus(error) !== 400) return false;
   const providerMessage = getRateLimitErrorDetails(error).providerMessage;
   const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
-  return (
+  const enableThinkingRequired =
     message.includes('enable_thinking') &&
-    /(?:restricted to|must be) true\b/i.test(message)
-  );
+    /(?:restricted to|must be) true\b/i.test(message);
+  const thinkingTypeRequired =
+    /\bthinking(?:\.type)?\b/i.test(message) &&
+    ((/\bdisabled\b/i.test(message) &&
+      /\b(?:not supported|unsupported|does not support|cannot)\b/i.test(
+        message,
+      )) ||
+      /\b(?:must be enabled|only supports enabled)\b/i.test(message));
+  return enableThinkingRequired || thinkingTypeRequired;
 }
 
 /**
@@ -834,7 +932,7 @@ export class ContentGenerationPipeline {
     );
 
     // Apply provider-specific enhancements
-    const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+    let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
@@ -852,6 +950,16 @@ export class ContentGenerationPipeline {
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
       ).stream = false;
     }
+
+    const reasoningConfiguration = resolveModelReasoningConfiguration({
+      modelId: context.model,
+      authType: this.contentGeneratorConfig.authType,
+      baseUrl: this.contentGeneratorConfig.baseUrl,
+    });
+    baseRequest = applyResolvedReasoningEffort(
+      baseRequest,
+      reasoningConfiguration,
+    );
 
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
@@ -880,6 +988,15 @@ export class ContentGenerationPipeline {
     let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
+    );
+    providerRequest = normalizeResolvedThinkingSwitch(
+      providerRequest,
+      reasoningConfiguration,
+    );
+    providerRequest = dropIncompatibleConfiguredEffort(
+      providerRequest,
+      reasoningConfiguration,
+      this.contentGeneratorConfig,
     );
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
@@ -911,7 +1028,10 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory = this.requiresThinking(model);
+    const thinkingMandatory = this.requiresThinking(
+      model,
+      reasoningConfiguration,
+    );
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -933,19 +1053,20 @@ export class ContentGenerationPipeline {
       // would leak the field, and a non-qwen config with a qwen request
       // model would miss the disable signal (the regression).
       if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
-        if (isDashScope) {
-          if (isTieredEffortWireModel(model)) {
-            // The tier-native family reads reasoning_effort, not the
-            // boolean: emit the canonical disable in the knob it reads
-            // (the strip below preserves 'none'). Drop a user-supplied
-            // thinking_budget too — DashScope rejects it alongside
-            // reasoning_effort.
-            delete typed['enable_thinking'];
-            delete typed['thinking_budget'];
-            typed['reasoning_effort'] = 'none';
-          } else {
-            typed['enable_thinking'] = false;
-          }
+        if (
+          reasoningConfiguration?.wireShape === 'qwen-effort' ||
+          (!reasoningConfiguration &&
+            isDashScope &&
+            isTieredEffortWireModel(model))
+        ) {
+          delete typed['enable_thinking'];
+          delete typed['thinking_budget'];
+          typed['reasoning_effort'] = 'none';
+        } else if (
+          reasoningConfiguration?.wireShape === 'qwen-toggle' ||
+          (!reasoningConfiguration && isDashScope)
+        ) {
+          typed['enable_thinking'] = false;
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
@@ -973,6 +1094,13 @@ export class ContentGenerationPipeline {
           };
         }
       }
+      if (
+        !thinkingMandatory &&
+        (reasoningConfiguration?.wireShape === 'alibaba-toggle' ||
+          reasoningConfiguration?.wireShape === 'alibaba-effort')
+      ) {
+        typed['enable_thinking'] = false;
+      }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
       // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
@@ -985,14 +1113,18 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
-      // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
-      // the effort knob alone leaves thinking on. Emit the explicit
-      // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
-      // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
-      // DeepSeek versions may not accept the V4 thinking parameter, so
-      // we don't push it there. See https://api-docs.deepseek.com/.
-      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
-        typed['thinking'] = { type: 'disabled' };
+      // First-party DeepSeek, Moonshot, and Z.AI routes use thinking.type for
+      // their switch. The resolver keeps this shape off unknown or self-hosted
+      // endpoints that may reject it.
+      if (
+        !thinkingMandatory &&
+        (reasoningConfiguration?.wireShape === 'thinking-toggle' ||
+          reasoningConfiguration?.wireShape === 'thinking-effort')
+      ) {
+        typed['thinking'] = {
+          ...asObject(typed['thinking']),
+          type: 'disabled',
+        };
       }
       // OpenRouter's thinking switch is the provider-level `reasoning`
       // parameter (`reasoning: { enabled: false }`, see
@@ -1030,6 +1162,16 @@ export class ContentGenerationPipeline {
       // it); a thinking-mandatory model rejects it like the boolean shapes.
       if (typed['reasoning_effort'] === 'none') {
         delete typed['reasoning_effort'];
+      }
+      const thinking = asObject(typed['thinking']);
+      if (thinking?.['type'] === 'disabled') {
+        const remaining = { ...thinking };
+        delete remaining['type'];
+        if (Object.keys(remaining).length > 0) {
+          typed['thinking'] = remaining;
+        } else {
+          delete typed['thinking'];
+        }
       }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
@@ -1107,9 +1249,13 @@ export class ContentGenerationPipeline {
     };
   }
 
-  private requiresThinking(model: string): boolean {
+  private requiresThinking(
+    model: string,
+    configuration?: ModelReasoningConfiguration,
+  ): boolean {
     const normalizedModel = model.toLowerCase();
     return (
+      configuration?.canDisable === false ||
       this.requiredThinkingModels.has(normalizedModel) ||
       (this.contentGeneratorConfig.thinkingMandatory === true &&
         normalizedModel ===
@@ -1180,12 +1326,15 @@ export class ContentGenerationPipeline {
       // provider-specific output-budget key in the result is clamped to the
       // window too — a config carrying both max_tokens and e.g.
       // max_completion_tokens must not leak the provider key unclamped.
-      return clampProviderOutputBudgetKeys(
+      const params = clampProviderOutputBudgetKeys(
         maxTokens !== undefined
           ? { ...configSamplingParams, max_tokens: maxTokens }
           : { ...configSamplingParams },
         requestMaxTokens,
       );
+      return configSamplingParams['reasoning'] === undefined
+        ? { ...params, ...this.buildReasoningConfig(request) }
+        : params;
     }
 
     const params: Record<string, unknown> = {
@@ -1289,6 +1438,7 @@ export class ContentGenerationPipeline {
       if (
         (wireRequest?.['enable_thinking'] === false ||
           chatTemplateKwargs?.['enable_thinking'] === false ||
+          asObject(wireRequest?.['thinking'])?.['type'] === 'disabled' ||
           // The tier-native family's disable shape (reasoning_effort:
           // 'none') replaces enable_thinking: false on the wire; recognise
           // it so runtime learning still fires there.

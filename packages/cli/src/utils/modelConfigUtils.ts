@@ -11,8 +11,11 @@ import {
   type ContentGeneratorConfigSources,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
+  resolveModelReasoningConfiguration,
   resolveModelConfig,
   resolveProviderProtocol,
+  settingsSource,
+  supportsGenericReasoningEffort,
   type ModelConfigSourcesInput,
   type ModelProvidersConfig,
   type ProviderModelConfig,
@@ -426,29 +429,48 @@ export function resolveCliGenerationConfig(
     openAILoggingDir,
   };
 
-  // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
-  // set via /effort) onto the unified reasoning config. Skip when thinking is
-  // explicitly disabled (reasoning === false) so effort never silently
-  // re-enables it; provider adapters clamp the tier to the active model.
+  // Apply the global preference only when the resolved model route accepts it.
   const rawReasoningEffort = settings.model?.reasoningEffort;
   const reasoningDisabled = rawReasoningEffort === 'none';
   const reasoningEffort = reasoningDisabled
     ? undefined
     : normalizeReasoningEffort(rawReasoningEffort);
-  // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
-  // normalizes to undefined and is silently skipped below. Surface it as a
-  // warning so the user isn't left wondering why /effort had no effect.
+  const reasoningConfiguration = resolveModelReasoningConfiguration({
+    modelId: generationConfig.model,
+    authType,
+    baseUrl: generationConfig.baseUrl,
+  });
+  const canDisableReasoning =
+    generationConfig.thinkingMandatory !== true &&
+    reasoningConfiguration?.canDisable !== false &&
+    (reasoningConfiguration !== undefined ||
+      supportsGenericReasoningEffort(generationConfig.model));
+  const supportsReasoningEffort =
+    reasoningEffort !== undefined &&
+    (reasoningConfiguration
+      ? !reasoningConfiguration.toggleOnly &&
+        reasoningConfiguration.efforts.includes(reasoningEffort)
+      : supportsGenericReasoningEffort(generationConfig.model));
   const invalidReasoningEffortWarning =
     rawReasoningEffort && !reasoningDisabled && !reasoningEffort
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: none, ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
+  const incompatibleReasoningEffortWarning =
+    rawReasoningEffort &&
+    !invalidReasoningEffortWarning &&
+    ((reasoningDisabled && !canDisableReasoning) ||
+      (reasoningEffort !== undefined && !supportsReasoningEffort))
+      ? `Ignoring model.reasoningEffort "${rawReasoningEffort}" because it is not supported by ${generationConfig.model || 'the active model'} on the resolved endpoint; using the provider default.`
+      : undefined;
+  if (reasoningDisabled && canDisableReasoning) {
     generationConfig.reasoning = false;
-  } else if (reasoningEffort && generationConfig.reasoning !== false) {
+    resolved.sources['reasoning'] = settingsSource('model.reasoningEffort');
+  } else if (supportsReasoningEffort && reasoningEffort) {
     generationConfig.reasoning = {
-      ...(generationConfig.reasoning ?? {}),
+      ...(generationConfig.reasoning || {}),
       effort: reasoningEffort,
     };
+    resolved.sources['reasoning'] = settingsSource('model.reasoningEffort');
   }
 
   return {
@@ -463,6 +485,9 @@ export function resolveCliGenerationConfig(
     warnings: [
       ...resolved.warnings,
       ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
+      ...(incompatibleReasoningEffortWarning
+        ? [incompatibleReasoningEffortWarning]
+        : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

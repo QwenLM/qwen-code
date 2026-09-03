@@ -19,6 +19,7 @@ import {
   APPROVAL_MODES,
   BUILT_IN_OUTPUT_STYLES,
   REASONING_EFFORT_TIERS,
+  resolveModelReasoningConfiguration,
   type ApprovalMode,
   type OutputStyleDefinition,
   type ReasoningEffort,
@@ -177,7 +178,20 @@ export function OpenTuiEffortDialog(props: {
   onClose: () => void;
 }) {
   const { config, settings, onClose } = props;
-  const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
+  const generation = config?.getContentGeneratorConfig?.();
+  const reasoning = resolveModelReasoningConfiguration({
+    modelId: config?.getModel?.(),
+    authType: generation?.authType ?? config?.getAuthType?.(),
+    baseUrl:
+      generation?.baseUrl ??
+      config?.getCurrentModelRegistryBaseUrl?.() ??
+      undefined,
+  });
+  const tiers = [
+    ...(reasoning && !reasoning.toggleOnly
+      ? reasoning.efforts
+      : REASONING_EFFORT_TIERS),
+  ] as ReasoningEffort[];
   // Pre-select the live tier only when one is configured; an unset effort
   // starts at the top (ink EffortDialog initialIndex parity).
   const currentEffort = config?.getReasoningEffort?.();

@@ -375,6 +375,8 @@ describe('isTieredEffortWireModel', () => {
     expect(isTieredEffortWireModel('qwen3.8-max-2026-01-15')).toBe(true);
     expect(isTieredEffortWireModel('qwen3.8-max-latest')).toBe(true);
     expect(isTieredEffortWireModel('Qwen3.8-Max')).toBe(true);
+    expect(isTieredEffortWireModel('qwen3.8-flash')).toBe(true);
+    expect(isTieredEffortWireModel('Qwen3.8-Flash')).toBe(true);
   });
 
   it('rejects other qwen models and non-qwen ids', () => {
