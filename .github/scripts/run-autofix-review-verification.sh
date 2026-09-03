@@ -1037,267 +1037,273 @@ fi
 # WEAKENED file, and the bite check reads only the tests a round ADDS --
 # never the ones it edits away.
 #
-# So: any pre-existing runnable test file this round deletes, whose assertion
-# density it lowers, or into which it introduces a skip/todo marker, must be
-# named in <workdir>/test-weakening.json -- a JSON array of
-# {"path": "<file>", "reason": "<evidence>"}. The gate judges PRESENCE and a
+# CONTRACT. Any pre-existing test file whose DECLARED test surface this
+# round shrinks must be named in <workdir>/test-weakening.json -- a JSON
+# array of {"path": "<file>", "reason": "<evidence>"} -- or the round is
+# rejected, retryably. The gate judges that the claim EXISTS and carries a
 # non-trivial reason, never the reason's merit: no semantic oracle is
-# available here, and turning a silent edit into an explicit attributable
-# claim is the whole point -- the reasons ride into the round report, where a
-# maintainer reads them against the diff.
+# available here, and turning a silent edit into an explicit, attributable
+# claim is the whole point. The reasons ride into the round report, where
+# a maintainer reads them against the diff.
 #
-# Signals, all measured per round COMMIT rather than over the net range:
-# each of the round's own commits is diffed against its first parent, so a
-# base-merging round is judged on its own changes; the per-commit scan
-# enumerates modified, deleted, and typechanged files (a pre-existing test
-# replaced by a symlink is status T, not a deletion, and still exists at
-# the tip). A merge commit counts only the lines its resolution is
-# responsible for -- an added line main's side did not already carry, a
-# removed line that is not freight -- where freight is exactly what main
-# itself deleted: present at the merge base and absent from main's side of
-# the merge (including the modify/delete shape with no blob on main's side
-# at all). So freight crossing the merge neither charges the round nor
-# shields it, and a weakening introduced while resolving a merge conflict
-# IS counted. One exception: a modify/delete resolution that KEEPS the
-# file main deleted authors every surviving line itself, so none of its
-# removals is freight. Freight attribution applies only when the merge's
-# second
-# parent is main-derived -- a side-branch merge has no main side, and its
-# first-parent diff is the round's own work.
-# A file that did not exist at the pre-round ref is not pre-existing
-# coverage and is not measured, whichever commit touched it. Per-file
-# pathspecs are `:(literal)` -- a branch-controlled filename may carry glob
-# magic, and the measurement must see exactly the file's own hunks, not the
-# union of every path its name matches.
-#   - the file was DELETED;
-#   - assertion lines removed exceed assertion lines added, an assertion
-#     line being one that carries a THROWING assertion: `expect(` or
-#     `expect.poll(` -- with a CALLED matcher chain following on the
-#     same line when ADDED, since expect('anything') passes for any
-#     value and a property-accessed matcher (expect(x).toBe;) throws
-#     nothing, the maximal relaxation, while a bare `expect(` removal
-#     still counts (a
-#     multi-line-formatted assertion measures as a removal: the
-#     fail-closed direction, one ack entry answers it) -- or
-#     `assert(`/`assert.member(` with a left boundary, where the member
-#     arm requires the CALL: a member access alone (an exported alias
-#     like const eq = assert.deepEqual;) executes no assertion, while a
-#     member call like console.assert( prints and continues and never
-#     fails a test. supertest's `.expect(` is the throwing exception --
-#     a MEMBER call whose mismatch rejects the awaited promise -- so it
-#     counts too; an over-count from a rare non-throwing .expect( member
-#     fails closed, one ack entry answers it. An
-#     assertion moved within a file nets zero; one moved OUT of a file
-#     nets negative and is answered by naming its new home. Removed lines
-#     count RAW and added lines count after comment-and-string-aware
-#     stripping: a commented-out copy of a removed assertion must not
-#     cancel it, and an over-charge on the raw del side fails closed (one
-#     ack entry answers it) while an over-credit on the add side would
-#     fail open.
-#     The line counts are cross-checked against the assertion density of
-#     the string-and-comment-stripped WHOLE BLOBS on every edited file:
-#     diff-line grep cannot see tokens that never execute -- an assertion
-#     wrapped into a multi-line block comment (the wrapped line stays
-#     byte-identical and never appears in a -U0 diff), a string-literal
-#     decoy, or a decoy planted inside a block comment opened above the
-#     hunk -- while the blob delta under symmetric stripping nets every
-#     untouched region to zero. The larger deletion signal wins. Merge
-#     commits are freight-attributed like the line counts: main's own
-#     density delta neither charges nor shields. The measurement
-#     diff is --text: a branch-controlled .gitattributes `-diff`/`binary`
-#     rule would otherwise collapse the hunk into a binary banner and zero
-#     every counter;
-#   - a skip/todo marker was added NET: `it`/`test`/`describe` followed by
-#     `.skip`, `.todo`, `.fails`, or `.failing` -- with a `.concurrent`/
-#     `.sequential`/`.shuffle` chain AHEAD of the modifier, behind it, or
-#     both, optionally chained with `.each`/`.for` (call tail `(`, `<`, a
-#     tagged template, or an optional-chaining `?.` before any member dot
-#     or the call) -- the computed accessor `it['skip'](` quoted with a
-#     single, double, or BACKTICK quote, or `xit(`/`xdescribe(`. Markers
-#     are measured on a joined view, so a newline-split member chain
-#     (it / .skip( on two lines) counts like the one-line form, and on the
-#     comment-stripped view on BOTH sides: a deleted comment line that
-#     merely contains marker text earns no removal credit. The line net is
-#     cross-checked against the whole-blob marker delta under the same
-#     code strip the assertion arm uses -- a line strip cold-starts at the
-#     hunk boundary, so block-comment state from unchanged bytes ABOVE the
-#     hunk cannot arrive there; the larger addition signal wins. Marker
-#     additions are charged on their own: removals in the same file do
-#     not cancel them, because un-skipping one test cannot license
-#     silencing another -- re-adding a marker to an already-skipped test
-#     (a rename) IS charged and one ack entry answers it, while a
-#     genuine un-skip (a removal with no addition) stays uncharged.
-#     `.skipIf` is deliberately NOT
-#     a signal -- it is this repo's standard environment guard (237 uses)
-#     and flagging it would charge every platform-conditional test to this
-#     gate.
-# Snapshots are out of scope on both signals: they carry no assertion token,
-# and an obsolete snapshot removed by `vitest -u` is routine bookkeeping.
-# Fails OPEN on the measured signals -- a diff the gate cannot read skips
-# them rather than rejecting a round it could not measure. The net-range
-# deletion arm is independent of that walk and still judges: a deletion is
-# proven by the pre-round->tip pair, not by the per-commit producer.
-# The rejecting gate must not see strictly less of the repo's test surface
-# than the advisory's TEST_PATHSPEC above: the advisory's directory arms
-# and the repo's non-JS test shapes belong here too. Whole-file deletions
-# are language-agnostic; the JS-syntax density REs simply never match the
-# non-JS bytes, so those files are judged by the deletion arm alone.
-# The limit of that promise: a Rust module carrying an inline
-# `#[cfg(test)] mod tests` block lives in src/*.rs beside production code,
-# so no pathspec can select those tests without also selecting every Rust
-# production file -- and charging a production-file deletion as a test
-# deletion would break the language-agnostic deletion rule above. Such a
-# file is outside every arm here, in-place weakening included; only Rust
-# test files whose NAME marks them as tests are enumerated.
-WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(glob)**/*_tests.rs' ':(exclude,glob)**/__snapshots__/**')
-# Member calls like console.assert( print and continue in Node — they
-# never fail a test — so the assert forms carry the left-boundary idiom
-# the skip RE uses, and the member arm requires the CALL: a member
-# access with no call (export const eq = assert.deepEqual;) executes no
-# assertion and earns nothing. supertest's .expect( is the throwing
-# exception — a member call whose mismatch rejects the awaited promise —
-# so the member form counts on every arm. This del-side/blob RE counts a
-# bare expect( call. The expect MEMBERS whitelisted beside poll are the
-# complete throwing assertions — soft( collects failures and throws at
-# test end, assertions(/hasAssertions( throw on a count mismatch,
-# unreachable( throws unconditionally — so deleting such a line removes
-# a pinning assertion exactly like deleting expect(...).toBe(...). The
-# list stays a whitelist on purpose: anything(/any(/arrayContaining(
-# are NON-throwing asymmetric matchers and must not count.
-WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\(|\.expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\('
-# Added lines count an expect( only when a CALLED matcher chain follows
-# it on the same line: expect('anything') passes for any return value,
-# and a matcher that is only property-accessed, never called
-# (expect(x).toBe;) throws nothing — the maximal relaxation of an
-# assertion. The tail therefore demands the member identifier plus a
-# CALL opener — '(' or the optional-chaining call '?.' — through any
-# further dotted members (expect(x).not.toBe(...)). A bare '?' is the
-# head of a ternary or nullish (expect(x).toBe ? 1 : 2 reads the
-# matcher as a value and throws nothing), so it earns no credit. The
-# del side stays bare on purpose: a multi-line-formatted expect(...)
-# then measures as a removal — the fail-closed direction, one ack entry
-# answers it. The member form .expect( IS its own assertion, but it
-# carries the same matcher-tail requirement here on purpose: a
-# bare-added member call then measures as removal-only — the
-# fail-closed direction. expect.soft( pins only through its RECORDED
-# matcher calls (a bare expect.soft( passes recording zero assertions),
-# so it rides the called-matcher arm and earns credit only with a
-# called matcher; hasAssertions( and unreachable( need no tail — the
-# CALL itself fails the test, so an added expect.unreachable( earns
-# addition credit as written.
-# expect.assertions( is NOT whitelisted here: assertions(0) passes
-# exactly when ZERO assertions run — the count-mismatch throw is
-# unreachable precisely when the test pins nothing, so its add-side
-# credit would certify that shape. The del/blob RE above keeps it:
-# REMOVING such a line still counts — the fail-closed asymmetry.
-WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.(poll|soft))?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*([?][.])?[(]|(^|[^A-Za-z0-9_$.])expect\.(hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*([?][.])?[(]'
-# The matcher-tail census: the counting layers below see lines carrying an
-# expect(/assert( head token, so deleting ONLY the matcher-tail line of a
-# multi-line-formatted assertion measures zero on every layer while the
-# assertion becomes expect(two());, the maximal relaxation. The density
-# census therefore counts CALLED matcher-chain calls too -- a member dot
-# followed by a call opener, the optional-chaining tolerance the add RE
-# grants -- with match-count semantics (a line count undercounts
-# assertions fused into one line), symmetrically on both blobs. The arm
-# only ever RAISES the deletion signal: a member call that throws nothing
-# can only over-charge the del side, the documented fail-closed direction.
-# Scoped to CONTINUATION-shaped lines -- a stripped line whose first
-# non-space byte is ')' or '.' -- because that is the only shape this arm
-# exists to see: the matcher tail of a multi-line-formatted assertion.
-# Counting every member call in the blob instead charged ordinary
-# non-assertion test code (vi.spyOn(...).mockReturnValue(...), a spy's
-# .mockRestore(), an array .map/.filter rewrite) as removed assertions,
-# and that is the common case, not a rare tail: across 285 sampled test
-# files 250 carry more member calls than assertion heads, and the census
-# counted 47041 member calls where the scoped one counts 3499.
-WEAKEN_MATCHER_TAIL_RE='[.][A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*([?][.])?[(]'
-# Collector-modifier member calls (.skip(, .each(, .concurrent(, ...) are
-# not assertions: the tail census must not count them, or a genuine
-# un-skip measures as a density loss. The exclusion mirrors the tail RE's
-# shape exactly, so it can never subtract more than the tail arm counted.
-WEAKEN_MATCHER_TAIL_EXCLUDE_RE='[.](skipIf|runIf|skip|todo|fails|failing|each|for|concurrent|sequential|shuffle|only)[[:space:]]*([?][.])?[(]'
-# Marker shapes beyond the dotted one-line form: a concurrent/
-# sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
-# describe.concurrent.skip()) or BEHIND it (it.skip.concurrent( — vitest
-# registers the skip either way), the optional-chaining spellings
-# it?.skip( and it.skip?.(, the tagged-template each tail
-# (it.skip.each`table`), and the computed-property accessor quoted with
-# a single, double, or BACKTICK quote (it['skip']('a', ...)).
-# Newline-split member chains (it / .skip( on two lines — valid JS
-# running as it.skip) are measured on the joined view
-# weaken_join_markers produces below. Three further disable surfaces:
-# suite — vitest's fourth collector — in the collector roots; the
-# options-object form test('x', { skip: true }, fn), which carries no
-# collector modifier (the value must be the true LITERAL: a
-# condition-valued skip is this repo's skipIf environment-guard idiom
-# and stays exempt like .skipIf), with the registering paren tolerant
-# of an each/for parameterizer between the root and the paren
-# (it.each(table)('x', { skip: true }, fn) disables the parameterized
-# test the same way); and the runtime body call skip( — ctx.skip()
-# disables a pre-existing test with no collector edit. The body arm
-# demands ( immediately after skip so .skipIf( stays exempt, and carries
-# the options arm's condition-valued exemption: ctx.skip(cond, reason) is
-# vitest's dynamic spelling of the environment guard this repo already
-# writes as skip(process.platform === 'win32', 'requires the POSIX daemon
-# harness'), so charging it rejects an honest platform-conditional test.
-# The `true` LITERAL stays charged on both spellings, exactly as in the
-# options arm. A condition the exemption cannot see is still charged — an
-# over-charge, which one ack entry answers: a single-argument skip(cond),
-# and any condition carrying its own comma or close paren, so
-# skip(isWindows(), 'reason') charges like the unconditional form.
-# shellcheck disable=SC2016  # the $ bytes are regex character-class literals, not shell expansions
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(each|for)[[:space:]]*[(][^)]*[)][[:space:]]*)*[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\(([^,)]*\)|[[:space:]]*true[[:space:]]*[,)])'
-# Measured weakenings travel as parallel indexed arrays, never a
-# newline/tab-joined string: filenames are branch-controlled bytes, and a
-# name carrying a newline or tab splits a delimited record into fragments
-# an ack loop then matches separately -- acknowledging the FRAGMENTS while
-# the actually-weakened file carries no evidence.
+# AUTHORITY. The surface is measured by count-test-surface.mjs -- the
+# TypeScript compiler's parser over the WHOLE file, never text patterns
+# over diff lines -- so comments, strings, regex literals, JSX and line
+# breaks are the parser's business and can neither decoy nor hide a token.
+# Per file it counts statement-level assertion call chains, test/describe
+# registrations with their enabled/disabled state (every collector
+# spelling of skip/todo/fails, the x-aliases, a literal skipIf/runIf, a
+# literal options object, a body-level unconditional skip()), and bare
+# early returns ahead of a test body's assertions. The script's header is
+# the definition of record.
+#
+# ATTRIBUTION. Each file's round delta is tip - pre-round - main's own
+# contribution. Across a main-derived merge, main's contribution is the
+# delta from the branch's side to git's auto-merge of main's side onto it
+# (three-way, `git merge-file --ours`: a conflict resolves for the branch,
+# a modify/delete conflict keeps the branch's version, a deletion the
+# result adopted is main's); across a fast-forwarded main commit it is the
+# commit's own delta. So a weakening committed before, during, or after a
+# merge of main measures the same, an assertion moved within a file nets
+# zero whichever commit sequence produced the tip, and main's own delta
+# neither charges nor shields the round. Assertions are counted per file;
+# registrations by title, so un-skipping one test never licenses silencing
+# another, while a brand-new todo/skip registration is the round's own and
+# charges nothing.
+#
+# SIGNALS, one entry per file, the first that applies: the file was
+# deleted (held by the baseline -- pre-round, or landed by main during the
+# round -- and absent at the tip); net assertions removed; a baseline-
+# enabled registration now disabled; net enabled registrations removed;
+# early returns added. Files are selected by NAME: `*.test.*`, `*.spec.*`,
+# `test_*.py`, and the `tests/*.rs` / `*_test.rs` / `*_tests.rs` shapes,
+# snapshots excluded. Non-JS shapes measure a zero surface and are judged
+# by the deletion arm alone. A test surface only a runner can enumerate --
+# a Rust `#[cfg(test)]` module inside a production file, a suite registered
+# under a condition -- is outside this gate by design.
+#
+# NOT MEASURED, by design: whether an assertion is REACHABLE (dead code, a
+# condition false in CI, a helper never called), condition-valued guards
+# (`.skipIf(cond)`, `skip(cond, reason)` -- this repository's environment-
+# guard idiom), and options carried by reference. Those are runtime facts;
+# the package test run and the bite check are the runner-backed
+# instruments, and this gate certifies only what it measures: the
+# declared surface.
+#
+# Fails OPEN on the measured signals -- a history the walk cannot read or
+# a counter that cannot run skips them with a logged UNAVAILABLE -- and
+# never on a whole-file deletion, which the pre-round->tip pair proves
+# without the walk.
+WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/test_*.py' ':(glob)**/tests/*.rs' ':(glob)**/*_test.rs' ':(glob)**/*_tests.rs' ':(exclude,glob)**/__snapshots__/**')
+WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"
+WEAKEN_MEASURED='true'
+WEAKEN_TMP="$(mktemp -d "${RUNNER_TEMP}/weaken.XXXXXX")"
+# Parallel indexed arrays throughout (bash 3.2 has no associative arrays):
+# measured files and their signal text.
 WEAKENED_PATHS=()
 WEAKENED_SIGNALS=()
-WEAKENED_CHARGED=()
-WEAKEN_MEASURED='true'
-# Parallel indexed arrays, not bash-4 associative arrays: this section
-# precedes the bite section's mapfile builtin (bash 4.4) -- the first
-# bash-4 boundary the test suite's host probe gates. On the bash-3.2 macOS
-# lane an unconditional bash-4 builtin here would abort every runGate spawn
-# before any verdict.
-WEAKEN_FILE_LIST=()
-WEAKEN_DEL_ACC=()
-WEAKEN_ADD_ACC=()
-WEAKEN_SKIP_ADD_ACC=()
-WEAKEN_SKIP_DEL_ACC=()
-# Test files a main-derived merge of THIS round landed (status A at the
-# merge): for the round's own post-merge commits they are pre-existing
-# coverage exactly like the pre-round ref's files -- main's newly landed
-# tests may not be silently weakened or deleted in the same round.
-WEAKEN_MERGE_INTRODUCED=()
-# Files measured at a main-derived merge commit: the byte-identity tip
-# netting may not drop their charges, because for an --ours resolution
-# the damage IS the identity with the pre-round bytes.
-WEAKEN_MERGE_TOUCHED=()
-# Per-file old side of the verdict-time recount: the introducing merge's
-# RESULT blob for files a main-derived merge touched or introduced.
-# Merge result to tip is exactly the round's post-merge authorship, so
-# the recount nets cross-commit decoys there too while main's own delta
-# crossing the merge neither charges nor shields. The oldest-first walk
-# overwrites earlier entries: the LAST such merge bounds the range.
-WEAKEN_RECOUNT_BASE_FILES=()
-WEAKEN_RECOUNT_BASE_REFS=()
-# Oldest-first: a merge's WEAKEN_MERGE_INTRODUCED seed must land before
-# the post-merge commits that consult it, and a pre-round-baseline re-add
-# measurement reads the accumulators the earlier commits filled.
-WEAKEN_ROUND_COMMITS="$(git rev-list --first-parent --reverse "origin/${BRANCH}..${BRANCH}" 2> /dev/null)" || WEAKEN_MEASURED='false'
-# The accumulator slot holding ${1}'s counts, or failure on first sight.
-weaken_file_slot() {
-  local f="${1}" weaken_i
-  for (( weaken_i = 0; weaken_i < ${#WEAKEN_FILE_LIST[@]}; weaken_i++ )); do
-    if [[ "${WEAKEN_FILE_LIST[weaken_i]}" == "${f}" ]]; then
-      printf '%s\n' "${weaken_i}"
+# The round's first-parent history, oldest first, each commit classified
+# once: main = an ancestor of origin/main (a fast-forwarded ride of main's
+# own commit), merge = a merge whose second parent is main-derived, own =
+# the round's authorship. Only main and merge commits are events the
+# measurement subtracts; the round's own commits are already inside
+# tip - pre-round.
+WEAKEN_COMMITS=()
+WEAKEN_KINDS=()
+[[ -f "${WEAKEN_COUNTER}" ]] || WEAKEN_MEASURED='false'
+if weaken_list="$(git rev-list --first-parent --reverse "origin/${BRANCH}..${BRANCH}" 2> /dev/null)"; then
+  while IFS= read -r c; do
+    [[ -n "${c}" ]] || continue
+    if ! git rev-parse -q --verify "${c}^" > /dev/null 2>&1; then
+      WEAKEN_MEASURED='false'
+      break
+    fi
+    if git merge-base --is-ancestor "${c}" origin/main 2> /dev/null; then
+      weaken_kind='main'
+    elif git rev-parse -q --verify "${c}^2" > /dev/null 2>&1 &&
+      git merge-base --is-ancestor "${c}^2" origin/main 2> /dev/null; then
+      weaken_kind='merge'
+    else
+      weaken_kind='own'
+    fi
+    WEAKEN_COMMITS+=("${c}")
+    WEAKEN_KINDS+=("${weaken_kind}")
+  done <<< "${weaken_list}"
+else
+  WEAKEN_MEASURED='false'
+fi
+# Export ${1}:${2} to a file under WEAKEN_TMP named ${3}; print the file's
+# path, or nothing when the ref holds no such blob. Failure means git
+# itself failed, never an absent blob.
+weaken_blob() {
+  local ref="${1}" f="${2}" out="${WEAKEN_TMP}/${3}"
+  if git cat-file -e "${ref}:${f}" 2> /dev/null; then
+    git show "${ref}:${f}" > "${out}" 2> /dev/null || return 1
+    printf '%s\n' "${out}"
+  fi
+}
+# Main's side auto-merged onto the branch at merge commit ${1} for file
+# ${2}: print the blob file, or nothing when the auto-merge holds no file.
+weaken_auto_blob() {
+  local c="${1}" f="${2}" tag="${3}" mb p1 p2 base out="${WEAKEN_TMP}/${3}.auto"
+  mb="$(git merge-base "${c}^" "${c}^2" 2> /dev/null)" || mb=''
+  p1="$(weaken_blob "${c}^" "${f}" "${tag}.p1")" || return 1
+  p2="$(weaken_blob "${c}^2" "${f}" "${tag}.p2")" || return 1
+  base=''
+  if [[ -n "${mb}" ]]; then
+    base="$(weaken_blob "${mb}" "${f}" "${tag}.mb")" || return 1
+  fi
+  if [[ -z "${p2}" ]]; then
+    # Main holds no blob. Never had one: nothing to merge, the branch's side
+    # stands. Deleted it: a deletion the merge result adopted is main's;
+    # keeping the file (a modify/delete conflict resolved for the branch)
+    # leaves the branch's version as the baseline.
+    if [[ -n "${base}" ]] && ! git cat-file -e "${c}:${f}" 2> /dev/null; then
       return 0
     fi
-  done
-  return 1
+    [[ -n "${p1}" ]] && printf '%s\n' "${p1}"
+    return 0
+  fi
+  if [[ -z "${p1}" ]]; then
+    # The branch holds no blob: main added the file and it lands; or the
+    # branch deleted it earlier and main's edit is a modify/delete conflict
+    # resolved for the branch's deletion.
+    [[ -z "${base}" ]] && printf '%s\n' "${p2}"
+    return 0
+  fi
+  if [[ -z "${base}" ]]; then
+    # Both sides added the file: an add/add conflict, the branch's side
+    # stands.
+    printf '%s\n' "${p1}"
+    return 0
+  fi
+  # Conflicts resolve for the branch (--ours). Only a hard failure (binary
+  # content) leaves the output empty, and then the branch's side stands.
+  git merge-file -p --ours "${p1}" "${base}" "${p2}" > "${out}" 2> /dev/null || true
+  [[ -s "${out}" ]] || cp "${p1}" "${out}"
+  printf '%s\n' "${out}"
 }
+# Measure file ${1}: write the manifest (tip, pre-round, and every main
+# event that touched the file) and print the counter's verdict JSON.
+weaken_measure() {
+  local f="${1}" tag="${2}" tip pre before after events='' weaken_i c kind j=0
+  tip="$(weaken_blob "${BRANCH}" "${f}" "${tag}.tip")" || return 1
+  pre="$(weaken_blob "origin/${BRANCH}" "${f}" "${tag}.pre")" || return 1
+  for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
+    c="${WEAKEN_COMMITS[weaken_i]}"
+    kind="${WEAKEN_KINDS[weaken_i]}"
+    [[ "${kind}" != 'own' ]] || continue
+    # An event only where the commit moved this file relative to a parent.
+    if git diff --quiet "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null &&
+      { [[ "${kind}" != 'merge' ]] || git diff --quiet "${c}^2" "${c}" -- ":(literal)${f}" 2> /dev/null; }; then
+      continue
+    fi
+    j=$(( j + 1 ))
+    before="$(weaken_blob "${c}^" "${f}" "${tag}.e${j}.before")" || return 1
+    if [[ "${kind}" == 'main' ]]; then
+      after="$(weaken_blob "${c}" "${f}" "${tag}.e${j}.after")" || return 1
+    else
+      after="$(weaken_auto_blob "${c}" "${f}" "${tag}.e${j}")" || return 1
+    fi
+    events+="$(jq -cn --arg b "${before}" --arg a "${after}" \
+      '{before: (if $b == "" then null else $b end), after: (if $a == "" then null else $a end)}'),"
+  done
+  jq -n --arg path "${f}" --arg tip "${tip}" --arg pre "${pre}" --argjson events "[${events%,}]" '
+    {path: $path,
+     tip: (if $tip == "" then null else $tip end),
+     pre: (if $pre == "" then null else $pre end),
+     events: $events}' > "${WEAKEN_TMP}/${tag}.json" || return 1
+  node "${WEAKEN_COUNTER}" measure "${WEAKEN_TMP}/${tag}.json"
+}
+weaken_add_file() {
+  local weaken_e
+  for weaken_e in "${WEAKEN_FILES[@]}"; do
+    [[ "${weaken_e}" != "${1}" ]] || return 0
+  done
+  WEAKEN_FILES+=("${1}")
+}
+# Add every pathspec file `git diff ${@}` lists. The producer's status is
+# read, not swallowed behind a process substitution: an enumeration git
+# could not perform marks the measurement UNAVAILABLE instead of silently
+# measuring nothing.
+weaken_add_diff() {
+  if ! git diff --name-only -z --no-renames "$@" -- "${WEAKEN_PATHSPEC[@]}" > "${WEAKEN_TMP}/list" 2> /dev/null; then
+    WEAKEN_MEASURED='false'
+    return 0
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    weaken_add_file "${f}"
+  done < "${WEAKEN_TMP}/list"
+}
+# Candidates: every pathspec file a non-main commit of the round moved
+# relative to a parent (a merge also lists what it moved relative to
+# main's side, so an --ours resolution that discards main's newly landed
+# test is enumerated), plus the pre-round->tip deletions, which need no
+# walk at all.
+WEAKEN_FILES=()
+if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
+  for (( weaken_i = 0; weaken_i < ${#WEAKEN_COMMITS[@]}; weaken_i++ )); do
+    c="${WEAKEN_COMMITS[weaken_i]}"
+    [[ "${WEAKEN_KINDS[weaken_i]}" != 'main' ]] || continue
+    weaken_add_diff "${c}^" "${c}"
+    [[ "${WEAKEN_KINDS[weaken_i]}" == 'merge' ]] || continue
+    weaken_add_diff "${c}^2" "${c}"
+  done
+fi
+weaken_add_diff --diff-filter=D "origin/${BRANCH}" "${BRANCH}"
+if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
+  for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILES[@]}; weaken_idx++ )); do
+    f="${WEAKEN_FILES[weaken_idx]}"
+    if ! weaken_verdict="$(weaken_measure "${f}" "f${weaken_idx}")"; then
+      WEAKEN_MEASURED='false'
+      break
+    fi
+    weaken_baseline="$(jq -r '.baselinePresent' <<< "${weaken_verdict}" 2> /dev/null)" || weaken_baseline=''
+    signal=''
+    if [[ "${weaken_baseline}" != 'true' ]]; then
+      # Not the round's to weaken: the file is its own (pre-round absent and
+      # never landed by main) or main itself removed it.
+      :
+    elif ! git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
+      signal='test file deleted'
+    else
+      signal="$(jq -r '
+        if .assertions < 0 then "net \(-.assertions) assertion(s) removed"
+        elif (.newlyDisabled | length) > 0 then "\(.newlyDisabled | length) pre-existing test registration(s) disabled"
+        elif .enabled < 0 then "net \(-.enabled) enabled test registration(s) removed"
+        elif .guards > 0 then "\(.guards) early return(s) added before assertions"
+        else "" end' <<< "${weaken_verdict}" 2> /dev/null)" || signal=''
+    fi
+    if [[ -n "${signal}" ]]; then
+      WEAKENED_PATHS+=("${f}")
+      WEAKENED_SIGNALS+=("${signal}")
+    fi
+  done
+fi
+if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
+  # UNAVAILABLE: only whole-file deletions are judged, from the explicit
+  # pre-round->tip pair. Without the walk, main's own deletion is told apart
+  # by the merge base -- main can only delete what it tracked, so freight is
+  # exactly "present at the merge base, gone from main's tip"; a test the PR
+  # itself added is in neither and stays charged. An unresolvable merge base
+  # degrades PR_BASE to origin/main above, which makes the exemption
+  # unsatisfiable: every deletion is then surfaced rather than dropped.
+  echo '🧪 test-weakening measurement UNAVAILABLE this round (history walk or counter failed) — only whole-file deletions are judged' | tee -a "${GATE_LOG}"
+  WEAKENED_PATHS=()
+  WEAKENED_SIGNALS=()
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    if git cat-file -e "${PR_BASE}:${f}" 2> /dev/null &&
+      ! git cat-file -e "origin/main:${f}" 2> /dev/null; then
+      continue
+    fi
+    WEAKENED_PATHS+=("${f}")
+    WEAKENED_SIGNALS+=('test file deleted')
+  done < <(git diff --name-only -z --no-renames --diff-filter=D "origin/${BRANCH}" "${BRANCH}" \
+    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+fi
+rm -rf "${WEAKEN_TMP}"
 # Success when ${1} exactly matches one of the remaining arguments.
 weaken_member() {
   local f="${1}" weaken_e
@@ -1309,689 +1315,6 @@ weaken_member() {
   done
   return 1
 }
-# Record ${2} as the recount base ref for file ${1}; a later merge
-# overwrites the earlier entry (the walk is oldest-first).
-weaken_recount_base_set() {
-  local f="${1}" ref="${2}" weaken_bi
-  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_RECOUNT_BASE_FILES[@]}; weaken_bi++ )); do
-    if [[ "${WEAKEN_RECOUNT_BASE_FILES[weaken_bi]}" == "${f}" ]]; then
-      WEAKEN_RECOUNT_BASE_REFS[weaken_bi]="${ref}"
-      return 0
-    fi
-  done
-  WEAKEN_RECOUNT_BASE_FILES+=("${f}")
-  WEAKEN_RECOUNT_BASE_REFS+=("${ref}")
-}
-# Print the recount base ref recorded for ${1}; failure on no entry.
-weaken_recount_base_get() {
-  local f="${1}" weaken_bi
-  for (( weaken_bi = 0; weaken_bi < ${#WEAKEN_RECOUNT_BASE_FILES[@]}; weaken_bi++ )); do
-    if [[ "${WEAKEN_RECOUNT_BASE_FILES[weaken_bi]}" == "${f}" ]]; then
-      printf '%s\n' "${WEAKEN_RECOUNT_BASE_REFS[weaken_bi]}"
-      return 0
-    fi
-  done
-  return 1
-}
-# Drop comment text so a commented-out copy of a removed assertion neither
-# shields an addition nor masks a removal. Both TS comment forms: //-to-EOL
-# and /* ... */ spans, the block state carried across lines. String and
-# template literals are STATE-tracked — an in-string /* cannot open the
-# block state and discard a genuine marker that follows in the same
-# stream — but their CONTENTS stay in the output: the skip patterns read
-# quoted names (it['skip']) and backtick call tails (it.skip.each`table`),
-# and a removed line with an in-string // must still measure. Applied to
-# the ADDED side and to the del-side skip-marker count only; the del-side
-# ASSERTION count stays raw.
-weaken_strip_comments() {
-  awk '
-    BEGIN { inc = 0; q = ""; tpl = 0 }
-    {
-      line = $0; out = ""; n = length(line); i = 1
-      while (i <= n) {
-        ch = substr(line, i, 1); nx = substr(line, i + 1, 1)
-        if (inc) {
-          if (ch == "*" && nx == "/") { inc = 0; i += 2 } else { i += 1 }
-          continue
-        }
-        if (q != "") {
-          if (q == "`" && ch == "$" && nx == "{") { out = out ch nx; tpl += 1; br[tpl] = 0; q = ""; i += 2; continue }
-          if (ch == "\\") { out = out ch nx; i += 2; continue }
-          out = out ch
-          if (ch == q) q = ""
-          i += 1
-          continue
-        }
-        if (ch == "}" && tpl > 0) {
-          if (br[tpl] > 0) { br[tpl] -= 1 } else { q = "`"; tpl -= 1 }
-          out = out ch; i += 1; continue
-        }
-        if (ch == "/" && nx == "/") break
-        if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
-        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch }
-        if (ch == "{" && tpl > 0) br[tpl] += 1
-        out = out ch; i += 1
-      }
-      if (q != "`") q = ""
-      if (out !~ /^[[:space:]]*$/) print out
-    }' | sed -e '/^[[:space:]]*\*/d'
-}
-# Comment stripping PLUS string-literal contents, applied to WHOLE blobs
-# with both states carried across lines -- the blob-density cross-check
-# below. A decoy `expect(` inside a string literal must earn no assertion
-# credit, and a decoy line inside a block comment opened ABOVE the diff
-# hunk is only inside it when the state arrives from the unchanged bytes.
-# Regex literals are state-tracked too, keyed on the last significant
-# TOKEN, not just the last character: a preceding operator (including a
-# division '/'), a regex-head keyword (return/typeof/yield/..., preserved
-# across whitespace), a CONTROL-head close paren, or line start opens a
-# literal; a value ahead (identifier, number, string, call close paren,
-# ']') means division. The char alone cannot tell if (one()) /re/ from
-# foo() / 2, so the paren kind is tracked on a depth stack, and cannot
-# see through the space in typeof /.../. An inert expect( decoy inside
-# /expect(x)?/ thus earns no credit, and a /[...]/ class carrying /*
-# cannot open the block state and swallow the assertions that follow.
-# Template nesting is tracked by depth: an inner backtick under ${}
-# closes the NESTED template, not the outer one, and a hole closes on
-# the brace matching ITS ${ -- per-hole brace depth, not the first }
-# byte, or an object literal inside the hole re-enters template state
-# early and swallows the live code up to the next backtick.
-# Single- and double-quoted strings cannot span lines in TS, so a
-# dangling quote at EOL closes there; a
-# template literal carries on. A regex literal cannot: an unterminated
-# one at EOL drops its state rather than swallowing the next line.
-weaken_strip_code() {
-  awk '
-    function flushident() {
-      if (ident == "") return
-      pltok = ltok
-      if (ident ~ /^(return|typeof|yield|await|throw|void|delete|do|else|in|of|case|new|instanceof|if|for|while|switch|catch|with)$/) ltok = ident
-      else ltok = "id"
-      ident = ""
-    }
-    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; ltok = ""; pltok = ""; ident = ""; pd = 0 }
-    {
-      line = $0; out = ""; n = length(line); i = 1
-      regx = 0; rcls = 0
-      while (i <= n) {
-        ch = substr(line, i, 1); nx = substr(line, i + 1, 1)
-        if (inc) {
-          if (ch == "*" && nx == "/") { inc = 0; i += 2 } else { i += 1 }
-          continue
-        }
-        if (regx) {
-          if (ch == "\\") { i += 2 }
-          else if (rcls) { if (ch == "]") rcls = 0; i += 1 }
-          else if (ch == "[") { rcls = 1; i += 1 }
-          else if (ch == "/") { regx = 0; ltok = "str"; i += 1 }
-          else { i += 1 }
-          continue
-        }
-        if (q != "") {
-          if (ch == "\\") { i += 2 }
-          else if (q == "`" && ch == "$" && nx == "{") { tpl += 1; br[tpl] = 0; q = ""; ltok = ""; i += 2 }
-          else if (ch == q) { q = ""; ltok = "str"; i += 1 }
-          else { i += 1 }
-          continue
-        }
-        if (ch == "}" && tpl > 0) {
-          flushident()
-          if (br[tpl] > 0) { br[tpl] -= 1; out = out ch; ltok = "}"; i += 1; continue }
-          q = "`"; tpl -= 1; ltok = ""; i += 1; continue
-        }
-        if (ch == "/" && nx == "/") break
-        if (ch == "/" && nx == "*") { flushident(); inc = 1; i += 2; continue }
-        if (ch == "/") {
-          flushident()
-          if (ltok == "" || ltok == ")ctl" || ltok ~ /^[=(,:;!&|?{}+*%~^<>\[\/-]$/ || ltok ~ /^(return|typeof|yield|await|throw|void|delete|do|else|in|of|case|new|instanceof)$/) { regx = 1; i += 1; continue }
-          out = out ch; ltok = "/"; i += 1; continue
-        }
-        if (ch == "\047" || ch == "\"" || ch == "`") { flushident(); q = ch; i += 1; continue }
-        if (ch ~ /[A-Za-z0-9_$]/) { ident = ident ch; out = out ch; i += 1; continue }
-        flushident()
-        if (ch == "(") { pd += 1; pk[pd] = (ltok ~ /^(if|for|while|switch|catch|with)$/) ? 1 : 0; pltok = ltok; ltok = "(" }
-        else if (ch == ")") { ctl = (pd > 0 && pk[pd]); if (pd > 0) pd -= 1; pltok = ltok; ltok = (ctl ? ")ctl" : ")") }
-        else if (ch !~ /[[:space:]]/) {
-          # Postfix ++/-- (and a TS postfix !) FOLLOW a value: the '/'
-          # after n++ / n-- / x! is division, not a regex head. pltok is
-          # the token class ahead of the PREVIOUS operator char, so a
-          # duplicated + or - with a value behind it resolves as a value
-          # itself; an adjacent-byte check keeps n + +x unary (a space
-          # breaks adjacency). A prefix ! after an operator or at line
-          # start keeps the regex-head behavior.
-          if ((ch == "+" || ch == "-") && substr(line, i - 1, 1) == ch && pltok ~ /^(id|str|[)\]])$/) { pltok = ltok; ltok = "id" }
-          else if (ch == "!" && ltok ~ /^(id|str|[)\]])$/) { pltok = ltok; ltok = "id" }
-          else { pltok = ltok; ltok = ch }
-        }
-        if (ch == "{" && tpl > 0) br[tpl] += 1
-        out = out ch; i += 1
-      }
-      flushident()
-      if (q != "" && q != "`") q = ""
-      # A regex literal still open at EOL is impossible in valid TS: the
-      # state can only come from a mis-lexed shape (a JSX close tag read
-      # as a regex head, a division confused for a literal). Drop the
-      # line rather than count the tokens the mis-lex swallowed or
-      # leaked; symmetric stripping nets an untouched copy of the line.
-      if (regx) next
-      if (out !~ /^[[:space:]]*$/) print out
-    }'
-}
-# Join newline-split member chains so a marker written across lines
-# measures like the one-line form: carry a one-line buffer, appending the
-# current line while the joined line still ends in a marker-chain head
-# (it/test/describe/suite — every root the skip RE measures — an
-# optional modifier chain, a trailing dot).
-weaken_join_markers() {
-  awk '
-    {
-      if (buf == "") buf = $0
-      else buf = buf $0
-      if (buf ~ /(^|[^A-Za-z0-9_$.])(it|test|describe|suite)([[:space:]]*\.[[:space:]]*(concurrent|sequential|shuffle|skip|todo|fails|failing|each|for))*[[:space:]]*\.?[[:space:]]*$/) next
-      print buf; buf = ""
-    }
-    END { if (buf != "") print buf }'
-}
-# Count the lines of ${1} that match regex ${3} and whose exact text is
-# absent from ${2}: the per-line freight census the merge blob arm uses.
-# Both blobs arrive through the same strip, so only untouched regions
-# net to zero; the sets compare byte-for-byte on the stripped lines.
-weaken_count_absent() {
-  # The pattern travels through ENVIRON, never -v: POSIX mandates escape
-  # processing on -v assignment values, so the shared ERE's \( and \.
-  # would arrive rewritten as ( and . — an unbalanced pattern gawk
-  # fatals on before END (busybox strips it silently), the substitution
-  # captures nothing, and the census silently degrades to zero. ENVIRON
-  # values are not escape-processed; the bytes stay identical to the
-  # grep -cE sites that consume the same variable.
-  WEAKEN_COUNT_RE="${3}" awk '
-    BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"] }
-    NR == FNR { seen[$0] = 1; next }
-    $0 ~ re && !($0 in seen) { c += 1 }
-    END { print c + 0 }
-  ' <(printf '%s\n' "${2}") <(printf '%s\n' "${1}")
-}
-# Total matches of regex ${1} across the CONTINUATION-shaped lines of the
-# stream -- first non-space byte ')' or '.', the matcher-chain tail shape
-# the census is scoped to -- minus the matches of the exclusion ${2}.
-# Match-count semantics, not the line count grep -c reports: gsub returns
-# the substitution count and "&" replaces each match with itself. The line
-# guard wraps BOTH patterns, so the exclusion stays a subset of what the
-# tail arm counted and the census cannot go negative. The patterns travel
-# through ENVIRON for the same escape-processing reason weaken_count_absent
-# uses.
-weaken_match_count() {
-  WEAKEN_COUNT_RE="${1}" WEAKEN_EXCLUDE_RE="${2}" awk '
-    BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"]; xre = ENVIRON["WEAKEN_EXCLUDE_RE"]; c = 0 }
-    /^[[:space:]]*[).]/ { c += gsub(re, "&"); c -= gsub(xre, "&") }
-    END { print c + 0 }
-  '
-}
-# The freight census at match-count semantics: total matches of regex ${3}
-# on CONTINUATION-shaped lines of ${1} whose exact text is absent from ${2}
-# -- the per-line classification weaken_count_absent applies, summed per
-# match for the matcher-tail arm and scoped to the same line shape
-# weaken_match_count uses, so the freight term and the census it adjusts
-# count the same population.
-weaken_count_absent_matches() {
-  WEAKEN_COUNT_RE="${3}" WEAKEN_EXCLUDE_RE="${4}" awk '
-    BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"]; xre = ENVIRON["WEAKEN_EXCLUDE_RE"] }
-    NR == FNR { seen[$0] = 1; next }
-    !($0 in seen) && /^[[:space:]]*[).]/ { c += gsub(re, "&"); c -= gsub(xre, "&") }
-    END { print c + 0 }
-  ' <(printf '%s\n' "${2}") <(printf '%s\n' "${1}")
-}
-# Fold one commit's diff of one test file into the per-file accumulators.
-# When ${3} is set the commit is a merge whose second parent is derived
-# from origin/main: the same file at that parent decides line authorship,
-# keeping only what the merge resolution itself authored.
-weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" pre_base="${4:-}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_old_t weaken_new_t weaken_o weaken_ot weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_freight_del weaken_freight_add weaken_tail_freight_del weaken_tail_freight_add weaken_skip_freight_del weaken_skip_freight_add
-  # A status-A re-add of a pre-existing path measures against the
-  # PRE-ROUND blob, not the commit's parent: main's deletion rode the
-  # merge in as freight, so the parent side is empty and the re-add
-  # would net as pure addition.
-  local old_ref="${c}^"
-  if [[ -n "${pre_base}" ]]; then
-    old_ref="origin/${BRANCH}"
-  fi
-  if [[ -n "${is_merge}" ]]; then
-    # An empty blob is not a missing one: key the freight filter on git
-    # show's exit status, so a modify/delete resolution (main deleted the
-    # file, the resolution kept it) cannot degrade p2 to '' and drop EVERY
-    # removed line.
-    if p2="$(git show "${c}^2:${f}" 2> /dev/null)"; then
-      have_p2=1
-    else
-      p2=''
-    fi
-    # A modify/delete resolution that KEEPS the file authors every line
-    # that survives it: main's side has no blob to freight against, so
-    # none of the kept-side removals may hide behind main's deletion.
-    # Full freight applies only when the result deletes the file too.
-    if [[ -z "${have_p2}" ]] && git cat-file -e "${c}:${f}" 2> /dev/null; then
-      kept=1
-    fi
-  fi
-  # --text: a branch-controlled .gitattributes rule (`<file> -diff` or
-  # `binary`) otherwise collapses this hunk into the "Binary files differ"
-  # banner -- no @@ content, every counter zeroed while the file still
-  # enumerates as changed.
-  if ! diff_body="$(git diff --text -U0 --no-renames "${old_ref}" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
-    return 1
-  fi
-  # Everything from the first `@@` on is hunk content, so the ---/+++ file
-  # headers are dropped by construction rather than by a `^+[^+]` guard that
-  # would also eat the first CONTENT character (and with it every marker
-  # anchored at column 1, `it.skip(` among them). -U0 emits no context lines,
-  # so each remaining +/- line is a real edit; stripping the marker lets the
-  # patterns below anchor on the source line itself.
-  diff_body="$(sed -n '/^@@/,$p' <<< "${diff_body}")"
-  add_lines="$(sed -n 's/^+//p' <<< "${diff_body}")"
-  del_lines="$(sed -n 's/^-//p' <<< "${diff_body}")"
-  [[ -n "${add_lines}" || -n "${del_lines}" ]] && weaken_has_edits=1
-  # An --ours resolution keeps the branch side byte-identical, so the
-  # first-parent diff body is empty -- yet the resolution discarded
-  # everything main's side added. The second-parent diff is the edit
-  # evidence for the blob-density cross-check in that shape.
-  if [[ -n "${is_merge}" ]] &&
-    ! git diff --quiet --no-renames "${c}^2" "${c}" -- ":(literal)${f}" 2> /dev/null; then
-    weaken_has_edits=1
-  fi
-  if [[ -n "${is_merge}" ]]; then
-    add_lines="$(while IFS= read -r l; do
-      if [[ -n "${l}" ]] && ! grep -qxF -- "${l}" <<< "${p2}"; then
-        printf '%s\n' "${l}"
-      fi
-    done <<< "${add_lines}")"
-    # A removed line is freight only when MAIN deleted it: present at the
-    # merge base and absent from main's side (or main's side has no blob at
-    # all). A branch-authored line the resolution dropped is the round's
-    # own weakening and is charged -- and when the resolution KEPT a file
-    # main deleted (kept above), every surviving line is resolution-
-    # authored, so no removal is freight at all.
-    mb="$(git merge-base "${c}^" "${c}^2" 2> /dev/null)" || mb=''
-    if [[ -n "${mb}" ]]; then
-      base_blob="$(git show "${mb}:${f}" 2> /dev/null)" || base_blob=''
-    else
-      base_blob=''
-    fi
-    del_lines="$(while IFS= read -r l; do
-      if [[ -z "${l}" ]]; then
-        continue
-      fi
-      if [[ -z "${kept}" ]] && grep -qxF -- "${l}" <<< "${base_blob}" &&
-        { [[ -z "${have_p2}" ]] || ! grep -qxF -- "${l}" <<< "${p2}"; }; then
-        continue
-      fi
-      printf '%s\n' "${l}"
-    done <<< "${del_lines}")"
-  fi
-  # Assertion counts: removed lines count RAW and added lines count after
-  # comment-and-string-aware stripping, so a commented-out copy of a
-  # removed assertion cannot cancel it. An over-charge on the raw del side
-  # (a commented-out assertion deletion) fails closed -- one ack entry
-  # answers it -- while an over-credit on the add side would fail open,
-  # which is what the stripping prevents.
-  # Skip-marker counts read the stripped view on BOTH sides, and the
-  # joined view: sd's over-count SUBTRACTS, so a deleted comment line
-  # that merely contains marker text must not earn the removal credit
-  # that cancels a genuine marker addition.
-  add_lines="$(weaken_strip_comments <<< "${add_lines}")"
-  add_lines="$(weaken_join_markers <<< "${add_lines}")"
-  local del_stripped
-  del_stripped="$(weaken_strip_comments <<< "${del_lines}")"
-  del_stripped="$(weaken_join_markers <<< "${del_stripped}")"
-  local d a sa sd
-  d="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${del_lines}" || true)"
-  a="$(grep -cE "${WEAKEN_ASSERT_ADD_RE}" <<< "${add_lines}" || true)"
-  sa="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${add_lines}" || true)"
-  sd="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${del_stripped}" || true)"
-  if [[ -n "${weaken_has_edits}" ]]; then
-    # The line counters grep diff LINES for assertion tokens, and -U0
-    # anchors a byte-identical line as implicit context: an assertion
-    # wrapped into a MULTI-line /* ... */ comment never appears in the
-    # diff at all, a sibling value change lets the wrap ride on a moved
-    # line signal, and a decoy token inside a string literal or a block
-    # comment opened above the hunk earns an addition credit that
-    # cancels a genuine removal. Cross-check the WHOLE blobs on every
-    # edited file instead of only the zero-signal ones: symmetric
-    # string-and-comment-aware stripping nets every untouched region to
-    # zero, so the blob delta sees exactly what the edits removed, and
-    # take whichever signal measures more deletion. The skip-marker net
-    # gets the same whole-blob backstop below. A merge's blob delta
-    # carries main-side freight exactly like the line counts: subtract
-    # main's own density delta so it neither charges nor shields.
-    weaken_old="$(git show "${old_ref}:${f}" 2> /dev/null)" || weaken_old=''
-    weaken_new="$(git show "${c}:${f}" 2> /dev/null)" || weaken_new=''
-    weaken_old_stripped="$(weaken_strip_code <<< "${weaken_old}")"
-    weaken_new_stripped="$(weaken_strip_code <<< "${weaken_new}")"
-    weaken_old_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_old_stripped}" || true)"
-    weaken_new_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_new_stripped}" || true)"
-    weaken_old_t="$(weaken_match_count "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}" <<< "${weaken_old_stripped}")"
-    weaken_new_t="$(weaken_match_count "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}" <<< "${weaken_new_stripped}")"
-    weaken_o=$(( weaken_old_n - weaken_new_n ))
-    weaken_ot=$(( weaken_old_t - weaken_new_t ))
-    weaken_old_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_old_stripped}" || true)"
-    weaken_new_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_new_stripped}" || true)"
-    weaken_s=$(( weaken_new_skip_n - weaken_old_skip_n ))
-    if [[ -n "${is_merge}" && -z "${kept}" ]]; then
-      weaken_mb_stripped="$(weaken_strip_code <<< "${base_blob}")"
-      weaken_p2_stripped="$(weaken_strip_code <<< "${p2}")"
-      # Freight is classified per LINE, never a subtraction of whole-blob
-      # density totals: git keeps an addition that branch AND main both
-      # made byte-identically ONCE in the result, so a total-level
-      # subtraction counts it twice — a phantom positive weaken_o that
-      # rejects an honest merge. Charge what MAIN removed (present at the
-      # merge base, absent from main's side) and credit what main added
-      # that the branch did not already carry — the same classification
-      # the line arm applies per diff line.
-      weaken_freight_del="$(weaken_count_absent "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_ASSERT_RE}")"
-      weaken_freight_add="$(weaken_count_absent "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_ASSERT_RE}")"
-      weaken_o=$(( weaken_o - (weaken_freight_del - weaken_freight_add) ))
-      # The tail arm gets the same per-line freight classification at
-      # match-count semantics, mirroring the head arm above it.
-      weaken_tail_freight_del="$(weaken_count_absent_matches "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}")"
-      weaken_tail_freight_add="$(weaken_count_absent_matches "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}")"
-      weaken_ot=$(( weaken_ot - (weaken_tail_freight_del - weaken_tail_freight_add) ))
-      # The skip arm gets the same per-marker classification, mirrored
-      # for its addition direction: a marker MAIN removed deflates the
-      # result census and is added back; a marker main ADDED that the
-      # branch did not already carry inflates it and is subtracted. The
-      # whole-blob total subtraction this replaces counted a marker both
-      # sides added byte-identically ONCE in the result but twice in the
-      # totals — deflating a genuine resolution-introduced skip, the
-      # shielding direction of the gate's freight invariant.
-      weaken_skip_freight_del="$(weaken_count_absent "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_SKIP_RE}")"
-      weaken_skip_freight_add="$(weaken_count_absent "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_SKIP_RE}")"
-      weaken_s=$(( weaken_s - (weaken_skip_freight_add - weaken_skip_freight_del) ))
-    fi
-    # The larger arm wins, the line/blob rule applied across metrics: a
-    # one-line assertion carries one head AND one tail, so summing the
-    # arms would double it.
-    if (( weaken_ot > weaken_o )); then weaken_o="${weaken_ot}"; fi
-    if (( weaken_o > 0 && weaken_o > d - a )); then
-      d=$(( a + weaken_o ))
-    fi
-    # The skip arm's whole-blob backstop, twin of the assertion one: the
-    # line counts cold-start their comment strip at the hunk boundary, so
-    # a block-comment span opened in unchanged bytes ABOVE the hunk can
-    # hand a deleted in-span marker line removal credit it never earned,
-    # or swallow a genuine marker addition. The blob delta carries the
-    # state in from the unchanged bytes; the larger addition wins.
-    if (( weaken_s > 0 && weaken_s > sa - sd )); then
-      sa=$(( sd + weaken_s ))
-    fi
-  fi
-  if ! weaken_slot="$(weaken_file_slot "${f}")"; then
-    weaken_slot="${#WEAKEN_FILE_LIST[@]}"
-    WEAKEN_FILE_LIST[weaken_slot]="${f}"
-    WEAKEN_DEL_ACC[weaken_slot]=0
-    WEAKEN_ADD_ACC[weaken_slot]=0
-    WEAKEN_SKIP_ADD_ACC[weaken_slot]=0
-    WEAKEN_SKIP_DEL_ACC[weaken_slot]=0
-  fi
-  WEAKEN_DEL_ACC[weaken_slot]="$(( WEAKEN_DEL_ACC[weaken_slot] + d ))"
-  WEAKEN_ADD_ACC[weaken_slot]="$(( WEAKEN_ADD_ACC[weaken_slot] + a ))"
-  WEAKEN_SKIP_ADD_ACC[weaken_slot]="$(( WEAKEN_SKIP_ADD_ACC[weaken_slot] + sa ))"
-  WEAKEN_SKIP_DEL_ACC[weaken_slot]="$(( WEAKEN_SKIP_DEL_ACC[weaken_slot] + sd ))"
-}
-while IFS= read -r c; do
-  [[ -n "${c}" ]] || continue
-  [[ "${WEAKEN_MEASURED}" == 'true' ]] || break
-  if ! git rev-parse -q --verify "${c}^" > /dev/null 2>&1; then
-    WEAKEN_MEASURED='false'
-    break
-  fi
-  # Freight attribution only when the second parent is main-derived
-  # (--is-ancestor, not equality: origin/main may have advanced past the
-  # merge point). A side-branch merge has no main side: its first-parent
-  # diff belongs to the round, and treating the weakened side branch as
-  # "main's side" would invert the attribution and zero every signal.
-  is_merge=''
-  if git rev-parse -q --verify "${c}^2" > /dev/null 2>&1 &&
-    git merge-base --is-ancestor "${c}^2" origin/main 2> /dev/null; then
-    is_merge=1
-    # The merge's status-A pathspec files are main's newly landed tests;
-    # for the round's OWN post-merge commits they are pre-existing
-    # coverage the freight machinery must no longer shield.
-    while IFS= read -r -d '' weaken_mf; do
-      [[ -n "${weaken_mf}" ]] || continue
-      WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
-      weaken_recount_base_set "${weaken_mf}" "${c}"
-    done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
-      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-    # A merge that wholesale DISCARDS a test main added during the round
-    # never shows the file at the merge RESULT (absent on both sides):
-    # the status-A feeder above misses it, and the pre-existence guard
-    # then drops the second-parent enumeration's only listing. Seed the
-    # introduction set from what main added relative to the branch side
-    # too; the discard then measures as a weakening of main's newly
-    # landed coverage, while a merge that KEEPS main's file adds a name
-    # both feeders agree on (deduplicated here).
-    while IFS= read -r -d '' weaken_mf; do
-      [[ -n "${weaken_mf}" ]] || continue
-      if ! weaken_member "${weaken_mf}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
-        WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
-      fi
-      weaken_recount_base_set "${weaken_mf}" "${c}"
-    done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}^2" \
-      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-  fi
-  # A fast-forward merge of origin/main (or a reset onto it) lands main's
-  # commits as ordinary parent-ful rides of the round range: no second
-  # parent exists to seed the introduction set, yet the files they added
-  # are pre-existing coverage for the round's own commits exactly like a
-  # real merge's. Seed on main ancestry -- a round-authored commit is
-  # never an ancestor of origin/main -- and skip the commit's own
-  # measurement: it IS main's side, and main's delta crossing a
-  # fast-forward is freight exactly as when it crosses a real merge,
-  # neither charging the round nor shielding it.
-  if [[ -z "${is_merge}" ]] &&
-    git merge-base --is-ancestor "${c}" origin/main 2> /dev/null; then
-    while IFS= read -r -d '' weaken_mf; do
-      [[ -n "${weaken_mf}" ]] || continue
-      if ! weaken_member "${weaken_mf}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
-        WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
-      fi
-      weaken_recount_base_set "${weaken_mf}" "${c}"
-    done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
-      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-    # A file main only MODIFIED during the ride is status M at every ridden
-    # commit, so the added-file feeder above records no recount base for it
-    # and the verdict-time recount spans pre-round -> tip: main's own delta
-    # is charged to a round that merely syncs onto main and then renames a
-    # symbol. Record the base for the modified and typechanged files too.
-    # Deliberately NOT routed through WEAKEN_MERGE_TOUCHED, which also
-    # disables the byte-identity netting skip -- that skip must still apply
-    # to a round restoring an ff-ridden file to its exact pre-round bytes.
-    # Status D is left out: the ridden commit holds no blob to recount from,
-    # and the pre-round base is the right one for a main-side deletion the
-    # round then re-adds.
-    while IFS= read -r -d '' weaken_mf; do
-      [[ -n "${weaken_mf}" ]] || continue
-      weaken_recount_base_set "${weaken_mf}" "${c}"
-    done < <(git diff --name-only -z --no-renames --diff-filter=MT "${c}^" "${c}" \
-      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-    continue
-  fi
-  # M, D, and T: a file deleted in one round commit and re-added weakened in
-  # a later one escapes a modify-only scan (the delete commit is D, the
-  # re-add A, neither M), and a pre-existing file replaced by a symlink is
-  # status T while still matching the pathspec and existing at the tip. The
-  # pre-round pre-existence guard below keeps a genuinely round-introduced
-  # file out of the D arm of this filter. A main-derived merge additionally
-  # enumerates the union of BOTH parents' views: a resolution that keeps
-  # the branch side byte-identical (--ours) leaves the first-parent diff
-  # empty while discarding main-side additions, so only the second-parent
-  # diff lists the file.
-  weaken_commit_files=()
-  while IFS= read -r -d '' f; do
-    [[ -n "${f}" ]] || continue
-    weaken_commit_files+=("${f}")
-  done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^" "${c}" \
-    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-  if [[ -n "${is_merge}" ]]; then
-    while IFS= read -r -d '' f; do
-      [[ -n "${f}" ]] || continue
-      if ! weaken_member "${f}" "${weaken_commit_files[@]}"; then
-        weaken_commit_files+=("${f}")
-      fi
-    done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^2" "${c}" \
-      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-  fi
-  for f in "${weaken_commit_files[@]}"; do
-    # Pre-existing means present at the PRE-ROUND ref — or landed by one
-    # of this round's own main-derived merges: for the round's post-merge
-    # commits, main's newly landed tests are coverage the round owes,
-    # whether it weakens them (status M here) or deletes them (status D).
-    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
-      ! weaken_member "${f}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
-      continue
-    fi
-    if [[ -n "${is_merge}" ]]; then
-      WEAKEN_MERGE_TOUCHED+=("${f}")
-      weaken_recount_base_set "${f}" "${c}"
-    fi
-    if ! weaken_count_commit_file "${c}" "${f}" "${is_merge}"; then
-      WEAKEN_MEASURED='false'
-      break
-    fi
-  done
-  [[ "${WEAKEN_MEASURED}" == 'true' ]] || break
-  # A status-A re-add of a path that WAS pre-existing: main deleted the
-  # file, the round merged the deletion in as freight, and the round's own
-  # commit re-added the file weakened — status A is outside the MDT
-  # enumeration above, and the net-range D arm never lists a file present
-  # at the tip. Measured against the PRE-ROUND blob (the fourth argument),
-  # the re-add nets exactly what the round's authorship removed. The
-  # guard keeps a round-introduced file out: its re-adds have no
-  # pre-round coverage to weaken.
-  while IFS= read -r -d '' f; do
-    [[ -n "${f}" ]] || continue
-    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
-      continue
-    fi
-    if ! weaken_count_commit_file "${c}" "${f}" '' 'preround'; then
-      WEAKEN_MEASURED='false'
-      break
-    fi
-  done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
-    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-done <<< "${WEAKEN_ROUND_COMMITS}"
-if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
-  # Insertion order is deterministic (round commits in rev-list order, each
-  # commit's files in diff order), so the indexed accumulators need no sort.
-  for (( weaken_idx = 0; weaken_idx < ${#WEAKEN_FILE_LIST[@]}; weaken_idx++ )); do
-    f="${WEAKEN_FILE_LIST[weaken_idx]}"
-    # A file byte-identical between the pre-round ref and the tip netted
-    # out over the round whichever commit sequence produced it: the
-    # per-commit arm charges a deletion by its full line count (the D
-    # filter), while a later byte-identical restore is status A, outside
-    # that filter, and never earns an offsetting credit. The netting
-    # principle reads the tip, not the sequence — and it applies only
-    # when the tip reading is meaningful: a file absent at the pre-round
-    # ref reads absent-on-both-sides as identity (masking the deletion of
-    # a test a round merge landed), and a file a main-derived merge
-    # touched is exempt because an --ours resolution's damage IS the
-    # identity with the pre-round bytes.
-    if git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
-      ! weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" &&
-      git diff --quiet "origin/${BRANCH}" "${BRANCH}" -- ":(literal)${f}" 2> /dev/null; then
-      continue
-    fi
-    w_del="${WEAKEN_DEL_ACC[weaken_idx]}"
-    w_add="${WEAKEN_ADD_ACC[weaken_idx]}"
-    w_skip_add="${WEAKEN_SKIP_ADD_ACC[weaken_idx]}"
-    w_skip_del="${WEAKEN_SKIP_DEL_ACC[weaken_idx]}"
-    # The whole-blob backstops adjudicate within a SINGLE commit while
-    # the accumulators net credits across ALL round commits: a decoy
-    # credit committed as a SIBLING commit to the weakening it cancels
-    # escapes both. Recount the whole round at verdict time — stripped
-    # base and tip densities per arm, the larger signal wins, the same
-    # rule the per-commit arms apply within one commit. The base is the
-    # pre-round ref, except where the ledger records one — a file a
-    # main-derived merge touched or introduced, or one a fast-forwarded
-    # main modified: those recount from that commit's RESULT blob,
-    # because result to tip is exactly the round's post-sync authorship —
-    # main's own delta that crossed the merge neither charges nor
-    # shields, and a pre->tip recount would charge it.
-    # Read the ledger, not set membership: every writer of the two merge
-    # sets records a base beside it, and the fast-forward arm records bases
-    # for files that belong to neither set.
-    weaken_round_ref="$(weaken_recount_base_get "${f}")" ||
-      weaken_round_ref="origin/${BRANCH}"
-    if git cat-file -e "${weaken_round_ref}:${f}" 2> /dev/null &&
-      git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
-      weaken_round_old="$(git show "${weaken_round_ref}:${f}" 2> /dev/null)" || weaken_round_old=''
-      weaken_round_new="$(git show "${BRANCH}:${f}" 2> /dev/null)" || weaken_round_new=''
-      weaken_round_old_stripped="$(weaken_strip_code <<< "${weaken_round_old}")"
-      weaken_round_new_stripped="$(weaken_strip_code <<< "${weaken_round_new}")"
-      weaken_round_old_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_round_old_stripped}" || true)"
-      weaken_round_new_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_round_new_stripped}" || true)"
-      weaken_round_old_t="$(weaken_match_count "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}" <<< "${weaken_round_old_stripped}")"
-      weaken_round_new_t="$(weaken_match_count "${WEAKEN_MATCHER_TAIL_RE}" "${WEAKEN_MATCHER_TAIL_EXCLUDE_RE}" <<< "${weaken_round_new_stripped}")"
-      weaken_round_delta=$(( weaken_round_old_n - weaken_round_new_n ))
-      weaken_round_tail_delta=$(( weaken_round_old_t - weaken_round_new_t ))
-      if (( weaken_round_tail_delta > weaken_round_delta )); then
-        weaken_round_delta="${weaken_round_tail_delta}"
-      fi
-      if (( weaken_round_delta > w_del - w_add )); then
-        w_del=$(( w_add + weaken_round_delta ))
-      fi
-      weaken_round_old_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_round_old_stripped}" || true)"
-      weaken_round_new_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_round_new_stripped}" || true)"
-      if (( weaken_round_new_skip_n - weaken_round_old_skip_n > w_skip_add - w_skip_del )); then
-        w_skip_add=$(( w_skip_del + weaken_round_new_skip_n - weaken_round_old_skip_n ))
-      fi
-    fi
-    if (( w_del > w_add )); then
-      WEAKENED_PATHS+=("${f}")
-      WEAKENED_SIGNALS+=("net $(( w_del - w_add )) assertion line(s) removed")
-      WEAKENED_CHARGED+=("${f}")
-    elif (( w_skip_add > 0 )); then
-      WEAKENED_PATHS+=("${f}")
-      WEAKENED_SIGNALS+=("$(( w_skip_add )) skip/todo marker(s) added")
-      WEAKENED_CHARGED+=("${f}")
-    fi
-  done
-fi
-# Deletions cannot use not_merge_freight: its content-equality test reads
-# "absent on both sides" as identical, so a round deleting a test the PR
-# ITSELF added (the classic round-5-deletes-what-round-3-pinned shape) looks
-# like freight and escapes. The distinguishing fact is the MERGE BASE — main
-# can only delete what it tracked, so freight is exactly "present at the
-# merge base, gone from main's tip". A PR-added test is in neither. When
-# the merge base is unresolvable PR_BASE degrades to origin/main above,
-# which makes this condition unsatisfiable — every deletion is then
-# surfaced rather than silently dropped, and the escape hatch is one
-# recorded entry.
-while IFS= read -r -d '' f; do
-  [[ -n "${f}" ]] || continue
-  # The exemption's safety rests on the per-commit MDT arm charging a
-  # DIRECT deletion of such a file: when measurement is UNAVAILABLE that
-  # discriminator never ran, so the exemption must not drop the deletion
-  # (one ack entry answers the fail-closed over-charge).
-  if [[ "${WEAKEN_MEASURED}" == 'true' ]] &&
-    git cat-file -e "${PR_BASE}:${f}" 2> /dev/null &&
-    ! git cat-file -e "origin/main:${f}" 2> /dev/null; then
-    continue
-  fi
-  # The per-commit arm already charged this file (a single delete, or a
-  # delete in one round commit re-added weakened in another): a second
-  # entry for the same path would duplicate the rejection and the advisory.
-  if weaken_member "${f}" "${WEAKENED_CHARGED[@]}"; then
-    continue
-  fi
-  WEAKENED_PATHS+=("${f}")
-  WEAKENED_SIGNALS+=('test file deleted')
-done < <(git diff --name-only -z --no-renames --diff-filter=D "origin/${BRANCH}" "${BRANCH}" \
-  -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
-# Deletions are judged even when the per-commit measurement went
-# UNAVAILABLE: the explicit pre-round->tip pair above does not need the
-# round's own history to be walkable (a parent-less root in a rebuilt
-# branch breaks the rev-list walk, not this net-range diff). UNAVAILABLE
-# skips the measured signals only — never a deletion.
 if (( ${#WEAKENED_PATHS[@]} > 0 )); then
   # The acknowledgement is the agent's own machine-readable claim, held to
   # the same shape rules as deferred-findings.json: an array, a string path,
@@ -2057,7 +1380,8 @@ if (( ${#WEAKENED_PATHS[@]} > 0 )); then
       | if type == "array" then
           map(select((.path? | type) == "string")
             | select(.path | IN($ok[]))
-            | select((.reason? | type) == "string"))
+            | select((.reason? | type) == "string")
+            | select((.reason | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | length) >= 40))
           | unique_by(.path) | .[]
           | "  - \(.path | gsub("[^A-Za-z0-9._/ -]"; "?")): \(.reason | gsub("\\s+"; " "))"
         else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null |
@@ -2067,8 +1391,6 @@ if (( ${#WEAKENED_PATHS[@]} > 0 )); then
         -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
   } >> "${WORKDIR}/gate-advisories.md"
   echo "🧪 test weakening recorded and acknowledged: $(grep -c '^- ' <<< "${WEAKEN_OK}" || true) file(s)" | tee -a "${GATE_LOG}"
-elif [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
-  echo '🧪 test-weakening measurement UNAVAILABLE this round (diff producer failed) — measured signals skipped' | tee -a "${GATE_LOG}"
 fi
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'

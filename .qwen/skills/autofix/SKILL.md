@@ -487,19 +487,26 @@ Two boundaries hold regardless of what any feedback asks for:
   say-so: it is sound only when the pinned behavior itself is wrong (show the
   probe that proves the correct behavior) or the coverage demonstrably
   survives in a named surviving test. State that evidence in the summary AND
-  record it machine-readably: the gate measures every pre-existing runnable
-  test file this round deletes, whose assertion count it lowers, or into
-  which it adds a `.skip`/`.todo`/`.failing` marker, and REJECTS the round
-  unless each such file is named in `<workdir>/test-weakening.json` — a JSON
-  array of `{"path": "<file>", "reason": "<evidence>"}` whose reason is at
-  least 40 characters. Environment guards (`.skipIf`) and snapshot churn are
-  not weakening and need no entry; an assertion moved WITHIN a file nets zero
+  record it machine-readably: the gate parses every pre-existing test file
+  (by name: `*.test.*`, `*.spec.*`, `test_*.py`, Rust test-file shapes) and
+  REJECTS the round when its declared test surface shrank — the file was
+  deleted, statement-level assertions were removed, a test or describe that
+  was enabled is now disabled by any spelling (`.skip`/`.todo`/`.fails`,
+  `xit`, a literal `skipIf(true)`/`runIf(false)`, `{ skip: true }`, a
+  body-level `skip()`/`ctx.skip()`), enabled registrations were removed, or
+  a bare early `return` was added ahead of a test's assertions — unless each
+  such file is named in `<workdir>/test-weakening.json`, a JSON array of
+  `{"path": "<file>", "reason": "<evidence>"}` whose reason is at least 40
+  characters. Condition-valued environment guards (`.skipIf(cond)`,
+  `skip(cond, reason)`), snapshot churn, and a brand-new `it.todo` are not
+  weakening and need no entry; an assertion moved WITHIN a file nets zero
   and needs none either, while one moved to another file does (name its new
-  home as the evidence). The gate checks that the claim EXISTS, not that it
-  is right — a maintainer reads each reason against the diff in the round
-  report, alongside the gate's own machine-measured advisory. Never write an
-  entry to buy silence for a weakening you cannot justify: restore the
-  assertion instead.
+  home as the evidence). Main's own changes crossing a merge are attributed
+  to main, never to the round. The gate checks that the claim EXISTS, not
+  that it is right — a maintainer reads each reason against the diff in the
+  round report, alongside the gate's own machine-measured advisory. Never
+  write an entry to buy silence for a weakening you cannot justify: restore
+  the assertion instead.
 
 The gate also measures a deny-by-default FOOTPRINT: any area (declared
 workspace, top-level directory, or root file) a round touches that the PR

@@ -648,7 +648,11 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     #   autofix-regression — the PRIOR round prepare found had left a green
     #                        head red. Written by whichever report this round
     #                        posts, so the record survives a later failure.
-    echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${CHECK_STATE:-none} key=${WINDOW:-none} -->"
+    # A salvage-merged branch move means the pushed head did not start
+    # from the head prepare classified: the premise is unknown, never green.
+    PUSH_PRE="${CHECK_STATE:-none}"
+    [[ "${PUSH_RACE_MERGED}" == 'true' ]] && PUSH_PRE='none'
+    echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
     if [[ -n "${REGRESSED_ROUND:-}" ]]; then
       echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
     fi
@@ -688,6 +692,10 @@ else
     if [[ -n "${RESOLUTION_NOTE}" ]]; then
       echo
       echo "${RESOLUTION_NOTE}"
+    fi
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo
+      echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
     fi
     echo
     echo "---"

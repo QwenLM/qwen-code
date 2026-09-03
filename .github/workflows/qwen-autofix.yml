@@ -3871,6 +3871,7 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # Absent from the trusted base until this PR merges, and this step
           # runs under -e: a hard failure here would kill every pre-merge
@@ -4283,9 +4284,15 @@ jobs:
             | jq -s 'add // []' > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             | jq -s 'add // []' > "${WORKDIR}/ic.json"
-          gh pr view "${PR}" --repo "${REPO}" \
-            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
-            2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
+          # headRefOid rides the same read as the rollup: the regression
+          # classifier below binds its verdict to the commit the rollup
+          # describes (af-155), and checks.json stays the bare array its
+          # positional readers expect.
+          PR_ROLLUP="$(gh pr view "${PR}" --repo "${REPO}" \
+            --json statusCheckRollup,headRefOid 2> /dev/null || echo '{}')"
+          jq '.statusCheckRollup // []' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json" 2> /dev/null \
+            || echo '[]' > "${WORKDIR}/checks.json"
+          ROLLUP_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_ROLLUP}" 2> /dev/null || echo '')"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
@@ -4736,16 +4743,32 @@ jobs:
           # the FEEDBACK sites (N_FAILED_CHECKS / N_RED_NOW), where a
           # failed own round genuinely is new feedback.
           # Full rationale → qwen-autofix.md#af-155
-          CHECK_STATE="$(jq -r '
+          # The loop's own dispatch-pending commit status is a StatusContext,
+          # which carries no workflowName: excluded by its exact context
+          # value (never by typename, or third-party DCO/CLA statuses would
+          # stop counting), or the loop's own stamp keeps the `none` arm
+          # unreachable and an unreported head classifies green.
+          # The rollup is read live, minutes after the checkout: bind the
+          # verdict to the commit it describes, or a head pushed in between
+          # is classified under the checked-out head's name. A moved head
+          # reads `none` -- unknown, never chargeable. A check with no verdict
+          # (EXPECTED: a required context that never reported; STALE; a run
+          # that never started) is pending, never green.
+          CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
             [ .[] | select((((.workflowName // "")
-                | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)) ] as $c
+                | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not))
+              | select(((.context // "") == $dispatch) | not) ] as $c
             | if ($c | length) == 0 then "none"
               elif any($c[]; (.conclusion // .state // "")
                 | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")) then "red"
               elif any($c[]; ((.status // "") | IN("QUEUED", "IN_PROGRESS", "WAITING", "PENDING"))
-                or ((.conclusion // .state // "") | IN("PENDING", ""))) then "pending"
+                or ((.conclusion // .state // "") | IN("PENDING", "", "EXPECTED", "STALE", "STARTUP_FAILURE"))) then "pending"
               else "green" end' "${WORKDIR}/checks.json" 2> /dev/null || echo 'none')"
           case "${CHECK_STATE}" in green | red | pending | none) ;; *) CHECK_STATE='none' ;; esac
+          if [[ "${ROLLUP_HEAD:-}" != "${CHECKED_OUT_HEAD}" ]]; then
+            echo "🩸 #${PR}: the check rollup describes ${ROLLUP_HEAD:-<unknown>}, not the checked-out head ${CHECKED_OUT_HEAD} — head state unknown"
+            CHECK_STATE='none'
+          fi
           REGRESSED_ROUND=''
           LAST_PUSH="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -5976,10 +5999,8 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
-          # Regression accounting (af-155): the head state this round STARTED
-          # from, stamped into the round's own push marker, and the prior
-          # round prepare charged as a regression.
-          CHECK_STATE: '${{ steps.prepare.outputs.check_state }}'
+          # Regression accounting (af-155): the prior round prepare charged as
+          # a regression, recorded by whichever report this round posts.
           REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           # This step also posts a round report (timeout / gate-rejection /
           # abort), so it writes the per-round growth-now marker too — else an
@@ -6588,6 +6609,10 @@ jobs:
               echo
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
+              if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+                echo
+                echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
+              fi
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo

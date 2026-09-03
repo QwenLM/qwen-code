@@ -4260,18 +4260,25 @@ is measured, never inferred:
 Attribution is deliberately conservative on every axis that
 could charge the loop for someone else's red. A head that
 moved (a human push, a base update) breaks the head equality
-and drops the charge. A re-arm changes the window key and
-drops the whole set with it. Cancelled checks are not red
-here, matching the scan's own N_RED_NOW filter. The loop's
-own lanes are excluded wholesale by the canonical five-name
-filter this file's other own-lane filters use — deliberately
-NOT the feedback renderer's review-address carve-out, which
-keeps failed and in-flight address runs visible as feedback:
-a charge verdict must never see them (a failed own round is
-feedback, not a regression the pushed code authored, and an
-in-flight own check would hold the verdict at pending across
-the trigger family whose suite attaches to the PR
-head). What remains uncovered is a flake: a
+and drops the charge — and the equality binds BOTH halves:
+the marker's head to the checked-out head, and the check
+rollup to the commit it describes (`headRefOid` is read in
+the same call as the rollup; a rollup for any other commit
+classifies `none`, unknown, never chargeable). A re-arm
+changes the window key and drops the whole set with it.
+Cancelled checks are not red here, matching the scan's own
+N_RED_NOW filter. The loop's own lanes are excluded wholesale
+by the canonical five-name filter this file's other own-lane
+filters use, plus the loop's own dispatch-pending commit
+status by its exact context value (a StatusContext carries no
+workflowName) — deliberately NOT the feedback renderer's
+review-address carve-out, which keeps failed and in-flight
+address runs visible as feedback: a charge verdict must never
+see them (a failed own round is feedback, not a regression
+the pushed code authored, and an in-flight own check would
+hold the verdict at pending across the trigger family whose
+suite attaches to the PR head). What remains uncovered is a
+flake: a
 genuinely flaky check failing on the bot's push
 reads as a regression. The consequence is bounded on purpose
 — one regression only declines to RESET a counter that needs
