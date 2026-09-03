@@ -307,6 +307,14 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
       const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+      // Deliberately NOT gated on `isSessionWorkflowEnabled()`, and the
+      // `blockedBy` schema description is not gated either. Both are plan
+      // data-model semantics, not presentation: gating them on what is a
+      // visualization switch would give `todo_write` two dialects, so the
+      // same call would produce different stored plans depending on whether
+      // anyone happens to be looking at the graph. The behaviour therefore
+      // reaches sessions with Session Workflow off, which is intended — see
+      // the preservation merge below for the exact blast radius.
       const hasActivePlan = oldTodos.some(
         (todo) => todo.status !== 'completed',
       );
@@ -317,6 +325,20 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
+        // Blast radius of the omitted-`blockedBy` preservation, stated once
+        // because it is ungated (see `hasActivePlan` above): it changes an
+        // update only when all three hold — the previous plan still has an
+        // unfinished item, the same id carried a non-empty `blockedBy`, and
+        // this call omits `blockedBy` for it. A plan that never used
+        // dependencies is untouched, because `undefined?.filter()` is
+        // `undefined` and the entry is returned as sent. Callers that always
+        // send the full dependency list are likewise unaffected, and `[]`
+        // remains the explicit clear (an empty array is not nullish, so it
+        // wins over the preserved value).
+        //
+        // Note the schema text for `blockedBy` actively invites the omission
+        // and reaches every session's prompt, so the prompt change widens the
+        // exposure of this branch rather than being independent of it.
         let preservedAnyBlockedBy = false;
         candidateTodos = todos.map((todo) => {
           // Preserved edges may only reference ids that survive this update:
