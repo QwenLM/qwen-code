@@ -343,6 +343,55 @@ describe('resolve-health: assessment', () => {
     );
   });
 
+  it('settles same-second ties on the comment id, not on input order', () => {
+    // GitHub's `created_at` is second-granular, so two results in one second
+    // tie and a stable sort keeps the order the input arrived in — for
+    // `fetchPrs` that is search ranking, which moves between ticks. The
+    // streak, the latest attempt, and the roster must not move with it.
+    const at = '2026-08-26T00:00:00Z';
+    const pushed = {
+      number: 1,
+      state: 'open',
+      comments: [result(at, PUSHED, 1)],
+    };
+    const failed = {
+      number: 2,
+      state: 'open',
+      comments: [result(at, AGENT_FAILED, 2)],
+    };
+    const forward = assess([pushed, failed], { now });
+    const backward = assess([failed, pushed], { now });
+    assert.equal(forward.streak, backward.streak);
+    assert.equal(forward.latestAttempt.id, backward.latestAttempt.id);
+    // The id settles it, so the later-posted failure is the latest attempt
+    // and the streak counts it whichever way the two PRs arrived.
+    assert.equal(forward.streak, 1);
+    assert.equal(forward.latestAttempt.id, failed.comments[0].id);
+
+    // The roster feeds sameState()'s order-sensitive comparison, so a tie
+    // that reordered it would report a changed picture about an unchanged one.
+    const first = {
+      number: 3,
+      state: 'open',
+      comments: [request(at, 3, 'writer1')],
+    };
+    const second = {
+      number: 4,
+      state: 'open',
+      comments: [request(at, 4, 'writer2')],
+    };
+    const one = assess([first, second], { now });
+    const other = assess([second, first], { now });
+    assert.deepEqual(
+      one.unanswered.map((u) => u.id),
+      [first.comments[0].id, second.comments[0].id],
+    );
+    assert.deepEqual(
+      other.unanswered.map((u) => u.id),
+      one.unanswered.map((u) => u.id),
+    );
+  });
+
   it('alarms at the default threshold and not one below it', () => {
     const failures = (n) => [
       {
@@ -1208,6 +1257,85 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(decide(tick3, { number: 46, texts }), []);
   });
 
+  it('records a barrier that rose while the alarm stayed below threshold', () => {
+    // The barrier only ever reached a marker on an alarm or a recovery tick,
+    // so a request that went unanswered BELOW the threshold was never
+    // recorded. Once its PR closes, assess() drops it by design, the barrier
+    // falls back to the one the streak-only issue filed (null), and the
+    // recovery gate closes on a push OLDER than that request — a false
+    // recovery that needs no adversary and no tampered marker.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
+    );
+    const opened = assess(
+      [{ number: 30, state: 'open', comments: [...failures] }],
+      { now },
+    );
+    const texts = [decide(opened, null)[0].body];
+    assert.equal(readState(texts).newestUnanswered, null);
+
+    // The lane pushes, then breaks never-ran: one request, unanswered, below
+    // the threshold of three.
+    const push = result('2026-08-26T19:00:00Z', PUSHED, 30);
+    const unanswered = request('2026-08-26T19:30:00Z', 31);
+    const withRequest = (state) => [
+      { number: 30, state: 'open', comments: [...failures, push] },
+      { number: 31, state, comments: [unanswered] },
+    ];
+    const tick2 = assess(withRequest('open'), { now });
+    assert.equal(tick2.alarm, false);
+    assert.equal(tick2.unanswered.length, 1);
+    // The in-tick barrier already blocks the close; what was missing is the
+    // write that keeps it once the request leaves the assessment.
+    const refresh = decide(tick2, { number: 47, texts });
+    assert.deepEqual(
+      refresh.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([...texts, refresh[0].body]).newestUnanswered,
+      '2026-08-26T19:30:00Z',
+    );
+    texts.push(refresh[0].body);
+
+    // The request's PR closes unanswered and the stale push stays in window.
+    const tick3 = assess(withRequest('closed'), { now });
+    assert.equal(tick3.alarm, false);
+    assert.equal(tick3.unanswered.length, 0);
+    assert.equal(tick3.latestAttempt.kind, 'pushed');
+    // Not closed — and not refreshed again either: the barrier recorded above
+    // now holds, so the write does not repeat every tick.
+    assert.deepEqual(decide(tick3, { number: 47, texts }), []);
+  });
+
+  it('does not close on a state it could not read', () => {
+    // A marker this tick cannot read is not evidence that no barrier was ever
+    // recorded: the body or comment carrying it can be edited into junk. The
+    // refresh is what keeps the refusal from wedging the issue open — it
+    // re-records the state, and the next tick closes on that.
+    const existing = {
+      number: 49,
+      texts: [
+        `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {not json} -->`,
+      ],
+    };
+    assert.equal(readState(existing.texts), null);
+    const actions = decide(healthy, existing);
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(actions[0].body, /State refresh:/);
+    const restored = {
+      number: 49,
+      texts: [...existing.texts, actions[0].body],
+    };
+    assert.deepEqual(
+      decide(healthy, restored).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
   it('does nothing when healthy and no issue is open', () => {
     assert.deepEqual(decide(healthy, null), []);
   });
@@ -1327,24 +1455,43 @@ describe('resolve-health: the tracking issue feed', () => {
     // Anyone can comment a state marker on the open tracking issue; only
     // markers the watch itself posted (github-actions[bot] today, the bot
     // login if it ever switches to the bot PAT) may feed readState — a
-    // forged marker must neither suppress updates nor force a recovery.
+    // forged marker must neither suppress updates nor force a recovery. An
+    // EDIT forgery just as surely: the watch posts a fresh comment per tick
+    // and never edits one, so an edited marker is someone else's word.
     const botState =
       '<!-- qwen-resolve-health-state {"streak":1,"unanswered":0,"latest":7} -->';
     const forgedState =
       '<!-- qwen-resolve-health-state {"streak":0,"unanswered":0,"latest":null} -->';
+    const filed = '2026-08-20T00:00:00Z';
+    const calls = [];
     const gh = (args) => {
+      calls.push(args);
       const path = args[3];
       if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
         return [
-          ['91', b64(`${HEALTH_MARKER}\n${botState}`)].join('\t'),
+          [
+            '91',
+            'github-actions[bot]',
+            filed,
+            filed,
+            b64(`${HEALTH_MARKER}\n${botState}`),
+          ].join('\t'),
           '',
         ].join('\n');
       }
       if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
         return [
-          ['github-actions[bot]', b64(botState)].join('\t'),
-          [BOT, b64(botState)].join('\t'),
-          ['stranger', b64(forgedState)].join('\t'),
+          ['github-actions[bot]', filed, filed, b64(botState)].join('\t'),
+          [BOT, filed, filed, b64(botState)].join('\t'),
+          ['stranger', filed, filed, b64(forgedState)].join('\t'),
+          // A watch comment a triage user edited into a forgery, last so that
+          // dropping the edit filter lets it win readState's last-marker read.
+          [
+            'github-actions[bot]',
+            filed,
+            '2026-08-26T00:00:00Z',
+            b64(forgedState),
+          ].join('\t'),
           '',
         ].join('\n');
       }
@@ -1352,10 +1499,66 @@ describe('resolve-health: the tracking issue feed', () => {
     };
     const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
     assert.equal(issue.number, 91);
-    // Body plus the two bot-authored comments; the stranger's marker is
-    // dropped, so the last marker readState sees is the watch's own.
+    // Body plus the two unedited bot-authored comments; the stranger's marker
+    // and the edited one are dropped, so the last readState sees is honest.
     assert.equal(issue.texts.length, 3);
     assert.equal(readState(issue.texts).streak, 1);
+    // The gates are only as good as the fields reaching them.
+    const jq = calls.at(-1)[calls.at(-1).indexOf('--jq') + 1];
+    assert.match(jq, /\.created_at/);
+    assert.match(jq, /\.updated_at/);
+  });
+
+  it('adopts only an issue the watch filed, and only its unedited body', () => {
+    // The body is a state source, so it carries the same two gates: the issue
+    // has to be the watch's own — a planted decoy needs the label, and
+    // applying one needs triage, the adversary assess() models — and an
+    // edited body is not the watch's word. Discovery must still match the
+    // marker in an edited body: gate that too and a triage user deletes the
+    // marker by editing, so every later tick files a duplicate.
+    const forgedState =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      const path = args[3];
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          // The issues API returns created-desc, so a planted decoy is the
+          // newest candidate and is reached first.
+          [
+            '99',
+            'stranger',
+            '2026-08-26T00:00:00Z',
+            '2026-08-26T00:00:00Z',
+            b64(`${HEALTH_MARKER}\n${forgedState}`),
+          ].join('\t'),
+          // The genuine issue, whose body a triage user has since edited.
+          [
+            '91',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            '2026-08-25T00:00:00Z',
+            b64(`${HEALTH_MARKER}\n${forgedState}`),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
+        return '';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
+    // The decoy is not the watch's, so the genuine issue is still tracked...
+    assert.equal(issue.number, 91);
+    // ...and its edited body fed no state, while still being what found it.
+    assert.equal(readState(issue.texts), null);
+    const jq = calls[0][calls[0].indexOf('--jq') + 1];
+    assert.match(jq, /select\(\.pull_request == null\)/);
+    assert.match(jq, /\.user\.login/);
+    assert.match(jq, /\.created_at/);
+    assert.match(jq, /\.updated_at/);
   });
 });
 
@@ -1442,9 +1645,18 @@ describe('resolve-health: end to end against a recording gh', () => {
         );
         assert.ok(args.includes('--paginate'));
         return [
-          ['90', b64('unrelated open issue')].join('\t'),
+          [
+            '90',
+            'maintainer',
+            '2026-08-19T00:00:00Z',
+            '2026-08-19T00:00:00Z',
+            b64('unrelated open issue'),
+          ].join('\t'),
           [
             '91',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            '2026-08-20T00:00:00Z',
             b64(
               `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":2,"unanswered":0,"latest":4} -->`,
             ),
@@ -1526,7 +1738,19 @@ describe('resolve-health: end to end against a recording gh', () => {
         return '';
       }
       if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
-        return issues.map(([n, body]) => `${n}\t${b64(body)}\n`).join('');
+        // The issues jq emits number, author, created, updated, body; a row
+        // defaults to the watch's own issue with an unedited body.
+        return issues
+          .map(
+            ([
+              n,
+              body,
+              author = 'github-actions[bot]',
+              created = '2026-08-20T00:00:00Z',
+              updated = created,
+            ]) => `${n}\t${author}\t${created}\t${updated}\t${b64(body)}\n`,
+          )
+          .join('');
       }
       if (args[2] === 'POST' || args[2] === 'PATCH') {
         return '{}';
@@ -1668,6 +1892,9 @@ describe('resolve-health: end to end against a recording gh', () => {
         return [
           [
             '92',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            '2026-08-20T00:00:00Z',
             b64(
               `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":5,"unanswered":0,"latest":3} -->`,
             ),
@@ -1679,6 +1906,8 @@ describe('resolve-health: end to end against a recording gh', () => {
         return [
           [
             'stranger',
+            '2026-08-26T02:00:00Z',
+            '2026-08-26T02:00:00Z',
             b64(
               '<!-- qwen-resolve-health-state {"streak":0,"unanswered":0,"latest":7,"recovered":7} -->',
             ),
@@ -1703,6 +1932,45 @@ describe('resolve-health: end to end against a recording gh', () => {
     assert.match(
       actions[0].body,
       /Recovered: the latest attempt .* is `pushed`/,
+    );
+  });
+
+  it('keeps reporting when the tracking issue body was edited into the current state', () => {
+    // Until the first update comment the body is the ONLY state source, so a
+    // triage user editing its marker to the state the next tick computes
+    // makes sameState() true and the watch reports nothing through an
+    // evolving outage — and re-editing each tick is cheap. The decoy is the
+    // cheaper shape of the same attack: plant a labelled issue carrying the
+    // marker and a forged state, and the created-desc lookup adopts it
+    // instead of the genuine one, which is then never updated or closed.
+    const calls = [];
+    const now = new Date('2026-08-27T12:00:00Z');
+    const prs = fiveFailures();
+    // The body the watch filed on the previous tick: its marker is the state
+    // this tick computes, which is exactly what an attacker edits it into.
+    const filed = decide(assess(prs, { now }), null)[0].body;
+    const { actions } = main({
+      gh: feedGh(calls, prs, [
+        [99, filed, 'stranger', '2026-08-26T00:00:00Z'],
+        [
+          91,
+          filed,
+          'github-actions[bot]',
+          '2026-08-25T00:00:00Z',
+          '2026-08-26T09:00:00Z',
+        ],
+      ]),
+      env: { REPO: 'QwenLM/qwen-code' },
+      now,
+    });
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(actions[0].number, 91);
+    assert.deepEqual(
+      calls.filter((c) => c.args[2] === 'POST').map((c) => c.args[3]),
+      ['repos/QwenLM/qwen-code/issues/91/comments'],
     );
   });
 

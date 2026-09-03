@@ -234,8 +234,13 @@ export function assess(prs, options = {}) {
       }
     }
   }
-  results.sort((a, b) => a.at.localeCompare(b.at));
-  unanswered.sort((a, b) => a.at.localeCompare(b.at));
+  // `created_at` is second-granular, so same-second events tie: without a
+  // second key the sort keeps the order the input arrived in, which for
+  // `fetchPrs` is search ranking. The streak, the latest attempt, and the
+  // roster would then move between ticks on unchanged data. Comment ids are
+  // unique, so they settle every tie.
+  results.sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
+  unanswered.sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
   const attempts = results.filter((r) => FAILED.has(r.kind) || OK.has(r.kind));
   let streak = 0;
   for (let i = attempts.length - 1; i >= 0; i -= 1) {
@@ -387,6 +392,18 @@ export function renderUpdate(assessment, options = {}, previous = null) {
   ].join('\n');
 }
 
+// The write decide() makes with the alarm quiet: it records state and claims
+// nothing else, so it must not reuse the update's "still failing" headline.
+function renderStateRefresh(assessment, options = {}, previous = null) {
+  return [
+    HEALTH_MARKER,
+    stateMarker(stateOf(assessment, previous)),
+    'State refresh: recording the picture as the watch now sees it, which the state on this issue does not yet carry. The alarm is not firing.',
+    '',
+    renderReport(assessment, options),
+  ].join('\n');
+}
+
 // decide() only emits this once a `pushed` attempt exists, so the comment
 // always names the attempt that recovered the lane.
 export function renderRecovery(assessment, options = {}, previous = null) {
@@ -441,7 +458,11 @@ export function decide(assessment, existing, options = {}) {
     // current assessment, so their newest timestamp survives in the state
     // markers written on the issue.
     const barrier = stateOf(assessment, previous).newestUnanswered;
+    // No readable state means no barrier ON RECORD, which is not the same as
+    // no barrier: the marker carrying it can be edited away, and closing on
+    // that would certify a recovery nothing vouches for.
     if (
+      previous &&
       latest &&
       latest.kind === 'pushed' &&
       (!barrier || latest.at > barrier)
@@ -451,7 +472,7 @@ export function decide(assessment, existing, options = {}) {
       // next tick from repeating it while it retries the close. A success
       // first seen in an alarm update still closes once the alarm clears —
       // only the recovery comment itself is deduped, never the close.
-      if (!previous?.recovered) {
+      if (!previous.recovered) {
         actions.push({
           type: 'comment',
           number: existing.number,
@@ -459,6 +480,18 @@ export function decide(assessment, existing, options = {}) {
         });
       }
       actions.push({ type: 'close', number: existing.number });
+    } else if (!previous || barrier > (previous.newestUnanswered ?? '')) {
+      // Persist the barrier while the alarm is quiet. A request that goes
+      // unanswered below the threshold reaches no marker otherwise, and once
+      // its PR closes assess() drops it by design: the gate above would fall
+      // back to the older recorded maximum and close on a push that predates
+      // it. This write is also what keeps the refusal above from wedging the
+      // issue open — the next tick reads the state recorded here.
+      actions.push({
+        type: 'comment',
+        number: existing.number,
+        body: renderStateRefresh(assessment, options, previous),
+      });
     }
   }
   return actions;
@@ -563,11 +596,21 @@ export function findOpenIssue(gh, repo, label) {
       'per_page=100',
       '--paginate',
       '--jq',
-      '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv',
+      '.[] | select(.pull_request == null) | [.number, .user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
     ]),
   );
-  for (const [number, body] of rows) {
+  for (const [number, author, created_at, updated_at, body] of rows) {
+    // The issue's body is a state source, so the issue has to be the watch's
+    // own: a planted issue carrying the label and the marker is exactly as
+    // forgeable as a comment on one, and applying that label needs triage —
+    // the same adversary assess() models for result comments.
+    if (!STATE_AUTHORS.has(author)) {
+      continue;
+    }
     const text = b64(body);
+    // Discovery keeps matching an edited body; only the state it feeds is
+    // dropped. Gating discovery too would let a triage user delete the marker
+    // by editing, and every later tick would file a duplicate.
     if (text.includes(HEALTH_MARKER)) {
       const comments = tsvLines(
         gh([
@@ -579,12 +622,20 @@ export function findOpenIssue(gh, repo, label) {
           'per_page=100',
           '--paginate',
           '--jq',
-          '.[] | [.user.login, (.body // "" | @base64)] | @tsv',
+          '.[] | [.user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
         ]),
       )
-        .filter(([user]) => STATE_AUTHORS.has(user))
-        .map(([, b]) => b64(b));
-      return { number: Number(number), texts: [text, ...comments] };
+        // An edit is a forgery whoever posted it: the watch writes a fresh
+        // comment per tick and never edits one.
+        .filter(
+          ([user, created, updated]) =>
+            STATE_AUTHORS.has(user) && updated === created,
+        )
+        .map(([, , , b]) => b64(b));
+      return {
+        number: Number(number),
+        texts: [updated_at === created_at ? text : '', ...comments],
+      };
     }
   }
   return null;
