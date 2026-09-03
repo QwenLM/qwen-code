@@ -540,7 +540,7 @@ describe('release workflow', () => {
     expect(testStep.run).toContain(
       'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
-    expect(testStep.run).toContain('::error title=Workspace tests failed::');
+    expect(testStep.run).toContain('::warning title=Workspace tests exited');
     // Every release schedule retries, stable included: running the stable
     // lane with no retry let one flaky test out of ~30k red a release whose
     // other gates were all green. The default is pinned here so a silent
@@ -639,30 +639,63 @@ describe('release workflow', () => {
     );
   });
 
-  it('annotates a workspace test failure without changing its exit code', () => {
+  it('names which failure this is, and never changes the exit code', () => {
+    // A shard that died on Vitest's own worker RPC timing out reads
+    // identically to a real break, and this release lost two attempts before
+    // anyone could tell them apart (run 33713579913). The annotation says
+    // which; the child's status is re-raised untouched either way, so no
+    // reading of the log can turn a failure green.
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
     const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
-    const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
-    try {
-      const stub = join(dir, 'npm');
-      writeFileSync(stub, '#!/bin/sh\nexit 7\n');
-      chmodSync(stub, 0o755);
 
-      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
-        env: {
-          ...process.env,
-          PATH: `${dir}:${process.env['PATH']}`,
-          VITEST_RETRY: '2',
-        },
-        encoding: 'utf8',
-      });
+    for (const [label, stub, code, annotation] of [
+      // A failing test names itself; an annotation would only add noise.
+      ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
+      [
+        'transport timeout',
+        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'unexplained',
+        'something odd',
+        7,
+        '::error title=Workspace tests exited 7 with no failing test::',
+      ],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
+      try {
+        const stubPath = join(dir, 'npm');
+        writeFileSync(stubPath, `#!/bin/sh\necho '${stub}'\nexit ${code}\n`);
+        chmodSync(stubPath, 0o755);
 
-      expect(result.status).toBe(7);
-      expect(result.stdout).toContain('::error title=Workspace tests failed::');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: '2',
+              RUNNER_TEMP: dir,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, label).toBe(code);
+        if (annotation) {
+          expect(result.stdout, label).toContain(annotation);
+        } else {
+          expect(result.stdout, label).not.toContain('::warning title=');
+          expect(result.stdout, label).not.toContain('::error title=');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
