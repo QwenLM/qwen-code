@@ -86,6 +86,36 @@ describe('parseOutputStyleFile', () => {
     expect(style.description).toBe('Custom code output style');
   });
 
+  // The description is rendered straight into a picker row, so it gets the
+  // same treatment the sibling `name` field already gets. An OSC-8 hyperlink
+  // can make a row link somewhere it does not say, and U+202E reorders the
+  // row so the `(project)` marker reads as something else.
+  it.each([
+    ['a declared description', 'description: "%s"', ''],
+    ['a derived description', '', '%s'],
+  ])('strips escape and format characters from %s', (_label, fm, body) => {
+    const payload =
+      'Safe \u001b]8;;https://evil.example\u0007link\u001b]8;;\u0007 \u202Etxet';
+    const content =
+      fm === ''
+        ? body.replace('%s', payload)
+        : `---\nname: Styled\n${fm.replace('%s', payload)}\n---\nBody`;
+    const style = parseOutputStyleFile(content, '/styles/x.md', 'user');
+
+    expect(style.description).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(style.description).not.toContain('evil.example');
+    expect([...style.description].length).toBeLessThanOrEqual(120);
+  });
+
+  it('caps a long declared description at the derived-description limit', () => {
+    const style = parseOutputStyleFile(
+      `---\nname: Styled\ndescription: "${'x'.repeat(5000)}"\n---\nBody`,
+      '/styles/x.md',
+      'user',
+    );
+    expect([...style.description].length).toBe(120);
+  });
+
   it.each([
     ['an empty body', '---\nname: Empty\n---\n\n', 'no prompt body'],
     ['the reserved name default', '---\nname: Default\n---\nBody', 'reserved'],
@@ -120,7 +150,7 @@ describe('loadOutputStylesFromDir', () => {
 
   it('returns nothing for a missing directory', async () => {
     expect(
-      await loadOutputStylesFromDir(path.join(dir, 'missing'), 'user'),
+      await loadOutputStylesFromDir(path.join(dir, 'missing'), 'user', dir),
     ).toEqual([]);
   });
 
@@ -130,7 +160,7 @@ describe('loadOutputStylesFromDir', () => {
     await fs.writeFile(path.join(dir, 'notes.txt'), 'not a style');
     await fs.mkdir(path.join(dir, 'nested.md'));
 
-    const styles = await loadOutputStylesFromDir(dir, 'user');
+    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
     expect(styles.map((s) => s.name)).toEqual(['a', 'b']);
     expect(styles.every((s) => s.source === 'user')).toBe(true);
   });
@@ -139,7 +169,7 @@ describe('loadOutputStylesFromDir', () => {
     await fs.writeFile(path.join(dir, 'bad.md'), '---\nname: default\n---\nx');
     await fs.writeFile(path.join(dir, 'good.md'), 'Good');
 
-    const styles = await loadOutputStylesFromDir(dir, 'project');
+    const styles = await loadOutputStylesFromDir(dir, 'project', dir);
     expect(styles.map((s) => s.name)).toEqual(['good']);
   });
 
@@ -150,7 +180,7 @@ describe('loadOutputStylesFromDir', () => {
       '---\nname: same\n---\nSecond',
     );
 
-    const styles = await loadOutputStylesFromDir(dir, 'user');
+    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
     expect(styles).toHaveLength(1);
     expect(styles[0].prompt).toBe('First');
   });
@@ -159,8 +189,81 @@ describe('loadOutputStylesFromDir', () => {
     await fs.writeFile(path.join(dir, 'huge.md'), 'x'.repeat(1024 * 1024 + 1));
     await fs.writeFile(path.join(dir, 'small.md'), 'Small');
 
-    const styles = await loadOutputStylesFromDir(dir, 'user');
+    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
     expect(styles.map((s) => s.name)).toEqual(['small']);
+  });
+
+  // A style file's body goes into the system prompt verbatim, so a link that
+  // names a file the repo author does not own is an exfiltration vector that
+  // survives `git clone` and needs no user action.
+  describe('links', () => {
+    let outside: string;
+    let secret: string;
+
+    beforeEach(async () => {
+      outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+      secret = path.join(outside, 'credentials');
+      await fs.writeFile(secret, 'AWS_SECRET_ACCESS_KEY=hunter2');
+    });
+
+    afterEach(async () => {
+      await fs.rm(outside, { recursive: true, force: true });
+    });
+
+    it('refuses a symlinked project style', async () => {
+      await fs.symlink(secret, path.join(dir, 'notes.md'));
+      await fs.writeFile(path.join(dir, 'ok.md'), 'Fine');
+
+      const styles = await loadOutputStylesFromDir(dir, 'project', dir);
+      expect(styles.map((s) => s.name)).toEqual(['ok']);
+    });
+
+    it('refuses a project symlink even when its target is in-workspace', async () => {
+      // Confinement alone would wave this through: the target is inside the
+      // project root. A repo can commit `notes.md -> .env` and read a
+      // developer's own secrets out of their checkout.
+      await fs.writeFile(path.join(dir, '.env'), 'API_KEY=hunter2');
+      await fs.symlink(path.join(dir, '.env'), path.join(dir, 'notes.md'));
+
+      const styles = await loadOutputStylesFromDir(dir, 'project', dir);
+      expect(styles).toEqual([]);
+    });
+
+    it('follows a user symlink that stays inside the root', async () => {
+      const inside = path.join(dir, 'dotfiles');
+      await fs.mkdir(inside);
+      await fs.writeFile(path.join(inside, 'x.md'), 'Dotfile style');
+      await fs.symlink(path.join(inside, 'x.md'), path.join(dir, 'linked.md'));
+
+      const styles = await loadOutputStylesFromDir(dir, 'user', dir);
+      expect(styles.map((s) => s.name)).toEqual(['linked']);
+      expect(styles[0].prompt).toBe('Dotfile style');
+    });
+
+    it('refuses a user symlink that escapes the root', async () => {
+      await fs.symlink(secret, path.join(dir, 'notes.md'));
+
+      const styles = await loadOutputStylesFromDir(dir, 'user', dir);
+      expect(styles).toEqual([]);
+    });
+
+    it('refuses a hard link, which lstat sees as an ordinary file', async () => {
+      await fs.link(secret, path.join(dir, 'notes.md'));
+
+      expect(await loadOutputStylesFromDir(dir, 'project', dir)).toEqual([]);
+      expect(await loadOutputStylesFromDir(dir, 'user', dir)).toEqual([]);
+    });
+
+    it('refuses a style reached through a symlinked ancestor', async () => {
+      // A checked-in `.qwen -> /outside`: a final-component lstat sees a
+      // plain file, so only the canonical path catches it.
+      await fs.writeFile(path.join(outside, 'notes.md'), 'Outside style');
+      const linkedDir = path.join(dir, 'styles');
+      await fs.symlink(outside, linkedDir);
+
+      const styles = await loadOutputStylesFromDir(linkedDir, 'project', dir);
+      expect(styles).toEqual([]);
+    });
   });
 });
 
