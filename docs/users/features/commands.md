@@ -707,10 +707,13 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                         | Usage Examples                                               |
-| -------------------- | ----------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions   | `qwen sessions list`, `qwen sessions list --json --limit 50` |
-| `qwen sessions ps`   | List the sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
+| Command                | Description                                   | Usage Examples                                               |
+| ---------------------- | --------------------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list`   | List recent conversation sessions             | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`     | List the sessions running right now           | `qwen sessions ps`, `qwen sessions ps --json`                |
+| `qwen sessions peek`   | Show what a background session is doing       | `qwen sessions peek 0f8e1c42`                                |
+| `qwen sessions answer` | Answer a background session waiting for input | `qwen sessions answer 0f8e1c42 "yes, go ahead"`              |
+| `qwen sessions stop`   | Stop a background session                     | `qwen sessions stop 0f8e1c42`                                |
 
 #### `qwen sessions list`
 
@@ -762,7 +765,7 @@ qwen --bg "find out why the release job is flaky"
 # See it with: qwen sessions ps
 ```
 
-What it does not do yet: there is no way to attach to a background session, read its transcript, answer its question from the CLI, or stop it. Those land with the Agent View roster.
+See what it is doing with `qwen sessions peek`, reply to it with `qwen sessions answer`, and end it with `qwen sessions stop`. What is still missing: attaching to a background session's terminal and reading its full transcript. Those land with the Agent View roster.
 
 #### `qwen sessions ps`
 
@@ -839,6 +842,31 @@ qwen sessions ps --json | jq -r .cwd
 # Which background sessions are waiting on me?
 qwen sessions ps --json | jq -r 'select(.state == "needs input") | .name'
 ```
+
+#### `qwen sessions peek|answer|stop <session>`
+
+A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one — the short form `qwen sessions ps` and `--bg` print is enough.
+
+`peek` shows what the session is doing, and what it has stopped to ask:
+
+```bash
+$ qwen sessions peek 0f8e1c42
+find out why the release job is flaky  [0f8e1c42]
+State:     waiting
+Directory: /w/app
+Waiting:   permission to write scripts/flake-report.md
+
+Answer it with: qwen sessions answer 0f8e1c42 "<your answer>"
+```
+
+`answer` replies to a session that is waiting, and `stop` ends one, leaving its transcript in place:
+
+```bash
+qwen sessions answer 0f8e1c42 "yes, write the report"
+qwen sessions stop 0f8e1c42
+```
+
+All three talk to a supervisor that is already running and never start one: if none is, they say so rather than spawning a process to report that nothing exists.
 
 ## 6. Messaging Another Running Session
 
