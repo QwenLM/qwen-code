@@ -1902,7 +1902,9 @@ jobs:
           # Salvage eligibility measures the CURRENT attempt (the reset
           # rewrites this before each attempt): a retry restarts the review
           # from zero, so run-level elapsed would overstate a fresh attempt.
-          write_signal "${SALVAGE_DIR}/attempt-start" "$START_TS"
+          # Best-effort like the reset's rewrite: a failed write degrades to
+          # the watcher's START_TS fallback, not to a red step under errexit.
+          write_signal "${SALVAGE_DIR}/attempt-start" "$START_TS" || true
 
           # Supersede watcher (#10110): only automatic lifecycle reviews — the
           # runs cancel-in-progress used to cancel on synchronize. It polls
@@ -2210,7 +2212,7 @@ jobs:
               cede_superseded
             fi
             reset_attempt_salvage_state
-            attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
+            attempt_timeout=$(( BUDGET_SECONDS - ($("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
@@ -2254,7 +2256,7 @@ jobs:
               break
             fi
             if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
-              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
+              && [ "$(( BUDGET_SECONDS - ($("${QWEN_CI_REAL_DATE:-date}" +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
               reset_attempt_salvage_state
               # The one-shot watcher exits the moment it arms or cedes, and

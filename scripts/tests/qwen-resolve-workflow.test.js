@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -25,18 +25,17 @@ const repoRoot = path.resolve(
 );
 
 // Capability probe, not a platform check: the FIFO wedge tests need
-// mkfifo(1), which macOS does not ship — the merge_group-gated test_macos
-// lane still runs this suite (vitest.config excludes win32 only), where
+// mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
+// gated test_macos lane runs this suite too, and on a host without mkfifo
 // spawnSync('mkfifo', ...) returns ENOENT without throwing, no FIFO is
 // ever created, and the wedge assertions would pass for the wrong reason
-// (R11-7).
+// (R11-7). Probe PRESENCE, not GNU-ness: BSD mkfifo rejects `--help`, so
+// an exit-code probe skipped the coverage on every macOS host although
+// macOS ships /usr/bin/mkfifo. With no operand both implementations print
+// usage and exit non-zero; only ENOENT means "absent".
 const hasMkfifo = (() => {
-  try {
-    execFileSync('mkfifo', ['--help'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+  const probe = spawnSync('mkfifo', [], { stdio: 'ignore' });
+  return probe.error?.code !== 'ENOENT';
 })();
 
 function escapeRegExp(value) {

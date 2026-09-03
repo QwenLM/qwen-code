@@ -25062,7 +25062,12 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   });
 
   it('documents the hold in the design doc', () => {
-    expect(designDoc).toContain('<a id="af-149"></a>');
+    // af-155 is the hold's own entry (af-149 predates it: pinning that
+    // anchor let the section be removed or renumbered with the suite green).
+    expect(designDoc).toContain('<a id="af-155"></a>');
+    expect(designDoc).toContain(
+      'Hold the stale-base refresh while a review-pr is in flight',
+    );
     expect(designDoc).toContain('deferred a stale-base refresh');
   });
 

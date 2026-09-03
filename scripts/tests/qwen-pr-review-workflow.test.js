@@ -40,17 +40,16 @@ const botLogin =
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
 // Capability probe, not a platform check: the FIFO wedge tests need
-// mkfifo(1), which macOS does not ship — the merge_group-gated test_macos
-// lane still runs this suite (vitest.config excludes win32 only), where
-// the plants would throw ENOENT or vacuously pass (R11-7). A BSD host
-// with mkfifo fronting PATH keeps the coverage.
+// mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
+// gated test_macos lane runs this suite too, and a host without mkfifo
+// would throw ENOENT or vacuously pass (R11-7). Probe PRESENCE, not
+// GNU-ness: BSD mkfifo rejects `--help`, so an exit-code probe skipped the
+// whole FIFO coverage on every macOS host although macOS ships
+// /usr/bin/mkfifo. With no operand both implementations print usage and
+// exit non-zero without spawning anything; only ENOENT means "absent".
 const hasMkfifo = (() => {
-  try {
-    execFileSync('mkfifo', ['--help'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+  const probe = spawnSync('mkfifo', [], { stdio: 'ignore' });
+  return probe.error?.code !== 'ENOENT';
 })();
 
 // The truthful id(1) for the watcher-replay pin: production captures it
@@ -518,8 +517,11 @@ function runScenario(
           // Same for the R18-4 rm/tee pins: production captures absolute
           // paths before the $proxy_bin prepend; the replay pins the real
           // utilities so proxyPlants shadow bare-command resolution only.
-          QWEN_CI_REAL_RM: '/bin/rm',
-          QWEN_CI_REAL_TEE: '/bin/tee',
+          // Resolved, not hardcoded: /bin/tee does not exist on macOS
+          // (/usr/bin/tee), and the replayed cede's tee then exited 127
+          // under errexit on the test_macos lane.
+          QWEN_CI_REAL_RM: realUtilityPath('rm'),
+          QWEN_CI_REAL_TEE: realUtilityPath('tee'),
           // The review lane exports this marker path into the agent
           // environment (R21-1); inherited through the spread, the
           // retry-branch reset rm-rfs and the watcher rewrite writes the
@@ -6630,9 +6632,11 @@ describe('review supersede salvage (#10110)', () => {
     try {
       const supersedeFile = join(dir, 'superseded');
       if (huge) {
+        // yes(1), not /dev/zero | tr: same ~1.5GB non-hex plant, generated
+        // at GB/s on GNU and BSD alike instead of ~65s per plant.
         spawnSync('sh', [
           '-c',
-          `head -c 1500000000 /dev/zero | tr '\\0' 'a' > "${supersedeFile}"`,
+          `yes "${'a'.repeat(4096)}" | head -c 1500000000 > "${supersedeFile}"`,
         ]);
       } else {
         writeFileSync(supersedeFile, 'b'.repeat(40));
@@ -6685,11 +6689,13 @@ describe('review supersede salvage (#10110)', () => {
       mkdirSync(salvage);
       if (marker !== null) writeFileSync(join(salvage, 'salvage-ok'), marker);
       if (movedToHuge) {
-        // ~1.5GB of hex chars: an unbounded cat slurps it past the
-        // harness bound; head -c 64 reads 64 bytes and closes.
+        // ~1.5GB of non-hex chars: an unbounded cat slurps it past the
+        // harness bound; head -c 64 reads 64 bytes and closes. Generated
+        // by yes(1) — GB/s on GNU and BSD alike, where the /dev/zero | tr
+        // pipeline measured ~65s per plant on a macOS host.
         spawnSync('sh', [
           '-c',
-          `head -c 1500000000 /dev/zero | tr '\\0' 'a' > "${join(salvage, 'moved-to')}"`,
+          `yes "${'a'.repeat(4096)}" | head -c 1500000000 > "${join(salvage, 'moved-to')}"`,
         ]);
       } else if (movedToFifo) {
         execFileSync('mkfifo', [join(salvage, 'moved-to')]);
