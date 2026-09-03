@@ -265,9 +265,13 @@ custom factory that ignores the second argument does not attest.
 `ConversationRuntimeManager` includes the bridge attestation in its
 owned-runtime validation before it accepts an existing registered runtime or
 publishes a new candidate. A missing or false attestation is a static runtime
-contract violation: it rejects and disposes or quarantines the runtime as the
-existing non-retryable `conversation_root_compromised`, and the runtime is never
-exposed to standalone, Live, scheduled-task, lifecycle, or maintenance callers.
+contract violation. A new candidate is rejected and disposed; an equivalent
+existing registered runtime is terminally quarantined. The manager retains the
+non-retryable `conversation_root_compromised` error as that quarantine's
+terminal reason, and every later `ensure()` or current-runtime assertion
+rethrows the same error instead of degrading it to retryable
+`conversation_runtime_unavailable`. The runtime is never exposed to standalone,
+Live, scheduled-task, lifecycle, or maintenance callers.
 
 An embedded runtime factory supplied through `createServeApp` must either use a
 factory returned by `createSpawnChannelFactory` or explicitly attest an
@@ -378,6 +382,14 @@ journal derives its state parent directly and retains private-directory
 creation, identity validation, and durability checks; it has no owner record,
 process liveness check, lock, grace period, acquire, or release operation.
 
+Preserve the existing directory-permission asymmetry when moving that logic.
+On POSIX systems, the `conversations/` leaf and its journal subtree require
+mode `0700`, and newly created directories use that mode. The stable state root
+and any existing ancestors must still be owned, non-symlink directories whose
+canonical identity remains stable, but their historical mode is not required
+to be `0700` and is not changed. In particular, an existing mode-`0755`
+`~/.qwen` remains valid.
+
 `StandaloneDeletionJournal` validates that parent before entering its journal
 subtree on every read, recovery, clear, and write path. Reads treat a missing
 state directory as empty; the first write safely creates it. An existing unsafe
@@ -418,6 +430,17 @@ to the Live publication path: immediately before `writeLiveDiscoveryFile()`,
 call `handoffLiveDiscoveryOwner()` for every target base, including the stable
 base. Conversations runtime initialization itself no longer participates in
 Live discovery ownership.
+
+The publication path uses the existing custom-base handoff semantics for every
+target: it passes a no-op `commitOwner` callback because there is no longer a
+Conversations owner record to commit, and it leaves `waitForHandoffGrace` at
+its default. On stale-owner reclaim, `handoffLiveDiscoveryOwner()` removes the
+validated dead locator while holding the Live lock, releases that lock, and
+then performs the existing handoff grace before returning. Publication then
+calls `writeLiveDiscoveryFile()`, which reacquires the Live lock and rejects a
+competing live publisher. The no-op deliberately removes the old cross-record
+ordering dependency; the post-lock Live grace is preserved rather than moved
+under the lock or retired.
 
 A stale discovery record can therefore still be reclaimed through the existing
 validated handoff before publication. An active foreign Live owner still blocks
@@ -507,19 +530,19 @@ mixed-mode compatibility problem without serving the requested default.
 
 ## Error contract
 
-| Condition                                                                        | Result                                                                                               |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Another updated daemon has a different session loaded                            | Listing, new-session creation, and operations on the different session continue                      |
-| Another updated daemon has the session loaded for open, rename, or repair        | `409 session_writer_conflict` for that session                                                       |
-| A batch archive or delete includes a session loaded by another updated daemon    | Existing `200` batch envelope with that item's `errors[].code` set to `session_writer_conflict`      |
-| A well-formed active owner is provably dead in the same local identity domain    | Reclaim, authoritative transcript reload, then continue                                              |
-| The active owner is live, stalled, foreign, or missing required reclaim identity | `409 session_writer_conflict` for that session                                                       |
-| The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                    |
-| A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                              |
-| A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                    |
-| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose or quarantine the runtime; non-retryable `503 conversation_root_compromised`      |
-| A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                        |
-| Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response |
+| Condition                                                                        | Result                                                                                                                                                    |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Another updated daemon has a different session loaded                            | Listing, new-session creation, and operations on the different session continue                                                                           |
+| Another updated daemon has the session loaded for open, rename, or repair        | `409 session_writer_conflict` for that session                                                                                                            |
+| A batch archive or delete includes a session loaded by another updated daemon    | Existing `200` batch envelope with that item's `errors[].code` set to `session_writer_conflict`                                                           |
+| A well-formed active owner is provably dead in the same local identity domain    | Reclaim, authoritative transcript reload, then continue                                                                                                   |
+| The active owner is live, stalled, foreign, or missing required reclaim identity | `409 session_writer_conflict` for that session                                                                                                            |
+| The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                                                                         |
+| A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                                                                                   |
+| A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                                                                         |
+| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose a new candidate, or terminally quarantine an existing runtime; every request remains non-retryable `503 conversation_root_compromised` |
+| A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                                                                             |
+| Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response                                                      |
 
 For every writer-state row, a batch lifecycle route preserves the same error
 kind in its existing `200` per-item result rather than changing the batch's
@@ -601,10 +624,11 @@ Unit tests cover server bootstrap without a long-lived legacy owner, live and
 stale legacy-owner compatibility checks, strict malformed-owner failures,
 runtime initialization without lifetime ownership, shutdown without owner
 release, retained root/generation/quarantine failures, deletion-journal
-state-parent creation and compromise detection, journal bootstrap without owner
-acquisition, parent revalidation on journal read/recovery/write paths,
-contention-as-skip during background reconciliation, and runtime-provenance
-writer-lease selection.
+state-parent creation and compromise detection, acceptance of a historical
+non-`0700` state root alongside rejection of a non-private `conversations/`
+leaf, journal bootstrap without owner acquisition, parent revalidation on
+journal read/recovery/write paths, contention-as-skip during background
+reconciliation, and runtime-provenance writer-lease selection.
 
 The writer matrix covers the user setting off for a Conversations runtime, off
 for an ordinary runtime, and on for all runtimes; Conversations selects
@@ -621,12 +645,13 @@ unattested factory that ignores its second argument, and rejects a capable
 factory when the marker is absent or wrong. Runtime-publication coverage accepts
 the conforming Conversations bridge, rejects and disposes a non-conforming new
 `live-conversation` candidate, and rejects and quarantines an equivalent
-existing registered runtime with non-retryable
-`conversation_root_compromised`. Standalone parent lifecycle and maintenance
-acquisitions must select the same `local` policy. Scheduler coverage verifies
-that the captured Conversations marker installs the unbound-durable-task skip
-before loading or catch-up detection, allows a task after it is bound to that
-session, and leaves ordinary workspace lock-owner behavior unchanged.
+existing registered runtime while preserving non-retryable
+`conversation_root_compromised` on every later access. Standalone parent
+lifecycle and maintenance acquisitions must select the same `local` policy.
+Scheduler coverage verifies that the captured Conversations marker installs the
+unbound-durable-task skip before loading or catch-up detection, allows a task
+after it is bound to that session, and leaves ordinary workspace lock-owner
+behavior unchanged.
 
 Core lease coverage records and validates the Linux PID namespace, treats a
 missing reclaim identity as live, reclaims dead and PID-reused owners only in
@@ -694,7 +719,10 @@ Conversations root and verifies:
 Live regression coverage verifies that Live discovery still has at most one
 publisher, that the publication path performs the existing validated handoff
 for the stable base as well as custom bases, and that a stale stable-base record
-can be reclaimed after its previous owner exits. Standalone availability
+can be reclaimed after its previous owner exits. It verifies the no-op
+`commitOwner` handoff, that the existing grace runs after the handoff lock is
+released and before publication, and that a competing publisher during that
+gap is rejected by the publication lock. Standalone availability
 remains independent of discovery publication failure and of which daemon
 published the record. It also covers a Live-enabled daemon and a second daemon
 serving a different standalone session at the same time.
