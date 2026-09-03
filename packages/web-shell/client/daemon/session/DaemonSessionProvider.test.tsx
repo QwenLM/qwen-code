@@ -10264,6 +10264,179 @@ describe('DaemonSessionProvider', () => {
         vi.useRealTimers();
       }
     });
+
+    it('keeps an observed turn loading across a transport close', async () => {
+      vi.useFakeTimers();
+      try {
+        // A proxy idle timeout can drop the SSE stream inside a long silent
+        // tool gap. While the daemon reports the turn in flight, the close
+        // must not settle the pane — the resume finds no events inside the
+        // gap to revive a settled indicator (#9487).
+        const streamEnded = createDeferred<void>();
+        const releaseStreamEnd = createDeferred<void>();
+        const events = vi.fn(async function* observedTurnThenStreamEnd(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (events.mock.calls.length === 1) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the close until the test has published the daemon's live
+            // prompt state, so the settle check runs with authority known.
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void releaseStreamEnd.promise.then(() => resolve());
+            });
+            if (opts.signal?.aborted) return;
+            streamEnded.resolve();
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        });
+        sdkMocks.sessions.push(createMockSession({ events }));
+
+        await renderWithProvider(<Harness />, {
+          autoConnect: true,
+          reconnectDelayMs: 1000,
+          maxReconnectDelayMs: 1000,
+        });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        await act(async () => {
+          releaseStreamEnd.resolve();
+          await streamEnded.promise;
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The passive settle window passes while the stream is down.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps an observed turn loading across a retriable connect error', async () => {
+      vi.useFakeTimers();
+      try {
+        // A retriable transport failure inside a silent gap is not a prompt
+        // terminal either: while the daemon reports the turn in flight, the
+        // pane must stay loading until the reconnect catches up (#9487).
+        const releaseTransportError = createDeferred<void>();
+        const events = vi.fn(async function* observedTurnThenTransportError(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (events.mock.calls.length === 1) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the failure until the test has published the daemon's live
+            // prompt state, so the settle check runs with authority known.
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void releaseTransportError.promise.then(() => resolve());
+            });
+            if (opts.signal?.aborted) return;
+            throw new Error('network blip');
+          }
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        });
+        sdkMocks.sessions.push(createMockSession({ events }));
+
+        await renderWithProvider(<Harness />, {
+          autoConnect: true,
+          reconnectDelayMs: 1000,
+          maxReconnectDelayMs: 1000,
+        });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Let the thrown transport error propagate through the settle check.
+        await act(async () => {
+          releaseTransportError.resolve();
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The passive settle window passes while reconnecting.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('finishes replayed assistant streaming when replay completes', async () => {

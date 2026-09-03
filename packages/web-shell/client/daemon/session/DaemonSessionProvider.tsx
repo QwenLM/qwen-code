@@ -3346,7 +3346,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              if (!hasSessionActivePrompt()) {
+              if (
+                !hasSessionActivePrompt() &&
+                daemonActivePromptRef.current !== true
+              ) {
                 // A transport close is only a safe "done" signal for passive
                 // observers. When a local/restored prompt is still active, the
                 // daemon may continue running while we reconnect via
@@ -3508,7 +3511,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // observed turn the daemon still reports in flight: the reconnect
           // resumes into the same silent gap with no events to revive a
           // settled indicator (#9487).
-          if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
+          if (
+            isAuthFailure ||
+            isTerminal ||
+            (!hasCurrentSessionActivePrompt() &&
+              daemonActivePromptRef.current !== true)
+          ) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
