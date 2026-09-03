@@ -33,6 +33,8 @@
  *    never hang waiting for a renderer;
  *  - the session re-key reaches the entry seam, or reports that no owner is
  *    wired to re-key the UI-side session state;
+ *  - host history writes reach the live transcript as projected events and a
+ *    host clear arrives as an empty reset;
  *  - user history rows drive the composer's history, and an error thrown in the
  *    subtree is caught by the boundary.
  */
@@ -416,6 +418,33 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('routes a host history write to the live transcript (U-28)', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    const host = mocks.state.host as {
+      addItem: (item: unknown, ts: number) => void;
+    };
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Report filed.',
+    });
+  });
+
+  it('routes a host clear to an empty transcript reset (U-29)', async () => {
+    const onTranscriptReset = vi.fn();
+    renderApp({ onTranscriptReset });
+    await settle();
+    const host = mocks.state.host as { clearItems: () => void };
+    await act(async () => {
+      host.clearItems();
+    });
+    expect(onTranscriptReset).toHaveBeenCalledWith([]);
   });
 
   it('routes the session re-key to the entry seam', async () => {

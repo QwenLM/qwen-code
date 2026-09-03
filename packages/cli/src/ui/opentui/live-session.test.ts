@@ -14,7 +14,11 @@
  */
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { ApprovalMode, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  getUnsupportedImageFormatWarning,
+  SendMessageType,
+} from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ToolCallConfirmationDetails,
@@ -613,18 +617,21 @@ describe('livePromptEvents', () => {
     const restoreSteering = vi.fn();
     atMocks.hang = () => controller.abort();
 
-    await drain(
+    const events = (await drain(
       livePromptEvents(config, 'start', controller.signal, {
         drainSteering: () => ['read @a.ts', 'then @b.ts'],
         restoreSteering,
       }),
-    );
+    )) as OpenTuiStreamEvent[];
 
     // All-or-nothing: the resolved hop dies with the turn, so every text comes
     // back instead of a half-built message reaching the model.
     expect(restoreSteering).toHaveBeenCalledWith(['read @a.ts', 'then @b.ts']);
     const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
     expect(secondPrompt).toEqual([toolResponse]);
+    // And nothing the restored hop produced reaches the transcript: the echo
+    // belongs to ink's accept step (U-12), which an aborted hop never gets to.
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
   });
 
   it('gives up on a hung mid-turn read instead of parking the boundary', async () => {
@@ -672,6 +679,141 @@ describe('livePromptEvents', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // --- U-12: the steer shows up as an unsent user row (ink accept()) -------
+
+  it('echoes each surviving steered text as an unsent user row', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: 'first', sentToModel: false },
+      { type: 'user', text: 'second', sentToModel: false },
+    ]);
+  });
+
+  it('echoes the steer after the resolved read cards, like ink accept()', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [
+        { text: 'look @src/a.ts' },
+        { text: '--- Content from src/a.ts ---\nFILE BODY' },
+      ],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['look @src/a.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // accept() order: the read cards first, then the USER row at grant.
+    const cardIndex = events.findIndex(
+      (e) => e.type === 'tool-end' && e.id === 'client-read-1',
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'look @src/a.ts',
+    );
+    expect(cardIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(cardIndex);
+    expect(events[echoIndex]).toEqual({
+      type: 'user',
+      text: 'look @src/a.ts',
+      sentToModel: false,
+    });
+  });
+
+  it('renders each steered message with its own cards before its own echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = {
+      processedQuery: [{ text: 'expanded' }],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['one @src/a.ts', 'two @src/b.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    // ink accept() runs each message's side effects and then adds its USER row,
+    // so the pairs interleave rather than grouping all cards before all rows.
+    expect(
+      events
+        .filter(
+          (e) =>
+            e.type === 'user' ||
+            (e.type === 'tool-end' && e.id === 'client-read-1'),
+        )
+        .map((e) => (e.type === 'user' ? `echo:${e.text}` : 'card')),
+    ).toEqual(['card', 'echo:one @src/a.ts', 'card', 'echo:two @src/b.ts']);
+  });
+
+  it('does not echo a steer the expander declined', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    atMocks.result = { processedQuery: null, shouldProceed: false };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@declined.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([]);
+  });
+
+  it('echoes a steer whose expansion resolved to no parts', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    // Proceeded, but nothing came back. The echo is deliberately decoupled from
+    // this message's own parts, which over-shows against ink in the all-empty
+    // hop — its caller drops the whole hop (use-llm-stream.ts:3394), so accept()
+    // never runs there. That is the divergence Decision 4 of the batch-9 design
+    // doc records, not a parity claim.
+    atMocks.result = { processedQuery: [], shouldProceed: true };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['@empty.ts'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'user')).toEqual([
+      { type: 'user', text: '@empty.ts', sentToModel: false },
+    ]);
   });
 
   // --- The prompt-side vision bridge (U-25) --------------------------------
@@ -922,6 +1064,79 @@ describe('livePromptEvents', () => {
     const notice = events.find((e) => e.type === 'info');
     expect(notice?.text).toContain('Vision bridge cancelled.');
     expect(notice?.text).toContain('were sent to qwen3-vl');
+  });
+
+  // --- U-27: unsupported image formats are disclosed on both hops ----------
+
+  it('discloses an unsupported image format once before the first send', async () => {
+    const yielded: OpenTuiStreamEvent[] = [];
+    let disclosedAtSend: boolean | undefined;
+    // Captured in the call body, not in a generator body: the request goes out
+    // when the client is called, and a generator's body would only run at the
+    // first `next()`. A check moved after the send leaves `yielded` empty here.
+    const sendMessageStream = vi.fn(() => {
+      disclosedAtSend = yielded.some(
+        (e) =>
+          e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+      );
+      return (function* () {})();
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+
+    for await (const ev of livePromptEvents(config, [{ text: 'look' }, avif])) {
+      yielded.push(ev);
+    }
+
+    expect(disclosedAtSend).toBe(true);
+    // Exactly one notice, with ink's own text naming the supported set.
+    expect(yielded.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the image anyway; only the disclosure is added.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
+  it('does not disclose an accepted format (png rides through silently)', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, imagePart]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([]);
+  });
+
+  it('discloses the format warning on the steering hop before the echo', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const warnIndex = events.findIndex(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const echoIndex = events.findIndex(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+    expect(warnIndex).toBeGreaterThan(-1);
+    expect(echoIndex).toBeGreaterThan(warnIndex);
   });
 
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {

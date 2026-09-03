@@ -37,8 +37,10 @@ import {
   formatVisionBridgeNotice,
   getErrorMessage,
   getFullTurnVisionModelSelector,
+  getUnsupportedImageFormatWarning,
   hasImageParts,
   isShellProgressData,
+  isSupportedImageMimeType,
   normalizeParts,
   parseAndFormatApiError,
   refreshMemoryInstruction,
@@ -318,6 +320,44 @@ interface TurnModelOverride {
 }
 
 /**
+ * ink parity (use-llm-stream checkImageFormatsSupport, U-27): true when a part
+ * carries an image MIME outside the acceptance list. The check uses the wide
+ * acceptance set while the warning text lists the narrower pipeline set —
+ * core's own quirk, ported as-is. ink's helper also returns `hasImages` and the
+ * offending mime list, but no caller reads either there or here, so the port
+ * keeps only the verdict both hops use.
+ */
+function hasUnsupportedImageFormat(parts: PartListUnion): boolean {
+  if (typeof parts === 'string') return false;
+
+  for (const part of Array.isArray(parts) ? parts : [parts]) {
+    if (typeof part === 'string') continue;
+
+    let mimeType: string | undefined;
+
+    if (
+      'inlineData' in part &&
+      part.inlineData?.mimeType?.startsWith('image/')
+    ) {
+      mimeType = part.inlineData.mimeType;
+    }
+
+    if ('fileData' in part && part.fileData?.mimeType?.startsWith('image/')) {
+      mimeType = part.fileData.mimeType;
+    }
+
+    if (mimeType && !isSupportedImageMimeType(mimeType)) return true;
+  }
+
+  return false;
+}
+
+/** ink's INFO row: the warning names the formats the pipeline supports. */
+function imageFormatWarningEvent(): OpenTuiStreamEvent {
+  return { type: 'info', text: getUnsupportedImageFormatWarning() };
+}
+
+/**
  * ink parity (`applyVisionBridgeIfNeeded`): with a vision bridge configured and
  * a primary model that cannot read images, an image must be converted before it
  * reaches the model — never forwarded as raw `inlineData`. The shape follows the
@@ -397,7 +437,12 @@ const MID_TURN_STEER_READ_TIMEOUT_MS = 10_000;
 interface SteeredPromptResolution {
   /** User content for the model, segments joined by a blank line as ink joins them. */
   parts: Part[];
-  /** Read cards and bridge notices — discarded when the hop is restored. */
+  /**
+   * Per message, in order: its read cards and bridge notices, then its USER
+   * echo (U-12). One flat list so a multi-message steer renders the way ink's
+   * `accept()` does — cards₁ row₁ cards₂ row₂ — not all cards then all rows.
+   * Discarded when the hop is restored.
+   */
   events: OpenTuiStreamEvent[];
   /**
    * Texts to put back at the front of the queue. All of them or none: ink
@@ -478,7 +523,17 @@ async function resolveSteeredPromptParts(
       continue;
     }
     const messageParts = normalizeParts(bridged.parts);
+    // U-27 (ink :3313-3327): the steering hop checks the resolved parts too.
+    if (hasUnsupportedImageFormat(messageParts)) {
+      events.push(imageFormatWarningEvent());
+    }
     if (messageParts.length > 0) segments.push(messageParts);
+    // U-12 (ink accept() :3359-3367): `sentToModel: false` — the steer rides
+    // the tool boundary, not a standalone user turn. Not coupled to this
+    // message's own parts: accept() echoes every message it recorded. The one
+    // residual divergence (ink drops a hop whose joined parts came out empty,
+    // :3394) is documented in the batch-9 design doc.
+    events.push({ type: 'user', text: message, sentToModel: false });
   }
 
   const parts: Part[] = [];
@@ -570,6 +625,11 @@ export async function* livePromptEvents(
   for (const ev of bridged.events) yield ev;
   if (bridged.parts === null) return;
   nextPrompt = bridged.parts;
+  // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
+  // before the send loop — tool-result continuations are never checked.
+  if (hasUnsupportedImageFormat(nextPrompt)) {
+    yield imageFormatWarningEvent();
+  }
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
@@ -787,6 +847,7 @@ export async function* livePromptEvents(
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
         }
+        // Carries the per-message USER echoes too (U-12), in ink accept() order.
         for (const ev of steered.events) yield ev;
         responseParts.push(...steered.parts);
       }

@@ -272,6 +272,7 @@ function OpenTuiEntryApp({
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}
+      onTranscriptEvent={applyEvent}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       availableTerminalHeight={height}

@@ -103,6 +103,11 @@ export interface OpenTuiAppProps {
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /**
+   * Folds one projected host-history event into the live transcript
+   * (U-28 project-on-write); wired to the live turn's `applyEvent`.
+   */
+  onTranscriptEvent?: (event: OpenTuiStreamEvent) => void;
+  /**
    * Re-keys UI-side session state (chat id + stats) after core rotates the
    * session. `/resume` and `/branch` treat this call as their commit point, so
    * the shell reports a notice when no owner is wired rather than leaving the
@@ -172,6 +177,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     onQuit,
     onTranscriptReset,
+    onTranscriptEvent,
     onStartNewSession,
     onToggleVim,
     updateNotice,
@@ -247,8 +253,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const transcript = useMemo(
     () => ({
       reset: (events: OpenTuiStreamEvent[]) => onTranscriptReset?.(events),
+      // /clear semantics: a fresh transcript — the live turn's reset with an
+      // empty batch (it also drops a stray steering queue).
+      clear: () => onTranscriptReset?.([]),
+      append: (event: OpenTuiStreamEvent) => onTranscriptEvent?.(event),
     }),
-    [onTranscriptReset],
+    [onTranscriptReset, onTranscriptEvent],
   );
 
   const host = useMemo(

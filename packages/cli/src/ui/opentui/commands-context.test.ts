@@ -32,6 +32,7 @@ vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
 function createFakeHost(): OpenTuiCommandHost & {
   calls: string[];
   sessionNames: Array<string | null>;
+  newSessionIds: string[];
 } {
   const calls: string[] = [];
   const sessionNames: Array<string | null> = [];
@@ -41,6 +42,7 @@ function createFakeHost(): OpenTuiCommandHost & {
   return {
     calls,
     sessionNames,
+    newSessionIds: [] as string[],
     getHistory: () => [{ id: 1, type: 'info', text: 'existing' }] as never,
     addItem: record('addItem') as never,
     updateItem: record('updateItem') as never,
@@ -85,6 +87,11 @@ function createFakeHost(): OpenTuiCommandHost & {
     presentActionConfirmation: async () => false,
     handleResume: record('handleResume') as never,
     handleBranch: record('handleBranch') as never,
+    // Shorthand, not an arrow: the real host's method reads `this.deps`, so a
+    // reference detached from the host must fail here too.
+    startNewSession(sessionId: string) {
+      this.newSessionIds.push(sessionId);
+    },
   };
 }
 
@@ -112,6 +119,15 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
     expect(clearScreenMock).not.toHaveBeenCalled();
     // Ink clears the session name as the final step.
     expect(host.sessionNames).toEqual([null]);
+  });
+
+  it('keeps the host receiver on session.startNewSession', () => {
+    const host = createFakeHost();
+    const context = createOpenTuiCommandContext(host, services);
+    // `/clear` calls this before `ui.clear()`; a reference detached from the
+    // host threw here and left the transcript standing.
+    context.session.startNewSession?.('sess-9');
+    expect(host.newSessionIds).toEqual(['sess-9']);
   });
 
   it('exposes a live history getter backed by the host', () => {

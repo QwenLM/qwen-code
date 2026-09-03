@@ -28,6 +28,8 @@ interface Harness {
   host: OpenTuiAppHost;
   onChange: ReturnType<typeof vi.fn>;
   transcriptReset: ReturnType<typeof vi.fn>;
+  transcriptClear: ReturnType<typeof vi.fn>;
+  transcriptAppend: ReturnType<typeof vi.fn>;
   presentShell: ReturnType<typeof vi.fn>;
   presentAction: ReturnType<typeof vi.fn>;
   toggleVim: ReturnType<typeof vi.fn>;
@@ -39,6 +41,8 @@ interface Harness {
 function makeHost(): Harness {
   const onChange = vi.fn();
   const transcriptReset = vi.fn();
+  const transcriptClear = vi.fn();
+  const transcriptAppend = vi.fn();
   const presentShell = vi.fn(async () => ({ outcome: 'proceed_once' }));
   const presentAction = vi.fn(async () => true);
   const toggleVim = vi.fn(async () => true);
@@ -50,7 +54,11 @@ function makeHost(): Harness {
     config: { getSessionId: () => 'sess-1' } as unknown as Config,
     settings: { merged: {} } as unknown as LoadedSettings,
     logger: null as unknown as Logger,
-    transcript: { reset: transcriptReset },
+    transcript: {
+      reset: transcriptReset,
+      clear: transcriptClear,
+      append: transcriptAppend,
+    },
     confirmations: {
       presentShell:
         presentShell as OpenTuiAppHostDeps['confirmations']['presentShell'],
@@ -70,6 +78,8 @@ function makeHost(): Harness {
     host: new OpenTuiAppHost(deps),
     onChange,
     transcriptReset,
+    transcriptClear,
+    transcriptAppend,
     presentShell,
     presentAction,
     toggleVim,
@@ -275,6 +285,60 @@ describe('OpenTuiAppHost — transcript and session switch delegation', () => {
     expect(handleResumeSession).toHaveBeenCalledWith(h.host, 'sess-9');
     await h.host.handleBranch('my-branch');
     expect(handleBranchSession).toHaveBeenCalledWith(h.host, 'my-branch');
+  });
+});
+
+describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
+  it('projects each recorded item into a transcript append', () => {
+    const { host, transcriptAppend } = makeHost();
+    host.addItem({ type: 'info', text: 'Done.' } as never, 1000);
+    expect(transcriptAppend).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Done.',
+    });
+  });
+
+  it('does not append for a consecutive-duplicate user message', () => {
+    const { host, transcriptAppend } = makeHost();
+    host.addItem({ type: 'user', text: 'hi' } as never, 500);
+    transcriptAppend.mockClear();
+    host.addItem({ type: 'user', text: 'hi' } as never, 500);
+    expect(transcriptAppend).not.toHaveBeenCalled();
+  });
+
+  it('updateItem is a flag flip the transcript does not replay', () => {
+    const { host, transcriptAppend } = makeHost();
+    const id = host.addItem(
+      { type: 'user', text: '/x', sentToModel: false } as never,
+      1,
+    );
+    transcriptAppend.mockClear();
+    host.updateItem(id, { sentToModel: true } as never);
+    expect(transcriptAppend).not.toHaveBeenCalled();
+  });
+
+  it('loadHistory replaces history without touching the transcript', () => {
+    const { host, transcriptAppend, transcriptReset } = makeHost();
+    host.loadHistory([
+      { id: 1, type: 'info', text: 'loaded' } as unknown as HistoryItem,
+    ]);
+    expect(transcriptAppend).not.toHaveBeenCalled();
+    expect(transcriptReset).not.toHaveBeenCalled();
+  });
+
+  it('clearItems empties the visible transcript too (U-29)', () => {
+    const { host, transcriptClear } = makeHost();
+    host.addItem({ type: 'info', text: 'x' } as never, 1);
+    expect(transcriptClear).not.toHaveBeenCalled();
+    host.clearItems();
+    expect(transcriptClear).toHaveBeenCalledTimes(1);
+  });
+
+  it('no-op kinds (tool_group, help) never append', () => {
+    const { host, transcriptAppend } = makeHost();
+    host.addItem({ type: 'tool_group', tools: [] } as never, 1);
+    host.addItem({ type: 'help', timestamp: new Date() } as never, 1);
+    expect(transcriptAppend).not.toHaveBeenCalled();
   });
 });
 

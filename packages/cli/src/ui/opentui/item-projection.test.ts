@@ -22,6 +22,7 @@ import {
   projectContextUsage,
   projectDoctor,
   projectExtensionsList,
+  projectItemToStreamEvent,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
@@ -31,9 +32,11 @@ import {
   projectSummary,
   projectToolStats,
   projectToolsList,
+  type ItemProjectionContext,
 } from './item-projection.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { HistoryItemWithoutId } from '../types.js';
 
 // R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
 // the real registry reports unknown servers as disconnected anyway, but the
@@ -689,5 +692,168 @@ describe('dispatcher coverage for compression/stats items (R1-7)', () => {
     );
     expect(statsText).toContain('Session Stats');
     expect(statsText).toContain('Session duration: 9m');
+  });
+});
+
+describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
+  const ctx: ItemProjectionContext = {};
+
+  it('projects the invocation echo as an unsent user row', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: '/stats', sentToModel: false },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: '/stats', sentToModel: false });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: 'x', sentToModel: false, promptId: 'p1' },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: 'x', sentToModel: false, promptId: 'p1' });
+  });
+
+  it("keeps the info row's link footer (InfoMessage parity)", () => {
+    expect(
+      projectItemToStreamEvent({ type: 'info', text: 'Report filed.' }, ctx),
+    ).toEqual({ type: 'info', text: 'Report filed.' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'info',
+          text: 'Report filed.',
+          linkUrl: 'https://example.com/1',
+          linkText: 'issue',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Report filed.\nissue: https://example.com/1',
+    });
+  });
+
+  it('maps warning/success/error onto their live kinds', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'warning', text: 'w' }, ctx),
+    ).toEqual({ type: 'warning', text: 'w' });
+    // Documented divergence: ink's green SuccessMessage renders as the info
+    // row — the live model has no success kind (arenaCommand is the producer).
+    expect(
+      projectItemToStreamEvent({ type: 'success', text: 's' }, ctx),
+    ).toEqual({ type: 'info', text: 's' });
+    expect(
+      projectItemToStreamEvent({ type: 'error', text: 'e', hint: 'h' }, ctx),
+    ).toEqual({ type: 'error', text: 'e', hint: 'h' });
+  });
+
+  it('maps the goal pair onto the live-model card kinds', () => {
+    const snapshot = { id: 'g1' } as never;
+    expect(
+      projectItemToStreamEvent(
+        { type: 'goal_state', snapshot, cause: 'create' },
+        ctx,
+      ),
+    ).toEqual({ type: 'goal', snapshot, cause: 'create' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'tests pass',
+          iterations: 2,
+          durationMs: 100,
+          lastReason: 'still failing',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'goal-legacy',
+      kind: 'set',
+      condition: 'tests pass',
+      iterations: 2,
+      durationMs: 100,
+      lastReason: 'still failing',
+    });
+  });
+
+  it('maps the stop-hook pair and the blocked prompt onto their kinds', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'stop_hook_system_message', message: 'Stop says: no' },
+        ctx,
+      ),
+    ).toEqual({ type: 'stop-hook-message', message: 'Stop says: no' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: 1,
+          stopHookCount: 2,
+          reasons: ['a', 'b'],
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: b',
+    });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'user_prompt_submit_blocked',
+          reason: 'denied',
+          originalPrompt: 'p@ss',
+        },
+        ctx,
+      )?.type,
+    ).toBe('warning');
+  });
+
+  it('routes the special kinds through projectSpecialItemText as info rows', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
+    ).toEqual({ type: 'info', text: expect.stringContaining('Status') });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'compression',
+          compression: {
+            isPending: true,
+            originalTokenCount: null,
+            newTokenCount: null,
+            compressionStatus: null,
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({ type: 'info', text: 'Compressing chat history' });
+    expect(
+      projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
+    ).toBe('info');
+  });
+
+  it('no-ops stream-duplicated kinds and kinds with no row shape here', () => {
+    const noOps = [
+      { type: 'tool_group', tools: [] },
+      { type: 'retry_countdown', attempt: 1 },
+      { type: 'vision_notice', text: 'n' },
+      { type: 'gemini', text: 'g' },
+      { type: 'gemini_content', text: 'g' },
+      { type: 'gemini_thought', text: 'g' },
+      { type: 'gemini_thought_content', text: 'g' },
+      { type: 'help', timestamp: new Date() },
+      { type: 'notification', text: 'n' },
+      { type: 'user_shell', text: 'u' },
+      { type: 'advisor', text: 'a' },
+      { type: 'arena_agent_complete', text: 'a' },
+      { type: 'arena_session_complete', text: 'a' },
+      { type: 'away_recap', text: 'a' },
+      { type: 'tool_use_summary', text: 't' },
+      { type: 'diff_stats', text: 'd' },
+    ] as unknown as HistoryItemWithoutId[];
+    for (const item of noOps) {
+      expect(projectItemToStreamEvent(item, ctx)).toBeNull();
+    }
   });
 });

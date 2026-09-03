@@ -163,7 +163,10 @@ export function createOpenTuiCommandContext(
     session: {
       stats: host.sessionStats,
       sessionShellAllowlist: host.sessionShellAllowlist,
-      startNewSession: host.startNewSession,
+      // Bound: the host's method reads `this.deps`, and `/clear` calls this
+      // before `ui.clear()` — a bare reference threw and left the transcript
+      // standing.
+      startNewSession: host.startNewSession?.bind(host),
     },
   };
 }
