@@ -22939,6 +22939,14 @@ describe('Session', () => {
           expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
         });
 
+        // A turn that ends with no pausing cause must not pause at all. This
+        // is what keeps the pause decision and the pause reason one list: a
+        // future cause that pauses without being named would land on the
+        // failure arm, and nothing else in the suite would see it.
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
+
         const optionsFor = (callId: string) =>
           mockChatRecordingService.recordToolResult.mock.calls.find(
             (call: unknown[]) =>
