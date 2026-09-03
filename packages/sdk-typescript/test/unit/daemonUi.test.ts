@@ -8531,6 +8531,7 @@ describe('parallel subAgent text interleaving fix', () => {
           result: 'large result',
           taskPrompt: 'large prompt',
           toolCalls: [{ callId: 'child-tool' }],
+          skills: ['repo-ops'],
           executionSummary: {
             inputTokens: 100,
             outputTokens: 20,
@@ -8548,6 +8549,13 @@ describe('parallel subAgent text interleaving fix', () => {
       taskPrompt: expect.anything(),
       toolCalls: expect.anything(),
     });
+    // The keep-set is what survives compaction, and every other entry in it is
+    // pinned here. Without this, dropping 'skills' from that list ships green
+    // and a session restored from a persisted transcript silently loses the
+    // skill list the live run recorded.
+    expect(
+      (state.blocks[1] as { rawOutput?: Record<string, unknown> }).rawOutput,
+    ).toMatchObject({ skills: ['repo-ops'] });
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
