@@ -43,8 +43,14 @@ export const useOutputStyleCommand = (
   const choicesRef = useRef<readonly OutputStyleDefinition[]>(
     BUILT_IN_OUTPUT_STYLES,
   );
+  // Counts opens so a load that resolves after the user moved on cannot act.
+  // The open suspends on a disk read, so a dismissal can land in between; the
+  // continuation would then re-open the dialog the user just closed, and the
+  // next Enter would be captured by it and write `general.outputStyle`.
+  const openGenerationRef = useRef(0);
 
   const openOutputStyleDialog = useCallback(() => {
+    const generation = ++openGenerationRef.current;
     // Read the style files first so the picker opens complete rather than
     // growing custom entries a moment later.
     void (async () => {
@@ -53,6 +59,9 @@ export const useOutputStyleCommand = (
         choices = await loadSessionOutputStyles(config);
       } catch (error) {
         debugLogger.warn('Failed to load custom output styles:', error);
+      }
+      if (openGenerationRef.current !== generation) {
+        return;
       }
       choicesRef.current = choices;
       setOutputStyleChoices(choices);
@@ -82,7 +91,10 @@ export const useOutputStyleCommand = (
   const handleOutputStyleSelect = useCallback(
     (styleName: string | undefined) => {
       // Close first: the apply below rebuilds the system instruction, and the
-      // dialog should not sit open while that runs.
+      // dialog should not sit open while that runs. Retiring the generation
+      // is part of closing: an open still waiting on its disk read must not
+      // re-open the dialog behind this selection.
+      openGenerationRef.current += 1;
       setIsOutputStyleDialogOpen(false);
       if (styleName === undefined) {
         // User cancelled the dialog — leave the current style unchanged.

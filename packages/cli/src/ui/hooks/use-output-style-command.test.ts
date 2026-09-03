@@ -168,6 +168,10 @@ describe('useOutputStyleCommand', () => {
     const { result } = renderHook(() =>
       useOutputStyleCommand(settings, config),
     );
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+    );
 
     await act(async () => result.current.handleOutputStyleSelect('default'));
 
@@ -179,6 +183,33 @@ describe('useOutputStyleCommand', () => {
       undefined,
       { throwOnWriteFailure: true },
     );
+    expect(result.current.isOutputStyleDialogOpen).toBe(false);
+  });
+
+  it('stays closed when a dismissed open resolves its load afterwards', async () => {
+    // The open suspends on the disk read, so a dismissal can land while it is
+    // in flight. Without a generation guard the stale continuation re-opens
+    // the dialog the user just closed, and the next Enter is captured by it.
+    let releaseLoad: (() => void) | undefined;
+    mockedLoadCatalog.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = () => resolve(BUILT_IN_OUTPUT_STYLES);
+        }),
+    );
+
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config),
+    );
+    act(() => result.current.openOutputStyleDialog());
+    await act(async () => result.current.handleOutputStyleSelect(undefined));
+    expect(result.current.isOutputStyleDialogOpen).toBe(false);
+
+    await act(async () => {
+      releaseLoad?.();
+      await Promise.resolve();
+    });
+
     expect(result.current.isOutputStyleDialogOpen).toBe(false);
   });
 
