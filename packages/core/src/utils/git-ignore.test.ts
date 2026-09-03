@@ -377,7 +377,7 @@ describe('isGitIgnored', () => {
         // wherever the shim cannot run (a noexec tmpdir, a PATH walk that
         // skips it), so the wiring would ship green unpinned.
         expect(Date.now() - start).toBeGreaterThanOrEqual(400);
-        expect(Date.now() - start).toBeLessThan(2500);
+        expectWithinLatencyBudget(Date.now() - start, 2500);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;

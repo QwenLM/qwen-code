@@ -13,6 +13,7 @@ import {
   OWN_PROCESS_AUTHORITY_NOTICE,
   PEER_AUTHORITY_NOTICE,
 } from './peer-envelope.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('defangEnvelopeTags', () => {
   it('neutralizes an embedded opening delimiter', () => {
@@ -111,7 +112,7 @@ describe('defangEnvelopeTags', () => {
     // loop while a reviewing receiver auto-accepts.
     const start = Date.now();
     defangEnvelopeTags(`<${' '.repeat(200_000)}not a tag`);
-    expect(Date.now() - start).toBeLessThan(1000);
+    expectWithinLatencyBudget(Date.now() - start, 1000);
   });
 });
 

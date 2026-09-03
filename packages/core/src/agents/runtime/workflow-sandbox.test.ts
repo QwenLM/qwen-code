@@ -13,6 +13,7 @@ import {
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -1054,7 +1055,7 @@ describe('createWorkflowSandbox security', () => {
     // The banked remainder (~80 ms) fires promptly; a fresh full budget
     // (200 ms) would overshoot the upper bound, and a pause-duration
     // deduction would fire before the lower bound.
-    expect(Date.now() - resumedAt).toBeLessThan(150);
+    expectWithinLatencyBudget(Date.now() - resumedAt, 150);
     expect(Date.now() - resumedAt).toBeGreaterThan(40);
   });
 

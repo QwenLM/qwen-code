@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('evaluateShellCommandReadOnly', () => {
   it('allows simple read-only command', () => {
@@ -463,7 +464,7 @@ describe('evaluateShellCommandReadOnly', () => {
         true,
         true,
       ]);
-      expect(performance.now() - startedAt).toBeLessThan(1000);
+      expectWithinLatencyBudget(performance.now() - startedAt, 1000);
     });
   });
 });

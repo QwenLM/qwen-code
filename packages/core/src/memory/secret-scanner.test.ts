@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { scanForSecrets } from './secret-scanner.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('scanForSecrets', () => {
   it('returns no matches for clean content', () => {
@@ -98,7 +99,7 @@ describe('scanForSecrets', () => {
     const payload = `sk-${'a-'.repeat(50_000)}`;
     const start = performance.now();
     expect(scanForSecrets(payload)).toEqual([]);
-    expect(performance.now() - start).toBeLessThan(1000);
+    expectWithinLatencyBudget(performance.now() - start, 1000);
   });
 
   it('never returns the matched secret value, only rule id and label', () => {

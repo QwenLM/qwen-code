@@ -91,6 +91,7 @@ import {
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connection-registry.js';
 import type { TransportStream } from './transport-stream.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -6527,7 +6528,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ac.abort();
     }
     // Server-initiated close arrives well under the 3s safety timeout.
-    expect(Date.now() - start).toBeLessThan(1500);
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('concurrent session/close calls the bridge exactly once (no TOCTOU double-close)', async () => {
@@ -6569,7 +6570,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    expect(Date.now() - start).toBeLessThan(1500);
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('session-stream reconnect does NOT abort the in-flight prompt', async () => {

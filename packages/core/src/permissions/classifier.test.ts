@@ -29,6 +29,7 @@ import {
 } from './classifier.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 function makeConfig(
   autoModeSettings: ReturnType<Config['getAutoModeSettings']> = {},
@@ -350,7 +351,7 @@ describe('sanitizeClassifierReason', () => {
     const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
     const t0 = Date.now();
     sanitizeClassifierReason(adversarial);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expectWithinLatencyBudget(Date.now() - t0, 1000);
   });
 
   it('collapses whitespace and newlines to single spaces', () => {
