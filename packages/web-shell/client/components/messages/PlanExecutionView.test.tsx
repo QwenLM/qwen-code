@@ -471,7 +471,28 @@ describe('PlanExecutionView', () => {
       );
     });
 
-    expect(container.textContent).toContain('Depends on: research');
+    // The drawn edge is the dependency statement, so the node face does not
+    // restate it. The step-details panel still does, asserted below.
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).not.toContain('Depends on');
+    // Content leads the node; the step number matches the inspector list and
+    // the dependency chips, and the agent count and elapsed carry the "is
+    // this alive" signal onto the face.
+    expect(buildNode?.textContent).toContain('Build');
+    expect(buildNode?.textContent).toContain('1 agent');
+    expect(buildNode?.textContent).toContain('1m 5s');
+    // Status is colour on the left rule, so it stays in the accessibility
+    // tree as words rather than being dropped. Asserted on a node with no
+    // linked agent, so the word can only come from the node's own status
+    // element and not from an execution row inside it.
+    const verifyNode = container
+      .querySelector('[data-plan-node-id="verify"]')
+      ?.closest('article');
+    // `verify` has no linked tool call in this fixture, so its whole text is
+    // the status word, the number and the content.
+    expect(verifyNode?.textContent).toBe('Blocked3Verify');
     expect(container.textContent).toContain('33%');
     expect(container.textContent).toContain('1 / 3');
     // 3, not 2: the strip now derives from the same source as the node
@@ -768,7 +789,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return scaledRect(100 + left * 0.72, 50 + top * 0.72, 144, 57.6);
         }
         return scaledRect(0, 0, 0, 0);
@@ -851,7 +876,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return rect(100 + left, 50 + top, 200, 80);
         }
         return rect(0, 0, 0, 0);
@@ -994,7 +1023,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return rect(100 + left, 50 + top, 200, 80);
         }
         return rect(0, 0, 0, 0);
@@ -1280,13 +1313,20 @@ describe('PlanExecutionView', () => {
 
     expect(container.querySelector('[data-plan-workflow]')).not.toBeNull();
     expect(container.querySelectorAll('[data-plan-edge]')).toHaveLength(0);
-    expect(
-      container.querySelectorAll('[data-plan-input], [data-plan-output]'),
-    ).toHaveLength(0);
+    expect(container.querySelectorAll('[data-plan-output]')).toHaveLength(0);
     expect(container.textContent).toContain('Dense 32');
     // Lines disappearing with no explanation reads as a broken render, so the
     // skip is stated rather than silent.
     expect(container.textContent).toContain('Too many dependencies to draw');
+    // With no edges drawn, the node's dependency row is the only statement of
+    // the dependency, so it must survive here even though a node whose edges
+    // ARE drawn drops it. Each reference reads as the step it names — number
+    // and title, matching the inspector — not as a raw id.
+    const denseNode = container
+      .querySelector('[data-plan-node-id="dense-1"]')
+      ?.closest('article');
+    expect(denseNode?.textContent).toContain('Depends on');
+    expect(denseNode?.textContent).toContain('Dense 0');
 
     act(() => root.unmount());
     container.remove();

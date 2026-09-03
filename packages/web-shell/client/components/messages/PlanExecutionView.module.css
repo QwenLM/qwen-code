@@ -246,14 +246,20 @@
    completed (green) or blocked (amber) node picked up a second border in a
    clashing hue the moment it was selected. */
 .node {
+  /* The status tone is carried by the left rule below, not by the border.
+     Tinting every border made a healthy plan read as a wall of coloured
+     boxes and left the one running node with nothing to stand out against —
+     which is the first thing a reader of an execution trace looks for. */
   --node-accent: var(--border);
   --node-ring: var(--agent-blue-500);
+  --node-rule: transparent;
   position: relative;
   display: flex;
+  overflow: hidden;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  padding: 9px 10px;
+  padding: 9px 10px 9px 13px;
   border: 1px solid var(--node-accent);
   border-radius: 8px;
   background: var(--background);
@@ -262,23 +268,33 @@
     box-shadow 160ms ease;
 }
 
-.dagCanvas .node::before,
+/* Status, stated once. Absent for the resting states, which are most of any
+   real plan. */
+.node::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--node-rule);
+  content: '';
+}
+
+/* The status rule owns ::before now, so the ports use ::after plus an inner
+   marker. They also drop the accent: every node with an edge had one, so a
+   permanently blue dot on most of the graph left selection nothing of its
+   own. They are structure, so they take the hairline. */
 .dagCanvas .node::after {
   display: none;
   position: absolute;
   top: 50%;
   width: 8px;
   height: 8px;
-  border: 1px solid var(--agent-blue-500);
+  border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--background);
   content: '';
   transform: translateY(-50%);
-}
-
-.dagCanvas .node[data-plan-input='true']::before {
-  left: -4px;
-  display: block;
 }
 
 .dagCanvas .node[data-plan-output='true']::after {
@@ -292,26 +308,26 @@
    real plan, so it stays neutral; painting it amber made a perfectly healthy
    graph read as a wall of warnings. */
 .node[data-status='completed'] {
-  --node-accent: color-mix(in srgb, var(--status-done-fg) 55%, var(--border));
+  --node-rule: var(--status-done-fg);
   --node-ring: var(--status-done-fg);
 }
 
 .node[data-status='running'],
 .node[data-status='in_progress'] {
-  --node-accent: color-mix(
-    in srgb,
-    var(--status-running-fg) 55%,
-    var(--border)
-  );
+  --node-rule: var(--status-running-fg);
   --node-ring: var(--status-running-fg);
 }
 
 .node[data-status='paused'] {
-  --node-accent: color-mix(
-    in srgb,
-    var(--status-attention-fg) 55%,
-    var(--border)
-  );
+  --node-rule: var(--status-attention-fg);
+  --node-ring: var(--status-attention-fg);
+}
+
+/* Attention folds into the same rule instead of adding a fourth status
+   token to the node face: one status, one place. It outranks the status
+   tone because it is the state the reader is being asked to act on. */
+.node[data-attention='true'] {
+  --node-rule: var(--status-attention-fg);
   --node-ring: var(--status-attention-fg);
 }
 
@@ -351,10 +367,47 @@
   outline: none;
 }
 
+/* Content first. The node led with a glyph, the raw Todo id and the status
+   word, so the only element that says what the step *is* came third — and an
+   id is an address, the least useful thing at graph scale. */
 .nodeTop {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: baseline;
+  gap: 7px;
+}
+
+/* The same number the inspector list and the dependency chips use, so the
+   three surfaces address a step identically. */
+.nodeNumber {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The left rule is colour, which assistive tech cannot read, so the status
+   stays in the accessibility tree as words. */
+.nodeStatusText {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: -1px;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Two facts, spaced, rather than one middle-dot-joined string: they wrap as
+   a unit and read out as one run of text when glued. */
+.nodeMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .nodeId {
@@ -391,13 +444,43 @@
 }
 
 .nodeContent {
+  min-width: 0;
   color: var(--foreground);
   font-size: 13px;
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
+/* Rendered only when no edge states the dependency — above
+   MAX_RENDERED_PLAN_EDGES the graph draws none, and then this row is the
+   only statement of it. Chips carry the step number and title, matching the
+   inspector, instead of a comma-joined run of raw ids. */
 .dependencies {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 6px;
+  color: var(--muted-foreground);
   font-size: 11px;
+}
+
+.dependencyChip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  overflow: hidden;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  color: var(--foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependencyChip > span {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }
 
 .executions {

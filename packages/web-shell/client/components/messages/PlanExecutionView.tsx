@@ -557,6 +557,7 @@ export function PlanExecutionView({
   // rather than defeating itself on fresh array identities.
   const {
     todosById,
+    stepNumberByTodo,
     toolsByTodo,
     unassigned,
     statesByTodo,
@@ -576,6 +577,12 @@ export function PlanExecutionView({
   } = useMemo(() => {
     const knownIds = new Set(todos.map((todo) => todo.id));
     const todosById = new Map(todos.map((todo) => [todo.id, todo]));
+    // The step number addresses a step in the inspector list and in the
+    // dependency chips, so the graph shows the same number or the three
+    // surfaces name the same step differently.
+    const stepNumberByTodo = new Map(
+      todos.map((todo, index) => [todo.id, index + 1]),
+    );
     const toolsByTodo = new Map<string, ACPToolCall[]>();
     const unassigned: ACPToolCall[] = [];
     for (const tool of tools) {
@@ -652,6 +659,7 @@ export function PlanExecutionView({
     }
     return {
       todosById,
+      stepNumberByTodo,
       toolsByTodo,
       unassigned,
       statesByTodo,
@@ -1234,10 +1242,19 @@ export function PlanExecutionView({
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
                 const state = statesByTodo.get(todo.id)!;
+                // Agent time this step has taken, summed across its root
+                // agent tasks. It is the node's "is this alive" signal, so it
+                // is on the face rather than only in the inspector.
+                const nodeRuntimeMs = executions.reduce(
+                  (total, tool) =>
+                    total + (taskForTool(tool, taskIndex)?.runtimeMs ?? 0),
+                  0,
+                );
                 return (
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    data-attention={state.attention || undefined}
                     onPointerEnter={() => setHoveredTodoId(todo.id)}
                     onPointerLeave={() =>
                       setHoveredTodoId((current) =>
@@ -1252,11 +1269,11 @@ export function PlanExecutionView({
                         current === todo.id ? undefined : current,
                       )
                     }
-                    data-plan-input={
-                      (drawsDependencyEdges &&
-                        (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||
-                      undefined
-                    }
+                    // No input port: the left edge now carries the status
+                    // rule, and an incoming edge already terminates in an
+                    // arrowhead at the node — that arrowhead is the input
+                    // marker. Outgoing edges leave their source unmarked, so
+                    // the output port stays.
                     data-plan-output={
                       (drawsDependencyEdges &&
                         (dependentsByTodo.get(todo.id)?.length ?? 0) > 0) ||
@@ -1296,29 +1313,55 @@ export function PlanExecutionView({
                         )
                       }
                     >
-                      <div className={styles.nodeTop}>
-                        <i aria-hidden="true" className={styles.nodeGlyph}>
-                          {PLAN_STATUS_GLYPH[state.status]}
-                        </i>
-                        <span className={styles.nodeId}>{todo.id}</span>
-                        <span
-                          className={`${styles.nodeStatus} ${styles[state.status]}`}
-                        >
-                          {t(statusKey(state.status))}
-                        </span>
-                        {state.attention && (
-                          <span className={styles.attention}>
-                            {t('planExecution.attention')}
-                          </span>
+                      {/* Status reaches assistive tech as words; the left
+                          rule that carries it visually is colour only. */}
+                      <span className={styles.nodeStatusText}>
+                        {t(
+                          state.attention
+                            ? 'planExecution.attention'
+                            : statusKey(state.status),
                         )}
+                      </span>
+                      <div className={styles.nodeTop}>
+                        <span className={styles.nodeNumber}>
+                          {(stepNumberByTodo.get(todo.id) ?? 0) || ''}
+                        </span>
+                        <span className={styles.nodeContent}>
+                          {todo.content}
+                        </span>
                       </div>
-                      <div className={styles.nodeContent}>{todo.content}</div>
-                      {(todo.blockedBy?.length ?? 0) > 0 && (
-                        <div className={styles.dependencies}>
-                          {t('planExecution.dependsOn')}{' '}
-                          {todo.blockedBy!.join(', ')}
+                      {(executions.length > 0 || nodeRuntimeMs > 0) && (
+                        <div className={styles.nodeMeta}>
+                          {executions.length > 0 && (
+                            <span>
+                              {t('planExecution.agentCount', {
+                                count: executions.length,
+                              })}
+                            </span>
+                          )}
+                          {nodeRuntimeMs > 0 && (
+                            <span>{formatRuntime(nodeRuntimeMs)}</span>
+                          )}
                         </div>
                       )}
+                      {/* Only when no edge states it. Above
+                          MAX_RENDERED_PLAN_EDGES the graph draws no edges at
+                          all, and then this row is the dependency's only
+                          statement. */}
+                      {!drawsDependencyEdges &&
+                        (todo.blockedBy?.length ?? 0) > 0 && (
+                          <div className={styles.dependencies}>
+                            <span>{t('planExecution.dependsOn')}</span>
+                            {todo.blockedBy!.map((id) => (
+                              <span className={styles.dependencyChip} key={id}>
+                                <span>
+                                  {(stepNumberByTodo.get(id) ?? 0) || '?'}
+                                </span>
+                                {todosById.get(id)?.content ?? id}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                     </button>
                     {executions.length > 0 && (
                       <div className={styles.executions}>

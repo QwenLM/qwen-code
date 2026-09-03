@@ -2744,6 +2744,8 @@ const EN: Messages = {
   'planExecution.unblocks': 'Unblocks:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
+  'planExecution.agentCount': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'agent' : 'agents'}`,
   'planExecution.status.running': 'Running',
   'planExecution.status.paused': 'Paused',
   'planExecution.status.completed': 'Completed',
@@ -6088,6 +6090,7 @@ const ZH: Messages = {
   'planExecution.unblocks': '解锁：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',
+  'planExecution.agentCount': (v) => `${v?.count ?? 0} 个 Agent`,
   'planExecution.status.running': '运行中',
   'planExecution.status.paused': '已暂停',
   'planExecution.status.completed': '已完成',
