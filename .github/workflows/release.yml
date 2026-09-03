@@ -572,7 +572,6 @@ jobs:
           fi
           node scripts/run-release-workspace-tests.js -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
 
-
   quality_scripts:
     name: 'Quality Checks (Scripts)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
