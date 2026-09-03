@@ -19,11 +19,24 @@ const workflowPath = join(
   'workflows',
   'ci.yml',
 );
-const testSteps = parse(readFileSync(workflowPath, 'utf8')).jobs.test.steps;
+const ciJobs = parse(readFileSync(workflowPath, 'utf8')).jobs;
+const testSteps = ciJobs.test.steps;
 
 function step(name) {
   const value = testSteps.find((candidate) => candidate.name === name);
   assert.ok(value, `missing ${name} step`);
+  return value;
+}
+
+// lint_and_static duplicates the sampling install step; it must also carry
+// its own failure()-gated collector, or the lane produces the #10035
+// telemetry and destroys it with the runner temp dir on the exact ENOSPC
+// death the sampler exists to explain.
+function lintStep(name) {
+  const value = ciJobs.lint_and_static.steps.find(
+    (candidate) => candidate.name === name,
+  );
+  assert.ok(value, `missing ${name} step in lint_and_static`);
   return value;
 }
 
@@ -86,6 +99,31 @@ describe('ci.yml disk-pressure evidence', () => {
     assert.equal(
       upload.with.path,
       '${{ runner.temp }}/disk-pressure-samples.log',
+    );
+  });
+
+  it('gives lint_and_static the same sampler and its own collector', () => {
+    // The install step is pinned byte-identical to test's by
+    // ci-platform-lanes.test.js's shared-prelude equality; what that pin
+    // cannot see is the collector, which deliberately diverges by artifact
+    // name (upload-artifact v4+ rejects duplicate names when both jobs fail
+    // in one run). Pin the collector's contract here.
+    const install = lintStep('Install dependencies').run;
+    assert.match(
+      install,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"/,
+    );
+    const upload = lintStep('Upload disk-pressure samples');
+    assert.equal(upload.if, '${{ failure() }}');
+    assert.equal(upload.with['if-no-files-found'], 'ignore');
+    assert.equal(
+      upload.with.path,
+      '${{ runner.temp }}/disk-pressure-samples.log',
+    );
+    assert.notEqual(
+      upload.with.name,
+      step('Upload disk-pressure samples').with.name,
+      'artifact names must differ or the second failing job cannot upload',
     );
   });
 

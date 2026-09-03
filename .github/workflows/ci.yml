@@ -7,13 +7,13 @@ on:
   # merged tree before it lands. No queue is enabled (none since 2026-07-02),
   # so nothing validated that tree on either side of a merge: `main` had no
   # gate before one and nothing faster than the ~40-minute E2E after one.
-  # Only `test` and the `classify_pr` it depends on accept it (see their
-  # `if`s); every other job excludes push, so a post-merge run is exactly
-  # Classify PR + Test. The no-AK integration gate is its own
+  # `test`, `lint_and_static`, and the `classify_pr` they depend on accept
+  # it (see their `if`s); every other job excludes push, so a post-merge run
+  # is exactly those three. The no-AK integration gate is its own
   # `integration_no_ak` job on pull_request / merge_group, so this lane is
   # lint, static analysis and unit tests. Removing it once the queue is
-  # enabled means dropping the trigger AND the push arm from BOTH those
-  # `if`s: a half-removal leaves every merge running Classify PR alone,
+  # enabled means dropping the trigger AND the push arm from ALL THREE
+  # `if`s: a partial removal leaves every merge running the survivors alone,
   # publishing outputs nothing consumes.
   push:
     branches:
@@ -76,9 +76,9 @@ env:
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
   # Single source of truth for the .github/scripts node:test suites — run by
-  # BOTH the github_ci_only helper step and the full-profile Test step, so a
-  # new helper test can't be added to one path and silently dropped from the
-  # other.
+  # BOTH the github_ci_only helper step and the full-profile helper step,
+  # both in `lint_and_static`, so a new helper test can't be added to one
+  # path and silently dropped from the other.
   HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
@@ -352,17 +352,18 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    # Accepts push on `main`: this is the only post-merge check faster than the
-    # ~40-minute E2E, and with no merge queue enabled nothing validates the
-    # merged tree before it lands either. The expensive and PR-shaped steps
-    # stay off it on their own gates, each by its own mechanism — the
-    # checkout-head verifier is restricted to pull_request / merge_group,
-    # while the test reporter carries no event gate at all: its same-repo
-    # clause (head.repo.full_name == github.repository) is empty on push. Do
-    # not "normalise" that clause into the event allowlist — it also keeps
-    # fork PRs out, and dorny/test-reporter needs `checks: write`, which
-    # fork-event runs do not have. So a push run is lint, static analysis and
-    # unit tests.
+    # Accepts push on `main`: one of the two post-merge checks faster than the
+    # ~40-minute E2E — the lint/static half lives in `lint_and_static` — and
+    # with no merge queue enabled nothing validates the merged tree before it
+    # lands either. The expensive and PR-shaped steps stay off it on their own
+    # gates, each by its own mechanism — the checkout-head verifier is
+    # restricted to pull_request / merge_group, while the test reporter
+    # carries no event gate at all: its same-repo clause (head.repo.full_name
+    # == github.repository) is empty on push. Do not "normalise" that clause
+    # into the event allowlist — it also keeps fork PRs out, and
+    # dorny/test-reporter needs `checks: write`, which fork-event runs do not
+    # have. So a push run is lint, static analysis and unit tests —
+    # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Shared ECS hosts can stretch the normally 25-minute lane beyond an hour
@@ -556,28 +557,9 @@ jobs:
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
-      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
-      # touches nothing but .github/ classifies as `github_ci_only`, and that
-      # is exactly the PR most likely to push a workflow file past GitHub's
-      # 500 KB start-runs limit — the limit that silently killed the autofix
-      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
-      - name: 'Check workflow file size'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        run: '.github/scripts/check-workflow-size.sh'
-
       - name: 'Docs-only CI'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'docs_only' }}"
         run: 'echo "Docs-only change; full CI skipped."'
-
-      - name: 'GitHub CI helper checks'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
-        timeout-minutes: 5
-        run: |-
-          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
-          node scripts/lint.js --setup
-          node scripts/lint.js --actionlint
-          node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -642,6 +624,489 @@ jobs:
           cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
+
+      # The install-script packaging suite needs zip/unzip, and throws on a
+      # CI host that ships neither, so a silent skip there is impossible.
+      # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
+      # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
+      # without tmux (the hosted ubuntu-latest image ships none), would
+      # silently skip every real-tmux behaviour — holder survival, matching,
+      # server reaping, refusal contracts — inside a green required check.
+      # Until it lands, the tmux half installs a tool nothing here uses;
+      # that is deliberate, so the tooling is in place before the suite that
+      # depends on it (qwen-autofix.yml already installs tmux the same way).
+      - name: 'Install tmux and zip tooling'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
+        # hang the job toward its 120-minute cap nor red the required check —
+        # continue-on-error absorbs the step-level timeout. The apt calls
+        # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
+        # step cap) so the guard below still runs: when the step-level
+        # timeout fires there is no `|| echo`, and the lane loses its
+        # tooling with no annotation to say so.
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
+            # Advisory here too: a broken-but-installed tmux (dangling
+            # symlink, missing lib) must not fail the required Test check
+            # before a single test has run.
+            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
+            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
+            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+          elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
+            # Root-container lanes have no sudo (and need none): apt-get
+            # runs as-is. Advisory, not a gate: an apt hiccup must not red
+            # this step before a single test has run — the suites carry
+            # their own signal (the real-tmux suite skips; the zip suite
+            # throws on CI). ::warning:: (not a plain echo) so a lane
+            # where the install PERMANENTLY fails shows the loss in the
+            # check UI instead of hiding it in a multi-thousand-line log.
+            timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
+            # Same advisory contract as the root branch; sudo -n here so a
+            # runner without passwordless sudo fails fast instead of
+            # hanging on a password prompt toward the step's bound.
+            timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          else
+            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          fi
+
+      - name: 'Run tests and generate reports'
+        id: 'unit_tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        # A hung suite used to burn the whole job budget: #10490's run 3 was
+        # cancelled at ~60 minutes with the runner terminating orphaned test
+        # processes, which reads as a timeout rather than a failure.
+        #
+        # The cap has to clear the slowest honest run, not the healthy one.
+        # ~32 minutes was measured at six Vitest forks; the pool now runs
+        # three, which roughly doubles the test phase on an idle host, and a
+        # failing run adds its retries on top. 110 leaves room for that and
+        # still fits the job's 120-minute budget, which this step enters at
+        # around minute 18.
+        timeout-minutes: 110
+        env:
+          NO_COLOR: true
+          # Every attempt of a contended shard is a fresh roll: the same
+          # commit run three times on this fleet failed three disjoint test
+          # sets (#10490), and a shard of identical work measures 6.7min or
+          # 36min depending only on which host it lands on. A retry lets a
+          # contention flake pass; a real break still fails all three
+          # attempts. Operators can retune or disable ('off') without a PR.
+          VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || '2' }}"
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          # Bound each Vitest process on the shared ECS host. Operators can
+          # tune the maximum without changing this workflow.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample the routed temp filesystem every 10s so the
+          # failing run captures the spike, and dump full state on failure.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
+          # The sample-file setup sits BEFORE the TMPDIR routing block (#10035)
+          # because no-ak-integration-ci pins that block byte-identical across
+          # the test/test_macos/test_windows legs; each DFSAMPLE line already
+          # carries the routed tmpdir, so the header only needs job/runner ids.
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          if [ ! -s "$DISK_SAMPLES" ]; then
+            echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
+          fi
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
+          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
+          SAMPLER_PID=$!
+          retry_arg=()
+          if [ -n "${VITEST_RETRY:-}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
+            retry_arg=(--retry="${VITEST_RETRY}")
+          fi
+          set +e
+          npm run test:ci:workspaces -- "${retry_arg[@]}"
+          RC=$?
+          if [ "$RC" -eq 0 ]; then
+            npm run test:scripts -- "${retry_arg[@]}"
+            RC=$?
+          fi
+          set -e
+          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
+          exit "$RC"
+
+      # The host looks healthy after cleanup, so persist the disk-pressure
+      # timeline from a failed run (#10035): the artifact keeps the samples
+      # around long enough to correlate them with this job and runner.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
+
+      # Release guard for the Chrome extension: build, package, and scan real
+      # artifacts for forbidden adapter signatures instead of leaving
+      # `scan:artifacts` manual-only. Linux leg only — packaging shells out to
+      # the POSIX `zip`; skip (not fail) where it is missing.
+      - name: 'Package and scan Chrome extension artifacts'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if ! command -v zip >/dev/null 2>&1; then
+            echo "::warning::zip is not installed; skipping the Chrome extension artifact scan"
+            exit 0
+          fi
+          npm -w packages/chrome-extension run package
+          npm -w packages/chrome-extension run scan:artifacts
+
+      - name: 'Publish Test Report (for non-forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
+        with:
+          name: 'Test Results (ubuntu-latest, Node 22.x)'
+          path: 'packages/*/junit.xml'
+          reporter: 'java-junit'
+          fail-on-error: 'false'
+
+      - name: 'Upload Test Results Artifact (for forks)'
+        if: |-
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'test-results-fork-22.x-ubuntu-latest'
+          path: 'packages/*/junit.xml'
+
+      # Excludes push: the only consumer, `post_coverage_comment`, is gated to
+      # pull_request and nothing else reads `coverage-reports-*`, so uploading
+      # on every merge spends egress and retention on a lane with no reader.
+      - name: 'Upload coverage reports'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'coverage-reports-22.x-ubuntu-latest'
+          path: 'packages/*/coverage'
+
+  #
+  # Lint & Static: everything that judges the tree without executing it.
+  #
+  lint_and_static:
+    name: 'Lint & Static (ubuntu-latest, Node 22.x)'
+    needs: 'classify_pr'
+    # Split out of `test` so this half can become a required status check on
+    # its own: these steps are deterministic (no test execution, no shared
+    # ECS worker contention), while the unit-test half of the old job was
+    # measured failing 41% of post-merge runs on flake alone in the week
+    # this split was made — one red gate must not hold the other's hostages.
+    # Same event surface as `test` (see its `if` for the reasoning), and the
+    # same release-sync convention: stay running on skip_ci PRs so a required
+    # context still reports, with the per-step guards making it a no-op pass.
+    if: "${{ !cancelled() && github.event_name != 'schedule' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # Routed like test's, not a bare constant: this lane was beheaded twice
+    # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
+    # (install 892s vs the sibling Test job's 347s) and again at 45 (install
+    # 940s, bundle closure 681s vs a warm 171s, every step 2–4x). The pool's
+    # contention is why test runs 120/60 and no_ak 60/30; a flat 45 priced
+    # only the warm half of that reality. Hosted runners keep the tighter
+    # ceiling so a genuine hang there does not burn the ECS allowance.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    permissions:
+      contents: 'read'
+    steps:
+      # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
+      # verify) may leave root-owned, read-only files anywhere in the workspace.
+      # Restore ownership and write permission unconditionally so the checkout
+      # below can wipe the tree without EACCES. Do not gate this behind a
+      # .qwen/.git probe: poisoning is workspace-wide (root-owned node_modules/
+      # dist with no .qwen/.git), so a probe reports "healthy" and skips the
+      # recovery exactly when it is needed.
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ and its recovery backup left by a previous job so
+      # actions/checkout doesn't trip on restrictive permissions.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
+      # `trusted-ci-classifier` is the third residue name: classify_pr's
+      # base-SHA checkout path. actions/checkout reuses a leftover copy
+      # whose origin URL matches and runs git (hooks included) inside it,
+      # so it is swept rather than warmed.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
+      # instant the branch is pushed) instead of github.ref. github.ref is the
+      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
+      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Merge queue refs are ephemeral; check out the event head SHA directly so
+      # slow hosted runners do not fail after the queue branch is removed.
+      # Non-PR/non-queue events keep github.ref.
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Pin push runs to the event SHA: the `github.ref` fallback resolves
+          # `refs/heads/main` at fetch time — a moving tip — while the check run
+          # attaches to the triggering commit, so the lane would validate a tree
+          # it does not report on. Nothing detects that (the checkout-head
+          # verifier is gated to pull_request / merge_group, and its ancestor
+          # check passes for a newer tip regardless), and merges land close
+          # enough together to hit it routinely. Regressions are still caught —
+          # the tested tree is a descendant — but attribution breaks: red on a
+          # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
+          # the event SHA by taking actions/checkout's default.
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          # Shallow: nothing here walks git history except on demand (the
+          # verify guard below checks head.sha == HEAD; the size gate and its
+          # vitest mirror fetch the PR's base commit at depth 1 when the
+          # baseline went stale; everything else touches only the working
+          # tree). On the in-repo ECS runner a full-history clone is the
+          # heaviest transfer and chokes the squid egress proxy, flaking
+          # checkout. depth 1 is enough.
+          fetch-depth: 1
+
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+
+      - name: 'Use trusted CI profile'
+        id: 'ci_profile'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
+        run: |-
+          if [ -z "${TRUSTED_CI_PROFILE}" ]; then
+            echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
+          fi
+          profile="${TRUSTED_CI_PROFILE:-full}"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *) profile=full ;;
+          esac
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected CI profile: ${profile}"
+
+      # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
+      # touches nothing but .github/ classifies as `github_ci_only`, and that
+      # is exactly the PR most likely to push a workflow file past GitHub's
+      # 500 KB start-runs limit — the limit that silently killed the autofix
+      # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
+      - name: 'Check workflow file size'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: '.github/scripts/check-workflow-size.sh'
+
+      # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
+      # through the egress proxy; reuse the machine's Node instead.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      # Fail fast on a saturated self-hosted host instead of dying on ENOSPC
+      # mid-install (#10035): the workspace cleaner skips busy runners, so a
+      # busy fleet can hit 100% while jobs keep being admitted. Gating before
+      # `npm ci` turns that into a clear, retryable reschedule onto a host
+      # with headroom, instead of a corrupted half-run.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
+          sample_disk() {
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            echo "$sample"
+            echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
+          }
+          sample_disk
+          ( while sleep 10; do sample_disk; done ) &
+          SAMPLER_PID=$!
+          trap 'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # The install step above starts the #10035 disk-pressure sampler; this
+      # is its collector, mirrored from `test`. Without it the lane produces
+      # the telemetry and destroys it with the runner temp dir on the exact
+      # ENOSPC death the sampler exists to explain. Distinct artifact name:
+      # both jobs can fail in one run, and upload-artifact v4+ rejects
+      # duplicate names.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-lint-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
+      - name: 'GitHub CI helper checks'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        timeout-minutes: 5
+        run: |-
+          # Keep this path dependency-free; script formatting is checked when those files hit full CI.
+          node scripts/lint.js --setup
+          node scripts/lint.js --actionlint
+          node scripts/lint.js --yamllint
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
 
       - name: 'Audit critical runtime dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -739,163 +1204,6 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
-
-      # The install-script packaging suite needs zip/unzip, and throws on a
-      # CI host that ships neither, so a silent skip there is impossible.
-      # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
-      # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
-      # without tmux (the hosted ubuntu-latest image ships none), would
-      # silently skip every real-tmux behaviour — holder survival, matching,
-      # server reaping, refusal contracts — inside a green required check.
-      # Until it lands, the tmux half installs a tool nothing here uses;
-      # that is deliberate, so the tooling is in place before the suite that
-      # depends on it (qwen-autofix.yml already installs tmux the same way).
-      - name: 'Install tmux and zip tooling'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
-        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
-        # hang the job toward its 120-minute cap nor red the required check —
-        # continue-on-error absorbs the step-level timeout. The apt calls
-        # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
-        # step cap) so the guard below still runs: when the step-level
-        # timeout fires there is no `|| echo`, and the lane loses its
-        # tooling with no annotation to say so.
-        timeout-minutes: 5
-        continue-on-error: true
-        run: |-
-          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
-            # Advisory here too: a broken-but-installed tmux (dangling
-            # symlink, missing lib) must not fail the required Test check
-            # before a single test has run.
-            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
-            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
-            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
-          elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
-            # Root-container lanes have no sudo (and need none): apt-get
-            # runs as-is. Advisory, not a gate: an apt hiccup must not red
-            # this step before a single test has run — the suites carry
-            # their own signal (the real-tmux suite skips; the zip suite
-            # throws on CI). ::warning:: (not a plain echo) so a lane
-            # where the install PERMANENTLY fails shows the loss in the
-            # check UI instead of hiding it in a multi-thousand-line log.
-            timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
-          elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            # Same advisory contract as the root branch; sudo -n here so a
-            # runner without passwordless sudo fails fast instead of
-            # hanging on a password prompt toward the step's bound.
-            timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
-          else
-            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
-          fi
-
-      - name: 'Run tests and generate reports'
-        id: 'unit_tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        env:
-          NO_COLOR: true
-          HOME: '${{ runner.temp }}/qwen-ci-home'
-          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
-          # Bound each Vitest process on the shared ECS host. Operators can
-          # tune the maximum without changing this workflow.
-          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
-          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
-          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          OPENAI_API_KEY: ''
-          DASHSCOPE_API_KEY: ''
-          QWEN_API_KEY: ''
-          GEMINI_API_KEY: ''
-          QWEN_DEFAULT_AUTH_TYPE: ''
-        run: |-
-          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
-          # ENOSPC has failed test steps mid-suite while the host looks
-          # healthy afterwards — a transient spike, likely /tmp inodes or a
-          # tmpfs cap. Sample the routed temp filesystem every 10s so the
-          # failing run captures the spike, and dump full state on failure.
-          # Keep Linux temp paths real and short on disk-backed /var/tmp.
-          # Symlink aliases break tests that intentionally compare real paths.
-          # The sample-file setup sits BEFORE the TMPDIR routing block (#10035)
-          # because no-ak-integration-ci pins that block byte-identical across
-          # the test/test_macos/test_windows legs; each DFSAMPLE line already
-          # carries the routed tmpdir, so the header only needs job/runner ids.
-          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
-          if [ ! -s "$DISK_SAMPLES" ]; then
-            echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
-          fi
-          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          if [ "${RUNNER_OS:-}" = "Linux" ]; then
-            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
-            if [ -n "$QWEN_CI_TMPDIR" ]; then
-              TMPDIR="$QWEN_CI_TMPDIR"
-              export TMPDIR
-              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
-            fi
-          fi
-          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
-          SAMPLER_PID=$!
-          set +e
-          npm run test:ci
-          RC=$?
-          set -e
-          pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
-          kill "$SAMPLER_PID" 2>/dev/null || true
-          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
-          exit "$RC"
-
-      # The host looks healthy after cleanup, so persist the disk-pressure
-      # timeline from a failed run (#10035): the artifact keeps the samples
-      # around long enough to correlate them with this job and runner.
-      - name: 'Upload disk-pressure samples'
-        if: '${{ failure() }}'
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'disk-pressure-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
-          path: '${{ runner.temp }}/disk-pressure-samples.log'
-          if-no-files-found: 'ignore'
-          retention-days: 14
-
-      # Release guard for the Chrome extension: build, package, and scan real
-      # artifacts for forbidden adapter signatures instead of leaving
-      # `scan:artifacts` manual-only. Linux leg only — packaging shells out to
-      # the POSIX `zip`; skip (not fail) where it is missing.
-      - name: 'Package and scan Chrome extension artifacts'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          if ! command -v zip >/dev/null 2>&1; then
-            echo "::warning::zip is not installed; skipping the Chrome extension artifact scan"
-            exit 0
-          fi
-          npm -w packages/chrome-extension run package
-          npm -w packages/chrome-extension run scan:artifacts
-
-      - name: 'Publish Test Report (for non-forks)'
-        if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
-        with:
-          name: 'Test Results (ubuntu-latest, Node 22.x)'
-          path: 'packages/*/junit.xml'
-          reporter: 'java-junit'
-          fail-on-error: 'false'
-
-      - name: 'Upload Test Results Artifact (for forks)'
-        if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
-          path: 'packages/*/junit.xml'
-
-      # Excludes push: the only consumer, `post_coverage_comment`, is gated to
-      # pull_request and nothing else reads `coverage-reports-*`, so uploading
-      # on every merge spends egress and retention on a lane with no reader.
-      - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'coverage-reports-22.x-ubuntu-latest'
-          path: 'packages/*/coverage'
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
