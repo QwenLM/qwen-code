@@ -122,7 +122,16 @@ export function lookupSkillDisablement(
   disablements: ReadonlyMap<string, SkillDisablement>,
   skill: { name: string; authoredName?: string },
 ): SkillDisablement | undefined {
-  return lookupSkillSetting(disablements, skill);
+  // A hard block beats a default one whichever spelling carries it; the
+  // registry-first walk would otherwise report the weaker entry in
+  // mixed-spelling states.
+  let fallback: SkillDisablement | undefined;
+  for (const name of skillRestrictionNames(skill)) {
+    const found = disablements.get(name);
+    if (found?.reason === 'hard') return found;
+    fallback ??= found;
+  }
+  return fallback;
 }
 
 function updateTarget(

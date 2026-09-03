@@ -915,6 +915,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   enabledSkillNamesProvider?: () => ReadonlySet<string>;
+  /**
+   * Raw normalized skills lists, as written, for the startup migration
+   * warnings: unlike the resolved disablement set, the raw lists let the
+   * warnings tell load-bearing entries (a bare opt-in pair) from stale ones.
+   */
+  skillSettingsListsProvider?: () => SkillSettingsLists;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -1553,11 +1559,17 @@ function normalizeModelFallbacks(raw: string[] | undefined): string[] {
  * editing settings.json has no other surface that names the qualified
  * replacement.
  */
+export interface SkillSettingsLists {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+}
+
 export function bareEnabledGrantWarnings(
-  enabled: ReadonlySet<string>,
+  lists: SkillSettingsLists,
   skills: ReadonlyArray<{ name: string; authoredName?: string }>,
 ): string[] {
-  if (enabled.size === 0) return [];
+  if (lists.enabled.size === 0) return [];
   const registry = new Set(
     skills.map((skill) => skill.name.trim().toLowerCase()),
   );
@@ -1569,7 +1581,10 @@ export function bareEnabledGrantWarnings(
     // A bare entry that IS some registry identity enables that skill; the
     // shadowing is a separate, pre-existing concern, not a stale grant.
     if (registry.has(authored)) continue;
-    if (!enabled.has(authored)) continue;
+    if (!lists.enabled.has(authored)) continue;
+    // A bare entry identical to a defaultDisabled entry is load-bearing: it
+    // cancels that entry, so the pair is a working opt-in, not a stale grant.
+    if (lists.defaultDisabled.has(authored)) continue;
     warnings.push(
       `Warning: skills.enabled lists '${authored}' by bare name, which no ` +
         `longer enables the extension skill '${skill.name}'. Replace it ` +
@@ -1588,31 +1603,33 @@ export function bareEnabledGrantWarnings(
  * unwarned, the pair reads as if the enable wins.
  */
 export function bareDisablementBlocksQualifiedGrantWarnings(
-  enabled: ReadonlySet<string>,
+  lists: SkillSettingsLists,
   disabledNames: ReadonlySet<string>,
   skills: ReadonlyArray<{ name: string; authoredName?: string }>,
 ): string[] {
-  if (enabled.size === 0 || disabledNames.size === 0) return [];
-  const registry = new Set(
-    skills.map((skill) => skill.name.trim().toLowerCase()),
-  );
+  if (lists.enabled.size === 0 || disabledNames.size === 0) return [];
   const warnings: string[] = [];
   for (const skill of skills) {
     const authored = authoredSkillName(skill).trim().toLowerCase();
     const registryName = skill.name.trim().toLowerCase();
     if (authored === registryName) continue;
-    if (registry.has(authored)) continue;
-    if (!enabled.has(registryName)) continue;
-    // An identical-spelling enabled entry already cancels a defaultDisabled
-    // one at resolution, and the stale-grant warning owns bare enables.
-    if (enabled.has(authored)) continue;
+    if (!lists.enabled.has(registryName)) continue;
     if (!disabledNames.has(authored)) continue;
+    // The advice follows the block's reason: a hard entry can only be
+    // removed (rewriting it to the qualified spelling would keep blocking
+    // and silence this warning), a defaultDisabled entry is cancelled by
+    // the identical spelling.
     warnings.push(
-      `Warning: skills.enabled opts in '${registryName}' but a bare ` +
-        `'${authored}' entry still blocks it — disable entries match under ` +
-        `either spelling; a skills.defaultDisabled entry is cancelled only ` +
-        `by the identical spelling, and skills.disabled never is. Write ` +
-        `'${registryName}' in both lists, or remove '${authored}'.`,
+      lists.hardDisabled.has(authored)
+        ? `Warning: skills.enabled opts in '${registryName}' but ` +
+            `'${authored}' in skills.disabled still blocks it — hard entries ` +
+            `are never cancelled by skills.enabled. Remove '${authored}' ` +
+            `from skills.disabled to enable the skill.`
+        : `Warning: skills.enabled opts in '${registryName}' but a bare ` +
+            `'${authored}' entry still blocks it — disable entries match ` +
+            `under either spelling; a skills.defaultDisabled entry is ` +
+            `cancelled only by the identical spelling. Write ` +
+            `'${registryName}' in both lists, or remove '${authored}'.`,
     );
   }
   return warnings;
@@ -2251,6 +2268,9 @@ export class Config {
   private readonly enabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly skillSettingsListsProvider:
+    | (() => SkillSettingsLists)
+    | null;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2611,6 +2631,7 @@ export class Config {
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.enabledSkillNamesProvider = params.enabledSkillNamesProvider ?? null;
+    this.skillSettingsListsProvider = params.skillSettingsListsProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -3493,14 +3514,14 @@ export class Config {
         await this.skillManager.startWatching();
       }
       this.debugLogger.debug('Skill manager initialized');
-      if (this.enabledSkillNamesProvider) {
+      if (this.skillSettingsListsProvider) {
         try {
-          const enabledNames = this.enabledSkillNamesProvider();
+          const lists = this.skillSettingsListsProvider();
           const skills = await this.skillManager.listSkills();
           this.warnings.push(
-            ...bareEnabledGrantWarnings(enabledNames, skills),
+            ...bareEnabledGrantWarnings(lists, skills),
             ...bareDisablementBlocksQualifiedGrantWarnings(
-              enabledNames,
+              lists,
               this.getDisabledSkillNames(),
               skills,
             ),

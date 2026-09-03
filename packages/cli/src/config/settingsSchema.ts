@@ -2325,8 +2325,10 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Explicit opt-ins, matched against the skill name as registered — ' +
-          'an extension skill is rust:pdf there, so a bare pdf entry grants it ' +
-          'nothing. Override a matching skills.defaultDisabled entry and, for ' +
+          'an extension skill is rust:pdf there, so a bare pdf entry never ' +
+          'enables one by itself (it still cancels an identically-spelled ' +
+          'skills.defaultDisabled entry). Override a matching ' +
+          'skills.defaultDisabled entry and, for ' +
           'an extension skill, the default the owning extension declares and ' +
           'the enablement stored for this workspace. Matched ' +
           'case-insensitively and UNION-merged across settings scopes. Cannot ' +

@@ -397,6 +397,33 @@ describe('SkillCommandLoader', () => {
       });
     });
 
+    it('carries the authored spelling onto skillDetail so restriction matching sees both spellings', async () => {
+      // Downstream (the session snapshot, commandRestrictionNames) matches
+      // legacy bare settings entries through skillDetail.authoredName; if the
+      // loader stops propagating it, a bare `slashCommands.disabled` entry
+      // silently stops gating the qualified command.
+      const skill = makeSkill({
+        name: 'superpowers-lab:tmux',
+        authoredName: 'tmux',
+        level: 'extension',
+        extensionName: 'superpowers-lab',
+        description: 'Use tmux for interactive commands',
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'extension' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands[0].skillDetail).toMatchObject({
+        name: 'superpowers-lab:tmux',
+        authoredName: 'tmux',
+        extensionName: 'superpowers-lab',
+      });
+    });
+
     it('should be modelInvocable when whenToUse is present', async () => {
       const skill = makeSkill({
         level: 'extension',

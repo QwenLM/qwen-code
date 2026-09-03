@@ -32,6 +32,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
+import { skillRestrictionNames } from '@qwen-code/qwen-code-core';
 import {
   computeWorkspaceSkillListUpdates,
   lookupSkillSetting,
@@ -40,6 +41,7 @@ import {
 import { t } from '../../../i18n/index.js';
 import { MAX_EXTENSION_OWNER_LABEL_WIDTH } from '../../../services/commandMetadata.js';
 import { skillOriginLabel } from '../../utils/skill-level-label.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -116,10 +118,10 @@ const LOCKED_DESCRIPTION_COLUMN = 60 - LOCKED_ORIGIN_COLUMN;
  * owner is display-only.
  */
 export function skillRowLabel(skill: SkillConfig): string {
-  return `${truncate(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
+  return `${truncateToWidth(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncateToWidth(
     skill.description,
     80,
-  )}  ${skillOriginLabel(skill)}`;
+  )}  ${truncateToWidth(skillOriginLabel(skill), LOCKED_ORIGIN_COLUMN)}`;
 }
 
 function lower(name: string): string {
@@ -149,11 +151,16 @@ function namesFromScope(
 
 export function buildHigherDisabled(settings: LoadedSettings): {
   /**
-   * The higher scope whose entry blocks this skill, or null when none names
-   * it. A skill's registry identity carries its extension prefix while an
-   * entry written before that prefix existed holds the authored spelling, so
-   * both are checked — a miss here renders a locked skill as a toggleable row
-   * and the label loses the scope the user has to edit.
+   * The scope or settings entry that blocks this skill, or null when the
+   * dialog's toggle can change its state. A skill's registry identity carries
+   * its extension prefix while an entry written before that prefix existed
+   * holds the authored spelling, so both are checked — a miss here renders a
+   * locked skill as a toggleable row and the label loses the scope the user
+   * has to edit. Entries the toggle cannot cancel lock the row the same way
+   * a higher scope does: a bare disablement keeps gating under either
+   * spelling, and the persisted qualified grant cancels only an
+   * identical-spelling `defaultDisabled` entry. Naming the entry (not just a
+   * scope) tells the user which list to edit.
    */
   lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
 } {
@@ -161,17 +168,54 @@ export function buildHigherDisabled(settings: LoadedSettings): {
   // Inserted lowest-precedence first so the highest scope that names an entry
   // wins the label. System > User > SystemDefaults matches the merge order in
   // `settings.ts`.
-  for (const [scope, label] of [
+  const scopes = [
     [SettingScope.SystemDefaults, 'SystemDefaults'],
     [SettingScope.User, 'User'],
     [SettingScope.System, 'System'],
-  ] as const) {
+  ] as const;
+  for (const [scope, label] of scopes) {
     for (const name of normalizeNames(namesFromScope(settings, scope))) {
       scopeOfEntry.set(name, label);
     }
   }
+  const allScopes = [...scopes.map(([scope]) => scope), SettingScope.Workspace];
+  const hardEntries = new Set(
+    allScopes.flatMap((scope) =>
+      normalizeNames(skillSettingStrings(settings, scope, 'disabled')),
+    ),
+  );
+  const defaultEntries = new Set(
+    allScopes.flatMap((scope) =>
+      normalizeNames(skillSettingStrings(settings, scope, 'defaultDisabled')),
+    ),
+  );
+  const workspaceDisabled = new Set(
+    normalizeNames(
+      skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
+    ),
+  );
   return {
-    lockedIn: (skill) => lookupSkillSetting(scopeOfEntry, skill) ?? null,
+    lockedIn: (skill) => {
+      const higherScope = lookupSkillSetting(scopeOfEntry, skill);
+      if (higherScope) return higherScope;
+      const registry = skill.name.trim().toLowerCase();
+      for (const spelling of skillRestrictionNames(skill)) {
+        if (hardEntries.has(spelling)) {
+          // The toggle removes an exact-spelling workspace entry itself.
+          if (spelling === registry && workspaceDisabled.has(spelling)) {
+            continue;
+          }
+          return `skills.disabled '${spelling}'`;
+        }
+        if (defaultEntries.has(spelling)) {
+          // The persisted qualified grant cancels an identical-spelling
+          // defaultDisabled entry at any scope.
+          if (spelling === registry) continue;
+          return `skills.defaultDisabled '${spelling}'`;
+        }
+      }
+      return null;
+    },
   };
 }
 
@@ -181,11 +225,6 @@ function sortSkills(skills: SkillConfig[]): SkillConfig[] {
       LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] ||
       a.name.localeCompare(b.name),
   );
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
 export function SkillsManagerDialog({
@@ -693,8 +732,10 @@ export function SkillsManagerDialog({
             return (
               <Text key={s.name} dimColor wrap="truncate">
                 {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                  name: truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN),
-                  description: truncate(
+                  name: truncateToWidth(s.name, NAME_COLUMN).padEnd(
+                    NAME_COLUMN,
+                  ),
+                  description: truncateToWidth(
                     s.description,
                     LOCKED_DESCRIPTION_COLUMN,
                   ),
@@ -704,7 +745,7 @@ export function SkillsManagerDialog({
                     origin is already translated inside `skillOriginLabel`, so
                     this costs no new string and the locked reason keeps its
                     place. Bounded like every other column on the row. */}
-                {`  ${truncate(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
+                {`  ${truncateToWidth(skillOriginLabel(s), LOCKED_ORIGIN_COLUMN)}`}
               </Text>
             );
           })}

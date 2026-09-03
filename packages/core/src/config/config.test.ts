@@ -8,7 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
-import type { ConfigParameters, SandboxConfig } from './config.js';
+import type {
+  ConfigParameters,
+  SandboxConfig,
+  SkillSettingsLists,
+} from './config.js';
 import {
   bareDisablementBlocksQualifiedGrantWarnings,
   bareEnabledGrantWarnings,
@@ -440,55 +444,97 @@ vi.mock('../core/toolHookTriggers.js', () => ({
 
 describe('bareEnabledGrantWarnings', () => {
   const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
+  const lists = (
+    enabled: string[],
+    defaultDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(defaultDisabled),
+    hardDisabled: new Set(),
+  });
   const warning =
     "Warning: skills.enabled lists 'pdf' by bare name, which no longer " +
     "enables the extension skill 'rust:pdf'. Replace it with 'rust:pdf'.";
 
   it('names the qualified replacement for a stale bare grant', () => {
-    expect(bareEnabledGrantWarnings(new Set(['pdf']), [rustPdf])).toEqual([
+    expect(bareEnabledGrantWarnings(lists(['pdf']), [rustPdf])).toEqual([
       warning,
     ]);
   });
 
   it('stays silent for qualified entries, registry-identity entries, non-extension skills, and an empty enabled set', () => {
-    expect(bareEnabledGrantWarnings(new Set(['rust:pdf']), [rustPdf])).toEqual(
+    expect(bareEnabledGrantWarnings(lists(['rust:pdf']), [rustPdf])).toEqual(
       [],
     );
     // A bare entry that owns some registry identity enables that skill.
     expect(
-      bareEnabledGrantWarnings(new Set(['pdf']), [rustPdf, { name: 'pdf' }]),
+      bareEnabledGrantWarnings(lists(['pdf']), [rustPdf, { name: 'pdf' }]),
     ).toEqual([]);
     expect(
-      bareEnabledGrantWarnings(new Set(['commit']), [{ name: 'commit' }]),
+      bareEnabledGrantWarnings(lists(['commit']), [{ name: 'commit' }]),
     ).toEqual([]);
-    expect(bareEnabledGrantWarnings(new Set(), [rustPdf])).toEqual([]);
+    expect(bareEnabledGrantWarnings(lists([]), [rustPdf])).toEqual([]);
+  });
+
+  it('stays silent for a load-bearing bare entry that cancels a defaultDisabled entry', () => {
+    expect(
+      bareEnabledGrantWarnings(lists(['pdf'], ['pdf']), [rustPdf]),
+    ).toEqual([]);
   });
 });
 
 describe('bareDisablementBlocksQualifiedGrantWarnings', () => {
   const rustPdf = { name: 'rust:pdf', authoredName: 'pdf' };
-  const warn = (enabled: string[], disabled: string[]) =>
+  const lists = (
+    enabled: string[],
+    hardDisabled: string[] = [],
+  ): SkillSettingsLists => ({
+    enabled: new Set(enabled),
+    defaultDisabled: new Set(),
+    hardDisabled: new Set(hardDisabled),
+  });
+  const warn = (
+    enabled: string[],
+    disabledNames: string[],
+    hardDisabled: string[] = [],
+    skills: Array<{ name: string; authoredName?: string }> = [rustPdf],
+  ) =>
     bareDisablementBlocksQualifiedGrantWarnings(
-      new Set(enabled),
-      new Set(disabled),
-      [rustPdf],
+      lists(enabled, hardDisabled),
+      new Set(disabledNames),
+      skills,
     );
+  const defaultAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but a bare 'pdf' entry " +
+    'still blocks it — disable entries match under either spelling; a ' +
+    'skills.defaultDisabled entry is cancelled only by the identical ' +
+    "spelling. Write 'rust:pdf' in both lists, or remove 'pdf'.";
+  const hardAdvice =
+    "Warning: skills.enabled opts in 'rust:pdf' but 'pdf' in " +
+    'skills.disabled still blocks it — hard entries are never cancelled ' +
+    "by skills.enabled. Remove 'pdf' from skills.disabled to enable the " +
+    'skill.';
 
-  it('names the bare disable entry a qualified opt-in cannot get past', () => {
-    expect(warn(['rust:pdf'], ['pdf'])).toEqual([
-      "Warning: skills.enabled opts in 'rust:pdf' but a bare 'pdf' entry " +
-        'still blocks it — disable entries match under either spelling; ' +
-        'a skills.defaultDisabled entry is cancelled only by the identical ' +
-        "spelling, and skills.disabled never is. Write 'rust:pdf' in both " +
-        "lists, or remove 'pdf'.",
-    ]);
+  it('advises both lists for a bare defaultDisabled block', () => {
+    expect(warn(['rust:pdf'], ['pdf'])).toEqual([defaultAdvice]);
+  });
+
+  it('advises removal for a hard block, since rewriting it would silence the warning without unblocking', () => {
+    expect(warn(['rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
+  });
+
+  it('still warns when a same-named skill owns the bare spelling', () => {
+    expect(warn(['rust:pdf'], ['pdf'], [], [rustPdf, { name: 'pdf' }])).toEqual(
+      [defaultAdvice],
+    );
+  });
+
+  it('still warns when the bare name is also enabled, if the block is hard', () => {
+    expect(warn(['pdf', 'rust:pdf'], ['pdf'], ['pdf'])).toEqual([hardAdvice]);
   });
 
   it('stays silent for qualified disables, bare enables, and missing pairs', () => {
-    // Identical-spelling dead config: a separate, documented tradeoff.
     expect(warn(['rust:pdf'], ['rust:pdf'])).toEqual([]);
-    // Bare enable + bare disable: cancelled at resolution, or owned by the
-    // stale-grant warning.
     expect(warn(['pdf'], ['pdf'])).toEqual([]);
     expect(warn([], ['pdf'])).toEqual([]);
     expect(warn(['rust:pdf'], [])).toEqual([]);

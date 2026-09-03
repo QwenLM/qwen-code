@@ -6,6 +6,7 @@
 
 import type { SlashCommand } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import { truncateToWidth } from '../ui/utils/textUtils.js';
 import { getEffectiveSupportedModes } from './commandUtils.js';
 
 export type CommandSourceGroup = {
@@ -65,14 +66,11 @@ export function extensionOwnerLabel(owner: ExtensionOwner): string {
  * 35 leaves the display name the 24 columns every fixed text column here
  * already uses (`NAME_COLUMN` in the skills dialog) on top of the
  * `Extension: ` prefix, and keeps the bracketed badge inside the popup's
- * half-width cap at 80 columns.
+ * half-width cap at 80 columns. Measured in terminal columns, not UTF-16
+ * units: the layouts consuming the badge count cells, and wide characters
+ * (CJK display names) take two.
  */
 export const MAX_EXTENSION_OWNER_LABEL_WIDTH = 35;
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
-}
 
 export function getCommandSourceBadge(
   command: Pick<SlashCommand, 'source' | 'sourceLabel' | 'sourceDetail'>,
@@ -97,7 +95,7 @@ export function getCommandSourceBadge(
       // extensions are installed. `sourceLabel` is display text and may be
       // localized — that is correct here, this is a display surface.
       return command.sourceLabel
-        ? `[${truncate(command.sourceLabel, MAX_EXTENSION_OWNER_LABEL_WIDTH)}]`
+        ? `[${truncateToWidth(command.sourceLabel, MAX_EXTENSION_OWNER_LABEL_WIDTH)}]`
         : '[Extension]';
     case 'mcp-prompt':
       return '[MCP]';

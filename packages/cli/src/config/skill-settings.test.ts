@@ -261,6 +261,15 @@ describe('lookupSkillDisablement', () => {
     expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
   });
 
+  it('prefers the hard entry even when the registry spelling carries the weaker one', () => {
+    const entries = new Map<string, SkillDisablement>([
+      ['rust:pdf', { reason: 'default' }],
+      ['pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
   it('normalizes the skill name it is given', () => {
     expect(
       lookupSkillDisablement(byRegistry, {

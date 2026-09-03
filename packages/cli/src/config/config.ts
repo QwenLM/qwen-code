@@ -104,7 +104,7 @@ import {
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
-import { resolveSkillSettings } from './skill-settings.js';
+import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1278,6 +1278,24 @@ export function buildEnabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).enabledNames;
 }
 
+export function buildSkillSettingsListsProvider(merged: {
+  skills?: {
+    enabled?: unknown;
+    defaultDisabled?: unknown;
+    disabled?: unknown;
+  };
+}): () => {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+} {
+  return () => ({
+    enabled: normalizeSkillNames(merged.skills?.enabled),
+    defaultDisabled: normalizeSkillNames(merged.skills?.defaultDisabled),
+    hardDisabled: normalizeSkillNames(merged.skills?.disabled),
+  });
+}
+
 /**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
@@ -2148,6 +2166,10 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     enabledSkillNamesProvider:
       bareMode || safeMode ? undefined : enabledSkillNamesProvider,
+    skillSettingsListsProvider:
+      bareMode || safeMode
+        ? undefined
+        : buildSkillSettingsListsProvider(settings),
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(

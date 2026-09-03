@@ -24,10 +24,16 @@ const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
 
 function fakeSettings(
   byScope: Partial<Record<SettingScope, unknown>>,
+  defaultsByScope: Partial<Record<SettingScope, unknown>> = {},
 ): LoadedSettings {
   return {
     forScope: (scope: SettingScope) => ({
-      settings: { skills: { disabled: byScope[scope] } },
+      settings: {
+        skills: {
+          disabled: byScope[scope],
+          defaultDisabled: defaultsByScope[scope],
+        },
+      },
     }),
   } as unknown as LoadedSettings;
 }
@@ -91,6 +97,38 @@ describe('buildHigherDisabled', () => {
 
     expect(higher.lockedIn(prefixed)).toBeNull();
     expect(higher.lockedIn({ name: 'review' })).toBeNull();
+  });
+
+  it('locks on a bare workspace defaultDisabled entry the toggle cannot cancel, naming the entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.Workspace]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe("skills.defaultDisabled 'pdf'");
+  });
+
+  it('does not lock on a registry-spelling defaultDisabled entry the qualified grant cancels', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.Workspace]: ['demo:pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('locks on a bare workspace hard entry, naming the entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf'");
+  });
+
+  it('does not lock on an exact-spelling workspace hard entry the toggle removes', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['demo:pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
   });
 
   it('tolerates a malformed list from the settings file', () => {

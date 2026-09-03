@@ -8007,6 +8007,57 @@ describe('Session', () => {
       expect(update.update._meta).toBeUndefined();
     });
 
+    it('omits inactive extension skills whose slash command carries the qualified registry name', async () => {
+      // The loader qualifies extension skill commands as `<ext>:<authored>`
+      // and carries the authored spelling on skillDetail, while the
+      // inactive-extension refs key on the manifest's authored spelling.
+      // Dropping the authoredName propagation into
+      // isInactiveExtensionSkill would miss that lookup and leak the
+      // inactive skill into the snapshot.
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'disabled-ext:pdf',
+          description: 'Inactive skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'disabled-ext:pdf',
+            authoredName: 'pdf',
+            description: 'Inactive skill',
+            body: 'Hidden instructions',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Inactive skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as { update: { availableCommands: Array<{ name: string }> } };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).not.toContain('disabled-ext:pdf');
+    });
+
     it('keeps active extension slash commands that share a skill name with inactive extensions', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
