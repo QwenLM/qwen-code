@@ -566,7 +566,6 @@ export function PlanExecutionView({
     activeAgentCount,
     attentionCount,
     topology,
-    dependencyIdsByTodo,
     topologyKey,
     dependencyCount,
     hasDependencies,
