@@ -11,6 +11,9 @@ import type {
   SendTypingResp,
   BaseInfo,
 } from './types.js';
+import JSONbigFactory from 'json-bigint';
+
+const JSONbig = JSONbigFactory({ storeAsString: true });
 
 // ── Error handling ────────────────────────────────────────────────
 
@@ -138,13 +141,14 @@ async function post<T>(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    const responseText = await resp.text();
     if (!resp.ok) {
       // Try to parse the API error body for ret/errcode/errmsg
       let ret: number | undefined;
       let errcode: number | undefined;
       let errmsg: string | undefined;
       try {
-        const errBody = (await resp.json()) as {
+        const errBody = JSONbig.parse(responseText) as {
           ret?: number;
           errcode?: number;
           errmsg?: string;
@@ -160,7 +164,7 @@ async function post<T>(
         : `WeChat API error (HTTP ${resp.status})`;
       throw new WeixinApiError(message, resp.status, ret, errcode);
     }
-    return (await resp.json()) as T;
+    return (responseText ? JSONbig.parse(responseText) : {}) as T;
   } finally {
     clearTimeout(timeout);
   }
