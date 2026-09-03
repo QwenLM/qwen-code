@@ -10156,6 +10156,9 @@ exit 1
     for (const step of envCheckSteps) {
       expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
       expect(step).toContain('not an approved agent pool member');
+      expect(step).toContain(
+        'echo \'QWEN_SKIP_LATENCY_BUDGETS=1\' >> "${GITHUB_ENV}"',
+      );
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
