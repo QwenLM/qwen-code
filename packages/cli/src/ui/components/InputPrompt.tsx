@@ -1437,8 +1437,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           slashCommands,
         );
         const commandPartCount = buffer.text.slice(1).split(/\s+/).length;
+        // Container commands (subcommands but no default action, e.g.
+        // /memory) are exact matches too: Enter must submit them, as it did
+        // before #10929. Requiring an `action` here made Enter autocomplete
+        // the first subcommand instead of submitting the command.
         isLiveSlashCommand =
-          commandToExecute?.action !== undefined &&
+          commandToExecute !== undefined &&
           args.length === 0 &&
           canonicalPath.length === commandPartCount;
       }
@@ -1953,6 +1957,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       categoryTabsVisible,
       voiceInput,
       targetDir,
+      slashCommands,
     ],
   );
 
