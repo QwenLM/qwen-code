@@ -115,6 +115,7 @@ import {
   InvalidRewindTargetError,
   PromptDeadlineExceededError,
   BridgeChannelQuarantinedError,
+  McpAuthenticationInProgressError,
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
@@ -941,14 +942,13 @@ interface ChannelInfo {
   sessionSpawnsInFlight: number;
   /** Workspace-level control calls that use the shared channel without a session. */
   workspaceControlInFlight: number;
-  /** A plain preheat keeps the channel through its first status read. */
-  preserveForFirstStatusRead: boolean;
   /** Background MCP discovery started by the workspace initialize control. */
   workspaceMcpDiscoveryInFlight: boolean;
   workspaceMcpDiscoveryTimer?: NodeJS.Timeout;
   workspaceMcpDiscoveryRequested: boolean;
   workspaceMcpAuthenticationServerNames: Set<string>;
   workspaceMcpAuthenticationTimers: Map<string, NodeJS.Timeout>;
+  workspaceMcpAuthenticationReleases: Map<string, () => void>;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
   /**
@@ -3839,13 +3839,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function withWorkspaceControl<T>(
     ci: ChannelInfo,
     fn: () => Promise<T>,
-    statusRead = false,
   ): Promise<T> {
-    const preservePreheat =
-      statusRead &&
-      ci.preserveForFirstStatusRead &&
-      resolvedChannelIdleTimeoutMs() <= 0;
-    ci.preserveForFirstStatusRead = false;
     if (liveChannelInfo() === ci) cancelIdleTimer();
     ci.workspaceControlInFlight++;
     try {
@@ -3859,12 +3853,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci.workspaceControlInFlight - 1,
       );
       await reapPendingEmptyChannel(ci);
-      if (
-        !preservePreheat &&
-        !ci.isDying &&
-        liveChannelInfo() === ci &&
-        hasNoChannelWork(ci)
-      ) {
+      if (!ci.isDying && liveChannelInfo() === ci && hasNoChannelWork(ci)) {
         await startIdleTimer(ci, 'workspace control');
       }
     }
@@ -3886,7 +3875,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return withWorkspaceControl(ci, fn, true);
+    return withWorkspaceControl(ci, fn);
   }
 
   function startSessionReaper(): void {
@@ -4606,11 +4595,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingRestoreIds: new Set(),
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
-        preserveForFirstStatusRead: false,
         workspaceMcpDiscoveryInFlight: false,
         workspaceMcpDiscoveryRequested: false,
         workspaceMcpAuthenticationServerNames: new Set(),
         workspaceMcpAuthenticationTimers: new Map(),
+        workspaceMcpAuthenticationReleases: new Map(),
         retireWhenSessionsDrain: false,
         emptyReapPending: false,
         unsettledAbandonedRestores: new Set(),
@@ -4693,6 +4682,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.workspaceMcpAuthenticationTimers.clear();
         info.workspaceMcpAuthenticationServerNames.clear();
+        for (const release of info.workspaceMcpAuthenticationReleases.values()) {
+          release();
+        }
+        info.workspaceMcpAuthenticationReleases.clear();
         for (const timer of info.restoreSettlementTimers.values()) {
           clearTimeout(timer);
         }
@@ -5244,7 +5237,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (ci.isDying) {
       throw new BridgeChannelClosedError('before newSession');
     }
-    ci.preserveForFirstStatusRead = false;
     ci.sessionSpawnsInFlight++;
     if (requestedSessionId !== undefined) {
       // A caller-supplied id can legitimately reuse an id after an abandoned
@@ -6112,9 +6104,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (
       Array.isArray(current.servers) &&
       previous?.discoveryState === 'completed' &&
+      previous.runtimeEpoch === current.runtimeEpoch &&
       current.discoveryState === 'not_started'
     ) {
-      if (current.servers.length === 0) return previous;
+      if (current.servers.length === 0) {
+        return {
+          ...previous,
+          runtimeEpoch: current.runtimeEpoch,
+          source: current.source,
+        };
+      }
       const currentServers = new Map(
         current.servers.map((server) => [server.name, server]),
       );
@@ -6133,6 +6132,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return {
         ...previous,
+        runtimeEpoch: current.runtimeEpoch,
+        source: current.source,
         discoveryState: 'completed',
         servers,
       };
@@ -6152,7 +6153,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         method === SERVE_STATUS_EXT_METHODS.workspaceMcp &&
         workspaceMcpStatusCache
       ) {
-        return workspaceMcpStatusCache as T;
+        return {
+          ...workspaceMcpStatusCache,
+          source: 'cache',
+        } as T;
       }
       return idle();
     }
@@ -6168,6 +6172,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         initTimeoutMs,
         method,
       );
+      if (
+        isRecord(response) &&
+        (method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources)
+      ) {
+        response = {
+          ...response,
+          runtimeEpoch,
+          ...(method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+            ? { source: 'live' }
+            : {}),
+        };
+      }
       if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
         const rawStatus = response as unknown as ServeWorkspaceMcpStatus;
         if (!Array.isArray(rawStatus.servers)) {
@@ -6178,12 +6196,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...info.workspaceMcpAuthenticationServerNames,
           ...(managedServerNames ?? []),
         ]);
-        if (
-          effectiveManagedServerNames.size > 0 ||
-          (workspaceMcpStatusCache?.discoveryState === 'completed' &&
-            rawStatus.discoveryState === 'not_started' &&
-            rawServers.length === 0)
-        ) {
+        if (effectiveManagedServerNames.size > 0) {
           response = mergeManagedWorkspaceMcpStatus(
             effectiveManagedServerNames,
             workspaceMcpStatusCache,
@@ -6233,6 +6246,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
+            info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+            info.workspaceMcpAuthenticationReleases.delete(serverName);
           }
         }
         workspaceMcpStatusCache =
@@ -8094,7 +8109,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new BridgeChannelClosedError(`before session/${action}`);
       }
       ci = restoreChannel;
-      restoreChannel.preserveForFirstStatusRead = false;
       restoreChannel.pendingRestoreIds.add(req.sessionId);
       // Mark this id as in-flight restore BEFORE the ACP
       // `loadSession`/`unstable_resumeSession` call. Restore-time
@@ -13670,68 +13684,106 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {
-      return await withEnsuredWorkspaceControl(async (info) => {
-        const timeout =
-          action === 'authenticate'
-            ? MCP_OAUTH_TIMEOUT_MS
-            : MCP_RESTART_TIMEOUT_MS;
-        const response = (await Promise.race([
-          withTimeout(
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
-              { serverName, action, originatorClientId },
-            ),
-            timeout,
-            SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
-          ),
-          getChannelClosedReject(info),
-        ])) as {
-          serverName: string;
-          action:
-            | 'approve'
-            | 'enable'
-            | 'disable'
-            | 'authenticate'
-            | 'clear-auth';
-          ok: true;
-          changed?: boolean;
-          messages?: string[];
-          authUrl?: string;
-          pending?: boolean;
-        };
-        if (action === 'authenticate' && response.pending) {
-          info.workspaceMcpAuthenticationServerNames.add(serverName);
-          const previousTimer =
-            info.workspaceMcpAuthenticationTimers.get(serverName);
-          if (previousTimer) clearTimeout(previousTimer);
-          const timer = setTimeout(() => {
-            void expireWorkspaceMcpAuthentication(info, serverName, timer);
-          }, MCP_OAUTH_TIMEOUT_MS);
-          timer.unref();
-          info.workspaceMcpAuthenticationTimers.set(serverName, timer);
-        }
-        invalidateWorkspaceMcpDetailCache(serverName);
-        await requestWorkspaceStatus<ServeWorkspaceMcpStatus>(
-          SERVE_STATUS_EXT_METHODS.workspaceMcp,
-          () => {
-            throw new BridgeChannelClosedError(
-              'workspace MCP management status refresh',
+      let releaseAuthentication =
+        action === 'authenticate'
+          ? opts.acquireMcpAuthentication?.(boundWorkspace, serverName)
+          : undefined;
+      if (
+        action === 'authenticate' &&
+        opts.acquireMcpAuthentication &&
+        !releaseAuthentication
+      ) {
+        throw new McpAuthenticationInProgressError();
+      }
+      try {
+        return await withEnsuredWorkspaceControl(async (info) => {
+          if (releaseAuthentication) {
+            info.workspaceMcpAuthenticationReleases.set(
+              serverName,
+              releaseAuthentication,
             );
-          },
-          {},
-          new Set([serverName]),
-        );
-        broadcastWorkspaceEvent({
-          type: 'mcp_server_changed',
-          data: {
-            serverName: response.serverName,
-            action: response.action,
-            originatorClientId,
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
+            releaseAuthentication = undefined;
+          }
+          const timeout =
+            action === 'authenticate'
+              ? MCP_OAUTH_TIMEOUT_MS
+              : MCP_RESTART_TIMEOUT_MS;
+          let response: {
+            serverName: string;
+            action:
+              | 'approve'
+              | 'enable'
+              | 'disable'
+              | 'authenticate'
+              | 'clear-auth';
+            ok: true;
+            changed?: boolean;
+            messages?: string[];
+            authUrl?: string;
+            pending?: boolean;
+          };
+          try {
+            response = (await Promise.race([
+              withTimeout(
+                info.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+                  { serverName, action, originatorClientId },
+                ),
+                timeout,
+                SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+              ),
+              getChannelClosedReject(info),
+            ])) as typeof response;
+          } catch (error) {
+            if (
+              action === 'authenticate' &&
+              !(error instanceof BridgeTimeoutError) &&
+              !(error instanceof BridgeChannelClosedError)
+            ) {
+              info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+              info.workspaceMcpAuthenticationReleases.delete(serverName);
+            }
+            throw error;
+          }
+          if (action === 'authenticate' && response.pending) {
+            info.workspaceMcpAuthenticationServerNames.add(serverName);
+            const previousTimer =
+              info.workspaceMcpAuthenticationTimers.get(serverName);
+            if (previousTimer) clearTimeout(previousTimer);
+            const timer = setTimeout(() => {
+              void expireWorkspaceMcpAuthentication(info, serverName, timer);
+            }, MCP_OAUTH_TIMEOUT_MS);
+            timer.unref();
+            info.workspaceMcpAuthenticationTimers.set(serverName, timer);
+          } else if (action === 'authenticate') {
+            info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+            info.workspaceMcpAuthenticationReleases.delete(serverName);
+          }
+          invalidateWorkspaceMcpDetailCache(serverName);
+          await requestWorkspaceStatus<ServeWorkspaceMcpStatus>(
+            SERVE_STATUS_EXT_METHODS.workspaceMcp,
+            () => {
+              throw new BridgeChannelClosedError(
+                'workspace MCP management status refresh',
+              );
+            },
+            {},
+            new Set([serverName]),
+          );
+          broadcastWorkspaceEvent({
+            type: 'mcp_server_changed',
+            data: {
+              serverName: response.serverName,
+              action: response.action,
+              originatorClientId,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+          return response;
         });
-        return response;
-      });
+      } finally {
+        releaseAuthentication?.();
+      }
     },
 
     async initializeWorkspaceMcp() {
@@ -14427,19 +14479,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.preheat',
           { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
           async () => {
-            const existing = liveChannelInfo();
-            const info = await ensureChannel();
+            await ensureChannel();
             if (keepAliveMs !== undefined) {
               keepAliveUntil = Math.max(
                 keepAliveUntil,
                 Date.now() + keepAliveMs,
               );
-            } else if (
-              !existing &&
-              configuredChannelIdleTimeoutMs() === 0 &&
-              hasNoSessionWork(info)
-            ) {
-              info.preserveForFirstStatusRead = true;
             }
           },
         );
