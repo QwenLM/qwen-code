@@ -12,10 +12,12 @@ import {
   isDeviceTokenSuccess,
   QwenOAuth2Client,
   QwenOAuthPollError,
-  type DeviceTokenPendingData,
-  type IQwenOAuth2Client,
-  type QwenCredentials,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/qwen/qwenOAuth2.js';
+import type {
+  DeviceTokenPendingData,
+  IQwenOAuth2Client,
+  QwenCredentials,
+} from '@qwen-code/qwen-code-core/qwen/qwenOAuth2.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,

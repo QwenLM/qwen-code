@@ -11,7 +11,7 @@ import {
   captureDaemonTelemetryContext,
   emitDaemonLog,
   runWithDaemonTelemetryContext,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';

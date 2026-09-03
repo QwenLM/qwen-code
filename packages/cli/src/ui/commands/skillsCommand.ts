@@ -12,7 +12,7 @@ import {
 } from './types.js';
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import { normalizeSkillPriority } from '@qwen-code/qwen-code-core/skills/skill-load.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {

@@ -7,10 +7,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  type MCPServerConfig,
-  normalizeClaudeMcpServer,
-} from '@qwen-code/qwen-code-core';
+import type { MCPServerConfig } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { normalizeClaudeMcpServer } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
 import stripJsonComments from 'strip-json-comments';
 import { SettingScope, type LoadedSettings } from './settings.js';
 

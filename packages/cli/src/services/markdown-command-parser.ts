@@ -5,10 +5,8 @@
  */
 
 import { z } from 'zod';
-import {
-  parse as parseYaml,
-  normalizeContent,
-} from '@qwen-code/qwen-code-core';
+import { normalizeContent } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import { parse as parseYaml } from '@qwen-code/qwen-code-core/utils/yaml-parser.js';
 
 /**
  * Defines the Zod schema for a Markdown command definition file.

@@ -5,7 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
-import { FatalConfigError } from '@qwen-code/qwen-code-core';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';

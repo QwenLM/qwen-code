@@ -5,7 +5,7 @@
  */
 
 import type { HistoryItemCompression } from '../types.js';
-import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core';
+import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';

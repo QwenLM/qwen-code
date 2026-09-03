@@ -7,11 +7,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  createDebugLogger,
-  ideContextStore,
-  Storage,
-} from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { ideContextStore } from '@qwen-code/qwen-code-core/ide/ideContext.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { findEnvFiles, preResolveHomeEnvOverrides } from './environment.js';
 import {
   getSystemDefaultsPath,

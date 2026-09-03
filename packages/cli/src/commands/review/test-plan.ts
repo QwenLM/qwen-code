@@ -51,7 +51,7 @@ import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
-import { isGitIgnored } from '@qwen-code/qwen-code-core';
+import { isGitIgnored } from '@qwen-code/qwen-code-core/utils/git-ignore.js';
 import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import {

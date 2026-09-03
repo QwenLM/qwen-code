@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_NOTIFICATION_METHOD,

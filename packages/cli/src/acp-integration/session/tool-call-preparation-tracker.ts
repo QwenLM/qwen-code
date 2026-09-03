@@ -5,7 +5,7 @@
  */
 
 import type { FunctionCall, GenerateContentResponse } from '@google/genai';
-import { getToolCallPreparations } from '@qwen-code/qwen-code-core';
+import { getToolCallPreparations } from '@qwen-code/qwen-code-core/core/tool-call-preparation.js';
 import type { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 
 /**

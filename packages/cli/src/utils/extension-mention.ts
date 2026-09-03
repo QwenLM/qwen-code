@@ -5,12 +5,10 @@
  */
 
 import * as fs from 'node:fs/promises';
-import type { Extension } from '@qwen-code/qwen-code-core';
-import {
-  getErrorMessage,
-  isSubpath,
-  stripTerminalControlSequences,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
 
 export const EXTENSION_REF_PREFIX = 'ext:';
 export const EXTENSION_CONTEXT_BUDGET = 200_000;

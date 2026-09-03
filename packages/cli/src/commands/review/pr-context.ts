@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
+import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core/config/config.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { HOSTNAME_RE, resolveGhHost, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';

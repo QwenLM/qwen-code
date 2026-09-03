@@ -8,15 +8,17 @@ import { constants } from 'node:fs';
 import { lstat, open, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import type { PermissionDecision } from '@qwen-code/qwen-code-core/permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
-  escapeJsonTagCharacters,
   Kind,
-  type PermissionDecision,
-  type ToolInvocation,
-  type ToolResult,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  ToolInvocation,
+  ToolResult,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import { escapeJsonTagCharacters } from '@qwen-code/qwen-code-core/utils/formatters.js';
 
 const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

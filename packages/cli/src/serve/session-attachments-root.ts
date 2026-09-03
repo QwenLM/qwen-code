@@ -6,7 +6,7 @@
 
 import { homedir } from 'node:os';
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 export const SESSION_ATTACHMENTS_ROOT_ENV =
   'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT';

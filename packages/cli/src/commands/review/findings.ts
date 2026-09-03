@@ -50,7 +50,7 @@ import {
   FINDING_DIRECTIONS,
   FINDING_BASELINES,
   compressFindingSummary,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/report-findings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
 import { isSameFile } from './lib/same-file.js';

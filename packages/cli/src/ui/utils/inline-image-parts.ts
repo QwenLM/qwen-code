@@ -5,7 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
-import { MAX_TERMINAL_IMAGE_BYTES } from '@qwen-code/qwen-code-core';
+import { MAX_TERMINAL_IMAGE_BYTES } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { InlineImageData } from '../types.js';
 
 export const MAX_INLINE_IMAGES_PER_ITEM = 4;

@@ -8,9 +8,11 @@ import type { Application, Request, Response } from 'express';
 import {
   fetchGitDiff,
   fetchGitDiffHunksForFile,
-  type GitDiffFileHunks,
-  type GitDiffResult,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/gitDiff.js';
+import type {
+  GitDiffFileHunks,
+  GitDiffResult,
+} from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {

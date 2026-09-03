@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  buildBackgroundEntryLabel,
-  type AgentTask,
-  type MonitorTask,
-  type ShellTask,
-} from '@qwen-code/qwen-code-core';
+import { buildBackgroundEntryLabel } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type { ShellTask } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
+import type { MonitorTask } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';

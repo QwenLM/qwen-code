@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  APPROVAL_MODES,
-  SESSION_TRANSCRIPT_MAX_LIMIT,
-  type ApprovalMode,
-  type SessionArchiveState,
-} from '@qwen-code/qwen-code-core';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { SESSION_TRANSCRIPT_MAX_LIMIT } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import type { SessionArchiveState } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   CreateStandaloneSessionRequest,

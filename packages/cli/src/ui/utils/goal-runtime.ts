@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  GoalPersistenceUnavailableError,
-  type Config,
-  type GoalStateCause,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { GoalStateCause } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import { GoalPersistenceUnavailableError } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
 
 export function shouldDisplayGoalStateCause(cause: GoalStateCause): boolean {
   switch (cause) {

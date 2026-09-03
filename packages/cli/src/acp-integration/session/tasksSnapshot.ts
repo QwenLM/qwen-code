@@ -4,15 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  buildBackgroundEntryLabel,
-  type AgentTask,
-  type Config,
-  type MonitorTask,
-  type ShellTask,
-  type WorkflowSnapshot,
-  type WorkflowTask,
-} from '@qwen-code/qwen-code-core';
+import { buildBackgroundEntryLabel } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import type { WorkflowTask } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import type { WorkflowSnapshot } from '@qwen-code/qwen-code-core/agents/workflow-snapshot.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ShellTask } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
+import type { MonitorTask } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
 import {
   STATUS_SCHEMA_VERSION,
   type ServeSessionAgentTaskStatus,

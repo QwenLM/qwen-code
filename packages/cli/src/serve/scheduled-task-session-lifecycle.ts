@@ -20,10 +20,8 @@
  * unchanged skips the write), so it's side-effect-free for ordinary sessions.
  */
 
-import {
-  updateCronTasks,
-  type DurableCronTask,
-} from '@qwen-code/qwen-code-core';
+import { updateCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import type { DurableCronTask } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 
 /** A task is session-bound when it carries a non-empty `sessionId`. Mirrors the
  * strict check the other scheduled-task modules use (`scheduled-tasks.ts`,

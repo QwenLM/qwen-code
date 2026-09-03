@@ -7,13 +7,13 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
-  Storage,
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
-  getAllMemoryFilenames,
   writeWorkspaceContextFile,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/memory/writeContextFile.js';
+import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
 import type { WorkspaceEventBridge } from './acp-session-bridge.js';

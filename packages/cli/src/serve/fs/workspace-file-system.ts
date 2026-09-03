@@ -18,19 +18,23 @@ import { glob as globAsync } from 'glob';
 // don't repeat the regression.
 
 import {
-  CursorNotAtLineBoundaryError,
-  LargeNonUtf8TextError,
   StandardFileSystemService,
-  TextScanBudgetExceededError,
-  decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
   encodeTextFileContentAsync,
-  isUtf8CompatibleEncoding,
-  loadIgnoreRules,
+} from '@qwen-code/qwen-code-core/services/fileSystemService.js';
+import type { WriteTextFileOptions } from '@qwen-code/qwen-code-core/services/fileSystemService.js';
+import { isUtf8CompatibleEncoding } from '@qwen-code/qwen-code-core/utils/encoding.js';
+import {
+  decodeBufferWithEncodingInfoAsync,
   isWithinRoot,
-  type Ignore,
-  type WriteTextFileOptions,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/fileUtils.js';
+import { loadIgnoreRules } from '@qwen-code/qwen-code-core/utils/filesearch/ignore.js';
+import type { Ignore } from '@qwen-code/qwen-code-core/utils/filesearch/ignore.js';
+import {
+  CursorNotAtLineBoundaryError,
+  LargeNonUtf8TextError,
+  TextScanBudgetExceededError,
+} from '@qwen-code/qwen-code-core/utils/read-text-range.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import {

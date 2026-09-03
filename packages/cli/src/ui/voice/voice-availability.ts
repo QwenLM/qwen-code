@@ -6,7 +6,7 @@
 
 import { existsSync } from 'node:fs';
 import process from 'node:process';
-import { isWsl } from '@qwen-code/qwen-code-core';
+import { isWsl } from '@qwen-code/qwen-code-core/utils/terminal-env.js';
 import { t } from '../../i18n/index.js';
 
 // Pre-flight environment check so users get a clear message at /voice-enable

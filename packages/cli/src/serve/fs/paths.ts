@@ -6,7 +6,7 @@
 
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
-import { isWithinRoot } from '@qwen-code/qwen-code-core';
+import { isWithinRoot } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
 import { FsError, type FsErrorKind } from './errors.js';
 
 // `canonicalizeWorkspace` and `MAX_WORKSPACE_PATH_LENGTH` lifted to

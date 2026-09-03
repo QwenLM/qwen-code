@@ -22,7 +22,7 @@
 // for it. The chunks tile the diff exactly, so the orchestrator can assert
 // that every line was assigned to some agent.
 
-import { unquoteCStylePath } from '@qwen-code/qwen-code-core';
+import { unquoteCStylePath } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 
 /** A single `@@` hunk. All line numbers are 1-based and inclusive. */
 export interface DiffHunk {

@@ -7,16 +7,18 @@
 import { promises as fs } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { BuiltinAgentRegistry } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
+import { SubagentManager } from '@qwen-code/qwen-code-core/subagents/subagent-manager.js';
 import {
-  APPROVAL_MODES,
-  BuiltinAgentRegistry,
   SubagentError,
   SubagentErrorCode,
-  SubagentManager,
-  type Config,
-  type SubagentConfig,
-  type SubagentLevel,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/subagents/types.js';
+import type {
+  SubagentConfig,
+  SubagentLevel,
+} from '@qwen-code/qwen-code-core/subagents/types.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,

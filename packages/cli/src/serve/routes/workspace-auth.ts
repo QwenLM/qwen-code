@@ -5,7 +5,7 @@
  */
 
 import type { Application, RequestHandler } from 'express';
-import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core';
+import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core/providers/all-providers.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,

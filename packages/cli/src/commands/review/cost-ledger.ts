@@ -31,7 +31,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { parseLineTolerant } from '@qwen-code/qwen-code-core';
+import { parseLineTolerant } from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
 import {
   writeStdoutLineSafe,
   writeStderrLineSafe,

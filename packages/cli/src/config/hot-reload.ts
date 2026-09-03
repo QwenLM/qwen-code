@@ -5,13 +5,11 @@
  */
 
 import equal from 'fast-deep-equal';
-import {
-  createDebugLogger,
-  ApprovalMode,
-  type Config,
-  getMCPServerStatus,
-  type MCPServerConfig,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { MCPServerConfig } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { getMCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from './settings.js';
 import type { SettingsWatcher } from './settingsWatcher.js';
 import { assembleMcpServers } from './mcpServers.js';

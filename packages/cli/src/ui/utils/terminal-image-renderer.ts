@@ -7,11 +7,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import {
-  MAX_TERMINAL_IMAGE_BYTES,
-  type TerminalImageRenderSupport,
-  type TerminalImageDisplay,
-} from '@qwen-code/qwen-code-core';
+import type { TerminalImageRenderSupport } from '@qwen-code/qwen-code-core/config/config.js';
+import { MAX_TERMINAL_IMAGE_BYTES } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { TerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   buildKittyPlaceholder,
   createRendererChildEnv,

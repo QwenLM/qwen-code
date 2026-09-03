@@ -5,7 +5,7 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { redactUrlCredentials } from '@qwen-code/qwen-code-core';
+import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from './utils.js';

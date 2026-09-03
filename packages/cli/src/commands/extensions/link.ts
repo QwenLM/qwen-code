@@ -5,10 +5,8 @@
  */
 
 import type { CommandModule } from 'yargs';
-import {
-  isExtensionCommittedWithWarningsError,
-  type ExtensionInstallMetadata,
-} from '@qwen-code/qwen-code-core';
+import type { ExtensionInstallMetadata } from '@qwen-code/qwen-code-core/config/config.js';
+import { isExtensionCommittedWithWarningsError } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {

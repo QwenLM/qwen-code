@@ -6,24 +6,28 @@
 
 import * as path from 'node:path';
 import type { Part, FunctionCall } from '@google/genai';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type {
+  GoalSnapshotV2,
+  GoalStateCause,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import type {
+  SlashCommandRecordPayload,
+  AtCommandRecordPayload,
+} from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type {
   ResumedSessionData,
   ConversationRecord,
-  Config,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type {
   AnyDeclarativeTool,
   ToolResultDisplay,
-  SlashCommandRecordPayload,
-  AtCommandRecordPayload,
-  GoalSnapshotV2,
-  GoalStateCause,
-  HistoryGap,
-} from '@qwen-code/qwen-code-core';
-import {
-  getToolResponseDisplayText,
-  isGoalCheckpointBookkeepingRecord,
-  parseGoalStateRecordPayloadV2,
-  projectUserTranscriptForDisplay,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { HistoryGap } from '@qwen-code/qwen-code-core/utils/conversation-chain.js';
+import { isGoalCheckpointBookkeepingRecord } from '@qwen-code/qwen-code-core/goals/goal-legacy-projection.js';
+import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
 import type {
   HistoryItem,
   HistoryItemInfo,

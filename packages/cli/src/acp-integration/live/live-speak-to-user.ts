@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { PermissionDecision } from '@qwen-code/qwen-code-core/permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-  type PermissionDecision,
-  type ToolInvocation,
-  type ToolResult,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  ToolInvocation,
+  ToolResult,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 
 export const SPEAK_TO_USER_TOOL_NAME = 'speak_to_user' as const;
 export const MAX_SPEAK_TO_USER_MESSAGE_CHARS = 32_000;

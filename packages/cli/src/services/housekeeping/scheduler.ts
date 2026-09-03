@@ -7,14 +7,12 @@
 import { stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import {
-  Storage,
-  type Config,
-  createDebugLogger,
-  getSubagentsRootDir,
-  resolveOpenAILogDir,
-  sessionIdContext,
-} from '@qwen-code/qwen-code-core';
+import { getSubagentsRootDir } from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { resolveOpenAILogDir } from '@qwen-code/qwen-code-core/utils/openaiLogger.js';
+import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
 import {

@@ -26,10 +26,8 @@
 // reached a verdict" from "blocking verdict" (opt-in via --fail-on).
 
 import type { CommandModule } from 'yargs';
-import {
-  APPROVAL_MODES,
-  isUnusableScriptEntry,
-} from '@qwen-code/qwen-code-core';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { isUnusableScriptEntry } from '@qwen-code/qwen-code-core/services/shellContextEnv.js';
 import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';

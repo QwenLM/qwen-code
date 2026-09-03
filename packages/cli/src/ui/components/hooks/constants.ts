@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { hookEventSupportsMatcher } from '@qwen-code/qwen-code-core/hooks/hookPlanner.js';
 import {
   HooksConfigSource,
   HookEventName,
-  hookEventSupportsMatcher,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookExitCode, HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 

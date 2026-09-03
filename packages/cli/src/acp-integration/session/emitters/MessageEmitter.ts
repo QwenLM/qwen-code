@@ -10,15 +10,15 @@ import {
   createTranscriptMessageUpdate,
   createTranscriptUsageUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
-import {
-  apiActivityTracker,
-  getActiveGoal,
-  projectGoalStateToLegacy,
-  type GoalRecord,
-  type GoalSnapshotV2,
-  type GoalStateCause,
-  type VisionBridgeResult,
-} from '@qwen-code/qwen-code-core';
+import { getActiveGoal } from '@qwen-code/qwen-code-core/goals/activeGoalStore.js';
+import { projectGoalStateToLegacy } from '@qwen-code/qwen-code-core/goals/goal-legacy-projection.js';
+import type {
+  GoalRecord,
+  GoalSnapshotV2,
+  GoalStateCause,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import type { VisionBridgeResult } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { apiActivityTracker } from '@qwen-code/qwen-code-core/telemetry/api-activity-tracker.js';
 import { BaseEmitter } from './base-emitter.js';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';

@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Storage, type Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { RequestError } from '@agentclientprotocol/sdk';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
