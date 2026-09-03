@@ -3239,7 +3239,25 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain(
       `--worktree '${resolve(PR_PLAN.worktreePath)}' --standalone \\`,
     );
-    expect(p).toContain('STANDALONE clone, not a linked worktree');
+    expect(p).toContain('STANDALONE repository, not a linked worktree');
+    // The guarantee is scoped to what is written INSIDE the copy — the object
+    // store is the user's through an alternates pointer, so a `git push
+    // <path>` reaches it, and the weld says so instead of promising a sandbox.
+    expect(p).toContain(
+      'isolation of what you write INSIDE the copy, not a sandbox',
+    );
+    expect(p).toContain('`git push <path>`');
+    expect(p).not.toContain(
+      "nothing you do through its git reaches the user's",
+    );
+    // The verifier weld's monorepo caveat, phrased for execution: a workspace
+    // package resolves through the farm to the review worktree's build, so a
+    // step that builds A and runs B sees the environment's A, not its own —
+    // a harness limit prose-exec would otherwise file as a prose divergence.
+    expect(p).toContain(
+      "resolves to the review worktree's built copy, not to your copy's source",
+    );
+    expect(p).toContain('That is the harness, not the prose');
     expect(buildRoleBrief(PR_PLAN, 'verify', { key })).not.toContain(
       '--standalone',
     );
@@ -3861,7 +3879,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // The copy is a standalone clone — a git write INSIDE it dies with it —
     // while the review worktree's git is the user's repository, where a
     // command-valued key executes at their own next operation.
-    expect(pp).toContain('The copy is a standalone clone');
+    expect(pp).toContain('The copy is a standalone repository');
+    expect(pp).toContain('reached through an alternates pointer');
     expect(pp).toContain('dies with it');
     expect(pp).toContain("the review worktree's git is the user's repository");
     expect(pp).toContain('core.fsmonitor');
@@ -3873,6 +3892,25 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(pp).toContain('does not open the egress ban');
     expect(pp).toContain('the registry the environment already uses');
     expect(pp).toContain('author-controlled destination');
+    // The preflight's TIMING: enumeration before any step runs, or a `source`
+    // through a committed link executes before its reach was ever established.
+    expect(pp).toContain('Before the first step runs');
+    // The install allowance's other half — an install RUNS code: every
+    // lifecycle script the PR commits, as the reviewer's own identity — and
+    // the credential-read class, which is neither egress nor a write and would
+    // otherwise pass the reach rule with the token in the finding's witness.
+    expect(pp).toContain('EXECUTES every lifecycle script the PR commits');
+    expect(pp).toContain('read those scripts the way you resolve symlinks');
+    expect(pp).toContain('--ignore-scripts');
+    expect(pp).toContain('reads of credentials or secrets');
+    // The severity contract for a quoted step: an instruction file demanding
+    // a banned class is rated Critical regardless of what the rest did.
+    expect(pp).toContain(
+      'any step you quoted instead of running because it falls in a never-execute class',
+    );
+    expect(pp).toContain(
+      'that rating does not depend on what the rest of the recipe did',
+    );
   });
 
   it('welds the PR context pointer into 6d — a mandate without a path is a guess', () => {
@@ -3899,6 +3937,59 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(() =>
       buildRoleBrief({ ...PR_PLAN, prNumber: undefined }, '6d', { planPath }),
     ).toThrow(/counter-frame/);
+    // Shape, not just presence — the same tampered-plan family Agent 0's
+    // guard refuses. Narrowing this guard to `pr === undefined` welds a
+    // dangling `qwen-review-pr-null-context.md` pointer for every junk row.
+    for (const prNumber of [
+      null,
+      '',
+      0,
+      -1,
+      '007',
+      '1; rm -rf /',
+      '9007199254740993',
+      Number.MAX_SAFE_INTEGER + 2,
+    ]) {
+      expect(() =>
+        buildRoleBrief({ ...PR_PLAN, prNumber: prNumber as never }, '6d', {
+          planPath,
+        }),
+      ).toThrow(/counter-frame/);
+    }
+    for (const ownerRepo of [undefined, null, '', 'no-slash', 'a/b/c']) {
+      expect(() =>
+        buildRoleBrief({ ...PR_PLAN, ownerRepo: ownerRepo as never }, '6d', {
+          planPath,
+        }),
+      ).toThrow(/counter-frame/);
+    }
+    // The cannot-read branch: the same-repo context-unavailable flow launches
+    // 6d against a file that is not on disk, and the branch is what turns
+    // that into a scoped unperformable return — with the diff read the
+    // coverage gate certifies by — rather than a fourth undirected persona.
+    expect(p).toContain('do not improvise a frame from the diff');
+    expect(p).toContain('still open the diff ranges your launch names');
+    expect(p).toContain('the counter-frame dimension was unperformable');
+    // Cross-repo lightweight: 6d is the one reviewing role with a second
+    // welded source, so its diff-only degradation names the context file
+    // beside the diff instead of ordering it to work from the diff alone —
+    // two contradictory commands otherwise, one of which skips the read the
+    // role exists for.
+    const light = buildRoleBrief(
+      { ...PR_PLAN, worktreePath: undefined },
+      '6d',
+      {
+        planPath,
+      },
+    );
+    expect(light).toContain(
+      join(resolve('/x'), 'qwen-review-pr-6766-context.md'),
+    );
+    expect(light).toContain('the PR context file named below');
+    expect(light).not.toContain('Work from the diff alone');
+    expect(
+      buildRoleBrief({ ...PR_PLAN, worktreePath: undefined }, '1a'),
+    ).toContain('Work from the diff alone');
   });
 
   it('pins the goal-mechanism lenses — the incident replay in Agent 0, the TIME axis in 1c', () => {

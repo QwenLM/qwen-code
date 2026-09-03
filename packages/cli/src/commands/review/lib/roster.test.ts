@@ -145,7 +145,7 @@ describe('requiredAgents — Step 3A', () => {
     ).toContain('6d');
   });
 
-  it('owes the prose-execution audit exactly when the diff touches an instruction file', () => {
+  it('owes the prose-execution audit when the diff touches an instruction file — or when its file list is unknown', () => {
     // No prompt file in the diff: no prose to execute, no agent.
     expect(keys(PR)).not.toContain('prose-exec');
     const withSkill = {
@@ -191,8 +191,9 @@ describe('requiredAgents — Step 3A', () => {
     // No `files[]` at all — a plan an older CLI wrote — is "we do not know",
     // and the answer is the one 1b gives the same input: run the audit (one
     // empty-scope return) rather than let the skew drop the role its only
-    // add site owes. A recorded, EMPTY list is a different statement — a
-    // diff that touched nothing owes nothing.
+    // add site owes. A recorded EMPTY list gets the same fail-safe answer
+    // (`hasDeletions` is pinned the same way): the audit runs and returns a
+    // documented empty scope.
     expect(keys({ ...PR, files: undefined })).toContain('prose-exec');
     expect(keys({ ...PR, files: 'junk' as unknown as never })).toContain(
       'prose-exec',

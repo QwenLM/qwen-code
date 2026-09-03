@@ -1664,11 +1664,20 @@ export function buildRoleBrief(
   // sites (1e) and asserts one is missing files a false Critical, and a false
   // Critical blocks a merge.
   if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
+    // 6d is the one reviewing role with a second welded source — the PR
+    // context file its two extractions live in — so its degradation names
+    // both: "work from the diff alone" beside a mandate to read that file is
+    // two contradictory commands, and an agent obeying the first degrades
+    // into the undirected persona the role exists to counter.
     parts.push(
       '',
-      '**You have the diff, and nothing else.** This is a cross-repo review: there is no ' +
-        'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
-        'Work from the diff alone.',
+      role === '6d'
+        ? '**You have the diff and the PR context file named below, and nothing else.** ' +
+            'This is a cross-repo review: there is no local checkout to read enclosing ' +
+            'functions from, and nothing to `grep_search`. Work from those two alone.'
+        : '**You have the diff, and nothing else.** This is a cross-repo review: there is no ' +
+            'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
+            'Work from the diff alone.',
     );
     // 1e's forwarding-completeness walk greps the wrapper's call sites, and a
     // caller lives outside the diff exactly like 1b's replacement or 1c's
@@ -1803,13 +1812,16 @@ export function buildRoleBrief(
         '**Your disposable copy — where every write-producing recipe step runs.** ' +
           'A recipe step that must build, install, or generate runs here, never in ' +
           'the review worktree the other agents are reading. It is a STANDALONE ' +
-          'clone, not a linked worktree: its `.git` is its own, sharing only the ' +
-          'object store, so a `git config`, hook or ref written inside it dies ' +
-          "with it and nothing you do through its git reaches the user's " +
-          'repository. Every call rebuilds it from the commit under review — ' +
-          "what you wrote last time is gone — with the review worktree's " +
-          "`node_modules` linked in so the repository's tooling starts without " +
-          'an install.',
+          'repository, not a linked worktree: its `.git` is its own, with the ' +
+          'object store reached through an alternates pointer, so a `git config`, ' +
+          'hook or ref written inside it stays inside it and dies with it. That ' +
+          'is isolation of what you write INSIDE the copy, not a sandbox: git ' +
+          'aimed at any other path (`git -C`, `git push <path>`) or at your ' +
+          'global config is outside it — and every such step is in a ' +
+          'never-execute class of your brief. Every call rebuilds it from the ' +
+          'commit under review — what you wrote last time is gone — with the ' +
+          "review worktree's `node_modules` linked in so the repository's " +
+          'tooling starts without an install.',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} --standalone \\`,
@@ -1827,6 +1839,16 @@ export function buildRoleBrief(
           'never write THROUGH a link (`npm rebuild`, a package writing into its ' +
           'own directory) — that lands in the shared tree every other agent is ' +
           'reading.',
+        '',
+        '**One limit of the copy, so you do not spend a run rediscovering it:** ' +
+          'its `node_modules` is linked from the review worktree, and in a ' +
+          'monorepo that means a workspace package (`@scope/pkg`) resolves to the ' +
+          "review worktree's built copy, not to your copy's source. A recipe step " +
+          'that builds or modifies package A and then runs something in package B ' +
+          "executes B's import of A against the review worktree's build, not the " +
+          'one the step just produced. That is the harness, not the prose: ' +
+          'attribute such a failure (or a false success) to the environment and ' +
+          'say so, rather than filing it as a divergence.',
       );
     }
   }
@@ -1936,12 +1958,19 @@ export function buildRoleBrief(
   if (role === '6d') {
     const pr = report.prNumber;
     const repo = report.ownerRepo;
-    // Shape, not just presence: `isPositivePrNumber`'s doc names null/0/''/
-    // junk as "no PR", and welding one of those produces a dangling
-    // `qwen-review-pr-null-context.md` pointer that masks a misconfigured
-    // plan as a genuine pr-context failure (role 0 re-validates the same
-    // fields for the same reason).
-    if (!isPositivePrNumber(pr) || typeof repo !== 'string') {
+    // Shape, not just presence — and role 0's shape, not the roster's:
+    // `isPositivePrNumber` admits a zero-padded `"007"` and an integer past
+    // the safe range, and welding either produces a context pointer no
+    // pr-context run ever writes, which masks a misconfigured plan as a
+    // genuine pr-context failure. The plan is a file on disk, so it is
+    // re-validated here exactly as role 0 re-validates it above.
+    if (
+      !isPositivePrNumber(pr) ||
+      !/^[1-9]\d*$/.test(String(pr)) ||
+      Number(pr) > Number.MAX_SAFE_INTEGER ||
+      typeof repo !== 'string' ||
+      !isOwnerRepo(repo)
+    ) {
       throw new Error(
         'agent-prompt: --role 6d needs a plan with `prNumber` and `ownerRepo` ' +
           '(the roster only owes the counter-frame audit on PR reviews — ' +

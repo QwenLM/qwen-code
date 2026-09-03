@@ -2677,10 +2677,12 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // written: the up-front removal of a STALE file already ran, so a failure
   // MID-WRITE of this one (ENOSPC creates the file then throws) would leave
   // a truncated-but-readable context at `out` — the exact shape the
-  // missing-context branches the launch flow keys on cannot see.
+  // missing-context branches the launch flow keys on cannot see. The temp
+  // write sits inside the same try, so a failure THERE removes its own
+  // debris too, rather than leaving a `.tmp` beside a missing context.
   const tmp = `${out}.${process.pid}.tmp`;
-  writeFileSync(tmp, md, 'utf8');
   try {
+    writeFileSync(tmp, md, 'utf8');
     renameSync(tmp, out);
   } catch (err) {
     try {
