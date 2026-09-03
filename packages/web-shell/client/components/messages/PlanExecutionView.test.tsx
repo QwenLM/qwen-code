@@ -888,6 +888,14 @@ describe('PlanExecutionView', () => {
       (match) => Number(match[1]),
     );
     expect(Math.max(...routedYs)).toBeGreaterThan(200);
+    // ...and arrives at the target's own row, not merely at its column. The
+    // `release` node sits at y 10 with height 80 inside a viewport whose
+    // origin is (100, 50), so its vertical centre is 50. Without this, a tail
+    // drawn from the return lane's `routeY` instead of the edge's `endY`
+    // lands ~170px below the node while the column and clearance assertions
+    // above both still pass.
+    expect(spanningEdge).toMatch(/ 50 H 876$/);
+    expect(routedYs).toContain(50);
 
     act(() => root.unmount());
     container.remove();

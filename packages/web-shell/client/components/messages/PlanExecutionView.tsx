@@ -1158,7 +1158,12 @@ export function PlanExecutionView({
           ref={hasDependencies ? graphRef : undefined}
           style={
             hasDependencies
-              ? ({ '--plan-edge-lanes': graph.lanes } as CSSProperties)
+              ? ({
+                  '--plan-edge-lanes': graph.lanes,
+                  // Publish the lane pitch so .dagCanvas reserves bottom
+                  // padding from the same constant that places the lanes.
+                  '--plan-edge-lane-height': `${EDGE_LANE_HEIGHT}px`,
+                } as CSSProperties)
               : undefined
           }
         >

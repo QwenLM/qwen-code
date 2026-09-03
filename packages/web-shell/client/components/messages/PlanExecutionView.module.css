@@ -137,6 +137,7 @@
 
 .dagCanvas {
   --plan-edge-lanes: 0;
+  --plan-edge-lane-height: 9px;
   position: relative;
   display: flex;
   align-items: center;
@@ -144,7 +145,11 @@
   gap: 64px;
   width: max-content;
   min-width: 100%;
-  padding: 8px 10px calc(28px + var(--plan-edge-lanes) * 9px);
+  /* Both operands come from TS (PlanExecutionView sets --plan-edge-lanes and
+     --plan-edge-lane-height from EDGE_LANE_HEIGHT) so the reservation cannot
+     drift from the lane placement it is reserving for. */
+  padding: 8px 10px
+    calc(28px + var(--plan-edge-lanes) * var(--plan-edge-lane-height, 9px));
 }
 
 .dagEdges {
@@ -218,8 +223,21 @@
 .dagCanvas .layer {
   position: relative;
   z-index: 1;
-  flex: 0 0 240px;
+  flex: 0 0 var(--plan-layer-width, 240px);
   min-width: 0;
+}
+
+/* Three 240px lanes plus two 64px gutters are ~850px, so on a phone the graph
+   became a canvas that scrolls in both axes at once — the horizontal scroll
+   hiding the layer the vertical scroll is looking for. Narrowing the lane and
+   the gutter keeps the whole topology on the horizontal axis the graph
+   actually needs, and leaves the layer semantics (and the measured edge
+   routing, which reads real rects) untouched. */
+@media (max-width: 720px) {
+  .dagCanvas {
+    --plan-layer-width: 168px;
+    gap: 32px;
+  }
 }
 
 /* Status drives one accent, and the accent drives every edge treatment on the
