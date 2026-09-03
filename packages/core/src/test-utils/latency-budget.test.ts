@@ -42,12 +42,16 @@ describe('expectWithinLatencyBudget', () => {
   });
 
   it('keeps asserting on the pool when the duration is the property', () => {
-    // Three of the quarantined cases have no other expect() — a complexity
-    // bound or a no-hang close guarantee is the whole test. Skipping there
-    // would leave them running and checking nothing, so they keep a relaxed
-    // bound:
-    // wide enough for a 5x-contended host, far too tight for a quadratic
-    // regression.
+    // 19 of the 34 quarantined sites keep a relaxed bound instead of
+    // skipping. The test is not "has no other expect()" — that reading was
+    // too narrow, and it left complexity guards asserting only things a
+    // quadratic regression still satisfies (a 1.5s busy-spin mutant in
+    // budgetGapDisclosures passed every surviving assertion). The test is
+    // whether the duration *is* the property: a complexity or ReDoS bound, a
+    // close that must not hang. Those keep a bound wide enough for a
+    // 5x-contended host and far too tight for a quadratic regression — 20x
+    // where the lane allows it, 10x or 5x where a shorter per-test timeout
+    // would otherwise decide the outcome before the assertion does.
     process.env['QWEN_SKIP_LATENCY_BUDGETS'] = '1';
     expect(() =>
       expectWithinLatencyBudget(1500, 100, { poolMultiplier: 20 }),
