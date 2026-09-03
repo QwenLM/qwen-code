@@ -336,6 +336,54 @@ describe('goal reducer', () => {
     });
   });
 
+  it('clears the pause reason when a paused goal resumes', () => {
+    const paused = reduceGoalControl(goalRecord(), {
+      request: {
+        action: 'pause',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      },
+      now: 150,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-150' },
+    });
+    expect(paused?.lastReason).toBe(GOAL_PAUSE_REASON_USER_INTERRUPT);
+
+    const resumed = reduceGoalControl(paused, {
+      request: {
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-200' },
+    });
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBeUndefined();
+  });
+
+  it("keeps a blocked goal's reason when it resumes", () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'blocked', lastReason: 'Waiting on a credential.' }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBe('Waiting on a credential.');
+  });
+
   it('rejects resuming an already-active goal', () => {
     expect(() =>
       reduceGoalControl(goalRecord(), {
