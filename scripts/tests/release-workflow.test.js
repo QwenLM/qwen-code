@@ -685,6 +685,15 @@ describe('release workflow', () => {
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
       ],
+      // Node prints coded internal errors as `Name [ERR_CODE]: message`, with
+      // the bracketed code between the class name and the colon, so a matcher
+      // anchored straight to `Error:` never sees the line.
+      [
+        'transport timeout beside a coded exception header',
+        'Error: [vitest-worker]: Timeout calling "x"\nAssertionError [ERR_ASSERTION]: Expected values to be strictly equal\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
       // The matcher is whole-file while the proof it demands is per-run, so a
       // passing tally from one workspace must not cover a later crash.
       [
