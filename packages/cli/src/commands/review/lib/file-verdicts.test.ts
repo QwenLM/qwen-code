@@ -28,6 +28,7 @@ import {
   changedPairs,
   readFileVerdicts,
 } from './file-verdicts.js';
+import { UNHASHABLE } from './local-anchor.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
@@ -183,6 +184,23 @@ describe('blobsAt / blobPairs', () => {
     );
   });
 
+  it('records a file literally named __proto__ at capture, not only on compare', () => {
+    // On a plain object the producer's `out['__proto__'] = …` is a silent
+    // no-op and the path would read absent at both refs — a pair that never
+    // transfers, so the failure is over-review, but the record would be
+    // wrong. Null-prototype maps on the producer side are what this pins.
+    write('__proto__', 'A\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'proto');
+    const sha = git('rev-parse', 'HEAD');
+    expect(blobsAt(repo, sha, ['__proto__'])!['__proto__']).toMatch(
+      /^100644 [0-9a-f]{40,64}$/,
+    );
+    expect(blobPairs(repo, sha, sha, ['__proto__'])!['__proto__'].head).toMatch(
+      /^100644 [0-9a-f]{40,64}$/,
+    );
+  });
+
   it('a batch past 200 paths still maps every file', () => {
     const many: string[] = [];
     for (let i = 0; i < 201; i++) {
@@ -289,6 +307,20 @@ describe('changedPairs', () => {
     expect(changedPairs(rec, cur, ['gone.ts'])).toEqual([]);
   });
 
+  it('an attribute path present on only one side retires every verdict', () => {
+    // A plan-set shift between rounds: the current record carries a
+    // `dir/.gitattributes` the recorded one never saw. Nothing about `a.ts`
+    // moved, and it must still re-enter — an attribute change no round read.
+    const pair = { base: '100644 b', head: '100644 h', attrs: 'x' };
+    const rec = { 'a.ts': pair };
+    const cur = {
+      'a.ts': pair,
+      'dir/.gitattributes': { base: NO_BLOB, head: '100644 g' },
+    };
+    expect(changedPairs(rec, cur, ['a.ts'])).toEqual(['a.ts']);
+    expect(changedPairs(cur, rec, ['a.ts'])).toEqual(['a.ts']);
+  });
+
   it('a path named __proto__ compares as an ordinary key', () => {
     const rec = JSON.parse(
       '{"__proto__": {"base": "b1", "head": "h1"}}',
@@ -352,5 +384,39 @@ describe('the attrs component survives the cache, and fails closed', () => {
       'x.txt': { base: 'b', head: 'h', attrs: 'unanswered' },
     };
     expect(changedPairs(unanswered, unanswered, ['x.txt'])).toEqual(['x.txt']);
+  });
+
+  it('never transfers a verdict over a rendering the probe called UNHASHABLE', () => {
+    // `renderingAttributes` answers UNHASHABLE for a `diff` attribute spelled
+    // `set`/`unset` — `check-attr` reports the state and a driver so named
+    // byte-identically, and they render differently — and `blobPairs`
+    // records the answer verbatim. It is a plain constant, so left to the
+    // string comparison it equalled itself: a repo with `data.bin diff=unset`
+    // promoted a clean verdict, the machine-local config then gained
+    // `diff.unset.binary`, and after a rebase the verdict transferred over a
+    // "Binary files … differ" no round ever read. `local-anchor`'s standard —
+    // never equal, not even to itself — applies here too.
+    const unhashable = {
+      'data.bin': { base: 'b', head: 'h', attrs: UNHASHABLE },
+    };
+    expect(changedPairs(unhashable, unhashable, ['data.bin'])).toEqual([
+      'data.bin',
+    ]);
+
+    // …and the real answer, through git: identical trees, identical
+    // records, still changed.
+    write('data.bin', 'payload\n');
+    write('.gitattributes', 'data.bin diff=unset\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    const recorded = blobPairs(repo, base, base, ['data.bin'])!;
+    expect(recorded['data.bin'].attrs).toBe(UNHASHABLE);
+    const roundTripped = readFileVerdicts(
+      JSON.parse(JSON.stringify(recorded)),
+    )!;
+    expect(changedPairs(roundTripped, recorded, ['data.bin'])).toEqual([
+      'data.bin',
+    ]);
   });
 });

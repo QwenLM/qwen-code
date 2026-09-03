@@ -30,7 +30,7 @@
 // keeps rebase survival — the same graceful degradation the cache has always
 // had.
 
-import { renderingAttributes } from './local-anchor.js';
+import { renderingAttributes, UNHASHABLE } from './local-anchor.js';
 import { gitRaw } from './git.js';
 import { LITERAL_PATHSPECS } from './diff-flags.js';
 
@@ -339,9 +339,17 @@ export function changedPairs(
     // recorded. A record written before the field has none on the recorded
     // side, so it reads as changed once and is re-recorded — the safe
     // direction.
+    //
+    // `UNHASHABLE` is the probe's OWN never-equal answer — a `diff` attribute
+    // spelled `set`/`unset`, an undecodable driver name, a `diff.unspecified`
+    // driver configured — recorded verbatim by `blobPairs`, and a plain
+    // constant like the sentinel above: `local-anchor`'s standard is that it
+    // never equals, not even itself, so it is refused here the same way.
     if (
       rec.attrs === UNANSWERED_ATTRS ||
       cur.attrs === UNANSWERED_ATTRS ||
+      rec.attrs === UNHASHABLE ||
+      cur.attrs === UNHASHABLE ||
       rec.attrs !== cur.attrs
     ) {
       return true;
