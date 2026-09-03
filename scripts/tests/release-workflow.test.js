@@ -694,6 +694,28 @@ describe('release workflow', () => {
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
       ],
+      // Each of these pins one constituent of the header matcher: the
+      // `Exception` alternative, the digits in the identifier class, and the
+      // `$` it carries. Without them a later narrowing reopens the hole with
+      // the whole suite still green.
+      [
+        'transport timeout beside an Exception-class header',
+        'Error: [vitest-worker]: Timeout calling "x"\nDOMException: operation aborted\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout beside a digit-bearing class header',
+        'Error: [vitest-worker]: Timeout calling "x"\nLargeNonUtf8TextError: range too large\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout beside a $-bearing class header',
+        'Error: [vitest-worker]: Timeout calling "x"\nFoo$Error: minified class crashed\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
       // The matcher is whole-file while the proof it demands is per-run, so a
       // passing tally from one workspace must not cover a later crash.
       [
