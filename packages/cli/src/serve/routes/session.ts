@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
@@ -46,7 +47,11 @@ import {
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  extractErrorCode,
+  extractErrorMessage,
+  parseSessionSource,
+} from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -448,6 +453,31 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
+}
+
+/**
+ * Renders a prompt-turn rejection for the daemon log. Non-Error rejections
+ * (bare JSON-RPC error objects forwarded by the bridge) must not degrade to
+ * `[object Object]` — that hid the failure cause in production incidents
+ * (#10710), so extract the structured message/code instead.
+ */
+export function describePromptTurnFailure(err: unknown): string {
+  const detail = extractErrorMessage(err);
+  if (err instanceof Error) {
+    return `[${err.name}] ${detail}`;
+  }
+  const code = extractErrorCode(err);
+  // `extractErrorMessage` terminates in `String(err)`, which renders a plain
+  // object as `[object Object]`. Fall back to `inspect` for those: unlike
+  // `JSON.stringify` it never throws, so circular and non-serializable
+  // rejections stay readable instead of degrading again.
+  const rendered =
+    typeof err === 'object' &&
+    err !== null &&
+    (detail === '' || detail === String(err))
+      ? inspect(err, { depth: 2, breakLength: Infinity })
+      : detail;
+  return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
 function parseTranscriptLimitQuery(
@@ -2451,7 +2481,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -4724,6 +4754,32 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/saved-workflows/:name',
+    withOwnerReadSession(
+      'GET /session/:id/saved-workflows/:name',
+      async (req, res, sessionId, runtime) => {
+        const name = req.params['name'];
+        if (!name) {
+          res.status(400).json({
+            error: '`name` route parameter is required',
+          });
+          return;
+        }
+        // An untrusted workspace fails closed with the same envelope the
+        // child returns for an unknown name, mirroring the supported-commands
+        // redaction rather than leaking a distinguishable error.
+        res
+          .status(200)
+          .json(
+            runtime.trusted
+              ? await runtime.bridge.getSessionSavedWorkflow(sessionId, name)
+              : { v: 1, sessionId, name, workflow: null },
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/lsp',
     withOwnerReadSession(
       'GET /session/:id/lsp',
@@ -4731,6 +4787,18 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(await runtime.bridge.getSessionLspStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/resources',
+    withOwnerReadSession(
+      'GET /session/:id/resources',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionResourcesStatus(sessionId));
       },
     ),
   );
@@ -5397,9 +5465,8 @@ export function registerSessionRoutes(
             },
             (err) => {
               if (daemonLog) {
-                const errName = err instanceof Error ? err.name : undefined;
                 daemonLog.warn(
-                  `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+                  `prompt turn failed: ${describePromptTurnFailure(err)}`,
                   { sessionId, promptId, clientId },
                 );
               }
@@ -5932,9 +5999,15 @@ export function registerSessionRoutes(
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
+                { ...pr, source: 'create' },
               )
             ).map(toSessionPrInfo);
+            // Reconcile the live entry to the authoritative persisted
+            // list: the bridge merge capped positionally while the
+            // sidecar caps by provenance authority — past the cap the
+            // two stores evict different entries, and every later event
+            // or rename response would serve the diverged list.
+            runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6095,10 +6168,13 @@ export function registerSessionRoutes(
                       sessionId,
                       'active',
                     ),
-                    pr,
+                    { ...pr, source: 'create' },
                   )
                 ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
+                // Reconcile the live entry to the authoritative persisted
+                // list (see the primary metadata route).
+                runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
@@ -6120,7 +6196,7 @@ export function registerSessionRoutes(
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
+                  { ...pr, source: 'create' },
                 );
                 assertRuntimeGenerationOpen?.();
                 effective.prs = persisted.map(toSessionPrInfo);

@@ -44,6 +44,8 @@ import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
+  ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
@@ -215,6 +217,15 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /**
+   * Only present when the spawn carried a `modelServiceId`. `true` iff the
+   * model was actually applied via `unstable_setSessionModel`; `false` means
+   * the apply failed (surfaced via `model_switch_failed`) and the session is
+   * running on the agent's default model. Lets create callers distinguish a
+   * confirmed selection from a silent fallback instead of assuming the
+   * requested model is live.
+   */
+  modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
@@ -711,6 +722,7 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */
@@ -802,6 +814,7 @@ export interface SessionPrIssueInfo {
 
 export interface SessionMetadataUpdate {
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Issues are daemon-derived, never client-bound — the input omits them. */
   pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */
@@ -1598,7 +1611,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Replace the in-memory PR binding list of a live session with the
-   * persisted sidecar contents after a rewrite that can evict bindings
+   * authoritative persisted one after a rewrite that can evict bindings
    * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
    * entry that already holds bindings, so the summary merge cannot
    * resurrect evicted numbers from a stale entry. No-op when the entry is
@@ -1814,6 +1827,21 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /** Read sanitized Skill and MCP snapshots for a live session. */
+  getSessionResourcesStatus(
+    sessionId: string,
+  ): Promise<ServeSessionResourcesStatus>;
+
+  /**
+   * Read one saved workflow definition visible to a live session. The
+   * envelope's `workflow` is null when the name is unknown or Workflow
+   * controls are unavailable.
+   */
+  getSessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+  ): Promise<ServeSessionSavedWorkflowStatus>;
 
   /**
    * Read a page of persisted transcript replay events through the ACP child.

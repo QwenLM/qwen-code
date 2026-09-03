@@ -17,6 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   MAX_FRAME_BYTES,
+  buildAuthLine,
   buildUserFrame,
   encodePeerFrame,
   type PeerFrame,
@@ -26,7 +27,12 @@ import {
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
-import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
+import {
+  startPeerInbox,
+  type PeerConnectionAuth,
+  type PeerInbox,
+} from './uds-inbox.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
@@ -281,6 +287,144 @@ describe.skipIf(isWindows)('framing', () => {
   });
 });
 
+describe.skipIf(isWindows)('inbox auth', () => {
+  const TOKEN = 'a'.repeat(64);
+
+  async function listenWithToken(): Promise<PeerInbox> {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'auth.sock'),
+      requiredToken: TOKEN,
+      onFrame: (frame) => received.push(frame),
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    return started;
+  }
+
+  it('delivers a frame preceded by the right token', async () => {
+    const started = await listenWithToken();
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'hi' }), {
+      authToken: TOKEN,
+    });
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('drops the connection on a wrong token, frames unread', async () => {
+    const started = await listenWithToken();
+    await writeRaw(started.socketPath, [
+      buildAuthLine('b'.repeat(64)) +
+        encodePeerFrame(buildUserFrame({ content: 'stolen' })),
+    ]).catch(() => {
+      // The server may reset the connection mid-write.
+    });
+    await settle();
+    expect(received).toHaveLength(0);
+  });
+
+  it('drops a connection whose first line is a frame, not an auth line', async () => {
+    const started = await listenWithToken();
+    await writeRaw(started.socketPath, [
+      encodePeerFrame(buildUserFrame({ content: 'unauthenticated' })) +
+        buildAuthLine(TOKEN) +
+        encodePeerFrame(buildUserFrame({ content: 'late auth' })),
+    ]).catch(() => {});
+    await settle();
+    // Neither the pre-auth frame nor anything after the destroy arrives.
+    expect(received).toHaveLength(0);
+  });
+
+  it('reads several frames after one auth line on the same connection', async () => {
+    const started = await listenWithToken();
+    await writeRaw(started.socketPath, [
+      buildAuthLine(TOKEN) +
+        encodePeerFrame(buildUserFrame({ content: 'one' })) +
+        encodePeerFrame(buildUserFrame({ content: 'two' })),
+    ]);
+    await settle();
+    expect(
+      received.map(
+        (f) => (f as { message: { content: string } }).message.content,
+      ),
+    ).toEqual(['one', 'two']);
+  });
+
+  it('drops a wrong-LENGTH token cleanly instead of throwing', async () => {
+    // timingSafeEqual throws on differing lengths, so the byte-length
+    // short-circuit in tokenMatches is the only thing keeping a truncated
+    // QWEN_CODE_MESSAGING_TOKEN a clean fail-closed refusal rather than an
+    // exception inside the line reader.
+    const started = await listenWithToken();
+    await writeRaw(started.socketPath, [
+      buildAuthLine('a'.repeat(32)) +
+        encodePeerFrame(buildUserFrame({ content: 'short token' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(0);
+    // The inbox is still serving: the refusal was per-connection.
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }), {
+      authToken: TOKEN,
+    });
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('does not let one connection refusal brick the inbox', async () => {
+    // Were `refused` hoisted out of the per-connection closure, a single
+    // unauthenticated connection — a pre-token build's send, which is only
+    // meant to be dropped — would silently kill the inbox for the rest of
+    // the session.
+    const started = await listenWithToken();
+    await writeRaw(started.socketPath, [
+      encodePeerFrame(buildUserFrame({ content: 'unauthenticated' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(0);
+
+    await sendPeerFrame(
+      started.socketPath,
+      buildUserFrame({ content: 'after the refusal' }),
+      { authToken: TOKEN },
+    );
+    await settle();
+    expect(received).toMatchObject([
+      { message: { content: 'after the refusal' } },
+    ]);
+  });
+
+  it('does not let one connection admission admit the next', async () => {
+    // The other leak direction: a hoisted `authed` would make the first
+    // legitimate sender open the inbox to every later connection, token or
+    // not.
+    const started = await listenWithToken();
+    await sendPeerFrame(
+      started.socketPath,
+      buildUserFrame({ content: 'authenticated' }),
+      { authToken: TOKEN },
+    );
+    await settle();
+    expect(received).toHaveLength(1);
+
+    await writeRaw(started.socketPath, [
+      encodePeerFrame(buildUserFrame({ content: 'riding on the last auth' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('an inbox without a required token skips a leading auth line', async () => {
+    // The old-receiver case: a sender always leads with the auth line
+    // when it has a token, and a pre-token inbox must read past it.
+    const started = await listen();
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'hi' }), {
+      authToken: TOKEN,
+    });
+    await settle();
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ message: { content: 'hi' } });
+  });
+});
+
 describe.skipIf(isWindows)('client errors', () => {
   it('reports ENOENT for a socket that does not exist', async () => {
     const missing = path.join(tmpDir, 'nope.sock');
@@ -338,9 +482,11 @@ describe.skipIf(isWindows)('client errors', () => {
     try {
       const startedAt = Date.now();
       await expect(
-        sendPeerFrame(dribblePath, buildUserFrame({ content: 'hi' }), 500),
+        sendPeerFrame(dribblePath, buildUserFrame({ content: 'hi' }), {
+          timeoutMs: 500,
+        }),
       ).rejects.toMatchObject({ name: 'PeerSendError', code: 'ETIMEDOUT' });
-      expect(Date.now() - startedAt).toBeLessThan(3000);
+      expectWithinLatencyBudget(Date.now() - startedAt, 3000);
     } finally {
       for (const conn of conns) conn.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -363,20 +509,105 @@ describe.skipIf(isWindows)('client errors', () => {
       const pending: Array<Promise<void>> = [];
       for (let i = 0; i < MAX_CONCURRENT_SENDS; i += 1) {
         pending.push(
-          sendPeerFrame(
-            stallPath,
-            buildUserFrame({ content: 'hi' }),
-            1000,
-          ).catch(() => {}),
+          sendPeerFrame(stallPath, buildUserFrame({ content: 'hi' }), {
+            timeoutMs: 1000,
+          }).catch(() => {}),
         );
       }
       await expect(
-        sendPeerFrame(stallPath, buildUserFrame({ content: 'hi' }), 1000),
+        sendPeerFrame(stallPath, buildUserFrame({ content: 'hi' }), {
+          timeoutMs: 1000,
+        }),
       ).rejects.toMatchObject({ name: 'PeerSendError', code: 'EBUSY' });
       await Promise.all(pending);
     } finally {
       for (const conn of conns) conn.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe.skipIf(isWindows)('child token', () => {
+  const PEER = 'a'.repeat(64);
+  const CHILD = 'c'.repeat(64);
+  let admitted: Array<PeerConnectionAuth | undefined>;
+
+  beforeEach(() => {
+    admitted = [];
+  });
+
+  async function listenWithBoth(
+    tokens: { requiredToken?: string; childToken?: string } = {
+      requiredToken: PEER,
+      childToken: CHILD,
+    },
+  ): Promise<PeerInbox> {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'child.sock'),
+      ...tokens,
+      onFrame: (frame, auth) => {
+        received.push(frame);
+        admitted.push(auth);
+      },
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    return started;
+  }
+
+  it('admits either token and reports which one it was', async () => {
+    const started = await listenWithBoth();
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'p' }), {
+      authToken: PEER,
+    });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'c' }), {
+      authToken: CHILD,
+    });
+    await settle();
+    expect(
+      received.map(
+        (f) => (f as { message: { content: string } }).message.content,
+      ),
+    ).toEqual(['p', 'c']);
+    expect(admitted).toEqual(['peer', 'child']);
+  });
+
+  it('holds the verdict for every frame on the connection', async () => {
+    // The kind is decided once per connection, at the auth line, and
+    // cannot be re-negotiated by a later line.
+    const started = await listenWithBoth();
+    await writeRaw(started.socketPath, [
+      buildAuthLine(CHILD) +
+        encodePeerFrame(buildUserFrame({ content: 'one' })) +
+        buildAuthLine(PEER) +
+        encodePeerFrame(buildUserFrame({ content: 'two' })),
+    ]);
+    await settle();
+    // The second auth line is an unparseable frame, skipped like any other.
+    expect(received).toHaveLength(2);
+    expect(admitted).toEqual(['child', 'child']);
+  });
+
+  it('still refuses a token that is neither', async () => {
+    const started = await listenWithBoth();
+    await writeRaw(started.socketPath, [
+      buildAuthLine('b'.repeat(64)) +
+        encodePeerFrame(buildUserFrame({ content: 'neither' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(0);
+  });
+
+  it('means nothing without a required token', async () => {
+    // A child token on an open inbox would be a third state — "admitted,
+    // but not by a token we asked for" — with no consumer. It is inert.
+    const started = await listenWithBoth({ childToken: CHILD });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'x' }), {
+      authToken: CHILD,
+    });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'y' }));
+    await settle();
+    expect(received).toHaveLength(2);
+    expect(admitted).toEqual([undefined, undefined]);
   });
 });

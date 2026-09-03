@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
@@ -113,6 +114,12 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
 }));
 
 const mockSlashCommands: SlashCommand[] = [
+  {
+    name: 'quit',
+    kind: CommandKind.BUILT_IN,
+    description: 'Quit',
+    action: vi.fn(),
+  },
   {
     name: 'clear',
     kind: CommandKind.BUILT_IN,
@@ -2037,6 +2044,53 @@ describe('InputPrompt', () => {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
     });
+    unmount();
+  });
+
+  it('should submit a live exact slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'model', value: 'model' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/quit');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
+      deferUntilIdle: false,
+      submittedPrompt: '/quit',
+    });
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should not submit a live partial slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'clear', value: 'clear' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/cle');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     unmount();
   });
 

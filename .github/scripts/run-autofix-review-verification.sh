@@ -1528,13 +1528,16 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
         (($x.pull_request_review_id // null) as $review
           | $review != null
           and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def leading_critical:
+        gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+        | startswith("**[Critical]**");
       def critical($c):
-        (($c.body // "") | contains("**[Critical]**"))
+        (($c.body // "") | leading_critical)
         or (($c.in_reply_to_id // null) as $root
           | $root != null
           and any($comments[];
             .id == $root
-            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+            and (((.body // "") | leading_critical) or cr_attached(.))))
         or cr_attached($c);
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
     "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
@@ -1555,13 +1558,16 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
           (($x.pull_request_review_id // null) as $review
             | $review != null
             and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def leading_critical:
+          gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+          | startswith("**[Critical]**");
         def critical($c):
-          (($c.body // "") | contains("**[Critical]**"))
+          (($c.body // "") | leading_critical)
           or (($c.in_reply_to_id // null) as $root
             | $root != null
             and any($comments[];
               .id == $root
-              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+              and (((.body // "") | leading_critical) or cr_attached(.))))
           or cr_attached($c);
       [ $comments[]
         | select(.id as $id | $resolved | index($id) != null)

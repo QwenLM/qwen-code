@@ -63,7 +63,12 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonMcpConfigMutationResult,
+  DaemonMcpConfigScope,
+  DaemonWorkspaceRuntimeStatus,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -427,9 +432,11 @@ export interface DaemonWorkspaceActions {
   channelPairing: DaemonChannelPairingActions;
 
   // MCP
+  ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
+  loadMcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus>;
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
-  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpReloadResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -443,6 +450,20 @@ export interface DaemonWorkspaceActions {
     request: DaemonRuntimeMcpAddRequest,
   ): Promise<DaemonRuntimeMcpAddResult>;
   removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
+  setMcpServer(
+    name: string,
+    scope: DaemonMcpConfigScope,
+    config: Record<string, unknown>,
+  ): Promise<DaemonMcpConfigMutationResult>;
+  removeMcpServer(
+    name: string,
+    scope: DaemonMcpConfigScope,
+  ): Promise<DaemonMcpConfigMutationResult>;
+  setMcpServerEnabled(
+    name: string,
+    scope: DaemonMcpConfigScope,
+    enabled: boolean,
+  ): Promise<DaemonMcpConfigMutationResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(

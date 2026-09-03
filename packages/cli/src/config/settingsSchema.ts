@@ -438,13 +438,14 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Output Style',
         category: 'General',
-        // Read once in `loadCliConfig` and frozen into `Config`; nothing
-        // applies a mid-session change, so the restart hint is the honest
-        // answer. Same as `general.outputLanguage`.
+        // Generic settings edits do not rebuild the running system instruction;
+        // `/output-style` owns the separate live-update path.
         requiresRestart: true,
         default: undefined as string | undefined,
         description:
-          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style.',
+          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',
+        // The style list will grow user/project-defined entries; the dedicated
+        // /output-style picker owns selection rather than a static enum here.
         showInDialog: false,
       },
       vimMode: {
@@ -3366,6 +3367,22 @@ const SETTINGS_SCHEMA = {
           { value: 'refuse', label: 'Refuse' },
         ],
       },
+      crossSessionHeldExpiry: {
+        type: 'enum',
+        label: 'Held Message Expiry',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: '5m' as string,
+        description:
+          'How long a message held for your review waits before it expires and the sending session is told nobody answered. "never" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival.',
+        showInDialog: false,
+        options: [
+          { value: '1m', label: '1 minute' },
+          { value: '5m', label: '5 minutes' },
+          { value: '10m', label: '10 minutes' },
+          { value: 'never', label: 'Never' },
+        ],
+      },
       modelGrades: {
         type: 'object',
         label: 'Model Grades',
@@ -3840,7 +3857,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.',
+          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.',
         showInDialog: true,
       },
       cron: {

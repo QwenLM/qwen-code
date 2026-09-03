@@ -39,8 +39,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
-import type { Config, Logger } from '@qwen-code/qwen-code-core';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -51,15 +50,26 @@ import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
+import type { WaitingCallInfo } from './live-session.js';
+import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  normalizeQuitSubmission,
+  OpenTuiSlashGateway,
+} from './slash-gateway.js';
 import {
   OpenTuiSlashDispatcher,
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import {
+  OpenTuiActionConfirmation,
+  OpenTuiShellConfirmation,
+  OpenTuiToolConfirmation,
+} from './dialogs-confirm.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -80,11 +90,13 @@ export interface OpenTuiAppProps {
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
    * argument: turning them into image parts (ink: attachments) belongs to the
-   * entry layer, so the shell must not flatten them into the prompt text.
+   * entry layer, so the shell must not flatten them into the prompt text. A
+   * `submit_prompt` outcome's per-turn options travel in the third argument.
    */
   onSubmitPrompt?: (
     content: PartListUnion,
     imagePaths?: readonly string[],
+    options?: OpenTuiSubmitOptions,
   ) => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
@@ -106,7 +118,47 @@ export interface OpenTuiAppProps {
    */
   updateNotice?: string | null;
   availableTerminalHeight?: number;
+
+  // --- Batch 6: live-turn + confirmation wiring ---------------------------
+  /** A live model turn is in flight (composer Esc interrupts, footer spins). */
+  streaming?: boolean;
+  /** Aborts the in-flight turn (Esc while streaming). */
+  onInterrupt?: () => void;
+  approvalMode?: ApprovalMode;
+  /** Mid-turn queued prompts (composer badge + Esc pop-back). */
+  queueLength?: number;
+  onPopQueue?: () => string | null;
+  /**
+   * Scheduler calls parked in `awaiting_approval`. The shell renders the
+   * first one as a modal dialog; settlement flows through the call's own
+   * `onConfirm` and is reported back via {@link onToolCallSettled}.
+   */
+  waitingToolCalls?: readonly WaitingCallInfo[];
+  /** Drops a waiting call after its dialog settled. */
+  onToolCallSettled?: (callId: string) => void;
+  /** U-10 parity: the entry logs/echoes render crashes (error boundary). */
+  onRenderError?: (error: Error) => void;
+  /** Entry-owned composer buffer handle (early-input injection). */
+  composerHandle?: {
+    current: { getText: () => string; setText: (text: string) => void } | null;
+  };
 }
+
+interface ShellModal {
+  kind: 'shell';
+  id: number;
+  commands: readonly string[];
+  resolve: (resolution: ShellConfirmationResolution) => void;
+}
+
+interface ActionModal {
+  kind: 'action';
+  id: number;
+  prompt: ReactNode;
+  resolve: (confirmed: boolean) => void;
+}
+
+type ConfirmationModal = ShellModal | ActionModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
   const {
@@ -123,6 +175,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onStartNewSession,
     onToggleVim,
     updateNotice,
+    streaming,
+    onInterrupt,
+    approvalMode,
+    queueLength,
+    onPopQueue,
+    waitingToolCalls,
+    onToolCallSettled,
+    onRenderError,
   } = props;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(null);
@@ -133,19 +193,56 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
 
-  // Neither confirmation renderer exists in this batch, so the bridge denies
-  // every request outright: a pending promise here would hang the dispatcher's
-  // `run()` (and the gateway's busy flag) for the rest of the session.
+  // Modal confirmation bridge (Batch 6): presentShell/presentAction enqueue
+  // a dialog and hand back the promise that its resolution settles. Both
+  // functions stay referentially stable (U-8) — they only touch setState and
+  // a sequence ref, never per-render state.
+  const [modals, setModals] = useState<readonly ConfirmationModal[]>([]);
+  const modalSeq = useRef(0);
   const confirmations = useMemo(
     () => ({
-      presentShell: () =>
-        Promise.resolve<ShellConfirmationResolution>({
-          outcome: ToolConfirmationOutcome.Cancel,
+      presentShell: (commandsToRun: readonly string[]) =>
+        new Promise<ShellConfirmationResolution>((resolve) => {
+          modalSeq.current += 1;
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'shell',
+              id: modalSeq.current,
+              commands: commandsToRun,
+              resolve,
+            },
+          ]);
         }),
-      presentAction: () => Promise.resolve(false),
+      presentAction: (prompt: ReactNode) =>
+        new Promise<boolean>((resolve) => {
+          modalSeq.current += 1;
+          setModals((prev) => [
+            ...prev,
+            { kind: 'action', id: modalSeq.current, prompt, resolve },
+          ]);
+        }),
     }),
     [],
   );
+
+  const activeModal = modals[0] ?? null;
+  const closeShellModal = useCallback(
+    (modal: ShellModal, resolution: ShellConfirmationResolution) => {
+      setModals((prev) => prev.filter((m) => m.id !== modal.id));
+      modal.resolve(resolution);
+    },
+    [],
+  );
+  const closeActionModal = useCallback(
+    (modal: ActionModal, confirmed: boolean) => {
+      setModals((prev) => prev.filter((m) => m.id !== modal.id));
+      modal.resolve(confirmed);
+    },
+    [],
+  );
+
+  const activeToolCall = waitingToolCalls?.[0] ?? null;
 
   const transcript = useMemo(
     () => ({
@@ -190,8 +287,23 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     useCallback(() => host.getVersion(), [host]),
   );
 
+  // Mirror the live-turn state onto the host so command gating (isIdle)
+  // reflects an in-flight model turn, not just dispatcher processing.
+  useEffect(() => {
+    host.setStreaming(!!streaming);
+  }, [host, streaming]);
+
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
+  // Slash submissions held back while a model turn streams (ink's message
+  // queue, restricted to commands: a queued prompt is the live turn's job).
+  const deferredCommandsRef = useRef<string[]>([]);
+  // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
+  // ref so re-queueing behind a turn or a dialog does not re-trigger the
+  // effect, but a push has to: the mid-turn gate awaits the registry, and a
+  // verdict that lands after the idle edge would otherwise strand the command
+  // until some future streaming transition.
+  const [deferredRevision, setDeferredRevision] = useState(0);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -238,13 +350,30 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           setDialog(outcome.request);
           return;
         case 'submit_prompt':
-          if (onSubmitPrompt) onSubmitPrompt(outcome.content);
+          if (onSubmitPrompt)
+            onSubmitPrompt(outcome.content, undefined, {
+              modelOverride: outcome.modelOverride,
+              refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
+              onComplete: outcome.onComplete,
+            });
           else notify('The live prompt turn is not wired in this shell.');
           return;
         case 'schedule_tool':
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return;
         case 'quit':
+          // Nothing queued may run behind an exit: the interrupt below creates
+          // the idle edge that wakes the drain, and the same abort promotes
+          // the live turn's steering queue into a fresh model turn. Both are
+          // discarded first, or the session spends another turn after the user
+          // asked to leave.
+          deferredCommandsRef.current = [];
+          onPopQueue?.();
+          // ink's quit action cancels the ongoing request before the exit
+          // drains, so a mid-turn /quit stops the stream instead of racing the
+          // cleanup chain (recording flush, config.shutdown) against a turn
+          // that is still writing. A no-op when nothing is in flight.
+          onInterrupt?.();
           onQuit?.(outcome.messages);
           return;
         default: {
@@ -253,26 +382,100 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, notify],
+    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify],
   );
 
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
-      const settlement = await gateway.dispatch(text);
+      // Ahead of the gate and the dispatch, exactly where ink's
+      // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
+      // it must not be deferred behind the turn or reach the model as text.
+      const submission = normalizeQuitSubmission(text);
+      // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
+      // only a command that opted into canRunDuringStreaming runs now — the
+      // rest wait for idle instead of racing the stream.
+      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
+        const command = submission.trim();
+        deferredCommandsRef.current.push(command);
+        setDeferredRevision((revision) => revision + 1);
+        notify(
+          `Queued ${command} — it will run when the current response ends.`,
+        );
+        return;
+      }
+      const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
       }
       if (settlement.outcome === false) {
-        if (onSubmitPrompt) onSubmitPrompt(text, imagePaths);
-        else notify('The live prompt turn is not wired in this shell.');
+        if (!onSubmitPrompt) {
+          notify('The live prompt turn is not wired in this shell.');
+          return;
+        }
+        // The raw typed text is both the prompt and the `UserPromptSubmit`
+        // provenance; `@path` expansion happens where the prompt enters the
+        // stream (live-session), so text queued mid-turn expands too.
+        const query = text.trim();
+        onSubmitPrompt(query, imagePaths, {
+          submittedPrompt: query || undefined,
+        });
         return;
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify],
+    [gateway, onSubmitPrompt, applyOutcome, notify, streaming],
   );
+
+  // Runs the commands the mid-turn gate held back, in submission order, once
+  // the turn ends and no dialog owns the UI (ink's shouldDrainMessageQueue
+  // gates the drain on both).
+  useEffect(() => {
+    // Nothing queued may run behind an exit either way: the exits that bypass
+    // this shell's quit branch (Ctrl+C/Ctrl+D double press, render-error
+    // bailout) never clear this ref, so the drain itself must consult the
+    // shared exit latch — at the edge and between dispatches, since the exit
+    // can start while an earlier command is still awaiting its outcome.
+    if (isExitInProgress()) return;
+    if (streaming || dialog || deferredCommandsRef.current.length === 0) {
+      return;
+    }
+    const pending = deferredCommandsRef.current;
+    deferredCommandsRef.current = [];
+    void (async () => {
+      for (const [i, command] of pending.entries()) {
+        if (isExitInProgress()) return;
+        const settlement = await gateway.dispatch(command);
+        if (settlement.kind === 'rejected') {
+          notify(settlement.reason);
+          continue;
+        }
+        if (settlement.outcome === false) continue;
+        const outcome = settlement.outcome;
+        applyOutcome(outcome);
+        // A submit_prompt outcome starts a turn and an open_dialog outcome
+        // takes the UI over, so the commands behind either wait for that turn
+        // to end or that dialog to close rather than racing the stream or
+        // overwriting the dialog with a second setDialog().
+        const holdsUi =
+          outcome.kind === 'open_dialog' ||
+          (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
+        if (holdsUi && i + 1 < pending.length) {
+          deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+          return;
+        }
+      }
+    })();
+  }, [
+    streaming,
+    dialog,
+    deferredRevision,
+    gateway,
+    notify,
+    applyOutcome,
+    onSubmitPrompt,
+  ]);
 
   const userMessages = useMemo(
     () =>
@@ -285,12 +488,41 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   return (
-    <OpenTuiErrorBoundary>
+    <OpenTuiErrorBoundary
+      recordForExitEcho
+      onError={(error) => onRenderError?.(error)}
+    >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         {renderMain ? renderMain() : null}
-        {!dialog && updateNotice ? <text>{updateNotice}</text> : null}
+        {!dialog && !activeModal && !activeToolCall && updateNotice ? (
+          <text>{updateNotice}</text>
+        ) : null}
         {noticeText ? <text>{noticeText}</text> : null}
-        {dialog ? (
+        {activeToolCall ? (
+          <OpenTuiToolConfirmation
+            key={activeToolCall.callId}
+            call={activeToolCall}
+            onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
+          />
+        ) : activeModal ? (
+          activeModal.kind === 'shell' ? (
+            <OpenTuiShellConfirmation
+              key={`shell-${activeModal.id}`}
+              commands={activeModal.commands}
+              onResolve={(resolution) =>
+                closeShellModal(activeModal, resolution)
+              }
+            />
+          ) : (
+            <OpenTuiActionConfirmation
+              key={`action-${activeModal.id}`}
+              prompt={activeModal.prompt}
+              onResolve={(confirmed) =>
+                closeActionModal(activeModal, confirmed)
+              }
+            />
+          )
+        ) : dialog ? (
           <OpenTuiDialogMount
             key={dialog.dialog}
             request={dialog}
@@ -311,6 +543,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             userMessages={userMessages}
             config={config}
             focus
+            streaming={streaming}
+            onInterrupt={onInterrupt}
+            approvalMode={approvalMode}
+            queueLength={queueLength}
+            onPopQueue={onPopQueue}
+            composerHandle={props.composerHandle}
           />
         )}
       </box>
