@@ -66,7 +66,9 @@ lets git answer authoritatively on click:
   upstream ref defeats the fetch itself; only a prune refreshes that shape,
   as the rule-site comment states.)
 - After a **rejected** Push, both the listing and the working-tree status
-  re-read (a rejected push is the strongest evidence the counts were stale).
+  re-read. That is a re-read, not a fetch: a rejected push moves no local ref,
+  so git's own message in the status line — not the refreshed counts — is what
+  explains the rejection.
 
 ## Evidence
 

@@ -1572,6 +1572,55 @@ describe('BranchPickerPopover post-failure refresh', () => {
     });
     await flush();
   });
+
+  it('keeps the stale rows mounted and the push row busy while the post-rejection refresh is in flight', async () => {
+    let settleListing: ((value: DaemonGitBranchesResult) => void) | undefined;
+    workspaceGitBranches
+      .mockResolvedValueOnce(
+        branches({
+          upstream: 'origin/main',
+          pushTarget: 'origin/main',
+          pushAhead: 2,
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<DaemonGitBranchesResult>((resolve) => {
+            settleListing = resolve;
+          }),
+      );
+    workspaceGitPush.mockRejectedValueOnce(new Error('non-fast-forward'));
+    mountFresh();
+    await flush();
+    expect(row('push')?.textContent).toContain('↑2');
+
+    clickButton('Push');
+    await flush();
+
+    // The silent re-read must not trade the stale-but-usable rows for the
+    // loading placeholder — the spinner the push-side `await` holds up is only
+    // visible while its row stays mounted.
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('non-fast-forward');
+    expect(document.body.textContent).not.toContain('Loading branches');
+    expect(row('push')).toBeTruthy();
+    expect(row('pull')).toBeTruthy();
+    expect(row('push')?.textContent).toContain('↑2');
+    // Awaiting the refresh (rather than firing it) is what keeps busyAction set
+    // until the re-read lands, so the row cannot re-enable on pre-push counts.
+    expect(row('push')?.disabled).toBe(true);
+
+    await act(async () => {
+      settleListing?.(
+        branches({ upstream: 'origin/main', pushTarget: 'origin/main' }),
+      );
+    });
+    await flush();
+
+    expect(row('push')?.disabled).toBe(false);
+    expect(row('push')?.textContent).toContain('Nothing to push');
+    expect(row('push')?.textContent).not.toContain('↑2');
+  });
 });
 
 describe('listingContradictsStatus', () => {

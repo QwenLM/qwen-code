@@ -382,11 +382,12 @@ export function BranchPickerPopover({
   onStatusRefreshedRef.current = onStatusRefreshed;
 
   // `silent` is the post-action refresh: the listing on screen is stale but
-  // usable, so a failed re-read must not replace the rows with its error.
+  // usable, so the refresh must neither raise the placeholder the render gate
+  // swaps those rows for nor replace them with its own error.
   const fetchBranches = useCallback(
     async (silent = false) => {
       const requestId = ++requestIdRef.current;
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError(null);
       try {
         const result = await ws.workspaceGitBranches(gitCwd);
@@ -574,8 +575,9 @@ export function BranchPickerPopover({
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
-      // A rejected push is the strongest evidence the last-fetch counts are
-      // stale. Awaited so the row spinner stays up until the refresh lands.
+      // A rejected push moves no local ref, so this re-read only picks up a
+      // fetch that landed elsewhere — git's message above is the authority on
+      // why. Awaited so the row spinner stays up until the re-read lands.
       await refreshAfterAction();
     } finally {
       setBusyAction(null);
