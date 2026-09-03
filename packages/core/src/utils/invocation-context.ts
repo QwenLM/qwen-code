@@ -10,13 +10,6 @@ export const INVOCATION_CONTEXT_META_KEY = 'qwen-code/invocation';
 export const PRIVATE_PARENT_CAPABILITY_META_KEY =
   'qwen-code/private-parent-capability';
 export const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
-// Marks an ACP child as hosted by the daemon's Conversations runtime so it
-// participates in the mandatory session writer lease. Private enable-only
-// provenance signal: captured and deleted by the CLI entry point, never a
-// user-facing setting.
-export const PRIVATE_CONVERSATIONS_RUNTIME_ENV =
-  'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME';
-export const PRIVATE_CONVERSATIONS_RUNTIME_ENABLE = '1';
 
 export interface InvocationContextV1 {
   readonly version: 1;
