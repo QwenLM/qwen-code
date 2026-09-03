@@ -510,9 +510,10 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Set by how busy the reserved host is, not by the suite: the same third
-    # ran 6.7 min quiet and 36 contended, and 45 killed shards at the boundary
-    # with every suite green (run 33713579913). Retunable without a PR.
+    # Set by how busy the reserved host is, not by the suite: six shards
+    # measured 42.7/44.0/45.4/45.4/42.9/45, none inside 80% of the 45 this
+    # falls back to, and the last two ran with the host to themselves
+    # (run 33713579913). Retune it through the variable, not a PR.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"
     needs:
       - 'prepare'
