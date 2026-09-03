@@ -393,6 +393,38 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
     });
+
+    it('still fails loud when a post-prefix survivor re-minted the first turn id', () => {
+      // Entrances mint `sessionId########<n>` from counters that restart
+      // independently, so two headless runs against one session write twins
+      // sharing an id. If marker-less compression absorbs the first twin's
+      // entry while the second survives (still marked with the shared id),
+      // the identity shortcut must not resolve the absorbed first turn onto
+      // the surviving twin — the entrance-3 refusal above must win (R25-1).
+      const firstTurn = userItem(1, 'pre 1') as HistoryItem & {
+        promptId: string;
+      };
+      firstTurn.promptId = 'session########1';
+      const twinTurn = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [firstTurn, llmItem(2), twinTurn, llmItem(4)];
+      const survivingTwin = userContent('pre 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+      // The surviving twin itself still maps (identity resolves it exactly
+      // where the positional walk cannot reach post-compression).
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
   });
 
   describe('with fast (non-summarizing) compression markers', () => {

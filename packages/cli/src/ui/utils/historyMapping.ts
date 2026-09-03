@@ -154,21 +154,6 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
-  // Identity first: when the target turn and its model-facing entry share a
-  // prompt identity, the boundary is an exact lookup instead of a
-  // content-shape guess. Anything else — no identity on the target, an
-  // identity that reaches no entry, or one that reaches several — falls
-  // through to the positional walk below, which is the behavior that
-  // shipped before identities existed.
-  const target = uiHistory[targetIndex]!;
-  if (isRealUserTurn(target) && target.promptId) {
-    const identifiedIndex = findApiHistoryPromptIndex(
-      apiHistory,
-      target.promptId,
-    );
-    if (identifiedIndex !== -1) return identifiedIndex;
-  }
-
   // Count how many UI user turns exist before the target
   let uiUserTurnCount = 0;
   for (
@@ -198,8 +183,32 @@ export function computeApiTruncationIndex(
     ) {
       return -1;
     }
-    // Rewinding to the first user turn: keep only startup context (if any)
+    // Rewinding to the first user turn: keep only startup context (if any).
+    // This returns BEFORE the identity shortcut below: identities are minted
+    // `sessionId########<n>` by entrances whose counters restart
+    // independently, so a UNIQUE match on a first turn can be another
+    // entrance's re-mint of the same id. If the first turn's own entry was
+    // absorbed by marker-less compression while the re-minted twin
+    // survived, the shortcut would resolve the absorbed turn onto the twin
+    // and bypass the entrance-3 refusal above — silently truncating at the
+    // wrong boundary (R25-1). Positional mapping loses nothing here: a
+    // reachable first turn's boundary is exactly `startIndex`.
     return startIndex;
+  }
+
+  // Identity first for non-first turns: when the target turn and its
+  // model-facing entry share a prompt identity, the boundary is an exact
+  // lookup instead of a content-shape guess. Anything else — no identity on
+  // the target, an identity that reaches no entry, or one that reaches
+  // several — falls through to the positional walk below, which is the
+  // behavior that shipped before identities existed.
+  const target = uiHistory[targetIndex]!;
+  if (isRealUserTurn(target) && target.promptId) {
+    const identifiedIndex = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+    );
+    if (identifiedIndex !== -1) return identifiedIndex;
   }
 
   // Walk the API history from after the startup context, counting
