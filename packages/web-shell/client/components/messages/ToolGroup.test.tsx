@@ -1600,6 +1600,11 @@ describe('tool row rendering', () => {
     expect(
       container.querySelector('[class*="chatSummaryTextActive"]'),
     ).toBeNull();
+    // The marker is scoped to "a background agent is the row's only active
+    // work", not to single-tool rows, so a mixed row must keep it too.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
   });
 
   it('keeps a mixed group animated while a foreground tool is active', () => {
@@ -1701,6 +1706,54 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('Running');
     expect(container.textContent).toContain('(ReadFile src/app.ts)');
     expect(container.textContent).toMatch(/\b45s\b/);
+  });
+
+  it('keeps the task description on a running foreground agent row', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'foreground-agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        executionMode: 'foreground',
+        startTime: Date.now() - 45_000,
+        args: { description: 'Trace the retry loop to its root cause' },
+        subTools: [
+          makeTool({
+            callId: 'sub-read',
+            toolName: 'read',
+            status: 'in_progress',
+            args: { file_path: 'src/app.ts' },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(container.textContent).toContain(
+      'Trace the retry loop to its root cause',
+    );
+    expect(container.textContent).toContain('(ReadFile src/app.ts)');
+  });
+
+  it('renders no empty parentheses without a live sub-tool', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'foreground-agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        executionMode: 'foreground',
+        startTime: Date.now() - 45_000,
+        subTools: [
+          makeTool({
+            callId: 'sub-done',
+            toolName: 'read',
+            status: 'completed',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(container.textContent).toContain('45s');
+    expect(container.textContent).not.toContain('()');
   });
 
   it('keeps the running foreground agent summary elapsed ticking', () => {
