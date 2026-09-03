@@ -12,8 +12,17 @@ set -euo pipefail
 archive="${1:?usage: e2e-build-unpack.sh <archive-path>}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 
-if ! stamp="$(tar -xzOf "$archive" e2e-build.sha 2>/dev/null)"; then
-  echo "::error::build artifact holds no e2e-build.sha stamp — not an archive e2e-build-pack.sh produced"
+# Three states an operator must tell apart: the download never landed
+# (the step's path and this argument drifted), the file is not a readable
+# gzip tarball (truncated upload), or the archive has no stamp member.
+if [ ! -r "$archive" ]; then
+  echo "::error::build artifact not found at $archive — check the Download build artifact step's path"
+  exit 1
+fi
+tar_err="$(mktemp)"
+trap 'rm -f "$tar_err"' EXIT
+if ! stamp="$(tar -xzOf "$archive" e2e-build.sha 2> "$tar_err")"; then
+  echo "::error::cannot read the e2e-build.sha stamp from $archive — the archive is corrupt, truncated, or not one e2e-build-pack.sh produced: $(tr '\n' ' ' < "$tar_err")"
   exit 1
 fi
 if [ "$stamp" != "${GITHUB_SHA}" ]; then
@@ -23,7 +32,9 @@ fi
 # The whole listing is read into a variable first. Piping tar into
 # `grep -q` would let grep exit at the first match while tar is still
 # writing: tar then dies of SIGPIPE, pipefail reports 141, and every real
-# archive (14k members, the bundle listed first) is refused.
+# archive (14k members, the bundle listed first) is refused. No guard on
+# this read: extracting the stamp above already ran the whole stream, so
+# an archive that lists badly here never got past that check.
 listing="$(tar -tzf "$archive")"
 if ! grep -qx 'dist/cli.js' <<< "$listing"; then
   echo "::error::build artifact holds no dist/cli.js — the pack step shipped an archive without the bundle"

@@ -296,9 +296,23 @@ describe('e2e workflow', () => {
       ]) {
         expect(yml.jobs[job].if, job).toBe(build.if);
       }
-      expect(build.if).toContain(
-        'github.event.pull_request.head.repo.full_name == github.repository',
+      // The whole expression, not a substring: the workflow declares no
+      // pull_request trigger, so the `event_name != 'pull_request' ||`
+      // prefix is the only clause that is ever true. Dropping it would skip
+      // the build — and every leg behind it — on every real event, green.
+      expect(build.if).toBe(
+        "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}",
       );
+    });
+
+    it('keeps the web-shell regression job building during its install', () => {
+      // That job has no build step of its own: its tree comes solely from
+      // the prepare script that npm ci runs, so it must not carry the skip
+      // the artifact-fed legs carry.
+      const install = yml.jobs['web-shell-browser-regression'].steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env?.QWEN_SKIP_PREPARE).toBeUndefined();
     });
 
     it.each(legs)('%s unpacks the shared build instead of building', (job) => {

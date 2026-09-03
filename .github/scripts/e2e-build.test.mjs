@@ -234,6 +234,7 @@ describe('e2e build archive', () => {
       /::error::build artifact was produced from a{40}, not b{40}/,
     );
     assert.ok(!existsSync(join(leg, 'dist/cli.js')), 'nothing is extracted');
+    assert.ok(existsSync(copy), 'a refused archive is left for inspection');
   });
 
   it('refuses an archive without the bundle, before extracting anything', () => {
@@ -330,6 +331,7 @@ describe('e2e build archive', () => {
       /::error::build artifact holds no dist\/cli\.js/,
     );
     assert.ok(!existsSync(join(leg, 'packages')), 'nothing is extracted');
+    assert.ok(existsSync(copy), 'a refused archive is left for inspection');
   });
 
   it('refuses an archive without a stamp, and says so', () => {
@@ -349,9 +351,48 @@ describe('e2e build archive', () => {
     assert.notEqual(result.status, 0);
     assert.match(
       result.stdout,
-      /::error::build artifact holds no e2e-build\.sha stamp/,
+      /::error::cannot read the e2e-build\.sha stamp from .*downloaded\.tar\.gz — the archive is corrupt, truncated, or not one e2e-build-pack\.sh produced/,
     );
     assert.ok(!existsSync(join(leg, 'dist')), 'nothing is extracted');
+    assert.ok(existsSync(copy), 'a refused archive is left for inspection');
+  });
+
+  it('names a download that never landed, apart from a bad archive', () => {
+    // The download step's path and this script's argument are a string
+    // pair nothing else cross-checks; a drift must read as "file missing",
+    // not as a pack-side problem.
+    const leg = mkdtempSync(join(scratch, 'nofile-'));
+    const missing = join(leg, 'never-downloaded.tar.gz');
+    const result = run(UNPACK, [missing], { cwd: leg });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::build artifact not found at .*never-downloaded\.tar\.gz — check the Download build artifact step's path/,
+    );
+    assert.doesNotMatch(result.stdout, /stamp/);
+  });
+
+  it("reports a download cut off before its stamp with tar's diagnostic", () => {
+    // 20 bytes is a gzip header and little else: no tar can read the
+    // first member from it, on either platform. There is no "cut after
+    // the stamp" sibling: extracting the stamp runs the whole stream, so
+    // a later cut is reported by this same branch (verified with a 60%
+    // cut of the fixture and of a real 85 MB archive, GNU tar and bsdtar).
+    const leg = mkdtempSync(join(scratch, 'corrupt-'));
+    const copy = join(leg, 'downloaded.tar.gz');
+    writeFileSync(copy, readFileSync(archive).subarray(0, 20));
+    const result = run(UNPACK, [copy], { cwd: leg });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::cannot read the e2e-build\.sha stamp from .*downloaded\.tar\.gz — the archive is corrupt, truncated/,
+    );
+    assert.match(
+      result.stdout,
+      /gzip|unexpected end|Unexpected EOF|truncated/i,
+    );
+    assert.ok(!existsSync(join(leg, 'dist')), 'nothing is extracted');
+    assert.ok(existsSync(copy), 'a refused archive is left for inspection');
   });
 
   it('requires the commit to compare against', () => {
