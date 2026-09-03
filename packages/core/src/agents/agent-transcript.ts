@@ -428,15 +428,22 @@ export function readAgentMeta(metaPath: string): AgentMeta | undefined {
 
 export async function readAgentMetaAsync(
   metaPath: string,
+  options?: { throwOnReadError?: boolean },
 ): Promise<AgentMeta | undefined> {
+  let contents: string;
   try {
-    return JSON.parse(
-      await fs.promises.readFile(metaPath, 'utf8'),
-    ) as AgentMeta;
+    contents = await fs.promises.readFile(metaPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
+      if (options?.throwOnReadError) throw error;
     }
+    return undefined;
+  }
+  try {
+    return JSON.parse(contents) as AgentMeta;
+  } catch (error) {
+    debugLogger.warn(`Failed to read agent meta sidecar ${metaPath}:`, error);
     return undefined;
   }
 }

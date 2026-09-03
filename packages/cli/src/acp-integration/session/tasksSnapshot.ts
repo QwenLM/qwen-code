@@ -355,11 +355,20 @@ export async function buildSessionAgentsStatus(
   }
 
   const limitAgentSidecarRead = pLimit(MAX_AGENT_SIDECAR_READ_CONCURRENCY);
+  let sidecarReadFailed = false;
   await Promise.all(
     files.map((fileName) =>
       limitAgentSidecarRead(async () => {
         if (!fileName.endsWith('.meta.json')) return;
-        const meta = await readAgentMetaAsync(path.join(dir, fileName));
+        let meta;
+        try {
+          meta = await readAgentMetaAsync(path.join(dir, fileName), {
+            throwOnReadError: true,
+          });
+        } catch {
+          sidecarReadFailed = true;
+          return;
+        }
         if (
           !meta ||
           typeof meta.agentId !== 'string' ||
@@ -427,7 +436,11 @@ export async function buildSessionAgentsStatus(
     ),
   );
 
-  if (directoryMtimeNs !== undefined && files.length > 0) {
+  if (
+    directoryMtimeNs !== undefined &&
+    files.length > 0 &&
+    !sidecarReadFailed
+  ) {
     const tasks = retainAgentTasks([...agents.values()]);
     const retainedIds = new Set(tasks.map((task) => task.id));
     agentSidecarCache.delete(cacheKey);

@@ -26724,7 +26724,7 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
-    it('keeps workspace transcript reads daemon-local', async () => {
+    it('flushes the first live backward workspace transcript page', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       await writeTranscriptSession(sid);
       const bridge = fakeBridge({
@@ -26733,7 +26733,7 @@ describe('createServeApp', () => {
           workspaceCwd: wsDir,
           createdAt: '2026-05-28T12:00:00.000Z',
           clientCount: 1,
-          hasActivePrompt: true,
+          hasActivePrompt: false,
           isWaitingForPermission: false,
           isWaitingForUserQuestion: false,
           pendingInteractionCount: 0,
@@ -26761,7 +26761,8 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(bridge.flushSessionTranscriptCalls).toEqual([]);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
       expect(JSON.stringify(res.body)).toContain('hello transcript');
     });
 

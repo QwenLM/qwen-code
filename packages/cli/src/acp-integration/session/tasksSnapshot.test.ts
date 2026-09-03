@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -200,6 +200,47 @@ describe('buildSessionAgentsStatus', () => {
       );
       expect(second.tasks[0]?.status).toBe('completed');
     } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cache a transient sidecar read failure', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
+    const sessionDir = path.join(projectDir, 'subagents', 'session-1');
+    const metaPath = path.join(sessionDir, 'agent-stored.meta.json');
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        metaPath,
+        JSON.stringify({
+          agentId: 'stored',
+          agentType: 'general-purpose',
+          description: 'stored agent',
+          parentSessionId: 'session-1',
+          parentAgentId: null,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          status: 'completed',
+          isBackgrounded: true,
+        }),
+      );
+      vi.spyOn(fs.promises, 'readFile').mockRejectedValueOnce(
+        Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
+      );
+
+      const first = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+      vi.restoreAllMocks();
+      const second = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+
+      expect(first.tasks).toEqual([]);
+      expect(second.tasks.map((task) => task.id)).toEqual(['stored']);
+    } finally {
+      vi.restoreAllMocks();
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
   });

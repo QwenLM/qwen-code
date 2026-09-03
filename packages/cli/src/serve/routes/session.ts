@@ -4564,16 +4564,43 @@ export function registerSessionRoutes(
               runtime.workspaceCwd,
               codec,
             );
-            const hasActivePrompt = (): boolean => {
+            const getLivePromptState = (): {
+              live: boolean;
+              activePrompt: boolean;
+            } => {
               try {
-                return runtime.bridge.getSessionSummary(sessionId)
-                  .hasActivePrompt;
+                return {
+                  live: true,
+                  activePrompt:
+                    runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+                };
               } catch (error) {
-                if (error instanceof SessionNotFoundError) return false;
+                if (error instanceof SessionNotFoundError) {
+                  return { live: false, activePrompt: false };
+                }
                 throw error;
               }
             };
-            const activePromptBeforeRead = hasActivePrompt();
+            const promptStateBeforeRead = getLivePromptState();
+            if (
+              cursor === undefined &&
+              direction === 'backward' &&
+              promptStateBeforeRead.live
+            ) {
+              try {
+                if (runtime.bridge.flushSessionTranscript) {
+                  await runtime.bridge.flushSessionTranscript(sessionId);
+                } else {
+                  await runtime.bridge.getSessionTranscriptPage({
+                    sessionId,
+                    direction,
+                    limit: 1,
+                  });
+                }
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+            }
             let page;
             try {
               page = await reader.readPage(sessionId, {
@@ -4602,12 +4629,12 @@ export function registerSessionRoutes(
             if (page.records.some((record) => record.sessionId !== sessionId)) {
               throw new SessionTranscriptSnapshotUnavailableError(sessionId);
             }
-            const activePromptAfterRead = hasActivePrompt();
+            const activePromptAfterRead = getLivePromptState().activePrompt;
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
               finalizeDangling:
-                !activePromptBeforeRead && !activePromptAfterRead,
+                !promptStateBeforeRead.activePrompt && !activePromptAfterRead,
               encodeCursor: (state) => codec.encode(state),
             });
             assertRuntimeGenerationOpen?.();
