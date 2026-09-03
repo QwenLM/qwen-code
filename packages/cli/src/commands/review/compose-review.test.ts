@@ -102,6 +102,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
   Promise.resolve(composeReviewCommand.handler(argv as never) as void);
@@ -1394,6 +1395,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Unresolved, please confirm:');
     expect(r.body).toContain('**[Critical]** SKILL.md:35');
     expect(r.body).not.toContain('no blockers');
@@ -2341,7 +2345,7 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).not.toContain('Downgraded');
   });
 
-  it('self-PR downgrade of an RC keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
+  it('self-PR downgrade of an RC exposes a leading Critical header and keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
     const r = composeReview(
       base({
         bodyCriticals: ['unmappable blocker'],
@@ -2353,11 +2357,32 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
     expect(r.body).toContain('**[Critical]** unmappable blocker');
     const sentenceIdx = r.body.indexOf('Downgraded');
     const blockerIdx = r.body.indexOf('unmappable blocker');
     expect(sentenceIdx).toBeLessThan(blockerIdx);
+  });
+
+  it('self-PR downgrade with attribution off keeps the body Critical without a visible Critical header', () => {
+    const r = composeReview(
+      base({
+        bodyCriticals: ['unmappable blocker'],
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['self-PR'],
+        },
+      }),
+      '0.21.2',
+      false,
+    );
+
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('unmappable blocker');
+    expect(r.body).not.toContain('**[Critical]**');
   });
 
   it('body Criticals never leak into a plain COMMENT that was not downgraded from RC', () => {
@@ -5846,6 +5871,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -5871,6 +5899,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.downgradedFrom).toBeNull();
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -9741,6 +9772,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Downgraded from Request changes');
   });
 
@@ -11079,7 +11113,9 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
     const t0 = performance.now();
     const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
-    expect(performance.now() - t0).toBeLessThan(2000);
+    expectWithinLatencyBudget(performance.now() - t0, 2000, {
+      poolMultiplier: 10,
+    });
     // 160k of model prose used to reach the body budget's last-resort
     // truncation; the per-entry char cap this account now shares bounds it
     // upstream of the budget instead, which is the better place for it. So

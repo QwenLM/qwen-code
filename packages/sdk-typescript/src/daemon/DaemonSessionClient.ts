@@ -52,6 +52,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
+  DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -510,6 +511,15 @@ export class DaemonSessionClient {
 
   get branch(): DaemonSession['branch'] {
     return this.session.branch;
+  }
+
+  /**
+   * Present when this client was created with a `modelServiceId`: `false`
+   * means the spawn-time model switch failed and the session is running on
+   * the agent default model.
+   */
+  get modelApplied(): DaemonSession['modelApplied'] {
+    return this.session.modelApplied;
   }
 
   get lastEventId(): number | undefined {
@@ -988,6 +998,14 @@ export class DaemonSessionClient {
 
   workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {
     return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
+  }
+
+  savedWorkflow(name: string): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.client.sessionSavedWorkflow(
+      this.sessionId,
+      name,
+      this.clientId,
+    );
   }
 
   lspStatus(): Promise<DaemonSessionLspStatus> {
