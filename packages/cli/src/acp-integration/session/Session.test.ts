@@ -905,6 +905,7 @@ describe('Session', () => {
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       // The restore-ask_user_question prompt path is gated on this flag;
       // the restore describe block overrides to true.
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
@@ -2831,6 +2832,99 @@ describe('Session', () => {
       'test-session-id########2',
       'test-session-id########1',
     );
+  });
+
+  it('continues the todo work chain on an ordinary prompt while a reminder is registered', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    // A registered reminder means the plan still has unfinished items
+    // (todo_write deletes it on completion).
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(
+      '<system-reminder>unfinished todo: delegated node</system-reminder>',
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+
+    // The first prompt has no previous chain to continue.
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+      'test-session-id########1',
+      undefined,
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'how is progress going?' }],
+    });
+
+    // The follow-up turn must continue the previous chain instead of
+    // discarding the plan context it asks about (#10953).
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
+      'test-session-id########1',
+    );
+  });
+
+  it('forces the active todo reminder due when an Agent tool result returns', async () => {
+    const reminder =
+      '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+    // Mimic the real budget: nothing is due under the ordinary cadence
+    // (the delegation consumed the only tool turn), only forcing delivers.
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+      (_promptId: string, force = false) => (force ? reminder : undefined),
+    );
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'agent done',
+      returnDisplay: 'agent done',
+    });
+    mockToolRegistry.getTool.mockReturnValue({
+      name: 'agent',
+      kind: core.Kind.Execute,
+      displayName: 'Agent',
+      description: 'Delegates work to a subagent',
+      build: vi.fn().mockReturnValue({
+        params: {},
+        execute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue('Agent'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }),
+      canUpdateOutput: false,
+      isOutputMarkdown: true,
+    });
+    mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [{ id: 'call-agent-1', name: 'agent', args: {} }],
+            },
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'delegate the work' }],
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+      'test-session-id########1',
+      true,
+    );
+    const toolResultCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as { message: Part[] };
+    expect(textParts(toolResultCall.message)).toContain(reminder);
   });
 
   it('includes active Todo context on the first retry request', async () => {
