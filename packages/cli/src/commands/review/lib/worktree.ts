@@ -762,7 +762,15 @@ export function carriesReplacementChar(value: string): boolean {
 
 export function localFilterCommands(worktree: string): LocalFilterScreen {
   const commonDir = revParsePath(worktree, '--git-common-dir');
-  const gitDir = revParsePath(worktree, '--git-dir');
+  // The second discovery spawn is skipped once the first fails. Both read
+  // config at git startup, so a plant that blocks one blocks the other for the
+  // whole `SCREEN_SPAWN_TIMEOUT_MS`, and a null `commonDir` already decides the
+  // refusal below whatever `gitDir` would have answered. Running both anyway
+  // doubled that stall to a measured 40s of blocked event loop — most of
+  // vitest's fixed 60s worker RPC budget, which on the Linux lane (no
+  // unhandled-error exemption) exits an all-green suite red.
+  const gitDir =
+    commonDir === null ? null : revParsePath(worktree, '--git-dir');
   if (commonDir === null || gitDir === null) {
     // Two very different reasons land here, and only one is benign. A plain
     // "not a repository" answer is the caller's own problem — its checkout has
@@ -803,9 +811,7 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   // between it and the checkout. This does not close the window — nothing
   // here can, since a checkout either reads merged config or does not run —
   // it removes the amplification.
-  const candidates = [
-    join(resolve(worktree, gitDir), 'config.worktree'),
-  ];
+  const candidates = [join(resolve(worktree, gitDir), 'config.worktree')];
   // Every OTHER worktree's per-worktree config too. This screen runs against
   // the review worktree, but the checkout it authorises runs in the SCRATCH
   // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored

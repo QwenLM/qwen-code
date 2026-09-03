@@ -1927,7 +1927,7 @@ describe('localFilterCommands', () => {
     expect(screen.unreadable).toBeNull();
   });
 
-  it('never reports the user\'s global keys through an include', () => {
+  it("never reports the user's global keys through an include", () => {
     // The screen does not follow includes at all — a declared limit, see the
     // spawn's comment. This pins the half of it that MUST hold: an
     // `include.path` naming the user's own global config never drags their
@@ -2030,13 +2030,20 @@ describe('localFilterCommands', () => {
       const fifo = join(dir, '.git', 'evil.fifo');
       execFileSync('mkfifo', [fifo]);
       appendFileSync(
-      join(dir, '.git', 'config'),
-      `[include]\n\tpath = ${fifo}\n`,
+        join(dir, '.git', 'config'),
+        `[include]\n\tpath = ${fifo}\n`,
       );
 
+      const started = Date.now();
       const screen = localFilterCommands(dir);
+      const elapsed = Date.now() - started;
 
       expect(screen.stopped).toBe('unreadable');
+      // One spawn timeout, not two. A null `commonDir` already decides the
+      // refusal above, so re-running discovery for `gitDir` only doubles the
+      // synchronous block: 40s measured, most of vitest's fixed 60s worker RPC
+      // budget, which on the Linux lane exits an all-green suite red.
+      expect(elapsed).toBeLessThan(30_000);
     },
     60_000,
   );
@@ -2075,31 +2082,33 @@ describe('localFilterCommands', () => {
       // racing it would not be.
       const shimDir = mkdtempSync(join(tmpdir(), 'qwen-shim-'));
       const log = join(shimDir, 'calls.log');
-      const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
       writeFileSync(
-      join(shimDir, 'git'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
+        join(shimDir, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
       );
       chmodSync(join(shimDir, 'git'), 0o755);
       for (const e of ['w1', 'w2']) {
-      mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
-      writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
+        mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
+        writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
       }
       writeFileSync(join(dir, '.git', 'config.worktree'), '');
       const savedPath = process.env['PATH'];
       try {
-      process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
 
-      localFilterCommands(dir);
+        localFilterCommands(dir);
 
-      const reads = readFileSync(log, 'utf8')
-        .split('\n')
-        .filter((l) => l.includes('--file'))
-        .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
-      const commonAt = reads.indexOf(join(dir, '.git', 'config'));
-      expect(commonAt).toBeGreaterThanOrEqual(0);
-      // Every other candidate was read before it.
-      expect(commonAt).toBe(reads.length - 1);
+        const reads = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('--file'))
+          .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
+        const commonAt = reads.indexOf(join(dir, '.git', 'config'));
+        expect(commonAt).toBeGreaterThanOrEqual(0);
+        // Every other candidate was read before it.
+        expect(commonAt).toBe(reads.length - 1);
       } finally {
         process.env['PATH'] = savedPath;
         rmSync(shimDir, { recursive: true, force: true });
@@ -2259,7 +2268,6 @@ describe('localFilterCommands', () => {
     expect(screen.keys).toEqual([]);
     expect(screen.stopped).toBeNull();
   });
-
 });
 
 describe('screenStopDetail', () => {
