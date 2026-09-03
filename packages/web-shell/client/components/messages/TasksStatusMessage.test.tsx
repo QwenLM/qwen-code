@@ -400,14 +400,16 @@ describe('TasksStatusMessage workflow details', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <TasksStatusMessage
-            message={{ snapshot: nextSnapshot }}
-            embedded
-            keyboardShortcuts={false}
-            manageActiveEvent={false}
-            syncSnapshot
-            taskView="workflow-active"
-          />
+          <TranscriptRenderModeProvider value="interactive">
+            <TasksStatusMessage
+              message={{ snapshot: nextSnapshot }}
+              embedded
+              keyboardShortcuts={false}
+              manageActiveEvent={false}
+              syncSnapshot
+              taskView="workflow-active"
+            />
+          </TranscriptRenderModeProvider>
         </I18nProvider>,
       );
     });
@@ -452,15 +454,17 @@ describe('TasksStatusMessage workflow details', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <TasksStatusMessage
-            message={{ snapshot: sessionBSnapshot }}
-            embedded
-            keyboardShortcuts={false}
-            manageActiveEvent={false}
-            syncSnapshot
-            taskView="workflow-active"
-            onTasksChange={onTasksChange}
-          />
+          <TranscriptRenderModeProvider value="interactive">
+            <TasksStatusMessage
+              message={{ snapshot: sessionBSnapshot }}
+              embedded
+              keyboardShortcuts={false}
+              manageActiveEvent={false}
+              syncSnapshot
+              taskView="workflow-active"
+              onTasksChange={onTasksChange}
+            />
+          </TranscriptRenderModeProvider>
         </I18nProvider>,
       );
     });
@@ -664,14 +668,16 @@ describe('TasksStatusMessage workflow details', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <TasksStatusMessage
-            message={{ snapshot: sessionBSnapshot }}
-            embedded
-            keyboardShortcuts={false}
-            manageActiveEvent={false}
-            syncSnapshot
-            taskView="workflow-active"
-          />
+          <TranscriptRenderModeProvider value="interactive">
+            <TasksStatusMessage
+              message={{ snapshot: sessionBSnapshot }}
+              embedded
+              keyboardShortcuts={false}
+              manageActiveEvent={false}
+              syncSnapshot
+              taskView="workflow-active"
+            />
+          </TranscriptRenderModeProvider>
         </I18nProvider>,
       );
     });
