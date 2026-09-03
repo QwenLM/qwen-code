@@ -24,7 +24,6 @@ const BREAKER_PROBE_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
 const INITIAL_RETRY_INTERVAL_MS = 1_000;
 const MAX_RETRY_INTERVAL_MS = 30_000;
-const PHASE_DETAIL_LIMIT = 60;
 export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
@@ -48,7 +47,6 @@ interface StatusRecord {
   content: string;
   sourcePrefix?: string;
   phase: DingtalkPresentationPhase;
-  phaseDetail?: string;
   startedAt: number;
   lastStatusSecond: number;
   lastContentSyncSecond: number;
@@ -99,10 +97,8 @@ function activeContent(
   content: string,
   language?: string,
   sourcePrefix?: string,
-  phaseDetail?: string,
 ): string {
-  const phaseLabel = presentationPhaseLabel(phase, language);
-  const label = phaseDetail ? `${phaseLabel} · ${phaseDetail}` : phaseLabel;
+  const label = presentationPhaseLabel(phase, language);
   const sanitized = sanitizeStreamingImageMarkers(content);
   const renderedSourcePrefix =
     sourcePrefix &&
@@ -124,17 +120,6 @@ function activeContent(
   return `${prefix}${separator}${TRUNCATION_MARKER}${body.slice(
     body.length - (available - TRUNCATION_MARKER.length),
   )}`;
-}
-
-function renderPhaseDetail(detail?: string): string | undefined {
-  const normalized = detail?.replace(/\s+/gu, ' ').trim();
-  if (!normalized) return undefined;
-  const characters = [...normalized];
-  const bounded =
-    characters.length <= PHASE_DETAIL_LIMIT
-      ? normalized
-      : `${characters.slice(0, PHASE_DETAIL_LIMIT - 1).join('')}…`;
-  return escapeDingTalkMarkdown(bounded);
 }
 
 export class StatusCardController {
@@ -317,25 +302,19 @@ export class StatusCardController {
     );
   }
 
-  updateRunPhase(
-    runId: string,
-    phase: DingtalkPresentationPhase,
-    detail?: string,
-  ): void {
+  updateRunPhase(runId: string, phase: DingtalkPresentationPhase): void {
     if (this.disposed) return;
-    const phaseDetail = renderPhaseDetail(detail);
     for (const segmentId of this.segmentIdsByRun.get(runId) ?? []) {
       const record = this.recordsBySegment.get(segmentId);
       if (
         !record ||
         record.terminal ||
         record.streamFailed ||
-        (record.phase === phase && record.phaseDetail === phaseDetail)
+        record.phase === phase
       ) {
         continue;
       }
       record.phase = phase;
-      record.phaseDetail = phaseDetail;
       record.contentVersion++;
       record.hasPendingWrite = true;
       this.scheduleFlush(record);
@@ -416,7 +395,6 @@ export class StatusCardController {
               record.content,
               this.options.language,
               record.sourcePrefix,
-              record.phaseDetail,
             ),
             flowStatus: 2,
             statusLine: this.statusLine(record).text,
@@ -451,7 +429,6 @@ export class StatusCardController {
           record.content,
           this.options.language,
           record.sourcePrefix,
-          record.phaseDetail,
         ),
         finalize: false,
       });
@@ -522,7 +499,6 @@ export class StatusCardController {
             record.content,
             this.options.language,
             record.sourcePrefix,
-            record.phaseDetail,
           ),
           finalize: false,
         });
@@ -788,7 +764,6 @@ export class StatusCardController {
                   record.content,
                   this.options.language,
                   record.sourcePrefix,
-                  record.phaseDetail,
                 ),
               }
             : {}),

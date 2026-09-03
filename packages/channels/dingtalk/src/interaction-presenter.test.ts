@@ -182,12 +182,12 @@ describe('DingtalkInteractionPresenter', () => {
     const { client, presenter } = createHarness();
 
     presenter.startStatusCard('run-1');
-    presenter.updateStatusCardPhase('run-1', 'searching', 'Search: qwen');
+    presenter.updateStatusCardPhase('run-1', 'searching');
 
     await vi.waitFor(() => {
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '🔎 Searching · Search\\: qwen',
+          content: '🔎 Searching',
           finalize: false,
         }),
       );

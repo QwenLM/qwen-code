@@ -2620,7 +2620,7 @@ describe('DingtalkChannel status cards', () => {
           sessionId: 'session-1',
           toolCallId: `tool-${kind}`,
           kind,
-          title: 'Hidden tool title',
+          title: 'Run shell: echo $SECRET from /private/workspace',
           status: 'in_progress',
         },
       });
@@ -2632,11 +2632,11 @@ describe('DingtalkChannel status cards', () => {
     await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(8));
 
     expect(updateStatusCardPhase.mock.calls).toEqual([
-      ['run-1', 'fetching', 'Hidden tool title'],
-      ['run-1', 'deleting', 'Hidden tool title'],
-      ['run-1', 'moving', 'Hidden tool title'],
-      ['run-1', 'thinking', 'Hidden tool title'],
-      ['run-1', 'switching', 'Hidden tool title'],
+      ['run-1', 'fetching'],
+      ['run-1', 'deleting'],
+      ['run-1', 'moving'],
+      ['run-1', 'thinking'],
+      ['run-1', 'switching'],
       ['run-1', 'replying'],
     ]);
     expect(attachReaction.mock.calls.slice(2).map(([, , tag]) => tag)).toEqual([

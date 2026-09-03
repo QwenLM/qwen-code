@@ -121,7 +121,7 @@ describe('StatusCardController', () => {
     );
   });
 
-  it('projects localized granular phases with an escaped tool title', async () => {
+  it('projects localized granular phases without tool details', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness({ language: 'zh-CN' });
 
@@ -129,43 +129,15 @@ describe('StatusCardController', () => {
     await vi.advanceTimersByTimeAsync(0);
     vi.mocked(client.openOrUpdateStream).mockClear();
 
-    await controller.updateRunPhase(
-      'run-1',
-      'fetching',
-      'WebFetch: [今日热点](https://example.com)',
-    );
+    await controller.updateRunPhase('run-1', 'fetching');
     await vi.advanceTimersByTimeAsync(500);
 
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content:
-          '🌐 获取中 · WebFetch\\: \\[今日热点\\]\\(https\\://example\\.com\\)\n\nanswer',
+        content: '🌐 获取中\n\nanswer',
         finalize: false,
       }),
     );
-  });
-
-  it('bounds and clears a tool title without changing the current phase', async () => {
-    vi.useFakeTimers();
-    const { client, controller } = createHarness({ language: 'zh-CN' });
-
-    controller.replace(segment(), target, 'answer');
-    await vi.advanceTimersByTimeAsync(0);
-    vi.mocked(client.openOrUpdateStream).mockClear();
-
-    await controller.updateRunPhase('run-1', 'fetching', 'x'.repeat(61));
-    await vi.advanceTimersByTimeAsync(500);
-    await controller.updateRunPhase('run-1', 'fetching');
-    await vi.advanceTimersByTimeAsync(500);
-
-    expect(
-      vi
-        .mocked(client.openOrUpdateStream)
-        .mock.calls.map(([request]) => request.content),
-    ).toEqual([
-      '🌐 获取中 · ' + 'x'.repeat(59) + '…\n\nanswer',
-      '🌐 获取中\n\nanswer',
-    ]);
   });
 
   it('includes replacement content in the initial card delivery', async () => {
@@ -1180,7 +1152,7 @@ describe('StatusCardController', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
 
-    await controller.updateRunPhase('run-1', 'fetching', 'WebFetch');
+    await controller.updateRunPhase('run-1', 'fetching');
     await vi.advanceTimersByTimeAsync(999);
     expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
@@ -1188,7 +1160,7 @@ describe('StatusCardController', () => {
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content: '🌐 Fetching · WebFetch\n\nfirst more',
+        content: '🌐 Fetching\n\nfirst more',
         finalize: false,
       }),
     );

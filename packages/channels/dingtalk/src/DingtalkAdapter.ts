@@ -2085,12 +2085,9 @@ export class DingtalkChannel extends ChannelBase {
     }
     const presentationPhase = lifecyclePresentationPhase(event);
     if (event.runId && presentationPhase) {
-      const phaseDetail =
-        event.type === 'tool_call' ? event.toolCall.title : undefined;
       this.interactionPresenter?.updateStatusCardPhase(
         event.runId,
         presentationPhase,
-        ...(phaseDetail ? [phaseDetail] : []),
       );
     }
     if (presentationPhase) {

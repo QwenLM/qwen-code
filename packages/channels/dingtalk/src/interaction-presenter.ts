@@ -123,15 +123,11 @@ export class DingtalkInteractionPresenter {
     });
   }
 
-  updateStatusCardPhase(
-    runId: string,
-    phase: DingtalkPresentationPhase,
-    detail?: string,
-  ): void {
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
     void this.enqueue(run, () =>
-      this.options.statusCards?.updateRunPhase(runId, phase, detail),
+      this.options.statusCards?.updateRunPhase(runId, phase),
     );
   }
 
