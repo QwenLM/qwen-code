@@ -5215,6 +5215,17 @@ async function runQwenServeImpl(
       }
       return source;
     };
+    let mcpAuthenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (mcpAuthenticationActive) return undefined;
+      mcpAuthenticationActive = true;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        mcpAuthenticationActive = false;
+      };
+    };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -5612,6 +5623,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace,
         runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
+        acquireMcpAuthentication,
         // Prompt terminal ledger: persisted beside the transcript so a
         // restarted daemon can reconcile dangling prompts on cold load.
         promptLedger: runtime.createPromptLedgerSink(
@@ -6186,6 +6198,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace: workspaceInput.cwd,
         runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
+        acquireMcpAuthentication,
         promptLedger: runtime.createPromptLedgerSink(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -6863,6 +6876,7 @@ async function runQwenServeImpl(
             : {}),
           boundWorkspace: cwd,
           runtimeEpochSource: runtimeEpochSourceFor(cwd),
+          acquireMcpAuthentication,
           // Live-conversation workspaces keep transcripts outside the
           // runtime storage layout, so no ledger sink is wired there.
           ...(provenance === 'live-conversation'
@@ -7330,7 +7344,9 @@ async function runQwenServeImpl(
             runtimeToDrain.provenance !== 'live-conversation'
           ) {
             await channelWorkerManager
-              .removeWorkspace(runtimeToDrain.workspaceCwd)
+              .removeWorkspace(runtimeToDrain.workspaceCwd, {
+                permanent: reason === 'workspace_removed',
+              })
               .catch((err) => {
                 daemonLog.error(
                   'workspace channel worker cleanup error',

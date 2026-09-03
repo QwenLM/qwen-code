@@ -289,6 +289,8 @@ import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
+import { registerWorkspaceMcpConfigRoutes } from './routes/workspace-mcp-config.js';
+import { registerWorkspaceRuntimeMcpRoutes } from './routes/workspace-runtime-mcp.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
 import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
@@ -312,7 +314,7 @@ import {
   type parseChannelWebhookConfig,
 } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
@@ -1531,6 +1533,7 @@ export function createServeApp(
   let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
   let liveRuntimeBootPromise: Promise<void> | undefined;
   let liveRuntimeBootResult: WorkspaceRuntime | undefined;
+  let liveRuntimeBootWarned = false;
   let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
   const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
@@ -1611,11 +1614,42 @@ export function createServeApp(
     liveBindingPromise = pending;
     return pending;
   };
+  const describeConversationBootError = (error: unknown): string => {
+    // Boot errors wrap the real failure in generic ownership messages; walk
+    // the cause chain so the log names the innermost root cause.
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (
+      current instanceof Error &&
+      !seen.has(current) &&
+      messages.length < 8
+    ) {
+      seen.add(current);
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.length > 0 ? messages.join(' <- ') : String(error);
+  };
   const startConversationRuntimeBoot = (): Promise<void> => {
     if (liveRuntimeBootPromise) return liveRuntimeBootPromise;
     const pending = ensureLiveConversationRuntime()
       .then((runtime) => {
         liveRuntimeBootResult = runtime;
+        liveRuntimeBootWarned = false;
+      })
+      .catch((error) => {
+        // Boot failures surface to clients only as a generic 503; log the
+        // root cause once per failure episode so stalls are diagnosable.
+        if (!liveRuntimeBootWarned) {
+          liveRuntimeBootWarned = true;
+          // writeStderrLineSafe must not throw even on a dead stderr; the
+          // latch stays set so a lost line cannot spin per retry either.
+          writeStderrLineSafe(
+            `qwen serve: Conversations runtime boot failed: ${describeConversationBootError(error)}`,
+          );
+        }
+        throw error;
       })
       .finally(() => {
         if (liveRuntimeBootPromise === pending) {
@@ -2738,6 +2772,17 @@ export function createServeApp(
           ...workspaceRegistry.list().map((runtime) => runtime.bridge),
         ]),
     });
+    registerWorkspaceMcpConfigRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      safeBody,
+      persistSetting: async (...args) => {
+        await persistSetting(...args);
+      },
+      sendBridgeError,
+      invalidateServeFeaturesCache,
+      broadcastSettingsChanged,
+    });
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2892,6 +2937,12 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedMcpControlRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    sendBridgeError,
+  });
+  registerWorkspaceRuntimeMcpRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,

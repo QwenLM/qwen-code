@@ -519,6 +519,15 @@ export class DaemonSessionClient {
     return this.session.branch;
   }
 
+  /**
+   * Present when this client was created with a `modelServiceId`: `false`
+   * means the spawn-time model switch failed and the session is running on
+   * the agent default model.
+   */
+  get modelApplied(): DaemonSession['modelApplied'] {
+    return this.session.modelApplied;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }

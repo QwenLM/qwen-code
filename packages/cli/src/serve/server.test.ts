@@ -717,7 +717,11 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'scheduled_task_session_reuse'];
     }
     if (feature === 'session_export') {
-      return [feature, 'standalone_sessions_v1'];
+      return [
+        feature,
+        'standalone_sessions_v1',
+        'standalone_session_options_v1',
+      ];
     }
     return [feature];
   }).filter(
@@ -2955,7 +2959,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'standalone_sessions_v1') {
+        if (
+          feature === 'standalone_sessions_v1' ||
+          feature === 'standalone_session_options_v1'
+        ) {
           expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
           expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -16068,6 +16075,8 @@ describe('createServeApp', () => {
       timestamp: string;
       prompt: string;
       mtime: Date;
+      customTitle?: string;
+      titleSource?: 'manual' | 'auto';
       state?: 'active' | 'archived';
       parentSessionId?: string;
       sourceType?: string;
@@ -16091,6 +16100,21 @@ describe('createServeApp', () => {
         cwd: input.cwd,
       };
       const lines = [JSON.stringify(record)];
+      if (input.customTitle !== undefined) {
+        lines.push(
+          JSON.stringify({
+            ...record,
+            uuid: `${input.sessionId}-title-1`,
+            parentUuid: record.uuid,
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: {
+              customTitle: input.customTitle,
+              ...(input.titleSource ? { titleSource: input.titleSource } : {}),
+            },
+          }),
+        );
+      }
       if (input.parentSessionId !== undefined) {
         // Mirror ChatRecordingService.recordParentSession: a single
         // `parent_session` system record near the head of the transcript that
@@ -16370,6 +16394,8 @@ describe('createServeApp', () => {
         timestamp: '2026-05-17T12:00:00.000Z',
         prompt: 'stored only prompt',
         mtime: new Date('2026-05-17T12:10:00.000Z'),
+        customTitle: 'Manual title',
+        titleSource: 'manual',
       });
       await writeStoredSession({
         sessionId: liveAndStoredId,
@@ -16408,7 +16434,8 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: storedOnlyId,
             workspaceCwd: WS_BOUND,
-            displayName: 'stored only prompt',
+            displayName: 'Manual title',
+            titleSource: 'manual',
             clientCount: 0,
             hasActivePrompt: false,
           }),
@@ -37382,6 +37409,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(partialCapabilities.body.features).not.toContain(
       'standalone_sessions_v1',
     );
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_session_options_v1',
+    );
 
     const complete = setupLiveRuntime();
     const completeRoute = await supertest(complete.app)
@@ -37394,6 +37424,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(completeRoute.status).toBe(400);
     expect(completeCapabilities.body.features).toContain(
       'standalone_sessions_v1',
+    );
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_session_options_v1',
     );
   });
 
@@ -37685,6 +37718,128 @@ describe('Live conversation runtime lifecycle', () => {
       await expect(retryPromise).resolves.toMatchObject({ status: 200 });
       expect(onConversationRuntimeReady).toHaveBeenCalledOnce();
     } finally {
+      await restoreLiveSettings();
+    }
+  });
+
+  it('logs a boot failure once per episode with the full cause chain', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let captured = '';
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      captured += String(chunk);
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const driveBoot = async (settle: () => void) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      settle();
+      return promise;
+    };
+    try {
+      const first = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-ONE', {
+            cause: new Error('ROOT-CAUSE-ONE EACCES'),
+          }),
+        ),
+      );
+      expect(first.status).toBe(503);
+
+      const second = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-TWO', {
+            cause: new Error('ROOT-CAUSE-TWO'),
+          }),
+        ),
+      );
+      expect(second.status).toBe(503);
+      const firstEpisode = captured;
+      expect(firstEpisode).toContain(
+        'qwen serve: Conversations runtime boot failed:',
+      );
+      expect(firstEpisode).toContain('WRAPPED-BOOT-FAILURE-ONE');
+      expect(firstEpisode).toContain('ROOT-CAUSE-ONE');
+      expect(firstEpisode).not.toContain('WRAPPED-BOOT-FAILURE-TWO');
+      expect(firstEpisode).not.toContain('ROOT-CAUSE-TWO');
+
+      const recovered = await driveBoot(() => setup.resolveCreation());
+      expect(recovered.status).toBe(200);
+
+      vi.mocked(setup.conversationWorkspace.revalidate).mockRejectedValueOnce(
+        new Error('ROOT-CAUSE-THREE ENOENT'),
+      );
+      const third = await request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(third.status).toBe(503);
+      expect(captured).toContain('ROOT-CAUSE-THREE');
+      const episodeLines = captured
+        .split('\n')
+        .filter((line) =>
+          line.includes('qwen serve: Conversations runtime boot failed:'),
+        );
+      expect(episodeLines).toHaveLength(2);
+    } finally {
+      stderrSpy.mockRestore();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('keeps the classified boot rejection when the stderr write itself fails', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let writeAttempts = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      if (String(chunk).includes('qwen serve: Conversations runtime boot')) {
+        writeAttempts += 1;
+        throw new Error('EPIPE dead stderr');
+      }
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const failBootOnce = async (message: string) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      setup.rejectCreation(new Error(message));
+      return promise;
+    };
+    try {
+      const first = await failBootOnce('SENTINEL-BOOT-FAILURE-ONE');
+      expect(first.status).toBe(503);
+      expect(first.body.code).toBe('conversation_runtime_unavailable');
+
+      const second = await failBootOnce('SENTINEL-BOOT-FAILURE-TWO');
+      expect(second.status).toBe(503);
+      expect(second.body.code).toBe('conversation_runtime_unavailable');
+      expect(writeAttempts).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
       await restoreLiveSettings();
     }
   });
