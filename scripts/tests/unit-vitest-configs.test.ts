@@ -5,6 +5,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -250,13 +251,15 @@ describe('scripts suite timeout ceiling', () => {
     // The pin above re-imports the config module, so it cannot see an override
     // a suite applies to itself: that lands after the project config resolves,
     // outranks it, and quietly holds the suite at the old flat ceiling on the
-    // shared pool while this file reads green.
-    const here = new URL('.', import.meta.url);
-    const shadowing = readdirSync(fileURLToPath(here))
-      .filter((name) => /\.test\.[jt]s$/.test(name))
+    // shared pool while this file reads green. The walk spans the config's
+    // whole include+setup surface — recursive, and setup files as well as
+    // suites — because an override anywhere in it outranks the ceiling.
+    const here = fileURLToPath(new URL('.', import.meta.url));
+    const shadowing = readdirSync(here, { encoding: 'utf8', recursive: true })
+      .filter((name) => /\.[jt]s$/.test(name))
       .filter((name) =>
-        /vi\.setConfig\(\s*\{\s*testTimeout/.test(
-          readFileSync(fileURLToPath(new URL(name, here)), 'utf8'),
+        /vi\.setConfig\([^)]*\btestTimeout\b/.test(
+          readFileSync(join(here, name), 'utf8'),
         ),
       );
     expect(shadowing).toEqual([]);
