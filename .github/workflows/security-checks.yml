@@ -27,7 +27,10 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    # A dead audit endpoint makes each of this job's three audits burn its own
+    # minutes in npm's backoff before erroring, so the retry budget below needs
+    # headroom above the ~1 minute a healthy run takes.
+    timeout-minutes: 25
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -52,7 +55,30 @@ jobs:
       - name: 'Audit production dependencies'
         run: |
           status=0
-          npm audit --omit=dev --audit-level=high || status=$?
+          # The registry's audit endpoint intermittently answers 400/500/503,
+          # which is not a finding: a 40-minute npm incident on 2026-09-03
+          # reddened a dozen PRs whose trees were clean, faster than the failure
+          # patrol could absorb them (five candidates a cycle, and only once a
+          # failure is 30 minutes stale). Retry just that transport error, under
+          # one deadline shared by every audit in this step.
+          audit_deadline=$(( $(date +%s) + 300 ))
+          audit() {
+            local out
+            while :; do
+              if out="$(npm audit --omit=dev --audit-level=high "$@" 2>&1)"; then
+                printf '%s\n' "${out}"
+                return 0
+              fi
+              printf '%s\n' "${out}"
+              # npm's own failure channel; a findings report never prints it, so
+              # a real high-severity CVE still fails on the first attempt.
+              case "${out}" in *'audit endpoint returned an error'*) ;; *) return 1 ;; esac
+              [ "$(date +%s)" -lt "${audit_deadline}" ] || return 1
+              echo '::notice::npm audit endpoint unavailable; retrying.'
+              sleep 30
+            done
+          }
+          audit || status=$?
           for lockfile in packages/*/package-lock.json; do
             [ -f "$lockfile" ] || continue
             # Covered by the root workspace audit; this vendored lockfile is not installed directly.
@@ -61,7 +87,7 @@ jobs:
             (
               cd "$package_dir"
               npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&
-                npm audit --omit=dev --audit-level=high --workspaces=false
+                audit --workspaces=false
             ) || status=$?
           done
           exit "$status"
