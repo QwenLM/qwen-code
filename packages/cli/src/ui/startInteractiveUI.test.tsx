@@ -198,6 +198,63 @@ describe('startInteractiveUI cross-session messaging', () => {
     expect(reassertSessionRegistryRecord).toHaveBeenCalledTimes(1);
   });
 
+  it('wires the hold lifetime setting into the gate', async () => {
+    // The only production wiring of the setting. Dropping the property
+    // type-checks -- it is optional -- and the gate then falls into its
+    // `undefined` -> default branch, so a user who sets `never` (the
+    // documented escape hatch) or `1m` silently gets five minutes and
+    // messages dropped on a schedule they cannot change.
+    const settingsWith = (crossSessionHeldExpiry: string) =>
+      ({
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: true, crossSessionHeldExpiry },
+        },
+      }) as unknown as LoadedSettings;
+
+    await start(makeConfig(), settingsWith('1m'));
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const minute = peerMessagingStart.mock.calls[0]?.[0] as {
+      getHeldExpiryMs: () => number | null;
+    };
+    expect(minute.getHeldExpiryMs()).toBe(60_000);
+
+    vi.clearAllMocks();
+    peerMessagingStart.mockResolvedValue({
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await start(makeConfig(), settingsWith('never'));
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const never = peerMessagingStart.mock.calls[0]?.[0] as {
+      getHeldExpiryMs: () => number | null;
+    };
+    expect(never.getHeldExpiryMs()).toBeNull();
+  });
+
+  it('forwards the inbox token, not only the address, into the record', async () => {
+    // Regressing this callback to `(ipcPath) => …(ipcPath)` type-checks —
+    // fewer parameters is assignable — and every record would then
+    // advertise an address with no token: peers resolve it, fail to
+    // authenticate, and every send is dropped while still reporting 'sent'.
+    const config = makeConfig();
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    const options = peerMessagingStart.mock.calls[0]?.[0] as {
+      updateSessionRegistryIpcPath: (
+        ipcPath: string | undefined,
+        ipcToken?: string,
+      ) => Promise<void>;
+    };
+    await options.updateSessionRegistryIpcPath('/run/self.sock', 'tok-abc');
+    expect(config.updateSessionRegistryIpcPath).toHaveBeenCalledWith(
+      '/run/self.sock',
+      'tok-abc',
+    );
+  });
+
   it('reads the session id live, so /clear moves the pin with the session', async () => {
     // `startNewSession` reassigns Config's session id in place, so /clear,
     // /new and /resume all leave the same Config answering with a new id.

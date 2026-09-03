@@ -32,7 +32,13 @@ jobs:
       image: 'node:22-bookworm'
       # Match the host runner UID/GID so bind-mounted files stay writable.
       options: '--init --user node'
-    timeout-minutes: 15
+    # This producer always cold-downloads -- RUNNER_TEMP is fresh per job and
+    # there is no cache/restore step here -- so its cost is a full registry
+    # fetch every time, and on the shared pool that is what varies. 22 green
+    # runs took 4.5-11.8 min, already within 3.2 min of the old 15; five more
+    # were cancelled at 15.2-16.8, i.e. at the cap. 30 covers the same ~4x
+    # contention factor measured on the pool's other npm ci steps.
+    timeout-minutes: 30
     steps:
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:

@@ -120,10 +120,21 @@ const RECEIPT_TRANSITIONS: Record<
   PeerDeliveryStatus | 'pending',
   ReadonlySet<PeerDeliveryStatus>
 > = {
-  pending: new Set(['held', 'delivered', 'denied', 'expired', 'misaddressed']),
+  pending: new Set([
+    'held',
+    'delivered',
+    'denied',
+    'refused',
+    'expired',
+    'misaddressed',
+  ]),
+  // A refusal is decided at admission, so it cannot follow a hold: a
+  // message already parked was not turned away. Switching the setting to
+  // `refuse` while it sits there settles it as `denied` — someone chose.
   held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
   delivered: new Set(['expired', 'misaddressed']),
   denied: new Set(),
+  refused: new Set(),
   expired: new Set(),
   misaddressed: new Set(),
 };
@@ -314,6 +325,8 @@ export async function sendToPeer(
   const frame = buildUserFrame({
     content: options.message,
     from: self.ipcPath,
+    // Our own inbox token, so the receiver's receipts authenticate back.
+    ...(self.ipcToken !== undefined ? { replyToken: self.ipcToken } : {}),
     fromName: self.name,
     // Pin the frame to the session the name resolved to. The address is
     // keyed by PID, and PIDs get reused: if that session has since been
@@ -336,7 +349,9 @@ export async function sendToPeer(
     state: 'pending',
   });
   try {
-    await sendPeerFrame(peer.ipcPath, frame);
+    await sendPeerFrame(peer.ipcPath, frame, {
+      ...(peer.ipcToken !== undefined ? { authToken: peer.ipcToken } : {}),
+    });
     return { kind: 'sent', peer, address };
   } catch (error) {
     if (

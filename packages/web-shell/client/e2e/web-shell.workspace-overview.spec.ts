@@ -174,7 +174,39 @@ function overviewRequests(
     .map((request) => request.path.slice(prefix.length));
 }
 
-test('shows facet chips and session counts for the expanded primary workspace', async ({
+/**
+ * Waits until `count()` reports the same value for a quiet window of real
+ * time, then returns it. Startup fires several request bursts that the fake
+ * clock cannot gate (the StrictMode double mount, the composer skill loader,
+ * and one more facet round when the connection settles), so the polling
+ * baseline must be taken after those bursts have landed.
+ */
+async function waitForStableOverviewCount(
+  count: () => number,
+  quietWindowMs = 2_000,
+): Promise<number> {
+  const deadline = Date.now() + 15_000;
+  let last = count();
+  let quietSince = Date.now();
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const now = Date.now();
+    const current = count();
+    if (current !== last) {
+      last = current;
+      quietSince = now;
+    } else if (now - quietSince >= quietWindowMs) {
+      return current;
+    }
+    if (now > deadline) {
+      throw new Error(
+        `overview request count never stabilised (last count: ${current})`,
+      );
+    }
+  }
+}
+
+test('shows workspace details on hover and no counts in the header', async ({
   page,
 }, testInfo) => {
   const scenario = createScenario();
@@ -187,31 +219,69 @@ test('shows facet chips and session counts for the expanded primary workspace', 
   });
   await expect(primaryHeader).toHaveAttribute('aria-expanded', 'true');
 
-  // The primary workspace lists two sessions; nothing is running.
-  await expect(primaryHeader.getByLabel('2 sessions')).toBeVisible();
+  // The header itself carries no counts; they moved into the popover.
+  await expect(primaryHeader.getByLabel('2 sessions')).toHaveCount(0);
 
-  // Both workspaces start expanded; the primary section renders first.
-  const chipLists = sidebar.getByRole('list', { name: 'Workspace overview' });
-  const chips = chipLists.first();
-  await expect(chips.getByLabel(/^MCP:/)).toHaveText('MCP1/2');
-  await expect(chips.getByLabel(/^MCP:/)).toHaveAttribute(
+  // Hovering the workspace header opens the details popover: full path,
+  // branch, session counts, and every known facet, zeros included.
+  await primaryHeader.hover();
+  const primaryDetails = page.getByRole('dialog', {
+    name: 'qwen-web-shell-e2e',
+  });
+  await expect(primaryDetails).toBeVisible();
+  // The primary workspace lists two sessions; nothing is running.
+  const primarySessions = primaryDetails.locator(
+    '[data-web-shell-workspace-sessions]',
+  );
+  await expect(primarySessions).toHaveText('Sessions2');
+  await expect(primarySessions).toHaveAttribute('title', '2 sessions');
+  await expect(
+    primaryDetails.locator('[data-web-shell-workspace-path]'),
+  ).toHaveText(PRIMARY_CWD);
+  const primaryMcp = primaryDetails.locator(
+    '[data-web-shell-workspace-overview="mcp"]',
+  );
+  await expect(primaryMcp).toHaveText('MCP1/2');
+  await expect(primaryMcp).toHaveAttribute(
     'title',
     'MCP: 1 of 3 connected, 1 failed, 1 disabled',
   );
-  await expect(chips.getByLabel(/^Skills:/)).toHaveText('Skills1');
-  await expect(chips.getByLabel(/^Extensions:/)).toHaveText('Extensions0');
-  await expect(chips.getByLabel(/^Channels:/)).toHaveText('Channels0');
-  await expect(chips.getByLabel(/^Context:/)).toHaveText('Context0');
   await expect(
-    sidebar.locator('[data-web-shell-workspace-path]').first(),
-  ).toHaveText(PRIMARY_CWD);
+    primaryDetails.locator('[data-web-shell-workspace-overview="skills"]'),
+  ).toHaveText('Skills1');
+  // The popover takes no persistent space, so known zeros show too.
+  await expect(
+    primaryDetails.locator('[data-web-shell-workspace-overview="extensions"]'),
+  ).toHaveText('Extensions0');
+  await expect(
+    primaryDetails.locator('[data-web-shell-workspace-overview="channels"]'),
+  ).toHaveText('Channels0');
+  await expect(
+    primaryDetails.locator('[data-web-shell-workspace-overview="context"]'),
+  ).toHaveText('Context0');
+  await page.mouse.move(0, 0);
+  await expect(primaryDetails).toBeHidden();
 
   // The secondary row shows its own facets, not the primary's.
-  const secondaryChips = chipLists.nth(1);
-  await expect(secondaryChips.getByLabel(/^Skills:/)).toHaveText('Skills3');
-  await expect(secondaryChips.getByLabel(/^Context:/)).toHaveText('Context2');
-  await expect(secondaryChips.getByLabel(/^MCP:/)).toHaveText('MCP0');
-  await expect(chips.getByLabel(/^Skills:/)).toHaveText('Skills1');
+  const secondaryHeader = sidebar.getByRole('button', {
+    name: /^qwen-api-service/,
+  });
+  await secondaryHeader.hover();
+  const secondaryDetails = page.getByRole('dialog', {
+    name: 'qwen-api-service',
+  });
+  await expect(secondaryDetails).toBeVisible();
+  await expect(
+    secondaryDetails.locator('[data-web-shell-workspace-overview="skills"]'),
+  ).toHaveText('Skills3');
+  await expect(
+    secondaryDetails.locator('[data-web-shell-workspace-overview="context"]'),
+  ).toHaveText('Context2');
+  await expect(
+    secondaryDetails.locator('[data-web-shell-workspace-overview="mcp"]'),
+  ).toHaveText('MCP0');
+  await page.mouse.move(0, 0);
+  await expect(secondaryDetails).toBeHidden();
 
   // Every expanded workspace is asked for exactly the default facet set
   // (hooks stay opt-in). The dev build runs effects twice under StrictMode,
@@ -230,16 +300,10 @@ test('shows facet chips and session counts for the expanded primary workspace', 
   await page.waitForTimeout(1_500);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
 
-  // Collapsing a row drops its chips; the next open refetches.
-  const secondaryHeader = sidebar.getByRole('button', {
-    name: /^qwen-api-service/,
-  });
+  // Collapsing a row stops its facet fetch; the next open refetches.
   const beforeCollapse = overviewRequests(daemon, SECONDARY_CWD).length;
   await secondaryHeader.click();
   await expect(secondaryHeader).toHaveAttribute('aria-expanded', 'false');
-  await expect(
-    sidebar.getByRole('list', { name: 'Workspace overview' }),
-  ).toHaveCount(1);
   await secondaryHeader.click();
   await expect(secondaryHeader).toHaveAttribute('aria-expanded', 'true');
   await expect
@@ -300,26 +364,37 @@ test('opens the workspace menu with management entries on the primary workspace 
   await expect(page.getByRole('region', { name: 'MCP Servers' })).toBeVisible();
 });
 
-test('polls an expanded workspace once per 30 s tick and not faster', async ({
+test('polls an expanded workspace once per 30 s tick and not faster @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   // A fake clock lets the spec observe the 30 s cadence without waiting.
+  // Pausing it keeps startup (StrictMode double mount, the composer skill
+  // loader, any connection-settle re-fetch) from eating into the interval
+  // the assertions measure: every startup timer is pinned to one fake
+  // instant, and nothing fires until runFor below.
   await page.clock.install();
+  await page.clock.pauseAt(Date.now());
   await gotoSession(page, scenario, daemon);
-  const sidebar = page.getByRole('complementary');
-  await expect(
-    sidebar.getByRole('list', { name: 'Workspace overview' }).first(),
-  ).toBeVisible();
   const facets = (cwd: string) =>
     [...new Set(overviewRequests(daemon, cwd))].sort();
   await expect
     .poll(() => facets(PRIMARY_CWD))
     .toEqual(['channels', 'extensions', 'mcp', 'memory', 'skills']);
-  const settled = overviewRequests(daemon, PRIMARY_CWD).length;
+  // Let the real-time startup bursts land before counting.
+  await waitForStableOverviewCount(
+    () => overviewRequests(daemon, PRIMARY_CWD).length,
+  );
+  // Flush everything the paused startup scheduled below one cadence,
+  // including the first poll tick itself, so the baseline sits on a known
+  // interval phase.
+  await page.clock.runFor(30_500);
+  const settled = await waitForStableOverviewCount(
+    () => overviewRequests(daemon, PRIMARY_CWD).length,
+  );
 
-  // Just short of a tick: no new facet requests.
+  // Just short of the next tick: no new facet requests.
   await page.clock.runFor(29_000);
   await page.waitForTimeout(200);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
@@ -329,4 +404,87 @@ test('polls an expanded workspace once per 30 s tick and not faster', async ({
   await expect
     .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
     .toBe(settled + 5);
+});
+
+test('opens the workspace folder and terminal locally when the daemon is loopback', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: PRIMARY_CWD,
+    displayName: 'Run auth migration',
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'workspace_settings',
+        'workspace_voice',
+        'workspace_local_open',
+        'workspace_local_terminal',
+      ],
+      workspaces: [
+        { id: 'ws-primary', cwd: PRIMARY_CWD, primary: true, trusted: true },
+      ],
+    },
+    gitStatus: { v: 2, workspaceCwd: PRIMARY_CWD, branch: 'main' },
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: connection.sessionId,
+      replayedCount: scenario.events.length,
+    }),
+  );
+
+  const sidebar = page.getByRole('complementary');
+  const header = sidebar.getByRole('button', { name: /^qwen-web-shell-e2e/ });
+  await expect(header).toBeVisible();
+
+  // The hover popover's path row carries the open-locally buttons.
+  await header.hover();
+  const details = page.getByRole('dialog', { name: 'qwen-web-shell-e2e' });
+  await expect(details).toBeVisible();
+  const openRequests = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        /\/workspaces\/.+\/open\/?$/.test(request.path),
+    );
+  const openButton = details.locator('[data-web-shell-open-workspace-folder]');
+  await expect(openButton).toBeVisible();
+  await openButton.click();
+  await expect.poll(() => openRequests()).toHaveLength(1);
+
+  const terminalButton = details.locator(
+    '[data-web-shell-open-workspace-terminal]',
+  );
+  await expect(terminalButton).toBeVisible();
+  await terminalButton.click();
+  await expect.poll(() => openRequests()).toHaveLength(2);
+  expect(openRequests()[1]?.body).toEqual({ target: 'terminal' });
+
+  // The workspace menu offers the same actions. The button clicks focused
+  // the popover content, which now holds the popover open (keyboard parity),
+  // so dismiss it explicitly.
+  await page.keyboard.press('Escape');
+  await expect(details).toBeHidden();
+  await header.hover();
+  await header
+    .locator('..')
+    .getByRole('button', { name: 'Workspace actions' })
+    .click();
+  const menu = page.getByRole('menu');
+  await expect(
+    menu.getByRole('menuitem', { name: 'Open folder' }),
+  ).toBeVisible();
+  await expect(
+    menu.getByRole('menuitem', { name: 'Open terminal' }),
+  ).toBeVisible();
 });
