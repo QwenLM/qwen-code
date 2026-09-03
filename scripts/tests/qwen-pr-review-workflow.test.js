@@ -79,8 +79,11 @@ function realUtilityPath(name) {
 }
 
 // The CEDE kill-scope replay signals real processes, so it needs a real
-// pkill(1). Capability probe, not a platform check (R11-7's rationale).
+// pkill(1) plus the real pgrep(1) that resolves the process group the
+// escalation signals (R25-1). Capability probe, not a platform check
+// (R11-7's rationale).
 const realPkillPath = realUtilityPath('pkill');
+const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the agent pool', () => {
@@ -4801,6 +4804,11 @@ describe('review supersede salvage (#10110)', () => {
         chmodSync(realDatePath, 0o755);
       }
       write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
+      // exit 1 is pgrep's "no process matched": an arm that does not
+      // measure the CEDE kill leaves the escalation with no group to
+      // signal, the no-op pkill stub's semantics. realCedeKill pins the
+      // truthful pgrep instead.
+      write('pgrep', '#!/bin/bash\nexit 1\n');
       // The watcher's bounded reads (timeout 5 node/head ...) need a
       // timeout(1) on every lane: macOS ships none, and a missing binary
       // makes the latch/read condition exit 127 — the compose latch then
@@ -4846,31 +4854,45 @@ describe('review supersede salvage (#10110)', () => {
       // survival.
       const decoy = join(side, 'decoy');
       const decoyBPid = join(side, 'decoy-b-pid');
+      const decoyTreePid = join(side, 'decoy-a-tree-pid');
       const cedeKill = realCedeKill
         ? {
             prelude: [
-              `printf '#!/bin/bash\\n/bin/sleep 8\\n' > "${decoy}"`,
+              // Job control gives each background job its own process group,
+              // which that job leads: GNU timeout's shape, and what makes the
+              // resolved direct child's pid the attempt tree's pgid. Pure
+              // bash, so the BSD/Darwin lane replays it too.
+              'set -m',
+              // Decoy A stands in for the attempt's timeout AND for the tree
+              // member the escalation exists for: it ignores TERM like a
+              // hijacked agent (`trap '' TERM`), and the child it backgrounds
+              // inherits both the ignore and its process group. A -P $$ sweep
+              // never matches that child, and SIGKILL to A is not forwarded
+              // down to it (R25-1).
+              `printf '#!/bin/bash\\ntrap "" TERM\\n( trap "" TERM; /bin/sleep 8 ) &\\necho "$!" > "\${DECOY_TREE_PID:-/dev/null}"\\n/bin/sleep 8\\n' > "${decoy}"`,
               `chmod +x "${decoy}"`,
               // stdout/stderr off the harness's pipes: a backgrounded decoy
               // holding the write end would make execFileSync wait for its
               // sleep instead of for this shell.
-              `"${decoy}" --prompt "$REVIEW_URL" >/dev/null 2>&1 &`,
+              `DECOY_TREE_PID="${decoyTreePid}" "${decoy}" --prompt "$REVIEW_URL" >/dev/null 2>&1 &`,
               'DECOY_A=$!',
               `DECOY_B_URL="$REVIEW_URL" bash -c '"$1" --prompt "$DECOY_B_URL" & echo $! > "$2"; /bin/sleep 8' bash "${decoy}" "${decoyBPid}" >/dev/null 2>&1 &`,
               'DECOY_B_PARENT=$!',
-              // Bounded wait on B's pid, not a fixed sleep: the epilogue
-              // reads B's state, and an unloaded-host guess is a loaded-host
-              // flake.
-              `i=0; while [ ! -s "${decoyBPid}" ] && [ "$i" -lt 100 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done`,
+              // Bounded wait on both pid files, not a fixed sleep: the
+              // epilogue reads both states, and an unloaded-host guess is a
+              // loaded-host flake.
+              `i=0; while { [ ! -s "${decoyBPid}" ] || [ ! -s "${decoyTreePid}" ]; } && [ "$i" -lt 100 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done`,
             ].join('\n'),
             // A signalled decoy is a zombie until its parent reaps it, so
             // ps state Z reads as dead, not alive.
             epilogue: [
               `DECOY_B="$(cat "${decoyBPid}" 2>/dev/null || true)"`,
+              `DECOY_T="$(cat "${decoyTreePid}" 2>/dev/null || true)"`,
               `sa="$(ps -o state= -p "$DECOY_A" 2>/dev/null | tr -d '[:space:]' || true)"`,
               `sb="$(ps -o state= -p "\${DECOY_B:-}" 2>/dev/null | tr -d '[:space:]' || true)"`,
-              'echo "CEDEKILL own=${sa:-gone} concurrent=${sb:-gone}"',
-              'kill -KILL "$DECOY_A" "${DECOY_B:-}" "$DECOY_B_PARENT" 2>/dev/null || true',
+              `st="$(ps -o state= -p "\${DECOY_T:-}" 2>/dev/null | tr -d '[:space:]' || true)"`,
+              'echo "CEDEKILL own=${sa:-gone} concurrent=${sb:-gone} tree=${st:-gone}"',
+              'kill -KILL "$DECOY_A" "${DECOY_B:-}" "$DECOY_B_PARENT" "${DECOY_T:-}" 2>/dev/null || true',
             ].join('\n'),
           }
         : { prelude: '', epilogue: '' };
@@ -4913,6 +4935,7 @@ describe('review supersede salvage (#10110)', () => {
             // export cannot redirect the poll at the real sleep 60).
             QWEN_CI_REAL_SLEEP: join(bin, 'sleep'),
             QWEN_CI_REAL_PKILL: join(bin, 'pkill'),
+            QWEN_CI_REAL_PGREP: join(bin, 'pgrep'),
             QWEN_CI_REAL_ID: realIdPath,
             // The R23-1 pins this arm measures: the harness stub where one
             // exists (the bounded-read semantics must survive), else the
@@ -4931,7 +4954,12 @@ describe('review supersede salvage (#10110)', () => {
             ...(realDatePath !== null
               ? { QWEN_CI_REAL_DATE: realDatePath }
               : {}),
-            ...(realCedeKill ? { QWEN_CI_REAL_PKILL: realPkillPath } : {}),
+            ...(realCedeKill
+              ? {
+                  QWEN_CI_REAL_PKILL: realPkillPath,
+                  QWEN_CI_REAL_PGREP: realPgrepPath,
+                }
+              : {}),
           },
         });
       } catch (e) {
@@ -4944,7 +4972,9 @@ describe('review supersede salvage (#10110)', () => {
         existsSync(join(dir, name))
           ? readFileSync(join(dir, name), 'utf8')
           : null;
-      const killed = /CEDEKILL own=(\S+) concurrent=(\S+)/.exec(stdout);
+      const killed = /CEDEKILL own=(\S+) concurrent=(\S+) tree=(\S+)/.exec(
+        stdout,
+      );
       const dead = (state) => state === 'gone' || state === 'Z';
       return {
         marker: readOr('salvage-ok'),
@@ -4953,6 +4983,7 @@ describe('review supersede salvage (#10110)', () => {
         pkilled: existsSync(pkillLog),
         ownAttemptKilled: killed ? dead(killed[1]) : null,
         concurrentRunAlive: killed ? !dead(killed[2]) : null,
+        attemptTreeKilled: killed ? dead(killed[3]) : null,
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -5388,7 +5419,7 @@ describe('review supersede salvage (#10110)', () => {
     }
   });
 
-  it.skipIf(!realPkillPath)(
+  it.skipIf(!realPkillPath || !realPgrepPath)(
     "cedes this run's own attempt without touching a concurrent run of the same PR (replayed watcher)",
     () => {
       // R23-2: the URL is not this run's identity. An explicit run gets a
@@ -5397,11 +5428,18 @@ describe('review supersede salvage (#10110)', () => {
       // URL-only sweep killed it too. Its attempt then dies with 143: not
       // 124/137 and not 0, so no retry and no cede branch, and a
       // human-requested review goes red over a push it has nothing to do
-      // with. -P scopes the sweep to this step shell's own children; GNU
-      // timeout signals its whole monitored group, so this run's attempt
-      // tree still dies with the timeout that is its direct child.
+      // with. -P scopes the sweep to this step shell's own children.
+      // R25-1: the escalation must reach the attempt TREE. GNU timeout
+      // forwards TERM down to its group but SIGKILL is never forwarded, so
+      // re-sweeping the direct children with -KILL killed only the timeout
+      // and left a TERM-resistant member alive holding the tee pipe — the
+      // step shell then blocked in run_review_once, the cede never landed,
+      // and the run went red at the job timeout. attemptTreeKilled is the
+      // falsifiable half: that member is a grandchild of the step shell, so
+      // no -P $$ sweep can reach it and only the group KILL does.
       const r = runWatcher({ realCedeKill: true });
       expect(r.ownAttemptKilled).toBe(true);
+      expect(r.attemptTreeKilled).toBe(true);
       expect(r.concurrentRunAlive).toBe(true);
       expect(r.superseded).toBe('head-b');
     },
@@ -6435,6 +6473,7 @@ describe('review supersede salvage (#10110)', () => {
       'TEE',
       'SLEEP',
       'PKILL',
+      'PGREP',
       'ID',
       'TIMEOUT',
       'HEAD',
@@ -6458,9 +6497,15 @@ describe('review supersede salvage (#10110)', () => {
     expect(run).toContain(
       '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])"',
     );
+    // R25-1: the escalation signals the process GROUP led by the direct
+    // child it resolves, because SIGKILL is not forwarded down the tree the
+    // way TERM is — the -P $$ -KILL sweep this replaced killed the timeout
+    // wrapper alone and left a TERM-resistant member holding the tee pipe.
     expect(run).toContain(
-      '"${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -KILL -f "${REVIEW_URL}($|[^0-9])"',
+      '"${QWEN_CI_REAL_PGREP:-pgrep}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -f "${REVIEW_URL}($|[^0-9])"',
     );
+    expect(run).toContain('kill -KILL -- "-${attempt_pgid}"');
+    expect(run).not.toContain('-P "$$" -KILL');
     // Self-bounded past the budget, and reaped on every exit path — a
     // watcher outliving the step on a reused self-hosted runner could kill
     // a later job's review of the same PR.

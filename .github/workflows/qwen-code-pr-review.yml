@@ -1317,16 +1317,21 @@ jobs:
             export QWEN_CI_REAL_TEE="$real_tee"
 
             # The supersede watcher below polls with bare sleep and kills
-            # with bare pkill/id through the same agent-writable prepend —
-            # pin them too (R21-2): an exit-1 planted sleep ends the
-            # one-shot watcher before its first poll, and a no-op pkill
-            # leaves the superseded tree reviewing a dead head.
+            # with bare pkill/pgrep/id through the same agent-writable
+            # prepend — pin them too (R21-2): an exit-1 planted sleep ends
+            # the one-shot watcher before its first poll, a no-op pkill
+            # leaves the superseded tree reviewing a dead head, and a
+            # planted pgrep would aim the R25-1 group KILL at a process
+            # group of the planter's choosing.
             local real_sleep
             real_sleep="$(command -v sleep || echo sleep)"
             export QWEN_CI_REAL_SLEEP="$real_sleep"
             local real_pkill
             real_pkill="$(command -v pkill || echo pkill)"
             export QWEN_CI_REAL_PKILL="$real_pkill"
+            local real_pgrep
+            real_pgrep="$(command -v pgrep || echo pgrep)"
+            export QWEN_CI_REAL_PGREP="$real_pgrep"
             local real_id
             real_id="$(command -v id || echo id)"
             export QWEN_CI_REAL_ID="$real_id"
@@ -1912,9 +1917,11 @@ jobs:
           # same URL concurrently, and a URL-only sweep killed it too (R23-2).
           # -P scopes to the step shell ($$ keeps that pid inside this
           # subshell), -U to the runner user. The attempt's timeout is that
-          # direct child, and GNU timeout signals its whole monitored group,
-          # so the qwen tree dies with it — the CLI relaunch wrapper
-          # included, which a recorded qwen PID would miss.
+          # direct child and forwards TERM to its whole monitored group, so
+          # a cooperative qwen tree dies with it — the CLI relaunch wrapper
+          # included, which a recorded qwen PID would miss. SIGKILL is not
+          # forwarded, so the escalation kills the group that timeout leads
+          # instead of re-sweeping the direct children (R25-1).
           # Explicit runs (/review, review_requested, dispatch) keep today's
           # behavior: a human asked for this head's review, and no synchronize
           # ever cancelled them. Self-bounded past the budget so a watcher
@@ -1926,7 +1933,7 @@ jobs:
           # file degrades to that re-check, not to silence.
           SALVAGE_POLL_SECONDS=60
           supersede_watcher() {
-            local live_head compose_seen elapsed attempt_start run_elapsed attempt_budget
+            local live_head compose_seen elapsed attempt_start run_elapsed attempt_budget attempt_pgid
             while "${QWEN_CI_REAL_SLEEP:-sleep}" "$SALVAGE_POLL_SECONDS"; do
               # Self-bound stays per RUN: the watcher must stop acting past
               # the whole budget even though eligibility is per attempt.
@@ -2018,9 +2025,26 @@ jobs:
                 write_signal "${SUPERSEDE_KILL_DIR}/killed" "$live_head" || true
               fi
               echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
+              # Escalate against the attempt's process GROUP, resolved before
+              # the TERM sweep retires the timeout that leads it: -P $$ sees
+              # only direct children, and the one carrying this review URL is
+              # the timeout wrapper. SIGKILL is not forwarded and the
+              # wrapper's --kill-after timer dies with it, so a -P $$ -KILL
+              # sweep left a TERM-resistant tree member — the hijacked
+              # agent's `trap '' TERM` — holding the tee pipe; run_review_once
+              # never returned, the cede checks below were never reached, and
+              # the run went red at the job timeout (R25-1). GNU timeout leads
+              # a group holding itself and the whole tree, pgid == its own pid
+              # (measured, coreutils 9.1/9.4). Scope is unchanged — still this
+              # shell's child matching THIS run's URL, never URL alone
+              # (R23-2) — and kill is a builtin, so no plant can shadow it.
+              attempt_pgid="$("${QWEN_CI_REAL_PGREP:-pgrep}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true)"
+              attempt_pgid="${attempt_pgid%%$'\n'*}"
               "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
               "${QWEN_CI_REAL_SLEEP:-sleep}" 15
-              "${QWEN_CI_REAL_PKILL:-pkill}" -U "$("${QWEN_CI_REAL_ID:-id}" -u)" -P "$$" -KILL -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              if [ -n "$attempt_pgid" ]; then
+                kill -KILL -- "-${attempt_pgid}" 2>/dev/null || true
+              fi
               return 0
             done
           }
