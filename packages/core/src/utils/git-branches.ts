@@ -147,19 +147,23 @@ export async function fetchGitBranches(
   // error and returning an empty-but-"available" result.
   await runGit(cwd, ['rev-parse', '--git-dir'], env);
 
-  // Which branches have a push destination override. `--get-regexp` exits 1
-  // on no matches; treat that as empty. Keys print lowercased but the
-  // branch subsection keeps its case.
+  // Which branches have a push destination override: a per-branch
+  // `pushRemote`, a global `remote.pushDefault`, or a `remote.<name>.push`
+  // refspec (e.g. Gerrit's `refs/heads/*:refs/for/*`, which `%(push)` cannot
+  // express as a branch at all). `--get-regexp` exits 1 on no matches; treat
+  // that as empty. Keys print lowercased but the branch subsection keeps its
+  // case.
   const pushConfigRaw = await runGit(
     cwd,
     [
       'config',
       '--get-regexp',
-      '^branch\\..*\\.pushremote$|^remote\\.pushdefault$',
+      '^branch\\..*\\.pushremote$|^remote\\.pushdefault$|^remote\\..*\\.push$',
     ],
     env,
   ).catch(() => '');
   const pushDefaultSet = /^remote\.pushdefault /m.test(pushConfigRaw);
+  const pushRefspecSet = /^remote\..*\.push /m.test(pushConfigRaw);
   const pushRemoteBranches = new Set(
     [...pushConfigRaw.matchAll(/^branch\.(.*)\.pushremote /gm)].map(
       (m) => m[1],
@@ -204,7 +208,7 @@ export async function fetchGitBranches(
   ]);
 
   const local = parseBranchLines(localRaw).map((b) =>
-    pushDefaultSet || pushRemoteBranches.has(b.name)
+    pushDefaultSet || pushRefspecSet || pushRemoteBranches.has(b.name)
       ? { ...b, pushConfigured: true }
       : b,
   );

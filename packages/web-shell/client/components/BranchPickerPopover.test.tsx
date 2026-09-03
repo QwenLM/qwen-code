@@ -86,8 +86,9 @@ const { BranchPickerPopover, deriveActionHints, listingContradictsStatus } =
   await import('./BranchPickerPopover');
 
 // A branch with an upstream it is behind on, so the Update Project row is
-// enabled (the action hints disable it without an upstream).
-const BRANCHES = {
+// enabled (the action hints disable it without an upstream). Annotated with
+// the wire type so overrides (e.g. push-side fields) typecheck.
+const BRANCHES: DaemonGitBranchesResult = {
   v: 1,
   workspaceCwd: '/repo',
   available: true,
@@ -98,6 +99,8 @@ const BRANCHES = {
       upstream: 'origin/main',
       ahead: 0,
       behind: 1,
+      commitDate: 0,
+      commitSubject: '',
     },
   ],
   remote: [],
@@ -187,7 +190,9 @@ afterEach(() => {
 });
 workspaceGit.mockRejectedValue(new Error('no status'));
 
-function mountWithBranches(branchesResult: typeof BRANCHES = BRANCHES): void {
+function mountWithBranches(
+  branchesResult: DaemonGitBranchesResult = BRANCHES,
+): void {
   workspaceGitBranches.mockResolvedValue(branchesResult);
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -431,17 +436,19 @@ describe('BranchPickerPopover actions', () => {
       output: 'pushed to origin',
     });
     // Triangular fixture: behind the tracking upstream (so a real pull can
-    // fail with the 409 that raises the panel) while ahead of the push
-    // remote (so the Push row is genuinely enabled) — a state real git can
-    // occupy, unlike ahead-only-with-a-409.
+    // fail with the 409 that raises the panel) while ahead of a *different*
+    // push remote — real git counts both atoms against one ref when they
+    // name the same destination, so only distinct refs can disagree.
     mountWithBranches({
       ...BRANCHES,
       local: [
         {
           ...BRANCHES.local[0],
+          upstream: 'upstream/main',
           pushTarget: 'origin/main',
           pushAhead: 1,
           pushBehind: 0,
+          pushConfigured: true,
         },
       ],
     });
@@ -783,7 +790,10 @@ describe('deriveActionHints', () => {
     });
   });
 
-  it('shows behind count with upstream for a clean tree and blocks push', () => {
+  it('warns on push, without disabling, when behind the destination', () => {
+    // The counts are a last-fetch snapshot and remote acceptance is not
+    // locally decidable (refspecs, forcing refspecs, staleness), so the row
+    // warns and stays clickable — git answers authoritatively on click.
     const h = deriveActionHints(
       tKey,
       branches({ upstream: 'origin/main', behind: 3 }),
@@ -791,12 +801,8 @@ describe('deriveActionHints', () => {
     );
     expect(h.pull).toEqual({ text: '↓3 · origin/main', tone: 'info' });
     expect(h.pullDisabled).toBe(false);
-    // Pushing an older tip is a non-fast-forward the remote refuses.
-    expect(h.push).toEqual({
-      text: 'branchPicker.hint.nothingToPush',
-      tone: 'muted',
-    });
-    expect(h.pushDisabled).toBe(true);
+    expect(h.push).toEqual({ text: '↓3', tone: 'warning' });
+    expect(h.pushDisabled).toBe(false);
   });
 
   it('warns on pull when behind with uncommitted changes', () => {
@@ -859,7 +865,8 @@ describe('deriveActionHints', () => {
     expect(h.push).toEqual({ text: '↑2', tone: 'info' });
     expect(h.pushDisabled).toBe(false);
 
-    // Diverged from the push target itself: disabled with push-side counts.
+    // Diverged from the push target itself: warning with push-side counts,
+    // still clickable.
     const diverged = deriveActionHints(
       tKey,
       branches({
@@ -875,12 +882,31 @@ describe('deriveActionHints', () => {
       text: 'branchPicker.hint.aheadBehind:{"ahead":1,"behind":1}',
       tone: 'warning',
     });
-    expect(diverged.pushDisabled).toBe(true);
+    expect(diverged.pushDisabled).toBe(false);
+
+    // Push side known and behind while the upstream is gone: the push-side
+    // warning shows even though `hasUpstream` is false.
+    const goneUpstream = deriveActionHints(
+      tKey,
+      branches({
+        upstream: 'upstream/main',
+        upstreamGone: true,
+        pushTarget: 'origin/main',
+        pushAhead: 0,
+        pushBehind: 1,
+        pushConfigured: true,
+      }),
+      status(),
+    );
+    expect(goneUpstream.push).toEqual({ text: '↓1', tone: 'warning' });
+    expect(goneUpstream.pushDisabled).toBe(false);
   });
 
-  it('fails open when a push override is configured but unresolvable (simple triangular)', () => {
-    // The R1-1 witness shape: branch.<name>.pushRemote set, push.default
-    // left at simple — `%(push)` cannot resolve, yet `git push` succeeds.
+  it('says nothing on push when the destination is configured but unresolvable', () => {
+    // R2 witness shapes: `push.default=simple` in a triangular repo, or a
+    // `remote.<name>.push` refspec (Gerrit) — git declines to name a branch,
+    // so any count here would be a pull-side number wearing a push-side
+    // label. The row carries no hint and stays enabled.
     const h = deriveActionHints(
       tKey,
       branches({
@@ -890,18 +916,11 @@ describe('deriveActionHints', () => {
       }),
       status(),
     );
+    expect(h.push).toBeUndefined();
     expect(h.pushDisabled).toBe(false);
-    // Without the override the same counts disable (plain-clone shape).
-    expect(
-      deriveActionHints(
-        tKey,
-        branches({ upstream: 'upstream/main', behind: 3 }),
-        status(),
-      ).pushDisabled,
-    ).toBe(true);
   });
 
-  it('never disables push when the push ref is missing (push would create it)', () => {
+  it('labels a missing push ref as branch creation, never "Nothing to push"', () => {
     const h = deriveActionHints(
       tKey,
       branches({
@@ -912,6 +931,10 @@ describe('deriveActionHints', () => {
       }),
       status(),
     );
+    expect(h.push).toEqual({
+      text: 'branchPicker.hint.createsPushBranch:{"target":"origin/feat"}',
+      tone: 'info',
+    });
     expect(h.pushDisabled).toBe(false);
   });
 
@@ -933,14 +956,14 @@ describe('deriveActionHints', () => {
       text: 'branchPicker.hint.aheadBehind:{"ahead":2,"behind":1}',
       tone: 'warning',
     });
-    // Diverged tips are a non-fast-forward too: the warning row is disabled.
+    // Diverged stays clickable: only a detached HEAD is locally provable.
     expect(
       deriveActionHints(
         tKey,
         branches({ upstream: 'origin/main', ahead: 2, behind: 1 }),
         status(),
       ).pushDisabled,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       deriveActionHints(
         tKey,
@@ -1190,7 +1213,7 @@ describe('BranchPickerPopover action hints', () => {
     }
   });
 
-  it('disables push while the branch is behind or diverged from its upstream', async () => {
+  it('warns on a behind or diverged push row but keeps it clickable', async () => {
     workspaceGitBranches.mockResolvedValue(
       branches({ upstream: 'origin/main', ahead: 1, behind: 2 }),
     );
@@ -1201,13 +1224,13 @@ describe('BranchPickerPopover action hints', () => {
     const push = document.body.querySelector<HTMLButtonElement>(
       '[data-testid="branch-picker-push"]',
     );
-    expect(push?.disabled).toBe(true);
+    expect(push?.disabled).toBe(false);
     expect(
       push
         ?.querySelector('[data-testid="branch-picker-action-hint"]')
         ?.getAttribute('data-tone'),
     ).toBe('warning');
-    expect(push?.textContent).toContain('update first');
+    expect(push?.textContent).toContain('diverged');
   });
 
   it("breaks a computedAt tie in favor of the popover's own fetch", async () => {
@@ -1384,16 +1407,23 @@ describe('BranchPickerPopover pull-failure refresh', () => {
     await flush();
     expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
 
-    const clickTarget = Array.from(
-      document.body.querySelectorAll('button'),
-    ).find((b) => b.textContent?.includes('Update Project'));
-    act(() => {
-      clickTarget?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
+    clickButton('Update Project');
     await flush();
 
     expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).toContain('fetch refused');
+    // The refreshed listing must actually drive the rows: the pre-pull
+    // snapshot said behind 2 (pull ↓2, push warning ↓2); the re-fetched
+    // listing is in sync.
+    const pull = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-pull"]',
+    );
+    expect(pull?.textContent).toContain('Up to date');
+    expect(pull?.textContent).not.toContain('↓2');
+    const push = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="branch-picker-push"]',
+    );
+    expect(push?.textContent).toContain('Nothing to push');
   });
 });
 

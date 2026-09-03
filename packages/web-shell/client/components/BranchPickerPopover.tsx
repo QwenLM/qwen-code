@@ -121,15 +121,17 @@ type TranslateFn = ReturnType<typeof useI18n>['t'];
  * Derive the per-action hints shown beside Update / Commit / Push so the user
  * can judge before clicking.
  *
- * Disabling is reserved for what git itself refuses: `git pull` during a
- * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
- * without a usable upstream; `git push` on a detached HEAD or from a branch
- * that is behind its upstream — pushing an older or diverged tip is a
- * non-fast-forward the remote rejects unconditionally. A push does not
- * consult the index, and mid-operation the outcome depends on where the
- * operation ends, so conflicts and in-progress operations are shown as
- * warnings on an enabled row. Soft states (up to date, nothing to push,
- * clean tree) only dim the row since the action is still harmless.
+ * Disabling is reserved for what is provable from the local repository
+ * alone: `git pull` during a merge/rebase/cherry-pick, with unmerged
+ * entries, on a detached HEAD, or without a usable upstream; `git push` only
+ * on a detached HEAD. Whether a remote will accept a push is *not* locally
+ * decidable — the destination depends on config git itself sometimes
+ * declines to resolve (`push.default=simple` in triangular shapes),
+ * `remote.<name>.push` refspecs and forcing refspecs change the answer, and
+ * every count is a snapshot of the last fetch — so a push the counts call
+ * doomed is warned about on an enabled row, and the click surfaces git's own
+ * authoritative message. Soft states (up to date, nothing to push, clean
+ * tree) only dim the row since the action is still harmless.
  *
  * The branch listing (fetched on open) provides ahead/behind/upstream; the
  * status provides the tree counters and the in-progress operation. When the
@@ -193,13 +195,18 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
-  // The push row reasons about the *push* destination, which may differ from
-  // the tracking upstream in triangular workflows. Three shapes:
-  //  - `pushTarget` resolved (git's own `%(push)` answer): its counts rule.
-  //  - `pushConfigured` without a target (`push.default=simple` cannot
-  //    resolve triangular even though plain `git push` succeeds): the push
-  //    side is unknown — fail open, never disable on upstream counts.
-  //  - Neither: a plain clone; the upstream is the push destination.
+  // The push row's *information* comes from the push destination — git's own
+  // `%(push)` answer, which may differ from the tracking upstream in
+  // triangular workflows. Shapes:
+  //  - `pushTarget` resolved: its counts rule.
+  //  - `pushGone`: the destination resolves but its ref is missing — a push
+  //    would create it; there are no counts to show.
+  //  - `pushConfigured` without a target (`push.default=simple` in a
+  //    triangular repo, or a `remote.<name>.push` refspec): git declined to
+  //    name a branch, so the push side is unknown — say nothing rather than
+  //    presenting pull-side numbers as push-side ones.
+  //  - Neither: git named no override, so the upstream-side counts stand in
+  //    (that is also all a status-only fallback can know).
   const pushKnown = head?.pushTarget !== undefined && head.pushGone !== true;
   const pushSideUnknown =
     head !== undefined &&
@@ -207,25 +214,30 @@ export function deriveActionHints(
     head.pushConfigured === true;
   const pushAhead = pushKnown ? (head.pushAhead ?? 0) : ahead;
   const pushBehind = pushKnown ? (head.pushBehind ?? 0) : behind;
-  // A detached HEAD makes the daemon's `git push --set-upstream` fail, and a
-  // branch behind its push destination cannot push: moving that ref to an
-  // older or diverged tip is a non-fast-forward rejection. The counts are
-  // from the last fetch — a remote deleted or force-reset since then keeps
-  // the row disabled until a fetch refreshes the picture (Update Project
-  // re-fetches the listing even when the pull itself fails). A missing push
-  // ref (`pushGone`) never disables: pushing would create the branch.
-  // Mid-operation the picture can change by the time the operation ends, so
-  // the row only warns then; conflicts alone don't stop a push.
-  const pushDisabled =
-    detached ||
-    (!s.operation &&
-      !pushSideUnknown &&
-      head?.pushGone !== true &&
-      hasUpstream === true &&
-      pushBehind > 0);
+  // Only a detached HEAD disables: it is the one push failure provable from
+  // local state alone (the daemon's `--set-upstream` path refuses it).
+  // Everything the counts suggest — behind, diverged — is a last-fetch
+  // snapshot about a remote whose acceptance also depends on refspecs and
+  // reconciliation config, so those states warn on an enabled row and let
+  // git give the authoritative answer on click.
+  const pushDisabled = detached;
   if (blocker) {
     push = blocker;
-  } else if (hasUpstream === false) {
+  } else if (head?.pushGone === true) {
+    // The destination is known and its ref is missing: a push publishes the
+    // branch. Named ahead of the count branches so this never reads as
+    // "Nothing to push".
+    push = {
+      text: t('branchPicker.hint.createsPushBranch', {
+        target: head.pushTarget ?? '',
+      }),
+      tone: 'info',
+    };
+  } else if (pushSideUnknown) {
+    // Git declined to name the destination; any number here would be a
+    // pull-side count wearing a push-side label.
+    push = undefined;
+  } else if (hasUpstream === false && !pushKnown) {
     push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
   } else if (pushAhead > 0 && pushBehind > 0) {
     push = {
@@ -235,9 +247,13 @@ export function deriveActionHints(
       }),
       tone: 'warning',
     };
+  } else if (pushBehind > 0) {
+    // Nothing to push and the destination is ahead: a push would be
+    // rejected as it stands, so this is a warning rather than a dim row.
+    push = { text: `↓${pushBehind}`, tone: 'warning' };
   } else if (pushAhead > 0) {
     push = { text: `↑${pushAhead}`, tone: 'info' };
-  } else if (hasUpstream) {
+  } else if (hasUpstream || pushKnown) {
     push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
   }
 
@@ -548,6 +564,10 @@ export function BranchPickerPopover({
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
+      // A rejected push is the strongest evidence the last-fetch counts are
+      // stale; re-read both the listing and the working-tree status.
+      await fetchBranches();
+      void fetchStatus();
     } finally {
       setBusyAction(null);
     }
@@ -555,6 +575,7 @@ export function BranchPickerPopover({
     ws,
     busyAction,
     gitCwd,
+    fetchStatus,
     fetchBranches,
     onBranchChanged,
     showStatus,
@@ -612,10 +633,12 @@ export function BranchPickerPopover({
           clearPullPanel();
           showStatus(pullErrorMessage(err), 'error');
         }
-        // Even a failed pull has usually fetched: refresh the listing (and
-        // the ahead/behind counts the action hints disable on) so an error
-        // never strands the rows on a pre-pull snapshot.
+        // A failed pull has usually still fetched (the force-reset shape
+        // self-heals here; a deleted upstream ref defeats the fetch itself
+        // and needs a prune). Refresh the listing and the status together so
+        // the hints don't mix a new listing with a pre-pull tree snapshot.
         await fetchBranches();
+        void fetchStatus();
       } finally {
         setBusyAction(null);
       }
@@ -625,6 +648,7 @@ export function BranchPickerPopover({
       busyAction,
       gitCwd,
       fetchBranches,
+      fetchStatus,
       onBranchChanged,
       showStatus,
       clearPullPanel,
