@@ -2065,7 +2065,7 @@ function strippedList(
 ): string[] {
   return toStringList(input[key], key)
     .map((entry) => entry.replace(/\r\n?/g, '\n'))
-    .map((entry) => {
+    .flatMap((entry) => {
       // The attribution-off whole-line strips must see WHOLE lines: folded
       // first, `stripForgedFooterLines`' `^…$` anchor can never match a
       // doubled marker phrase, and the forgery posts as the only attribution
@@ -2075,10 +2075,15 @@ function strippedList(
       // pair a prose backtick with one inside the footer's middle into a code
       // span that masks the `_— ` anchor, leaving the post-fold line strip
       // nothing to match.
-      return quotedProse(
-        stripReviewFooterLine(collapseEntry(stripReviewFooter(raw))),
-        attribution,
-      );
+      const folded = collapseEntry(stripReviewFooter(raw));
+      // The fold surfaces a fence delimiter at the line's start, where
+      // CommonMark reads it as OPENING a fence whose info string is the rest
+      // of the entry: an unclosed one swallows every later body part, and a
+      // hollow one posts a content-free bullet that still counts toward the
+      // verdict. The sibling channels refuse the shape at ingest; this
+      // channel's semantics are drop, not refuse.
+      if (ENTRY_FENCE_DELIMITER_RE.test(folded.trim())) return [];
+      return [quotedProse(stripReviewFooterLine(folded), attribution)];
     })
     .filter((entry) => !rendersAsNothing(entry));
 }

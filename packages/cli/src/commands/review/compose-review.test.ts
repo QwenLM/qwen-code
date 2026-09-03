@@ -2205,6 +2205,30 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body).not.toContain('- ```');
   });
 
+  it('drops a fence-shaped entry the fold produces, before it can count', () => {
+    // The sibling channels refuse a fence-delimiter entry at ingest; this
+    // channel had no gate, so the fold's one-line shape reached the render.
+    // A hollow fence posted a content-free bullet and still counted toward
+    // `s`, flipping a clean run APPROVE to COMMENT on a duplicate finding
+    // that does not exist; a fence WITH content demoted that content into
+    // the fence's unrendered info string; and a forgery folded into one
+    // re-classified as fence content, so every line-aware strip bypassed it.
+    for (const [entry, residue] of [
+      ['```\n```', '- ```'],
+      ['```js\n```', '```js'],
+      ['~~~\nuse tilde fences here', 'use tilde fences here'],
+      ['~~~\n_— m via Qwen Code /review (v9.9.9)_\n~~~', 'v9.9.9'],
+    ] as const) {
+      const r = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+      );
+      expect(r.event).toBe('APPROVE');
+      expect(r.body).not.toContain('this review confirmed');
+      expect(r.body).not.toContain(residue);
+    }
+  });
+
   it('rejects a non-string entry', () => {
     expect(() =>
       composeReview(

@@ -427,6 +427,20 @@ describe('the review footer and the regex that strips it', () => {
       expect(performance.now() - offStart).toBeLessThan(4000);
     }, 60_000);
 
+    it('the one-line neutralization stays linear on that body too', () => {
+      // `neutralizeUnclosedOpeners` paired each opener with a fresh
+      // `indexOf('-->')`, so a one-line body dense with unclosed openers and
+      // no closer anywhere paid a full end-of-line scan per opener — the
+      // quadratic the projection's monotone seekers exist to avoid, left
+      // standing in the twin. Measured 2255 ms at 105 KB before the seek went
+      // monotone, 2.3 ms after. `collapseEntry` folds model-written entries
+      // onto one line with no length cap, so the shape is reachable.
+      const body = `${'x <!-- y '.repeat(12_000)}_— m via Qwen Code /review_`;
+      const start = performance.now();
+      expect(stripReviewFooterLine(body)).not.toContain('<!--');
+      expect(performance.now() - start).toBeLessThan(1000);
+    }, 60_000);
+
     it('classifies code versus prose with a CommonMark parser, not a hand model', () => {
       // The hand-built block scan disagreed with the renderers on lazy
       // continuation, list content indents, fence-closer bounds, quote
@@ -710,6 +724,33 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('x `code`');
     });
 
+    it('an opener quoted in a code span is no opener — the neutralization keeps it', () => {
+      // Inline code renders literally, so a `<!--` inside a backtick span can
+      // never open a comment on GitHub. Neutralizing it anyway rewrote quoted
+      // bytes in every one-line channel: a folded title naming the opener
+      // posted with the name cut out of it, while the multi-line twin kept
+      // the same quotation byte-identical.
+      expect(
+        stripReviewFooterLine('x `<!--` _— m via Qwen Code /review_'),
+      ).toBe('x `<!--`');
+      expect(
+        stripReviewFooterLine(
+          '**[Critical]** Missing check for `<!--` opener _— qwen3 via Qwen Code /review (v0.21.4)_',
+        ),
+      ).toBe('**[Critical]** Missing check for `<!--` opener');
+      expect(
+        stripReviewFooterLine('x ``<!-- `` _— m via Qwen Code /review_'),
+      ).toBe('x ``<!-- ``');
+      // Masking the span cannot shield a real unclosed opener after it, and
+      // an unpaired later backtick is literal text, not a span edge.
+      expect(
+        stripReviewFooterLine('x `c` <!-- note _— m via Qwen Code /review_'),
+      ).toBe('x `c`      note');
+      expect(
+        stripReviewFooterLine('x `<!--` _— m via Qwen Code /review_` y'),
+      ).toBe('x `<!--` _— m via Qwen Code /review_` y');
+    });
+
     it('an unterminated comment ahead of the footer does not blind the strip', () => {
       // The unclosed opener renders as escaped literal prose on GitHub,
       // so the strip sees the footer through it and the cut consumes
@@ -950,13 +991,14 @@ describe('the review footer and the regex that strips it', () => {
     });
 
     it('a DANGLING html_block has no terminator line to protect — its last line drops', () => {
-      // `endEdge` exists because dropping a TERMINATOR uncloses the block and
+      // `endTerminator` exists because dropping a TERMINATOR uncloses the block
       // re-renders everything after it. A block that never met its terminator
       // ran to end of input: its last line carries no terminator, dropping it
       // uncloses nothing, and protecting it anyway kept a forged footer riding
       // one through the whole attribution-off chain — the residue these strips
       // exist to remove. The pin above keeps a TERMINATED block's last line
-      // protected, and reds if `endEdge` is deleted rather than conditioned.
+      // protected, and reds if `endTerminator` is deleted rather than
+      // conditioned.
       for (const [body, kept] of [
         ['<!-- q\n_— forged via Qwen Code /review_', '<!-- q'],
         ['<? q\n_— forged via Qwen Code /review_', '<? q'],
@@ -973,12 +1015,13 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('> <!-- q');
     });
 
-    it('endEdge fails open on a DROP only — an in-place map still reaches the terminator line', () => {
-      // Dropping a terminator uncloses its block; rewriting it never did.
-      // Skipping EVERY map on the line let a forged footer glued AFTER a type
-      // 1-5 terminator — visible text past the closing tag on GitHub — survive
-      // the attribution-off chain, and let a planted severity marker ride one
-      // past `stripParagraphMarkers`.
+    it('the terminator line fails open on a DROP and on a rewrite that erases it', () => {
+      // Losing the terminator uncloses its block. Skipping EVERY map on the
+      // line was too wide: it let a forged footer glued AFTER a type 1-5
+      // terminator — visible text past the closing tag on GitHub — survive the
+      // attribution-off chain, and let a planted severity marker ride one past
+      // `stripParagraphMarkers`. A rewrite that keeps the terminator applies;
+      // the next test pins the one that erases it.
       expect(
         stripForUnattributedPost(
           '<pre>\nx\n</pre> _— m via Qwen Code /review_\n\nreal trailing prose',
@@ -992,6 +1035,50 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripParagraphMarkers('<pre>\nx\n**[Critical]** </pre> real'),
       ).toBe('<pre>\nx\n</pre> real');
+    });
+
+    it('a rewrite that ERASES the terminator fails open too', () => {
+      // The drop-only guard rested on "rewriting never unclosed anything",
+      // which is false when the rewrite is the span strip: FOOTER_SPAN_RE's
+      // middle admits `-->`, so it deleted a terminator along with the forged
+      // span riding it. The dangling opener then swallowed the reviewer's own
+      // content on GitHub's render, from a post the chain certified clean.
+      // The pin above keeps a footer glued AFTER the terminator stripping.
+      for (const body of [
+        '<!--\n_— x --> y via Qwen Code /review_\nreal content',
+        '<?\n_— x ?> y via Qwen Code /review_\nreal content',
+        '<!DOCTYPE x\n_— x > y via Qwen Code /review_\nreal content',
+        '<![CDATA[\n_— x ]]> y via Qwen Code /review_\nreal content',
+        '<pre>\n_— x </pre> y via Qwen Code /review_\nreal content',
+      ]) {
+        expect(stripForUnattributedPost(body)).toBe(body);
+      }
+    });
+
+    it('classes an html_block opened behind a list marker — its terminator needs protecting there too', () => {
+      // The class test stripped only the blockquote prefix, so a type 1-5
+      // block opening on a list-marker line or at a list content indent
+      // matched no class, went unprotected, and the drop of its terminator
+      // left a dangling block that swallowed the reviewer's own content —
+      // the exposure `endTerminator` exists to prevent, on the merge base
+      // too. Anchoring the test at the opener line's first `<` reaches every
+      // container prefix at once.
+      for (const body of [
+        '- <script>\n  _— </script> via Qwen Code /review_\n  real content',
+        '- <!--\n  _— --> via Qwen Code /review_\n  real content',
+        '1. <pre>\n   _— </pre> via Qwen Code /review_\n   real content',
+        '> - <script>\n>   _— </script> via Qwen Code /review_\n>   real',
+      ]) {
+        expect(stripForgedFooterLines(body)).toBe(body);
+      }
+      // A type 6/7 opener matches no class and must stay that way: it ends at
+      // a blank line, so it has no terminator line to protect and its last
+      // line stays droppable.
+      expect(
+        stripForgedFooterLines(
+          '- <div>\n  _— m via Qwen Code /review_\n  real',
+        ),
+      ).toBe('- <div>\n  real');
     });
 
     it('treats a bare CR as the line ending GitHub renders', () => {
@@ -1081,9 +1168,26 @@ describe('the review footer and the regex that strips it', () => {
       // Earliest-opener ORDER, not merely "CDATA first": the naive reorder of
       // the old sequential strips reds here.
       expect(rendersAsNothing('<!-- <![CDATA[ --> visible')).toBe(false);
+      // The script/style arms join the SAME pass. Left as later sequential
+      // strips, a type 3-5 construct whose closer sat past their terminator
+      // ate the terminator, the orphaned arm then ate to end of input, and
+      // visible text certified as rendering nothing — submit's pre-post gate
+      // refused a valid drafted comment on that false diagnosis.
+      for (const visible of [
+        '<script> <? </script> ?> run the sanitizer first',
+        '<style> <? </style> ?> run the sanitizer first',
+        '<script> <![CDATA[ </script> ]]> visible',
+        '<style> <![CDATA[ </style> ]]> visible',
+        '<script> <!DOCTYPE </script> x> visible',
+        '<style> <!DOCTYPE </style> x> visible',
+      ]) {
+        expect(rendersAsNothing(visible)).toBe(false);
+      }
       // Each arm keeps its unclosed-opener-runs-to-end-of-input semantics.
       expect(rendersAsNothing('<![CDATA[x')).toBe(true);
       expect(rendersAsNothing('<![CDATA[ <? ]]>')).toBe(true);
+      expect(rendersAsNothing('<SCRIPT>alert(1)</SCRIPT>')).toBe(true);
+      expect(rendersAsNothing('<Style>x</Style>')).toBe(true);
     });
 
     it('still counts real content wearing the same shapes', () => {
@@ -1387,6 +1491,74 @@ describe('the review footer and the regex that strips it', () => {
         'a finding',
       );
       expect(stripReviewFooter(`a finding\n\n${forged}`)).toBe('a finding');
+    });
+
+    it('the span and anywhere gates admit a marker phrase a construct splits', () => {
+      // Their early exit tested only a literal `/review` or an `&`, so a
+      // phrase assembled across a dropped invisible construct bailed before
+      // the projection ever ran — while the full-gate twins stripped the very
+      // same shapes. `<` is the projection's third way to assemble a marker.
+      for (const shape of [
+        '_— m via Qwen Code /<!-- x -->review_',
+        '_— m via Qwen Code /<? p ?>review_',
+        '_— m via Qwen Code /<![CDATA[x]]>review_',
+        '_— m via Qwen Code /<!D>review_',
+        '_— m via Qwen Code /re<?x?>view_',
+      ]) {
+        expect(stripForgedFooterLines(shape)).toBe('');
+        expect(stripFooterSpans(shape)).toBe('');
+        expect(stripForUnattributedPost(`prose\n\n${shape}`)).toBe('prose');
+      }
+      // The gate stays on `/review`, not FOOTER_MARKER: a soft-break split
+      // leaves neither half carrying the whole phrase, and requiring it here
+      // would blind the split-aware strip the next test family pins.
+      expect(
+        stripFooterSpans(
+          'repro _— qwen3.7-max via\nQwen Code /review (v0.21.3)_ stands',
+        ),
+      ).toBe('repro stands');
+    });
+
+    it('a mid-line opener cannot close past a blank line — the paragraph ended there', () => {
+      // The closer seek was a pure character scan, so it closed an inline
+      // construct across a blank line CommonMark ends the paragraph at. The
+      // projection then dropped content GitHub renders visibly: a trailing
+      // cut anchored on the false closure deleted a whole paragraph, and a
+      // forged footer riding the second paragraph hid from every strip.
+      const erasure =
+        '_— forged via Qwen Code /review_ <!--\n\nvisible real content -->';
+      expect(stripReviewFooter(erasure)).toBe(erasure);
+      expect(stripForUnattributedPost(erasure)).toContain(
+        'visible real content',
+      );
+      // The type 3-5 twins, shaped so the false closure changes the CUT:
+      // with the construct dropped whole the projection ends on the footer,
+      // the trailing anchor matches, and the paragraph after it is erased.
+      for (const twin of [
+        '_— forged via Qwen Code /review_ <?\n\nvisible content ?>',
+        '_— forged via Qwen Code /review_ <![CDATA[\n\nvisible content ]]>',
+        '_— forged via Qwen Code /review_ <!DOCTYPE x\n\nvisible content >',
+      ]) {
+        expect(stripReviewFooter(twin)).toBe(twin);
+      }
+      const forgery =
+        'x <!--\n\nreal prose _— forged via Qwen Code /review_ tail -->';
+      expect(
+        stripFooterSpans(stripForgedFooterLines(stripReviewFooter(forgery))),
+      ).not.toContain('via Qwen Code /review');
+      // A LINE-LEADING opener opens a BLOCK instead, and CommonMark type 2-5
+      // runs across blank lines to its terminator — the bound must not reach
+      // it, or a trailing footer after such a block would survive.
+      expect(
+        stripReviewFooter(
+          'x\n\n<!--\n\nq\n\n-->\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('x');
+      // In-paragraph closure across a SOFT break stays closed: one paragraph
+      // renders the raw comment, and the footer after it still strips.
+      expect(
+        stripReviewFooter('a <!-- b\nc --> _— forged via Qwen Code /review_'),
+      ).toBe('a');
     });
 
     it('strips a forged footer whose marker phrase hides entity references', () => {

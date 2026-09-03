@@ -189,6 +189,32 @@ function rawOpenerLineStart(input: string, i: number): number {
 }
 
 /**
+ * The exclusive end of the backtick code span opening at `i`, or -1 when it
+ * never closes. A span closes on the next run of EXACTLY the same length on
+ * this line; runs of other lengths inside are its content, and a lone
+ * backtick is no span in CommonMark. Read by the projection, which masks the
+ * span, and by `maskCodeSpans`, which must agree with it byte for byte or the
+ * two would pair raw openers differently.
+ */
+function codeSpanEnd(input: string, i: number, n: number): number {
+  let runEnd = i;
+  while (runEnd < n && input[runEnd] === '`') runEnd++;
+  const runLen = runEnd - i;
+  let j = runEnd;
+  while (j < n && input[j] !== '\n') {
+    if (input[j] === '`') {
+      let k = j;
+      while (k < n && input[k] === '`') k++;
+      if (k - j === runLen) return k;
+      j = k;
+    } else {
+      j++;
+    }
+  }
+  return -1;
+}
+
+/**
  * The projection every footer/marker strip matches on: what GitHub DISPLAYS
  * once the invisible inline constructs are resolved. HTML comments and the
  * type 3-5 raw constructs the sanitizer drops the same way — `<?…?>` PIs,
@@ -253,31 +279,37 @@ function projectInvisibles(input: string): Projection {
   const nextCdataEnd = nextOf(']]>');
   const nextDeclEnd = nextOf('>');
   const nextNul = nextOf('\u0000');
+  // A blank line ends the paragraph an INLINE raw construct lives in, so a
+  // closer past one belongs to a paragraph of its own and cannot close the
+  // opener. Unbounded, the character scan closed across that boundary and the
+  // projection dropped content GitHub renders visibly — erasing it from a
+  // trailing cut, and hiding a forged footer riding it. A LINE-LEADING opener
+  // opens a block instead, and CommonMark type 2-5 runs across blank lines to
+  // its terminator, so the callers apply the bound only where
+  // `rawOpenerLineStart` reports a mid-line opener. Monotone like `nextOf`:
+  // `i` only advances and an opener position can never fall inside an
+  // all-whitespace match, so `lastIndex` never rewinds and each opener's
+  // check stays O(1) amortized.
+  const blankLineRe = /(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/g;
+  let blank: RegExpExecArray | null | undefined;
+  const crossesBlankLine = (from: number, to: number): boolean => {
+    if (blank === undefined) blank = blankLineRe.exec(input);
+    if (blank === null) return false;
+    if (blank.index < from) {
+      blankLineRe.lastIndex = from;
+      blank = blankLineRe.exec(input);
+      if (blank === null) return false;
+    }
+    return blank.index < to;
+  };
   let i = 0;
   while (i < n) {
     const ch = input[i]!;
     if (ch === '`') {
-      let runEnd = i;
-      while (runEnd < n && input[runEnd] === '`') runEnd++;
-      const runLen = runEnd - i;
-      // A span closes on the next run of EXACTLY the same length on this
-      // line; runs of other lengths inside are its content.
-      let closeEnd = -1;
-      let j = runEnd;
-      while (j < n && input[j] !== '\n') {
-        if (input[j] === '`') {
-          let k = j;
-          while (k < n && input[k] === '`') k++;
-          if (k - j === runLen) {
-            closeEnd = k;
-            break;
-          }
-          j = k;
-        } else {
-          j++;
-        }
-      }
+      const closeEnd = codeSpanEnd(input, i, n);
       if (closeEnd === -1) {
+        let runEnd = i;
+        while (runEnd < n && input[runEnd] === '`') runEnd++;
         push(input.slice(i, runEnd), i, runEnd);
         i = runEnd;
       } else {
@@ -290,9 +322,14 @@ function projectInvisibles(input: string): Projection {
       if (input.startsWith('<!--', i)) {
         const close = nextCloser(i + 4);
         // A closer past blanked code cannot close this opener — a code
-        // block between them ends the opener's paragraph on GitHub.
+        // block between them ends the opener's paragraph on GitHub — and
+        // neither can one past a blank line when the opener rides mid-line.
         const nul = nextNul(i);
-        if (close === -1 || (nul !== -1 && nul < close + 3)) {
+        if (
+          close === -1 ||
+          (nul !== -1 && nul < close + 3) ||
+          (rawOpenerLineStart(input, i) === -1 && crossesBlankLine(i, close))
+        ) {
           // Unclosable. With nothing but whitespace after the opener to
           // the line end it is the truncation twin — a looping model cut
           // off mid-comment — and blanking it lets the trailing anchor
@@ -361,7 +398,11 @@ function projectInvisibles(input: string): Projection {
       }
       if (openLen !== 0) {
         const nul = nextNul(i);
-        if (term !== -1 && (nul === -1 || nul >= term + termLen)) {
+        if (
+          term !== -1 &&
+          (nul === -1 || nul >= term + termLen) &&
+          !(rawOpenerLineStart(input, i) === -1 && crossesBlankLine(i, term))
+        ) {
           i = term + termLen;
           continue;
         }
@@ -434,18 +475,12 @@ function stripByProjection(line: string, re: RegExp): string {
 }
 
 function stripFooterSpanInLine(line: string): string {
-  // The projection can only forge the marker phrase out of a literal
-  // `/review` or an entity reference — anything else cannot match.
-  if (!line.includes('/review') && !line.includes('&')) return line;
+  if (!canProjectFooterMarker(line)) return line;
   return stripByProjection(line, FOOTER_SPAN_RE);
 }
 
 export function stripFooterSpans(text: string): string {
-  // `/review`, not FOOTER_MARKER: re-wrapping can split the marker phrase
-  // across a soft break, and only `/review` survives every split point
-  // short of the word itself — and an entity reference can stand in for
-  // any character of it, so an `&` must open the gate too.
-  if (!text.includes('/review') && !text.includes('&')) return text;
+  if (!canProjectFooterMarker(text)) return text;
   if (!text.includes('\n')) {
     const stripped = stripFooterSpanInLine(text);
     return stripped === text ? text : stripped.trim();
@@ -647,12 +682,18 @@ function normalizeSourceNuls(text: string): string {
  * assembles the marker only out of literal characters, entity decodes
  * (which need a literal `&`), or a dropped invisible construct joining
  * the halves a literal `<` sits between — comments and the type 3-5 raw
- * spans alike. One predicate, both gate sites — the `stripReviewFooter`
- * hoist and `stripTrailingFooter`, which `stripReviewFooterLine` reaches
- * with its raw line.
+ * spans alike.
+ *
+ * `/review`, not FOOTER_MARKER: re-wrapping can split the phrase across a
+ * soft break, and only `/review` survives every split point short of the word
+ * itself. One predicate, every gate site — the `stripReviewFooter` hoist,
+ * `stripTrailingFooter` (which `stripReviewFooterLine` reaches with its raw
+ * line), and the span and anywhere strips, whose narrower `'/review' || '&'`
+ * pair bailed before the projection could join a phrase a dropped construct
+ * had split.
  */
 function canProjectFooterMarker(s: string): boolean {
-  return s.includes(FOOTER_MARKER) || s.includes('&') || s.includes('<');
+  return s.includes('/review') || s.includes('&') || s.includes('<');
 }
 
 /**
@@ -687,22 +728,62 @@ export function stripReviewFooterLine(line: string): string {
 }
 
 /**
+ * The line's backtick code spans replaced with same-length NULs, so a caller
+ * pairing raw bytes sees neither an opener nor a closer quoted inside one.
+ * Length-preserving: an offset into the mask is that offset into the line.
+ */
+function maskCodeSpans(line: string): string {
+  if (!line.includes('`')) return line;
+  const chars = line.split('');
+  const n = chars.length;
+  let i = 0;
+  while (i < n) {
+    if (chars[i] !== '`') {
+      i++;
+      continue;
+    }
+    const closeEnd = codeSpanEnd(line, i, n);
+    if (closeEnd === -1) {
+      while (i < n && chars[i] === '`') i++;
+      continue;
+    }
+    chars.fill('\u0000', i, closeEnd);
+    i = closeEnd;
+  }
+  return chars.join('');
+}
+
+/**
  * Every UNCLOSED `<!--` replaced with same-length spaces; closed spans
  * keep their delimiters so the projection drops them whole. Paired like
  * the projection pairs — left to right, each opener closing on the next
  * `-->` — so a span between two openers closes on the one closer.
+ *
+ * Backtick code spans are masked out of the pairing first: inline code
+ * renders literally, so an opener quoted inside one can never open a comment,
+ * and blanking it rewrote the quoted bytes — a folded title naming the opener
+ * posted with the name cut out of it.
  */
 function neutralizeUnclosedOpeners(line: string): string {
   if (!line.includes('<!--')) return line;
+  const pairable = maskCodeSpans(line);
   let out = '';
   let i = 0;
+  // Monotone, like the projection's seekers: a per-opener `indexOf('-->')`
+  // rescans from the opener every time, which on a one-line body dense with
+  // unclosed openers and no `-->` at all is a per-opener end-of-line scan —
+  // the quadratic the projection's own comment names. One forward seek
+  // decides every later opener too, and dies once the remainder holds none.
+  let close = pairable.indexOf('-->');
   for (;;) {
-    const open = line.indexOf('<!--', i);
+    const open = pairable.indexOf('<!--', i);
     if (open === -1) {
       out += line.slice(i);
       return out;
     }
-    const close = line.indexOf('-->', open + 4);
+    while (close !== -1 && close < open + 4) {
+      close = pairable.indexOf('-->', close + 3);
+    }
     if (close === -1) {
       out += line.slice(i, open) + '    ';
       i = open + 4;
@@ -852,14 +933,15 @@ interface ScannedLine {
   /** The line's content after its blockquote prefix. */
   content: string;
   /**
-   * The line a TERMINATED `html_block` type 1-5 ENDS ON, carrying its
-   * terminator. Dropping it uncloses the block and re-renders everything after
-   * it, so a DROP of it fails open — the line is kept verbatim, and a forged
-   * footer riding one survives instead of swallowing the reviewer's own
-   * content. An in-place rewrite still reaches it: rewriting never unclosed
-   * anything, and a footer glued AFTER the terminator renders as visible text.
+   * The class terminator of the TERMINATED `html_block` type 1-5 this line
+   * ENDS ON; undefined on every other line. Losing the terminator uncloses
+   * the block and re-renders everything after it, so a DROP of the line and a
+   * rewrite that ERASES the terminator both fail open — the line is kept
+   * verbatim, and a forged footer riding one survives instead of swallowing
+   * the reviewer's own content. A rewrite that leaves it in place still
+   * applies: a footer glued AFTER the terminator renders as visible text.
    */
-  endEdge: boolean;
+  endTerminator: RegExp | undefined;
 }
 
 /**
@@ -895,28 +977,37 @@ interface ScannedLine {
 function scanLines(body: string): ScannedLine[] {
   const lines = body.split(LINE_ENDING_RE);
   const kinds: LineKind[] = new Array<LineKind>(lines.length).fill('text');
-  const endEdges = new Set<number>();
+  const endTerminators = new Map<number, RegExp>();
   for (const token of BLOCK_PARSER.parse(body, {})) {
     if (token.map === null) continue;
     let kind: LineKind;
     if (token.type === 'fence') kind = 'fence';
     else if (token.type === 'code_block') kind = 'code';
     else if (token.type === 'html_block') {
-      const opener = (lines[token.map[0]] ?? '').replace(QUOTE_PREFIX_RE, '');
+      // The class test anchors at the opener line's first `<`, not at its
+      // container prefixes: a type 1-5 block can open on a list-marker line
+      // or at a list content indent (`- <script>`), where stripping only the
+      // blockquote prefix matched no class, so the terminator line went
+      // unprotected and its drop left a dangling block that swallowed the
+      // reviewer's own content. An html_block always starts at its first
+      // `<`, and no type 6/7 tag is a class opener, so those stay class-less.
+      const openerLine = lines[token.map[0]] ?? '';
+      const opener = openerLine.slice(Math.max(openerLine.indexOf('<'), 0));
       const cls = HTML_BLOCK_CLASSES.find(([open]) => open.test(opener));
       kind = cls?.[2] ?? 'html';
       // A block that opens and closes on ONE line is not protected: dropping
       // that line removes the whole block, so nothing is left unclosed — and
       // protecting it would keep the bare marker line
       // `stripCommentMarkerLines` exists to remove. A DANGLING one has no
-      // terminator line either, so its last line stays droppable.
-      const last = (lines[token.map[1] - 1] ?? '').replace(QUOTE_PREFIX_RE, '');
+      // terminator line either, so its last line stays droppable. The
+      // terminator regexes are unanchored and a blockquote prefix carries
+      // none of their characters, so the last line needs no prefix strip.
       if (
         token.map[1] - 1 > token.map[0] &&
         cls !== undefined &&
-        cls[1].test(last)
+        cls[1].test(lines[token.map[1] - 1] ?? '')
       ) {
-        endEdges.add(token.map[1] - 1);
+        endTerminators.set(token.map[1] - 1, cls[1]);
       }
     } else continue;
     for (let l = token.map[0]; l < token.map[1]; l += 1) kinds[l] = kind;
@@ -930,7 +1021,7 @@ function scanLines(body: string): ScannedLine[] {
       kind: kinds[i]!,
       depth,
       content,
-      endEdge: endEdges.has(i),
+      endTerminator: endTerminators.get(i),
     };
   });
 }
@@ -957,16 +1048,15 @@ function mapLinesAware(
   // at its edge), so the collapse must never touch the blank runs around
   // them — those blanks belong to the quotation and render.
   const quotedDrops = new Set<number>();
-  for (const { line, kind, endEdge } of scanLines(body)) {
+  for (const { line, kind, endTerminator } of scanLines(body)) {
     if (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml') {
       out.push(line);
       continue;
     }
     const mapped = map(line);
     if (mapped === null) {
-      // Only a DROP of a terminator line uncloses its block, so only the drop
-      // fails open — the in-place maps reach that line as any other.
-      if (endEdge) {
+      // Losing the terminator uncloses its block, so the drop fails open.
+      if (endTerminator !== undefined) {
         out.push(line);
         continue;
       }
@@ -976,6 +1066,17 @@ function mapLinesAware(
       // either, so its drop collapses like a text drop. Only the visible
       // tag-based HTML quotation protects the blank runs around a drop.
       if (kind === 'html') quotedDrops.add(out.length);
+      continue;
+    }
+    // So does a rewrite that erases it: `FOOTER_SPAN_RE`'s middle admits
+    // `-->`, so the span strip deleted a terminator along with the forged
+    // span riding it and left the block dangling over everything after.
+    if (
+      mapped !== line &&
+      endTerminator !== undefined &&
+      !endTerminator.test(mapped)
+    ) {
+      out.push(line);
       continue;
     }
     if (mapped !== line) changed = true;
@@ -1054,6 +1155,23 @@ function linkRefDefLines(lines: string[], i: number): number {
 }
 
 /**
+ * The constructs GitHub's sanitizer drops whole, as ONE earliest-opener-wins
+ * alternation: they never nest, so the first one claims its own closer.
+ * Sequential strips let a `<?` or `<!--` quoted INSIDE a CDATA payload eat
+ * past the `]]>` to end of input and take the visible text after the section
+ * with it — and, once the construct arms ran first, left the script/style
+ * arms LAST, so a construct whose closer sat past their terminator ate the
+ * terminator, the orphaned arm then ate to end of input, and visible text
+ * certified as rendering nothing. Each arm keeps its
+ * unclosed-opener-runs-to-end-of-input semantics. The two tag arms spell
+ * their case per arm rather than take a global `i`, so the ordering fix is
+ * the only delta this pass makes: the four construct arms matched
+ * case-sensitively before it.
+ */
+const RENDER_NOTHING_RE =
+  /<!--[\s\S]*?(?:-->|$)|<\?[\s\S]*?(?:\?>|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<![A-Za-z][\s\S]*?(?:>|$)|<[sS][cC][rR][iI][pP][tT]\b[\s\S]*?(?:<\/[sS][cC][rR][iI][pP][tT]\s*>|$)|<[sS][tT][yY][lL][eE]\b[\s\S]*?(?:<\/[sS][tT][yY][lL][eE]\s*>|$)/g;
+
+/**
  * Whether what remains would render as NOTHING on GitHub. Whitespace,
  * format characters (Cf, e.g. zero-width spaces — `.trim()` does not see
  * them), HTML comments — terminated or not: an unclosed `<!--` runs to the
@@ -1073,17 +1191,7 @@ function linkRefDefLines(lines: string[], i: number): number {
  */
 export function rendersAsNothing(text: string): boolean {
   let stripped = text
-    // One pass, earliest opener wins: these constructs never nest, so the
-    // first one claims its own closer. Sequential strips let a `<?` or `<!--`
-    // quoted INSIDE a CDATA payload eat past the `]]>` to end of input and
-    // take the visible text after the section with it. Each arm keeps its
-    // unclosed-opener-runs-to-end-of-input semantics.
-    .replace(
-      /<!--[\s\S]*?(?:-->|$)|<\?[\s\S]*?(?:\?>|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<![A-Za-z][\s\S]*?(?:>|$)/g,
-      '',
-    )
-    .replace(/<script\b[\s\S]*?(?:<\/script\s*>|$)/gi, '')
-    .replace(/<style\b[\s\S]*?(?:<\/style\s*>|$)/gi, '')
+    .replace(RENDER_NOTHING_RE, '')
     .replace(/\p{Cf}/gu, '')
     // No-break, space, and invisible named/numeric entity families.
     .replace(
@@ -1159,7 +1267,7 @@ const FORGED_FOOTER_LINE_ANYWHERE_RE =
   /^[ \t]*(?:>[ \t]*)?_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*\r?$/;
 
 export function stripForgedFooterLines(body: string): string {
-  if (!body.includes('/review') && !body.includes('&')) return body;
+  if (!canProjectFooterMarker(body)) return body;
   return mapLinesAware(body, (line) =>
     FORGED_FOOTER_LINE_ANYWHERE_RE.test(
       projectInvisibles(normalizeSourceNuls(line)).text,

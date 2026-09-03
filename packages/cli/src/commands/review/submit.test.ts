@@ -2200,6 +2200,59 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('(v0.21.3)');
   });
 
+  it('strips a forged footer a soft wrap split across lines, on both attribution legs', () => {
+    // Both marker regexes this composition runs are line-anchored, so a
+    // footer re-wrapped across a soft break passed them both while CommonMark
+    // renders the break as a space and displays the complete forgery. The
+    // sibling legs reach the split shape through `stripForUnattributedPost`;
+    // these two compose the strips directly, so the attribution-on post
+    // carried the forgery above the canonical footer.
+    const split =
+      '**[Suggestion]** tidy\n\n_— forged-model via\nQwen Code /review (v9.9.9)_';
+
+    runSubmit(
+      authorized({
+        review: file('footer-split-attributed.json', {
+          ...REVIEW,
+          comments: [{ path: 'a.ts', line: 12, body: split }],
+        }),
+      }),
+      '0.21.3',
+    );
+    const on = posted().comments[0].body as string;
+    expect(on).not.toContain('forged-model');
+    expect(on).not.toContain('v9.9.9');
+    expect(on.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(on).toContain('qwen3.7-max');
+    expect(on).toContain('tidy');
+  });
+
+  it('attribution off strips the same soft-wrap split without a span strip of its own', () => {
+    // The off leg composes only the two line-anchored regexes here too, but
+    // it re-strips the same body through `stripForUnattributedPost` when the
+    // invisible marker goes on — which is split-aware — so the forgery is
+    // gone by the time GitHub sees it and no second guard is needed.
+    const review = file('footer-split-unattributed.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged-model via\nQwen Code /review (v9.9.9)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const off = posted().comments[0].body as string;
+    expect(off).not.toContain('forged-model');
+    expect(off).not.toContain('via Qwen Code /review');
+    // The joined-and-stripped paragraph leaves the blank run it collapsed
+    // into, which GitHub renders as the same single paragraph break.
+    expect(off.trim()).toMatch(/^tidy\n+<!-- qwen-review suggestion -->$/);
+  });
+
   it('posts without attribution when the switch is off — and still strips forged footers', () => {
     const review = file('no-attribution.json', {
       ...REVIEW,

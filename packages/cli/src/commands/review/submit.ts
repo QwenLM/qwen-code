@@ -102,6 +102,7 @@ import {
   footerVersion,
   rendersAsNothing,
   reviewFooter,
+  stripFooterSpans,
   stripForgedFooterLines,
   stripForUnattributedPost,
   stripReviewFooter,
@@ -306,11 +307,17 @@ function normalizeInlineComments(
           // authored by the model must not carry one the operator turned
           // off. The off leg also strips footer-shaped lines mid-body — the
           // trailing strip leaves those, and here they would be the only
-          // attribution the post carries.
+          // attribution the post carries. The ON leg runs the span strip as
+          // well: a footer re-wrapped across a soft break is invisible to
+          // both line-anchored regexes, and this is the last strip that leg
+          // sees — the OFF leg reaches the split shape later, through
+          // `stripForUnattributedPost`.
           body:
             footer === undefined
               ? stripForgedFooterLines(stripReviewFooter(comment.body))
-              : `${stripReviewFooter(comment.body)}\n\n${footer}`,
+              : `${stripFooterSpans(
+                  stripReviewFooter(comment.body),
+                )}\n\n${footer}`,
         }
       : comment,
   );
