@@ -574,7 +574,22 @@ jobs:
             if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
               : # A failing test names itself; an annotation adds nothing.
             elif grep -q 'Timeout calling' "${log}"; then
-              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::Every executed test passed. Vitest could not get a worker's progress callback back before its RPC deadline — a starved host, and one --retry cannot cover because retries re-run failing TESTS while an unhandled error fails the run outright. Rerun the job."
+              # Passed only with proof the run reached its end and nothing
+              # else broke: a normal exit (a signal death is 128+N), a
+              # passing tally, no failing tally, and no unhandled error that
+              # is not the transport. Vitest's worker RPC giving up says
+              # nothing about the product, and --retry cannot cover it —
+              # retries re-run failing TESTS while an unhandled error fails
+              # the run outright. It has now cost this release three
+              # attempts (run 33713579913).
+              if [ "${status}" -lt 128 ] \
+                && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
+                && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
+                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
+                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
+                exit 0
+              fi
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
             else
               echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
             fi

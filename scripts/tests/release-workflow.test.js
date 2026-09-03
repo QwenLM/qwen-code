@@ -650,11 +650,34 @@ describe('release workflow', () => {
     );
     const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
 
-    for (const [label, stub, code, annotation] of [
+    for (const [label, stub, code, annotation, expected] of [
       // A failing test names itself; an annotation would only add noise.
       ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
+      // Vitest's worker RPC giving up says nothing about the product, and
+      // --retry cannot cover it. Passed only with proof the run reached its
+      // end: a normal exit, a passing tally, no failing tally, and no other
+      // unhandled error. It cost this release three attempts before that.
       [
-        'transport timeout',
+        'transport timeout, run completed',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        0,
+      ],
+      [
+        'transport timeout, killed by a signal',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        137,
+        '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout beside a real one',
+        'Error: [vitest-worker]: Timeout calling "x"\nError: write after end\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout, no tally to back it',
         'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
@@ -686,7 +709,7 @@ describe('release workflow', () => {
           },
         );
 
-        expect(result.status, label).toBe(code);
+        expect(result.status, label).toBe(expected ?? code);
         if (annotation) {
           expect(result.stdout, label).toContain(annotation);
         } else {
