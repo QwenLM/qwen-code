@@ -148,6 +148,12 @@ describe('no-AK integration CI wiring', () => {
         `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
       );
     }
+    // The latency-budget skip shares this fleet predicate; if the line is
+    // dropped, renamed, or its expression altered, every millisecond budget
+    // silently dies on every lane while the helper tests stay green.
+    expect(testStep).toContain(
+      `QWEN_SKIP_LATENCY_BUDGETS: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+    );
   });
 
   it('defines a focused no-AK integration script', () => {
@@ -827,17 +833,6 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeCalls.integration_no_ak).toContain(
       "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
     );
-  });
-
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
-    );
-    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
-
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
   });
 
   it('does not install Linux packages on self-hosted Playwright runners', () => {

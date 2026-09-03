@@ -232,6 +232,17 @@
   min-width: 0;
 }
 
+.workflowLineDetail {
+  padding: 8px 0 2px;
+}
+
+.workflowFallback {
+  padding: 10px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chatSummary {
   width: 100%;
   margin: 0;
@@ -398,6 +409,12 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Collapsed groups that stay mounted (workflow details keep their live state)
+   collapse the grid row instead of unmounting via `display: none`. */
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {

@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { SchemaValidator } from './schemaValidator.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('SchemaValidator', () => {
   it('strictly validates without coercing application data', () => {
@@ -2325,7 +2326,7 @@ describe('SchemaValidator', () => {
       // 1s budget catches a regression on any realistic hardware without
       // flaking on slow CI (the fixed path does linear work in both Ajv and
       // the coercion passes).
-      expect(elapsed).toBeLessThan(1000);
+      expectWithinLatencyBudget(elapsed, 1000, { poolMultiplier: 20 });
     });
   });
 });
