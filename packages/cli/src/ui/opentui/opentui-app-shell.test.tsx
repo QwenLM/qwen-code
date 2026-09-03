@@ -62,6 +62,8 @@ const mocks = vi.hoisted(() => {
     actionConfirmProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
+    /** Runs while a dispatched command is still awaiting its outcome. */
+    onHandle: null as null | ((text: string) => void),
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -135,6 +137,7 @@ vi.mock('./commands-dispatch.js', () => ({
     dispose() {}
     async handle(text: string) {
       mocks.state.handledTexts.push(text);
+      mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
     }
@@ -224,6 +227,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.actionConfirmProps = null;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.exitInProgress = false;
+    mocks.state.onHandle = null;
   });
 
   it('renders the composer inside the error boundary by default', async () => {
@@ -848,6 +852,36 @@ describe('OpenTuiApp shell wiring', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(mocks.state.handledTexts).toEqual([]);
+  });
+
+  it('stops between dispatches when the exit starts while one is in flight', async () => {
+    // The crossing the edge check cannot see: the drain is already past it,
+    // and the exit begins while '/first' awaits its outcome. Only the in-loop
+    // latch check keeps '/second' back (R4-1).
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/first');
+    await submit('/second');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    mocks.state.onHandle = () => {
+      mocks.state.exitInProgress = true;
+    };
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.handledTexts).toEqual(['/first']);
   });
 
   it('catches a subtree render error inside the error boundary', async () => {
