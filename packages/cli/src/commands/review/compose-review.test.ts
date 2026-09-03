@@ -6286,6 +6286,54 @@ describe('composeReview — fixedFindings', () => {
     ).toEqual([{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }]);
   });
 
+  it('refuses a `by` the EXIT strips to nothing — a bare severity marker (#9940 review, round 21)', () => {
+    // `submit` posts the reply through the attribution-off strip chain
+    // and the footer strip, so the gate projects through the same exit
+    // closure the body-Criticals boundary uses (`rendersAsNothingAtExit`):
+    // a bare marker renders as prose to the plain test and as nothing at
+    // the exit — under attribution off the reply posted bare `R1-2 fixed`
+    // beside a resolve, under attribution on the machine marker posted
+    // verbatim.
+    for (const by of ['**[Critical]**', '**[Suggestion]**: ']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('degrades a `by` whose visible tail sits past the cap to a by-less ruling (#9940 review, round 21)', () => {
+    // The gate ran on the clause as written — visible `fixed it` at the
+    // end — and the cap then cut exactly that tail off, leaving forty
+    // complete `&nbsp;` entities: the invisible-only reply the gate
+    // refuses. The cut is the tool's, not the model's, so the ruling
+    // degrades to the by-less form (`R<id> fixed`) instead of refusing.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '&nbsp;'.repeat(40) + 'fixed it' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // A long comment ahead of the text slices into an UNTERMINATED
+    // comment — the same invisible-only shape.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `<!-- ${'c'.repeat(250)} --> the guard rewrite` },
+          ],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // The ordinary cap keeps a visible clause, capped (the sibling cells
+    // above pin the length and the code-point cut).
+    expect(
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'x'.repeat(300) }] }),
+      ).fixedFindings[0]!.by,
+    ).toHaveLength(240);
+  });
+
   it('refuses a non-object entry', () => {
     expect(() =>
       composeReview(base({ fixedFindings: ['R1-2'] as never })),
@@ -14657,6 +14705,41 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // … so its still-standing original mints no closure — while a truly
     // vanished same-file Critical beside it still does.
     expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('reads a SOURCE tag before the id on the deferral channel — the re-post join is the head-slot read (#9940 review, round 15)', () => {
+    // The join reads the id through the head-slot tokeniser's own id
+    // (`readClaimHead(title).id`), so a title leading with a source tag
+    // (`[probe] R10-1: …`) still names the claim it re-posts; the anchored
+    // read over `.stripped` kept the source tag at position 0 and saw no
+    // id — `repostUnidentified` then withheld EVERY closure of the round,
+    // the truly vanished sibling included. The axis-tag twin below cannot
+    // pin this: axis tags are stripped from `.stripped`, source tags are
+    // not.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'sparse wedge' },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 8,
+          source: 'probe',
+          severity: 'Critical',
+          title: '[probe] R10-1: sparse wedge',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/other.ts' }]);
   });
 
   it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {

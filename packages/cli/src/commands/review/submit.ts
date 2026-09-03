@@ -772,16 +772,21 @@ function inconsistencies(
         problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
       }
     });
-    // The deferral channel's Critical leg. A deferred Critical is
-    // RELOCATED into the composed body's Criticals, and the relocation's
-    // `path:line — [source]` prefix strips the carried id from position
-    // 0 — buildLedger carries the claim renumbered, and no scan above
-    // sees the id. The closure mint already reads these titles as its
-    // re-post signal; the gate reads them the same way, keyed on the
-    // split's own predicate so the scan covers exactly the entries the
-    // relocation carries (#9940 review).
+    // The deferral channel — EVERY entry, whatever its severity. A
+    // deferred Critical is RELOCATED into the composed body's Criticals,
+    // and the relocation's `path:line — [source]` prefix strips the
+    // carried id from position 0 — buildLedger carries the claim
+    // renumbered, and no scan above sees the id. A deferred Suggestion
+    // is not relocated, but it is still a finding channel: the body's
+    // deferral list publishes its title as a standing (deferred) claim,
+    // `deferredCount` counts it as a finding, and the closure mint reads
+    // its id-bearing title as a re-post of the entry it names — severity,
+    // path and wording are irrelevant to that readback. So the gate reads
+    // the same population the mint reads, or one pass could resolve the
+    // thread as fixed while the body re-voices the claim deferred and the
+    // mint carries its lineage (#9940 review, rounds 12 and 21). An
+    // id-less title still names nothing and posts.
     toDeferredEntries(payload.state?.deferredSuggestions).forEach((e, i) => {
-      if (e.severity !== 'Critical') return;
       // Through the head-slot tokeniser's own id read — the same read the
       // closure mint applies: a title leading with its axis tags still
       // names the claim it re-posts (#10291), and so does one leading
@@ -793,16 +798,16 @@ function inconsistencies(
         problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
       }
     });
-    // The floor reroute's Critical leg — the CLI's own deferrals, beside
-    // the model-written channel above. A rerouted blocker leaves the
-    // posting set but still lands in the body's deferral list as a
-    // standing assertion the closure mint reads as a re-post; its record
-    // title is where a below-the-claim-line carried id surfaces. Same
-    // head-slot id read as the two legs above, refusing with the
-    // authored comment index the comment leg cites (#9940 review,
-    // round 14).
+    // The floor reroute's leg — the CLI's own deferrals, beside the
+    // model-written channel above, and every entry of it for the same
+    // reason: a rerouted comment leaves the posting set but still lands
+    // in the body's deferral list as a standing assertion the closure
+    // mint reads as a re-post; a rerouted Critical's record title is
+    // where a below-the-claim-line carried id surfaces. Same head-slot
+    // id read as the legs above, refusing with the authored comment
+    // index the comment leg cites (#9940 review, rounds 14 and 21).
     for (const { entry, at } of floorRerouted) {
-      if (entry?.severity !== 'Critical') continue;
+      if (entry === undefined) continue;
       const id = readClaimHead(entry.title).id;
       if (id !== undefined && fixedIds.has(id)) {
         problems.push(contradiction(`comments[${at}]`, id));

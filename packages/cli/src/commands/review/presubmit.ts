@@ -30,16 +30,12 @@ import { detectPlatformKind } from './lib/platform/registry.js';
 import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
   LEADING_INVISIBLE_RE,
-  carriedClaimLine,
   readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
-import {
-  LEDGER_ID_READBACK,
-  LEDGER_ID_SHAPE,
-  LEDGER_ID_TOKEN,
-} from './lib/ledger.js';
+import { LEDGER_ID_SHAPE, LEDGER_ID_TOKEN } from './lib/ledger.js';
+import { ledgerClaimLine } from './compose-review.js';
 import {
   aoneAccountName,
   getMrAuthorAndHead,
@@ -90,9 +86,23 @@ interface CommentSummary {
   matchedIds?: string[];
 }
 
-/** The carried id this comment's claim line leads with, if any. */
+/**
+ * The carried id this comment's claim line leads with, if any — read
+ * through the SAME projection every other consumer of a carried id applies
+ * (`ledgerClaimLine`: forged footer spans, comment-marker lines and leading
+ * render-nothing residue stripped; the head-slot tokeniser for the id), so
+ * this end can never call a posted comment id-less while the ledger
+ * builder, the contradiction gate and the thread matcher carry it. It did:
+ * a re-report drafted `**[Critical]** _— via Qwen Code /review_ R1-2: …`
+ * posts with the span intact under attribution on, and the plain claim
+ * line read here stopped at the `_` — the standing re-post landed in the
+ * overlap bucket and was dedup-dropped every round while the ledger kept
+ * carrying R1-2 (#9940 review, round 21). The marked leg keeps the
+ * `null` shape the bare-leg guard keys on.
+ */
 function extractCarriedIds(body: string): string[] {
-  let line = carriedClaimLine(body);
+  const marked = ledgerClaimLine(body);
+  let line: string | null = marked === '' ? null : marked;
   if (line === null && carriesCommentMarker(body)) {
     // The attribution-off POSTED shape: `submit` strips the severity
     // prefix before posting, so the marker-less body carries the claim on
@@ -106,12 +116,17 @@ function extractCarriedIds(body: string): string[] {
       .split(/\r\n?|\n/)[0]
       .trim();
   }
-  // Through the claim-head strip the ledger builder applies (#10291): a
-  // re-post whose claim line leads with the axis tags before its carried
-  // id must still read as that id's re-post, or it lands in the plain
-  // overlap bucket and is dedup-dropped every round.
-  const carried = LEDGER_ID_READBACK.exec(readClaimHead(line ?? '').stripped);
-  return carried ? [carried[1]] : [];
+  // Through the head-slot tokeniser's own id read, the read the ledger
+  // builder, the contradiction gate and the closure mint apply (#10291):
+  // a re-post whose claim line leads with the axis tags OR a source tag
+  // (`[probe] R1-2: …`) before its carried id must still read as that
+  // id's re-post, or it lands in the plain overlap bucket and is
+  // dedup-dropped every round. The anchored read over `.stripped` kept
+  // the source tag at position 0 and read no id there (#9940 review,
+  // round 21). The slot grammar keeps a mid-body mention ("see R3-2 for
+  // context") non-carried, so the id-less fallback below stays safe.
+  const carried = readClaimHead(line ?? '').id;
+  return carried === undefined ? [] : [carried];
 }
 
 /**

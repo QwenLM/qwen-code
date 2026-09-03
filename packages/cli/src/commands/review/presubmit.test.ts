@@ -1106,6 +1106,46 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
+    it('reads the carried id past a SOURCE tag placed before it — the head-slot read, like every other end (#9940 review, round 21)', async () => {
+      // `[probe] R3-2: …` is a head-slot shape #10291 admits and the
+      // ledger builder, the contradiction gate and the thread matcher all
+      // read; the anchored read over `.stripped` kept the source tag at
+      // position 0 and saw no id, so the standing re-post landed in the
+      // overlap bucket and was dedup-dropped every round — the re-post
+      // loop meanwhile counting it re-posted. Both posted shapes.
+      for (const body of [
+        '**[Critical]** [probe] R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+        '[probe] R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+      ]) {
+        const result = await presubmitWithComments(
+          [{ ...CARRIED_COMMENT, body }],
+          [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+        );
+        expect(result.existingComments.byBucket.repost).toBe(1);
+        expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      }
+    });
+
+    it('reads the carried id through a forged footer span between the marker and the id — the ledger projection (#9940 review, round 21)', async () => {
+      // Under attribution on `normalizeInlineComments` strips only the
+      // TRAILING footer, so a re-report drafted with a forged span ahead
+      // of its id posts with the span intact; `buildLedger`, the gate and
+      // the matcher read the id through `ledgerClaimLine` (spans
+      // stripped) and kept carrying R3-2 while this end read none, and
+      // the standing re-post was dedup-dropped every round.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** _— model via Qwen Code /review (v0.21.3)_ R3-2: eq-form rescue asymmetry',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
     it('marks an id-matched overlap comment as a re-post target', async () => {
       const result = await presubmitWithComments(
         [CARRIED_COMMENT],

@@ -3630,14 +3630,20 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     // as nothing (a bare HTML comment, a Cf run `trim` keeps) posts
     // `R<id> fixed by` with no account of what fixed it, on the thread
     // this same pass resolves; the body-Criticals boundary already
-    // refuses the identical texts (#9940 review, round 14). Residue
-    // AHEAD of visible text stays admitted, like everywhere else.
+    // refuses the identical texts (#9940 review, round 14) — through the
+    // EXIT projection, not the plain render test: `submit` strips the
+    // reply through the attribution-off chain and the footer strip before
+    // posting, so a bare severity marker (`**[Critical]**`) renders as
+    // prose here and as nothing there, and `rendersAsNothingAtExit` is
+    // the one statement of what the exit empties (#9940 review, round
+    // 21). Residue AHEAD of visible text stays admitted, like everywhere
+    // else.
     if (
       by !== undefined &&
       (typeof by !== 'string' ||
         by.trim() === '' ||
         /[\r\n]/.test(by) ||
-        rendersAsNothing(by))
+        rendersAsNothingAtExit(by))
     ) {
       throw new Error(
         `compose-review: ${at}.by must be ONE non-empty line — it ` +
@@ -3647,13 +3653,27 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     }
     if (seen.has(id)) return;
     seen.add(id);
+    // Cut by code point, not UTF-16 unit: a slice landing inside a
+    // surrogate pair would post a lone surrogate into the thread. The
+    // cap is applied AFTER the gate, so the gate must run again on what
+    // the cap left: a clause whose visible tail sat past the cap (forty
+    // `&nbsp;` entities then `fixed it`, or a long comment ahead of the
+    // text) passed the gate as written and sliced to invisible-only —
+    // exactly the reply the gate refuses. That shape is the tool's own
+    // cut, not the model's draft, so it degrades to a by-less ruling
+    // (`R<id> fixed`) rather than refusing the round (#9940 review,
+    // round 21).
+    const slicedBy =
+      by === undefined
+        ? undefined
+        : [...by.trim()].slice(0, FIXED_BY_MAX).join('');
     out.push({
       id,
-      // Cut by code point, not UTF-16 unit: a slice landing inside a
-      // surrogate pair would post a lone surrogate into the thread.
-      ...(by === undefined
+      ...(slicedBy === undefined ||
+      slicedBy.trim() === '' ||
+      rendersAsNothingAtExit(slicedBy)
         ? {}
-        : { by: [...by.trim()].slice(0, FIXED_BY_MAX).join('') }),
+        : { by: slicedBy }),
     });
   });
   return out;

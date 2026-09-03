@@ -4507,6 +4507,65 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a SUGGESTION deferral whose title carries a fixed id — the mint reads every entry, so does the gate (#9940 review, round 21)', () => {
+    // A deferred Suggestion is not relocated, but it is still a finding
+    // channel: the body's deferral list publishes the title as a standing
+    // (deferred) claim, `deferredCount` counts it, and the closure mint
+    // reads its id-bearing title as a re-post regardless of severity. A
+    // Critical-only gate let one pass reply `R2-3 fixed by …` and
+    // resolve the thread while the same body re-voiced R2-3 deferred —
+    // one finding ruled two ways.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R2-3: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'R2-3: the guard drops a valid case',
+        },
+      ],
+      fixedFindings: [{ id: 'R2-3', by: 'the guard rewrite' }],
+    });
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /state\.deferredSuggestions\[0\] re-posts R2-3/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(resolveCalls()).toHaveLength(0);
+  });
+
+  it('a Suggestion deferral whose title carries NO id posts beside a fixed ruling — nothing to contradict (#9940 review, round 21)', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R2-3: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'the guard drops a valid case (see R2-3)',
+        },
+      ],
+      fixedFindings: [{ id: 'R2-3', by: 'the guard rewrite' }],
+    });
+    runSubmit(authorizedPost({ review }));
+    expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 1 });
+  });
+
   it('the same Critical deferral posts without the fixed ruling — relocated and standing (#9940 review)', () => {
     // The flip half of the refusal cell: the deferral alone is a
     // standing re-post — relocated into the body Criticals, carried
@@ -4562,20 +4621,10 @@ describe('the thread lifecycle', () => {
         ],
       },
     ],
-    [
-      'a deferral title',
-      {
-        deferredSuggestions: [
-          {
-            file: 'src/foo.ts',
-            line: 12,
-            source: 'review',
-            severity: 'Suggestion',
-            title: 'R1-2 loose review-config pins',
-          },
-        ],
-      },
-    ],
+    // A deferral TITLE leading with the id is no longer in this table: the
+    // deferral list is a finding channel the closure mint reads as a
+    // re-post whatever the severity, so the gate refuses it — see the
+    // Suggestion-deferral refusal cell above (#9940 review, round 21).
     [
       'a deferral path',
       {
