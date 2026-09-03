@@ -105,7 +105,10 @@ describe('cleanup', () => {
       // 100 × 50ms perFn ≈ 5000ms drain — structurally impossible for "drain
       // finished naturally" to satisfy < 800ms, so the upper bound proves
       // wallClock actually fired. Lower bound proves we waited for it and
-      // didn't short-circuit. 800ms slack absorbs CI scheduler jitter.
+      // didn't short-circuit. 800ms slack absorbs CI scheduler jitter. On
+      // the pool the bound keeps asserting with x5 slack: 4000ms still sits
+      // under the ~5000ms no-cap drain but above a ~100ms firing under the
+      // fleet's ~5x contention (a larger multiple would clear the drain).
       for (let i = 0; i < 100; i++) {
         registerCleanup(() => new Promise<void>(() => {}));
       }
@@ -117,7 +120,7 @@ describe('cleanup', () => {
       });
       const elapsed = Date.now() - start;
 
-      expectWithinLatencyBudget(elapsed, 800);
+      expectWithinLatencyBudget(elapsed, 800, { poolMultiplier: 5 });
       expect(elapsed).toBeGreaterThanOrEqual(80);
     });
 
