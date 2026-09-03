@@ -31,6 +31,14 @@ export type FakeOpenAIResponse = {
   contentChunks?: string[];
   errorContent?: string;
   disconnectAfterContentChunks?: number;
+  /**
+   * Streaming-only: pause the response once this many content deltas have been
+   * written across the whole response, and resume when `holdUntil` resolves.
+   * Awaiting the handler only holds a turn before the first byte; a test that
+   * needs the CLI genuinely mid-stream has to stop the stream itself.
+   */
+  holdAfterChunks?: number;
+  holdUntil?: Promise<void>;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
   choices?: FakeOpenAIChoice[];
@@ -131,7 +139,7 @@ export async function startFakeOpenAIServer(
 
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
-        writeStreamed(
+        await writeStreamed(
           res,
           getModel(body),
           response,
@@ -271,12 +279,12 @@ function writeNonStreamed(
   );
 }
 
-function writeStreamed(
+async function writeStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
   keepAlive: boolean,
-): void {
+): Promise<void> {
   res.writeHead(200, {
     'cache-control': 'no-cache',
     connection: keepAlive ? 'keep-alive' : 'close',
@@ -303,6 +311,14 @@ function writeStreamed(
     res.write(`data: ${JSON.stringify(payload)}\n\n`, callback);
   };
 
+  const holdAfterChunks = message.holdAfterChunks ?? -1;
+  let contentDeltas = 0;
+  const sendContent = async (choiceIndex: number, content: string) => {
+    send(chunk(choiceIndex, { content }));
+    contentDeltas += 1;
+    if (contentDeltas === holdAfterChunks) await message.holdUntil;
+  };
+
   const choices = responseChoices(message);
   for (const [choicePosition, choice] of choices.entries()) {
     send(chunk(choice.index, { role: 'assistant' }));
@@ -319,10 +335,10 @@ function writeStreamed(
         send(chunk(choice.index, { content }), () => res.destroy());
         return;
       }
-      send(chunk(choice.index, { content }));
+      await sendContent(choice.index, content);
     }
     if (!choice.contentChunks && choice.content) {
-      send(chunk(choice.index, { content: choice.content }));
+      await sendContent(choice.index, choice.content);
     }
     for (const [toolIndex, toolCall] of (choice.toolCalls ?? []).entries()) {
       send(

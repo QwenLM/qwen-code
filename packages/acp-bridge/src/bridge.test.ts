@@ -4674,6 +4674,9 @@ describe('createAcpSessionBridge', () => {
     await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
+    await expect(
+      bridge.getSessionSavedWorkflow('missing', 'deep-review'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it('reuses an echoed daemon-issued client id on attach', async () => {

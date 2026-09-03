@@ -2451,6 +2451,29 @@ export function createDaemonSessionActions({
       }
     },
 
+    async readSavedWorkflow(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Read saved workflow failed',
+        'read_saved_workflow',
+      );
+      try {
+        const status = await withActionTimeout(
+          session.savedWorkflow(name),
+          'Read saved workflow timed out',
+        );
+        return status.workflow;
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Read saved workflow failed',
+          error,
+          'read_saved_workflow',
+        );
+      }
+    },
+
     async clearGoal() {
       const session = requireSessionForAction(
         addNotice,

@@ -328,6 +328,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/session/agent_trace',
   '_qwen/session/attachments',
   '_qwen/session/lsp',
+  '_qwen/session/saved_workflow',
   '_qwen/session/artifacts',
   '_qwen/workspace/mcp',
   '_qwen/workspace/skills',

@@ -1946,6 +1946,31 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('reads a saved workflow definition and unwraps the envelope', async () => {
+    const session = createMockSession('session-a');
+    const workflow = {
+      v: 1 as const,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      source: 'project' as const,
+      scriptPath: '/workspace/.qwen/workflows/deep-review.js',
+      script: 'export const meta = { name: "deep-review", description: "d" }',
+      meta: { name: 'deep-review', description: 'd' },
+    };
+    session.savedWorkflow.mockResolvedValueOnce({
+      v: 1,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      workflow,
+    });
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.readSavedWorkflow('deep-review')).resolves.toEqual(
+      workflow,
+    );
+    expect(session.savedWorkflow).toHaveBeenCalledWith('deep-review');
+  });
+
   it('suppresses a stale workflow-control failure after switching sessions', async () => {
     const sessionA = createMockSession('session-a');
     const sessionB = createMockSession('session-b');
@@ -4165,6 +4190,7 @@ function createMockSession(
       sessionWorkflowTaskAction: vi.fn(),
       removeSessionAttachment: vi.fn(async () => true),
     },
+    savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),

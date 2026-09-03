@@ -511,14 +511,14 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(snapshot.tasks).toEqual([]);
   });
 
-  it('exposes phase visits and dispatch dependencies from the workflow registry', () => {
+  it('uses the saved name before metadata is available and exposes the workflow graph', () => {
     const workflow = {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
       toolUseId: 'workflow-call-1',
-      description: 'Review and fix',
-      meta: { name: 'review-and-fix', description: 'Review and fix' },
+      description: 'wf_graph',
+      meta: null,
       status: 'running',
       startTime: 1_000,
       isBackgrounded: true,
@@ -581,6 +581,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       tokenBudgetTotal: 8_000,
       perPhaseTokens: new Map(),
       script: '',
+      workflowName: 'review-and-fix',
       sourceRunId: 'wf_source',
       startMode: 'rerun',
       pendingApprovals: [
@@ -615,6 +616,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       toolUseId: 'workflow-call-1',
+      workflowName: 'review-and-fix',
       label: 'review-and-fix',
       currentPhase: 'Review',
       agentsDispatched: 2,
@@ -668,7 +670,14 @@ describe('buildSessionTasksStatus workflow graph', () => {
       'session-1',
       configWith([]),
       2_000,
-      [workflowSnapshot()],
+      [
+        workflowSnapshot({
+          meta: null,
+          toolUseId: 'workflow-call-1',
+          workflowName: 'review-and-fix',
+          description: 'wf_saved',
+        }),
+      ],
       { includeWorkflows: true },
     );
 
@@ -676,6 +685,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       expect.objectContaining({
         kind: 'workflow',
         id: 'wf_saved',
+        toolUseId: 'workflow-call-1',
         label: 'review-and-fix',
         status: 'failed',
         runtimeMs: 500,

@@ -545,6 +545,21 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ sessionId: 's18' });
   });
 
+  it('GET /session/:id/saved-workflows/:name maps to _qwen/session/saved_workflow', () => {
+    const result = matchRoute(
+      '/session/s19/saved-workflows/deep%20review',
+      'GET',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/saved_workflow');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's19', name: 'deep review' });
+  });
+
   // ---- Granular workspace routes ----------------------------------------
 
   it('GET /workspace/mcp maps to _qwen/workspace/mcp', () => {

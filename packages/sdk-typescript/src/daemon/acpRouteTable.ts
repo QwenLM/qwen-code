@@ -511,6 +511,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
+  // GET /session/:id/saved-workflows/:name -> _qwen/session/saved_workflow
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/saved-workflows\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/session/saved_workflow',
+      extractParams: (segs) => ({ sessionId: segs[0], name: segs[1] }),
+    },
+  },
 
   // ---- Granular workspace routes (_qwen/workspace/*) ---------------------
 

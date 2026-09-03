@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useActions,
   useConnection,
-  usePromptStatus,
   useDaemonSessionOwnerGuard,
   useWorkspaceEventSignals,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -11,13 +10,17 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
 
-function cacheArtifacts(
-  cache: Map<string, DaemonSessionArtifact[]>,
+function cacheArtifacts<Owner>(
+  cache: Map<
+    string,
+    { artifacts: DaemonSessionArtifact[]; hydratedOwner?: Owner }
+  >,
   sessionKey: string,
   artifacts: DaemonSessionArtifact[],
+  hydratedOwner?: Owner,
 ): void {
   cache.delete(sessionKey);
-  cache.set(sessionKey, artifacts);
+  cache.set(sessionKey, { artifacts, hydratedOwner });
   while (cache.size > MAX_CACHED_SESSIONS) {
     const oldest = cache.keys().next().value;
     if (!oldest) break;
@@ -36,6 +39,7 @@ export interface SessionArtifactsState {
   artifactById: ReadonlyMap<string, DaemonSessionArtifact>;
   loading: boolean;
   error: string | null;
+  hydrated: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -46,7 +50,6 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
   const owner = ownerRef.current;
-  const promptStatus = usePromptStatus();
   const workspaceEventSignals = useWorkspaceEventSignals();
   const artifactsVersion = workspaceEventSignals?.artifactsVersion;
   const isConnected = connection.status === 'connected';
@@ -57,26 +60,24 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const sessionKey = sessionId
     ? `${connection.workspaceCwd ?? ''}\0${sessionId}`
     : undefined;
-  const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
-  const [, setLoadRevision] = useState(0);
+  const [, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
   const requestIdRef = useRef(0);
-  const loadedSessionKeyRef = useRef<string | undefined>(undefined);
   const artifactsBySessionRef = useRef(
-    new Map<string, DaemonSessionArtifact[]>(),
+    new Map<
+      string,
+      { artifacts: DaemonSessionArtifact[]; hydratedOwner?: typeof owner }
+    >(),
   );
-  const previousPromptStatusRef = useRef(promptStatus);
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
-    if (!sessionKey || !isConnected || !supportsArtifacts) {
-      loadedSessionKeyRef.current = undefined;
+    if (!sessionKey) {
       setArtifacts([]);
       return;
     }
-    if (loadedSessionKeyRef.current !== sessionKey) {
-      loadedSessionKeyRef.current = sessionKey;
-      setArtifacts(artifactsBySessionRef.current.get(sessionKey) ?? []);
+    if (!isConnected || connection.catchingUp || !supportsArtifacts) {
+      return;
     }
     try {
       const result = await actions.loadArtifacts();
@@ -85,8 +86,8 @@ export function useSessionArtifacts(): SessionArtifactsState {
         artifactsBySessionRef.current,
         sessionKey,
         result.artifacts,
+        owner,
       );
-      setArtifacts(result.artifacts);
     } catch {
       // The artifacts panel treats a failed refresh as an empty error state.
       if (
@@ -98,24 +99,24 @@ export function useSessionArtifacts(): SessionArtifactsState {
       }
     } finally {
       if (requestIdRef.current === requestId) {
-        setLoadRevision((revision) => revision + 1);
+        setArtifacts(
+          artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+            EMPTY_ARTIFACTS,
+        );
       }
     }
-  }, [actions, isConnected, owner, sessionKey, supportsArtifacts]);
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  }, [
+    actions,
+    connection.catchingUp,
+    isConnected,
+    owner,
+    sessionKey,
+    supportsArtifacts,
+  ]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  useEffect(() => {
-    const previous = previousPromptStatusRef.current;
-    previousPromptStatusRef.current = promptStatus;
-    if (previous !== 'idle' && promptStatus === 'idle') {
-      void refreshRef.current();
-    }
-  }, [promptStatus]);
 
   useEffect(() => {
     const previous = previousArtifactsVersionRef.current;
@@ -125,16 +126,14 @@ export function useSessionArtifacts(): SessionArtifactsState {
       artifactsVersion !== undefined &&
       artifactsVersion !== previous
     ) {
-      void refreshRef.current();
+      void refresh();
     }
-  }, [artifactsVersion]);
+  }, [artifactsVersion, refresh]);
 
   const visibleArtifacts =
     sessionKey && isConnected && supportsArtifacts
-      ? (artifactsBySessionRef.current.get(sessionKey) ??
-        (loadedSessionKeyRef.current === sessionKey
-          ? artifacts
-          : EMPTY_ARTIFACTS))
+      ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+        EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
   const artifactById = useMemo(
     () => new Map(visibleArtifacts.map((artifact) => [artifact.id, artifact])),
@@ -144,9 +143,15 @@ export function useSessionArtifacts(): SessionArtifactsState {
     artifacts: visibleArtifacts,
     artifactById,
     loading:
-      Boolean(sessionId && isConnected && supportsArtifacts) &&
+      Boolean(
+        sessionId && isConnected && !connection.catchingUp && supportsArtifacts,
+      ) &&
       Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
     error: null,
+    hydrated: Boolean(
+      sessionKey &&
+        artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
+    ),
     refresh,
   };
 }

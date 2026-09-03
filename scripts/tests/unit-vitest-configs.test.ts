@@ -221,3 +221,28 @@ describe('bundle-guard timeout ceiling', () => {
     }
   });
 });
+
+describe('scripts suite timeout', () => {
+  it('gives the scripts suite room for a contended host, and a knob', async () => {
+    // 30s was the quiet-host figure. Release run 33725742855 lost its Quality
+    // Checks (Scripts) job to two files at once — qwen-autofix-workflow, whose
+    // heaviest case measures ~14s idle, and acp-serve-boundary-guard — neither
+    // slow, both past 30s under contention. A per-file `vi.setConfig` cannot
+    // fix it: these cases register their timeout at collection.
+    for (const [stub, expected] of [
+      [undefined, 90_000],
+      ['5000', 5_000],
+    ] as const) {
+      if (stub === undefined) {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
+        vi.unstubAllEnvs();
+      } else {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
+      }
+      vi.resetModules();
+      const mod = await import('./vitest.config.js');
+      expect(mod.default.test?.testTimeout, `stub=${stub}`).toBe(expected);
+      vi.unstubAllEnvs();
+    }
+  });
+});

@@ -289,6 +289,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/tasks/cancel`,
   `${QWEN_METHOD_NS}session/tasks/workflow_action`,
   `${QWEN_METHOD_NS}session/lsp`,
+  `${QWEN_METHOD_NS}session/saved_workflow`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
   `${QWEN_METHOD_NS}session/artifacts/remove`,
@@ -3915,6 +3916,27 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionLspStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/saved_workflow`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const name = String(params['name'] ?? '');
+          if (!name) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`name` is required'),
+              );
+            }
+            return;
+          }
+          // Same fail-closed shape as the redacted supported-commands list:
+          // an untrusted workspace never reads workflow scripts.
+          const result = this.isWorkspaceTrusted()
+            ? await this.bridge.getSessionSavedWorkflow(sessionId, name)
+            : { v: 1, sessionId, name, workflow: null };
           this.replyConn(conn, id, result as unknown);
           return;
         }
