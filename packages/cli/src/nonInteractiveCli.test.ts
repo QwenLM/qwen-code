@@ -45,6 +45,7 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
@@ -544,7 +545,10 @@ describe('runNonInteractive', () => {
       expectedStatus: 'paused',
       expectedObjective: 'existing goal',
       expectedWorkers: 0,
-      expectedText: 'Goal paused: existing goal',
+      // TEXT prints the reason for every non-active status, so a headless
+      // `/goal pause` says why it stopped rather than only that it did.
+      expectedText:
+        'Goal paused: existing goal\nReason: Paused with /goal pause.',
     },
     {
       name: 'resume',
@@ -1358,7 +1362,13 @@ describe('runNonInteractive', () => {
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // The budget is what stopped this Goal. The generic failure prose
+      // would tell a headless user their turn broke and point them at a
+      // slash command in a process that has already exited.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('tool-calls'),
+      },
     });
 
     void run;
@@ -1475,7 +1485,12 @@ describe('runNonInteractive', () => {
     );
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // Same discrimination in the settlement window, where the abort
+      // listener inside `finishGoalTurn` is the writer that settles first.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('wall-time'),
+      },
     });
 
     void run;
