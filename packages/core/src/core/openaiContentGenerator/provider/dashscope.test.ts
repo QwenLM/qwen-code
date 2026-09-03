@@ -582,6 +582,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
             'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
           },
+          fetch: expect.any(Function),
         }),
       );
 

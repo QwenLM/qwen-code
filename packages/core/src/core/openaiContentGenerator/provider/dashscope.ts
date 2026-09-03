@@ -24,6 +24,7 @@ import {
 import type { ReasoningEffort } from '../../reasoning-effort.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { wrapFetchWithSessionId } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -314,6 +315,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       'openai',
       this.cliConfig.getProxy(),
     );
+    const baseFetch =
+      (runtimeOptions?.fetch as typeof fetch | undefined) ?? globalThis.fetch;
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
@@ -321,6 +324,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: wrapFetchWithSessionId(baseFetch, this.cliConfig),
     });
   }
 

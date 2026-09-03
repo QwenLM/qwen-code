@@ -151,6 +151,9 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBe('cli');
     expect(anthropicState.constructorOptions?.['authToken']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['apiKey']).toBeNull();
+    expect(anthropicState.constructorOptions?.['fetch']).toEqual(
+      expect.any(Function),
+    );
   });
 
   it('uses QwenCode identity + apiKey auth when baseURL is api.anthropic.com', async () => {

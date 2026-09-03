@@ -175,6 +175,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
           defaultHeaders: {
             'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
           },
+          fetch: expect.any(Function),
         }),
       );
 

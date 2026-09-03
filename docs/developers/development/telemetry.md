@@ -393,15 +393,23 @@ Verify both flags when wiring an ARMS+DashScope correlation setup:
 }
 ```
 
-### Other outbound correlation headers
+### Routify session affinity
 
-`X-Qwen-Code-Session-Id` and `X-Qwen-Code-Request-Id` are **not part of
-this PR**. They will be designed and proposed in their own follow-up
-PR(s) under the same `outboundCorrelation.*` namespace, each with its
-own threat model and operator-consent flow. PR #4390 review (LaZzyMan)
-established the principle: "telemetry's scope of work doesn't include
-sending identifiers to LLM providers"; correlation-header work moves to
-its own design discussion rather than landing under telemetry.
+HTTPS requests to `routify.alibaba-inc.com`,
+`routify-online.alibaba-inc.com`, and `routify-pub.alibaba-inc.com` include the
+current Qwen Code session ID in the `session_id` header. Routify's ModelRouter
+uses this value for session affinity and traffic marking. This behavior is not
+controlled by `telemetry.enabled` or `outboundCorrelation.*`.
+
+The match is deliberately narrow: subdomains, other `alibaba-inc.com` hosts,
+and all other LLM endpoints do not receive the header.
+
+The session ID is read for every request, so a new session created by
+`/clear` gets a new affinity value without rebuilding the SDK client. Gemini
+requires an explicit Routify `baseUrl` so Qwen Code can verify the
+destination.
+
+`X-Qwen-Code-Request-Id` is not implemented.
 
 ## Inbound correlation (daemon HTTP API)
 
