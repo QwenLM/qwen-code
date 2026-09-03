@@ -3490,6 +3490,10 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getSettings(): LoadedSettings {
+    return this.settings;
+  }
+
   getWorkflowHistory(): readonly WorkflowSnapshot[] {
     return this.workflowHistory;
   }

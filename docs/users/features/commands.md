@@ -832,15 +832,23 @@ a message is delivered if the receiving session still reviews each
 action (default or plan mode), or if both sessions are in a mode that
 applies actions without per-action review; otherwise it is held for
 review. Held messages are listed and released with `/peers` in the
-receiving session.
+receiving session, which shows how long each one has left.
+
+A hold does not wait forever. A message nobody decides on expires after
+`agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
+minutes by default — and the sending session is told that no decision
+came. Shortening the setting applies to messages already waiting.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, expired, or misaddressed (the address changed hands — list the
-agents again) — or released after a hold — a notice appears in the
-sending session's transcript (`Message to <name>: …`). The model that
-sent it is not told; if the other session replies, the reply arrives as a
-cross-session message.
+declined, refused, expired, or misaddressed (the address changed hands —
+list the agents again) — or released after a hold — a notice appears in
+the sending session's transcript (`Message to <name>: …`). Declined and
+refused are different answers: declined means someone reviewed the
+message and said no, while refused means that session's
+`agents.crossSessionInbound` is `refuse` and nobody saw it at all. The
+model that sent it is not told; if the other session replies, the reply
+arrives as a cross-session message.
 
 ### Inbox authentication and scripted injection
 
