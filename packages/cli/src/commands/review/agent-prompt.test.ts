@@ -7418,6 +7418,58 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     expect(rendered).not.toContain('No hunk below touches');
   });
 
+  it('corroborates a finding whose file name git C-quotes in the headers', () => {
+    // Git quotes a header name holding a TAB, a quote, a backslash or a
+    // control byte even under the `core.quotePath=false` fix-delta renders
+    // with — that setting only stops the quoting of non-ASCII bytes. The
+    // unquoted-only header read contributed no path for such a file: its
+    // finding was annotated as uncorroborated beside a hunk that was in
+    // the input, and when every `fixed` finding sat in such a name a
+    // consistent build was refused wholesale.
+    const render = renderFixAuditInput as (a: unknown, h: string) => string;
+    const finding = (id: string, file: string) => ({
+      id,
+      severity: 'Critical',
+      summary: 'bound picked by hand',
+      failureScenario: 'the bound disagrees with the configured limit',
+      locations: [{ file, line: 1 }],
+      outcome: 'fixed',
+    });
+    const tab =
+      'diff --git "a/src/a\\tb.ts" "b/src/a\\tb.ts"\n' +
+      '--- "a/src/a\\tb.ts"\n+++ "b/src/a\\tb.ts"\n@@ -1 +1 @@\n' +
+      '-const a = 1;\n+const a = 2;\n';
+    // Beside a corroborated sibling: no annotation over the quoted one.
+    expect(
+      render(
+        [finding('c1', 'src/a\tb.ts'), finding('c2', 'src/f1.ts')],
+        tab + HUNKS,
+      ),
+    ).not.toContain('No hunk below touches');
+    // Alone: not refused.
+    expect(() => render([finding('c1', 'src/a\tb.ts')], tab)).not.toThrow();
+    // Octal bytes decode to the name the finding carries…
+    const octal =
+      'diff --git "a/src/\\303\\251.ts" "b/src/\\303\\251.ts"\n' +
+      '--- "a/src/\\303\\251.ts"\n+++ "b/src/\\303\\251.ts"\n@@ -1 +1 @@\n' +
+      '-1\n+2\n';
+    expect(() => render([finding('c1', 'src/é.ts')], octal)).not.toThrow();
+    // …an escaped quote too, through the mixed quoted/bare rename header.
+    const rename =
+      'diff --git "a/src/q\\"x.ts" b/src/qx.ts\n' +
+      'similarity index 100%\nrename from "src/q\\"x.ts"\nrename to src/qx.ts\n';
+    expect(() => render([finding('c1', 'src/q"x.ts')], rename)).not.toThrow();
+    expect(() => render([finding('c1', 'src/qx.ts')], rename)).not.toThrow();
+    // A decode the decoder cannot complete contributes NOTHING: the list
+    // may over-match, never invent, so an unknown escape leaves the claim
+    // uncorroborated rather than corroborated by a garbled name.
+    const garbled =
+      '--- "a/src/bad\\qx.ts"\n+++ "b/src/bad\\qx.ts"\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(() => render([finding('c1', 'src/bad\\qx.ts')], garbled)).toThrow(
+      /carries no edit/,
+    );
+  });
+
   it('a different set of hunks is a different launch — the key follows the content', () => {
     const a = setup({});
     const b = setup({ hunks: HUNKS.replace('hops', 'depth') });

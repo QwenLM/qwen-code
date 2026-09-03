@@ -87,9 +87,29 @@ export function gitWithEnv(
 }
 
 /**
+ * `gitWithEnv` with the output as RAW BYTES — `gitRaw`'s contract under the
+ * throwaway-index environment. A `-z` listing read through the string
+ * form rewrites every non-UTF-8 name byte to U+FFFD, and a path handed
+ * back to git under that rendering names a file that does not exist.
+ */
+export function gitWithEnvRaw(
+  extraEnv: Record<string, string>,
+  args: string[],
+): Buffer {
+  const opts = gitOpts();
+  return execFileSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
  * `gitWithEnv` with stderr CAPTURED instead of inherited and the exit
- * status KEPT instead of thrown. The one caller is `fix-delta`'s `add -A`,
- * which must rule on the child's own notes: an unlistable directory exits 0
+ * status KEPT instead of thrown. The callers are `fix-delta`'s captures
+ * (`add -A`, and the tracked re-inclusion `add -u` that follows it), which
+ * must rule on the child's own notes: an unlistable directory exits 0
  * with only a warning and leaves its content silently absent from the
  * index, and a co-occurring failure hides behind a tolerated neighbour's
  * stderr — neither shape is reachable through a try/catch on the exit
@@ -98,6 +118,7 @@ export function gitWithEnv(
 export function gitWithEnvReport(
   extraEnv: Record<string, string>,
   args: string[],
+  input?: Buffer,
 ): { stdout: string; stderr: string; status: number; completed: boolean } {
   const opts = gitOpts();
   // spawnSync, not execFileSync: the verdicts need stderr when the child
@@ -112,7 +133,11 @@ export function gitWithEnvReport(
     // a large tree pass Node's 1 MiB default — past it the child is killed
     // mid-capture and its truncated notes are all the verdict sees.
     maxBuffer: 512 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // `input` is the byte-exact channel for a pathspec list: a tracked name
+    // spawn args would coerce through UTF-8 rides `--pathspec-from-file=-`
+    // untouched.
+    ...(input === undefined ? {} : { input }),
+    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
   return {
     stdout: result.stdout ?? '',

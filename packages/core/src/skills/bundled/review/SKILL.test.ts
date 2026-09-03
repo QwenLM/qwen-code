@@ -1096,14 +1096,39 @@ describe('bundled review skill', () => {
     expect(step).toContain('for every `fixed` the fix audit annotated');
     // The subagent type mandate reaches this launch too.
     expect(step).toContain('`subagent_type: "review-agent"`');
-    // The refusal rule's ONE carve-out: the empty-hunks refusal is a
-    // ledger/tree mismatch whose message is the diagnosis, not an audit
-    // failure to disclose and move past. Folding it back into the blanket
-    // rule re-issues `report_findings` with `fixed` outcomes for edits the
-    // tree does not hold — the artifact lies and the correction the refusal
-    // directs never runs.
+    // The refusal rule's carve-outs: the THREE ledger/tree-mismatch
+    // refusals are diagnoses to follow, not audit failures to disclose and
+    // move past. Folding any of them back into the blanket rule re-issues
+    // `report_findings` with outcomes the tree contradicts — the artifact
+    // lies and the correction the refusal directs never runs. Each is
+    // pinned on its own: a singular carve-out named only the first, four
+    // lines below a paragraph that already instructed following the
+    // second, and never named the third at all.
     expect(step).toContain(
-      'The one refusal that is NOT in this class is the empty-hunks refusal',
+      'The refusals that are NOT in this class are the three ledger/tree-mismatch refusals',
+    );
+    expect(step).toContain(
+      'the empty-hunks refusal (`--hunks is empty, but the ledger marks … fixed`)',
+    );
+    expect(step).toContain(
+      'the no-`fixed`-beside-landed-hunks refusal (`the ledger records no `fixed` outcome, but --hunks carries edits`)',
+    );
+    expect(step).toContain(
+      'the wholesale-mismatch refusal (`--hunks carries no edit for any of the … finding(s) the ledger marks fixed`)',
+    );
+    expect(step).toContain('All three take the same two-way ruling.');
+    expect(step).not.toContain('The one refusal that is NOT in this class');
+    // The stderr relay: `fix-delta` prints its steering and blind-spot
+    // qualifications on stderr and exits 0, and the terminal summary's
+    // closed lists carried none of them — the orchestrator reported an
+    // unqualified all-clear over a possibly-partial hunks file, the exact
+    // "certifying past it" DESIGN.md says the lines exist to prevent.
+    expect(step).toContain(
+      'repeat every qualification `fix-delta` printed on stderr on the way',
+    );
+    expect(step).toContain('`committed or stashed inside`');
+    expect(step).toContain(
+      'never into `findings-in.json`, the census, or the verdict',
     );
     expect(step).toContain(
       'the pre-edit state is gone — there is no re-taking it at refusal time',

@@ -2156,18 +2156,15 @@ describe('fix-delta', () => {
     git('add', '-A');
     git('commit', '-qm', 'ignore ig');
     mkdirSync(join(repo, 'ig'), { recursive: true });
+    // The review's own worktree is what `git worktree add` registers under
+    // the family name — a repository merely planted there is not it, and
+    // is probed like any other (see `isRegisteredWorktreeOf`).
     const target = join(repo, '.qwen', 'tmp', 'review-pr-1');
-    mkdirSync(target, { recursive: true });
-    gitAt(target, 'init', '-q', '-b', 'main');
-    gitAt(target, 'config', 'user.email', 't@t.t');
-    gitAt(target, 'config', 'user.name', 't');
-    writeFileSync(join(target, 'f.txt'), 'inside\n');
-    gitAt(target, 'add', '-A');
-    gitAt(target, 'commit', '-qm', 'init');
+    git('worktree', 'add', '-q', '--detach', target);
     symlinkSync(target, join(repo, 'ig', 'x'));
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-    writeFileSync(join(target, 'f.txt'), 'dirtied between the states\n');
+    writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
@@ -2183,17 +2180,11 @@ describe('fix-delta', () => {
     // review's own worktree past the exclusion and reported the review's
     // state as a blind spot.
     const target = join(repo, '.qwen', 'tmp', 'review-pr-1');
-    mkdirSync(target, { recursive: true });
-    gitAt(target, 'init', '-q', '-b', 'main');
-    gitAt(target, 'config', 'user.email', 't@t.t');
-    gitAt(target, 'config', 'user.name', 't');
-    writeFileSync(join(target, 'f.txt'), 'inside\n');
-    gitAt(target, 'add', '-A');
-    gitAt(target, 'commit', '-qm', 'init');
+    git('worktree', 'add', '-q', '--detach', target);
     symlinkSync(target, join(repo, 'x'));
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-    writeFileSync(join(target, 'f.txt'), 'dirtied between the states\n');
+    writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
@@ -2702,5 +2693,208 @@ describe('fix-delta', () => {
           l.includes('steers how the hunks above render') && l.includes('a.ts'),
       ),
     ).toBe(true);
+  });
+
+  it('discloses a process filter that steers what the capture stores', () => {
+    // gitattributes(5): `filter.<name>.process` takes precedence over
+    // `clean`/`smudge` whenever it is set, so a repository configured with
+    // the process key ALONE steers `add -A` exactly as a clean filter does
+    // — and a disclosure that matched only `.clean` named nothing over it.
+    git('config', 'filter.x.process', 'cat');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    expect(stderr().some((l) => l.includes('filter.x.process'))).toBe(true);
+  });
+
+  it('discloses a core.excludesFile whose rule drops a new file from the capture', () => {
+    // A fourth steering surface of the `info/exclude` class, settable from
+    // the repository's own config and pointing OUTSIDE the tree: the
+    // fix's new file enters neither captured tree, the hunks never mention
+    // it, and without the disclosure the run all-clears a fix whose
+    // content it never saw.
+    writeFileSync(join(repo, '.git', 'steer-excludes'), 'newfile.txt\n');
+    git('config', 'core.excludesFile', '.git/steer-excludes');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
+    writeFileSync(join(repo, 'newfile.txt'), 'the fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    // The drop is real…
+    expect(readFileSync(hunksFile(), 'utf8')).not.toContain('newfile.txt');
+    // …and named, at both moments.
+    const lines = stderr();
+    expect(
+      lines.filter(
+        (l) =>
+          l.includes('core.excludesFile') && l.includes('what `git add -A`'),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('never executes the audited repository’s own core.fsmonitor', () => {
+    // The outer spawns — `add`, `write-tree`, `status`, `ls-files` — read
+    // the AUDITED repository's `.git/config`, the same surface the probe
+    // pins one level down, and `core.fsmonitor` runs a command from it
+    // during exactly those commands. The hook must never run: the
+    // measurement must not become the execution.
+    const marker = join(out, 'root-fsmonitor-ran');
+    const hook = join(out, 'root-fsmonitor.sh');
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    git('config', 'core.fsmonitor', hook);
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 5;');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('refuses a core.worktree that points the capture at a decoy', () => {
+    // A pre-snapshot `[core] worktree = <decoy>` redirects
+    // `rev-parse --show-toplevel` itself, so every later spawn — the
+    // `--work-tree` pin included, since its argument IS the steered root —
+    // measures the decoy consistently, both moments agree, and a bare
+    // all-clear certifies a tree nobody read. The gate sits at root
+    // derivation: the tree git names must contain the directory this
+    // command runs in.
+    const decoy = join(repo, '.decoy');
+    mkdirSync(decoy);
+    writeFileSync(join(decoy, 'a.ts'), 'export const x = 1;\n');
+    git('config', 'core.worktree', decoy);
+
+    expect(() =>
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+    ).toThrow(/core\.worktree/);
+    expect(existsSync(snapshotFile())).toBe(false);
+  });
+
+  it('records a fix to a tracked path under a family name', () => {
+    // The families are excluded because the flow writes them between the
+    // two states — as UNTRACKED files. A path the repository TRACKS under
+    // a family name is user content by the `FIX_DELTA_EXCLUDES` contract,
+    // and the glob used to drop the fix's edit to it from both trees: the
+    // hunks omitted a landed edit and the run printed "unchanged" over it.
+    const notes = join(repo, '.qwen', 'tmp', 'qwen-review-notes.md');
+    writeFileSync(notes, 'v1\n');
+    git('add', '-A');
+    git('commit', '-qm', 'track a family-named file');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(notes, 'v2 — the fix\n');
+    // …beside the flow's own UNTRACKED side file, which stays excluded.
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'qwen-review-local-ledger.json'),
+      '[]\n',
+    );
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('+v2 — the fix');
+    expect(hunks).toContain('qwen-review-notes.md');
+    expect(hunks).not.toContain('qwen-review-local-ledger.json');
+    expect(stderr().at(-1)).toContain(
+      '1 file(s) changed since the snapshot — .qwen/tmp/qwen-review-notes.md',
+    );
+  });
+
+  it('names a repository planted one level under a side-file family name', () => {
+    // The walk pruned a `.git`-less directory by its family NAME, so a
+    // repository nested one level under it was never discovered, while
+    // the same-shaped capture pathspec hid the subtree from both trees —
+    // an edit inside appeared in no hunks and drew no blind-spot line.
+    // The walk descends: the side-file family holds files, which the
+    // probe never asks about, and a repository under it is a repository.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    const inner = join(repo, '.qwen', 'tmp', 'qwen-review-hide', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('qwen-review-hide/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('names a repository planted under the worktree family name', () => {
+    // The worktree family pruned ANY repository under its name, while the
+    // capture pathspec removed the subtree from both trees — a `git init`
+    // planted there was invisible while the identical plant under any
+    // other name was disclosed. What is pruned now is what git's own
+    // registry says is a linked worktree of this repository (pinned by
+    // 'excludes the review worktree when .gitignore names the family
+    // directly'); a plant carries a `.git` directory and no registration.
+    const planted = join(repo, '.qwen', 'tmp', 'review-pr-planted');
+    mkdirSync(planted, { recursive: true });
+    gitAt(planted, 'init', '-q', '-b', 'main');
+    gitAt(planted, 'config', 'user.email', 't@t.t');
+    gitAt(planted, 'config', 'user.name', 't');
+    writeFileSync(join(planted, 'f.txt'), 'v1\n');
+    gitAt(planted, 'add', '-A');
+    gitAt(planted, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(planted, 'f.txt'), 'the hidden fix\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('review-pr-planted'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('discloses content committed inside a nested repository the trees cannot record', () => {
+    // A repository an ignored directory hides enters neither tree at all —
+    // there is no gitlink to move — and a fix COMMITTED inside it leaves
+    // its status empty at both moments. The probe answered clean twice
+    // and the run all-cleared. Identity rides the digest: a moved HEAD is
+    // the one trace the commit leaves, and it is disclosed.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'g.txt'), 'the fix, committed\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'the fix');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('committed or stashed inside') && l.includes('ig/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 });

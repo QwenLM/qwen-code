@@ -2343,15 +2343,104 @@ function normalizeAuditPath(path: string): string {
 }
 
 /**
+ * Decode one of git's C-quoted path tokens — `"…"` around `\t`, `\n`,
+ * `\"`, `\\`, the other single-letter escapes and octal `\NNN` bytes.
+ *
+ * Git quotes a header name that holds a TAB, a quote, a backslash or a
+ * control character even under the `core.quotePath=false` the hunks are
+ * rendered with (that setting only stops the quoting of non-ASCII bytes),
+ * so such a file contributed no path to the header list and its finding
+ * was annotated as uncorroborated — or, when every `fixed` finding sat in
+ * such a name, a consistent build was refused wholesale. Null for anything
+ * that is not one complete quoted token or carries an escape this decoder
+ * does not know: the list this feeds may over-match, never invent, and a
+ * garbled decode must contribute nothing rather than a name that happens
+ * to corroborate the wrong finding.
+ */
+function unquoteGitPath(token: string): string | null {
+  if (token.length < 2 || !token.startsWith('"') || !token.endsWith('"')) {
+    return null;
+  }
+  const body = token.slice(1, -1);
+  const simple: Record<string, number> = {
+    a: 7,
+    b: 8,
+    t: 9,
+    n: 10,
+    v: 11,
+    f: 12,
+    r: 13,
+    '"': 34,
+    '\\': 92,
+  };
+  const bytes: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '"') return null;
+    if (ch !== '\\') {
+      bytes.push(...Buffer.from(ch, 'utf8'));
+      continue;
+    }
+    const next = body[i + 1];
+    if (next === undefined) return null;
+    if (next in simple) {
+      bytes.push(simple[next]);
+      i += 1;
+      continue;
+    }
+    const octal = body.slice(i + 1, i + 4);
+    if (!/^[0-7]{3}$/.test(octal)) return null;
+    bytes.push(parseInt(octal, 8));
+    i += 3;
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/**
+ * Split the rest of a `diff --git` line into its two name tokens, each
+ * either C-quoted (`"a/…"`) or bare. Git quotes each side on its own, so a
+ * rename from a quoted name to a plain one mixes the two shapes.
+ */
+function diffGitTokens(rest: string): string[] {
+  const tokens: string[] = [];
+  let pos = 0;
+  while (pos < rest.length && tokens.length < 2) {
+    if (rest[pos] === '"') {
+      let end = pos + 1;
+      while (end < rest.length && rest[end] !== '"') {
+        end += rest[end] === '\\' ? 2 : 1;
+      }
+      if (end >= rest.length) return tokens;
+      tokens.push(rest.slice(pos, end + 1));
+      pos = end + 1;
+    } else {
+      const quoted = rest.indexOf(' "', pos);
+      // A bare first token ends where the quoted second begins; a bare
+      // second token, or a bare-only line, is everything that is left —
+      // the generous split in `hunkHeaderPaths` handles that shape.
+      const end = tokens.length === 0 && quoted !== -1 ? quoted : rest.length;
+      tokens.push(rest.slice(pos, end));
+      pos = end;
+    }
+    if (rest[pos] === ' ') pos += 1;
+  }
+  return tokens;
+}
+
+/**
  * The paths the hunks actually touch, taken from the patch's own headers.
  *
  * `--- a/…` / `+++ b/…` are the unambiguous pair and are read first; a
  * rename with no content change and a bare mode change emit neither, so
- * `rename from|to` and the `diff --git` line back them up. The `diff --git`
- * split is deliberately GENEROUS — `a/<from> b/<to>` cannot be split
- * unambiguously when a name holds ' b/' — and every candidate is kept: this
- * list is used to decide whether a finding's claim is CORROBORATED, so an
- * over-wide list can only fail to raise a question, never invent one.
+ * `rename from|to` and the `diff --git` line back them up. Each production
+ * is admitted in its C-quoted form too (`--- "a/…"`, `diff --git "a/…"
+ * "b/…"`, `rename from "…"`), decoded by `unquoteGitPath`. The bare
+ * `diff --git` split is deliberately GENEROUS — `a/<from> b/<to>` cannot be
+ * split unambiguously when a name holds ' b/' — and every candidate is
+ * kept: this list is used to decide whether a finding's claim is
+ * CORROBORATED, so an over-wide list can only fail to raise a question,
+ * never invent one. The quoted productions keep that guarantee by
+ * contributing nothing on a decode they cannot complete.
  */
 function hunkHeaderPaths(hunks: string): string[] {
   const paths = new Set<string>();
@@ -2359,20 +2448,46 @@ function hunkHeaderPaths(hunks: string): string[] {
     const normalized = normalizeAuditPath(path);
     if (normalized !== '' && normalized !== 'dev/null') paths.add(normalized);
   };
+  // A decoded `a/…`/`b/…` token, its prefix stripped; nothing on a garbled
+  // decode or a token that carries no such prefix.
+  const addPrefixed = (token: string, prefix: 'a/' | 'b/'): void => {
+    const decoded = unquoteGitPath(token);
+    if (decoded !== null && decoded.startsWith(prefix)) add(decoded.slice(2));
+  };
+  const addQuoted = (token: string): void => {
+    const decoded = unquoteGitPath(token);
+    if (decoded !== null) add(decoded);
+  };
   for (const line of hunks.split('\n')) {
     if (line.startsWith('--- a/')) add(line.slice(6));
     else if (line.startsWith('+++ b/')) add(line.slice(6));
+    else if (line.startsWith('--- "')) addPrefixed(line.slice(4), 'a/');
+    else if (line.startsWith('+++ "')) addPrefixed(line.slice(4), 'b/');
+    else if (line.startsWith('rename from "')) addQuoted(line.slice(12));
+    else if (line.startsWith('rename to "')) addQuoted(line.slice(10));
     else if (line.startsWith('rename from ')) add(line.slice(12));
     else if (line.startsWith('rename to ')) add(line.slice(10));
-    else if (line.startsWith('diff --git a/')) {
+    else if (line.startsWith('diff --git ')) {
       const rest = line.slice('diff --git '.length);
-      for (
-        let i = rest.indexOf(' b/');
-        i !== -1;
-        i = rest.indexOf(' b/', i + 1)
-      ) {
-        add(rest.slice(2, i));
-        add(rest.slice(i + 3));
+      if (rest.includes('"')) {
+        const [from, to] = diffGitTokens(rest);
+        for (const [token, prefix] of [
+          [from, 'a/'],
+          [to, 'b/'],
+        ] as const) {
+          if (token === undefined) continue;
+          if (token.startsWith('"')) addPrefixed(token, prefix);
+          else if (token.startsWith(prefix)) add(token.slice(2));
+        }
+      } else if (rest.startsWith('a/')) {
+        for (
+          let i = rest.indexOf(' b/');
+          i !== -1;
+          i = rest.indexOf(' b/', i + 1)
+        ) {
+          add(rest.slice(2, i));
+          add(rest.slice(i + 3));
+        }
       }
     }
   }
