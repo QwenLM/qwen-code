@@ -18,8 +18,7 @@ import {
   statSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { sanitizeFilenameComponent } from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { sanitizeFilenameComponent, Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**

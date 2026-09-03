@@ -21,7 +21,7 @@ import { performStandaloneUpdate } from './standalone-update.js';
 import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 

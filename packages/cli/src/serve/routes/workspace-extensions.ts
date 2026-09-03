@@ -8,27 +8,23 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { ExtensionInstallMetadata } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
-import type {
-  ExtensionCredentialPersistence,
-  ExtensionGitCredential,
-} from '@qwen-code/qwen-code-core/extension/extension-git-credentials.js';
-import type { ExtensionStoreSnapshot } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import {
+  parseInstallSource,
+  redactUrlCredentials,
+  getErrorMessage,
   SettingScope,
+  type Extension,
+  type ExtensionInstallMetadata,
+  type ExtensionManager,
+  type ExtensionStoreSnapshot,
+  type ClaudeMarketplaceConfig,
+  type ExtensionSetting,
+  type ExtensionCredentialPersistence,
+  type ExtensionGitCredential,
   ExtensionNotUpdatableError,
-} from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type {
-  Extension,
-  ExtensionManager,
-} from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type { ExtensionSetting } from '@qwen-code/qwen-code-core/extension/extensionSettings.js';
-import { isSupportedArchiveUrl } from '@qwen-code/qwen-code-core/extension/github.js';
-import { parseInstallSource } from '@qwen-code/qwen-code-core/extension/marketplace.js';
-import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
-import { validateSkillName } from '@qwen-code/qwen-code-core/skills/types.js';
-import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+  isSupportedArchiveUrl,
+  validateSkillName,
+} from '@qwen-code/qwen-code-core';
 import express, {
   type Application,
   type Request,

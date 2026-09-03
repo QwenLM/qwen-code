@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SandboxConfig } from '@qwen-code/qwen-code-core/config/config.js';
-import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import type { SandboxConfig } from '@qwen-code/qwen-code-core';
+import {
+  FatalSandboxError,
+  stripAnsiAndControl,
+} from '@qwen-code/qwen-code-core';
 import commandExists from 'command-exists';
 import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';

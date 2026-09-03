@@ -17,7 +17,7 @@ import {
   applyReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
-} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+} from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');

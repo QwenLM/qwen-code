@@ -9,18 +9,14 @@ import { createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import {
   getSubagentSessionDir,
-  readAgentMeta,
-} from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import type {
-  SessionTranscriptCursorState,
-  SessionTranscriptRecordPage,
-} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
-import {
   parseLineTolerant,
   read as readJsonl,
-} from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
+  readAgentMeta,
+  Storage,
+  type ChatRecord,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptRecordPage,
+} from '@qwen-code/qwen-code-core';
 import {
   EventBus,
   type BridgeEvent,

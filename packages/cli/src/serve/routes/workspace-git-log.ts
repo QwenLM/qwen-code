@@ -10,11 +10,9 @@ import {
   fetchGitCommitDetail,
   MAX_LOG_LIMIT,
   DEFAULT_LOG_LIMIT,
-} from '@qwen-code/qwen-code-core/utils/gitDiff.js';
-import type {
-  GitLogResult,
-  GitCommitDetail,
-} from '@qwen-code/qwen-code-core/utils/gitDiff.js';
+  type GitLogResult,
+  type GitCommitDetail,
+} from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {

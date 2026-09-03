@@ -25,9 +25,11 @@
  */
 
 import type { Application } from 'express';
-import { buildUsageDashboard } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
-import { loadUsageHistoryWithLive } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
-import type { UsageSummaryRecord } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import {
+  buildUsageDashboard,
+  loadUsageHistoryWithLive,
+  type UsageSummaryRecord,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const DEFAULT_HEATMAP_DAYS = 183;

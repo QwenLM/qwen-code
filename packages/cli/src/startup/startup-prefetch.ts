@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
-import { initializeTelemetry } from '@qwen-code/qwen-code-core/telemetry/sdk.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  createDebugLogger,
+  IdeClient,
+  initializeTelemetry,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { preconnectApi } from '../utils/apiPreconnect.js';
 import { AppEvent, appEvents } from '../utils/events.js';

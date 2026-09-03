@@ -14,9 +14,7 @@ import type {
   InsightProgressCallback,
 } from '../types/StaticInsightTypes.js';
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { updateSymlink } from '@qwen-code/qwen-code-core/utils/symlink.js';
+import { updateSymlink, Storage, type Config } from '@qwen-code/qwen-code-core';
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;

@@ -5,14 +5,14 @@
  */
 
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import type {
-  GoalRecord,
-  GoalSnapshotV2,
-  GoalStateCause,
-} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
-import { GoalPersistenceUnavailableError } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
-import type { GoalRuntime } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import {
+  GoalPersistenceUnavailableError,
+  type ChatRecord,
+  type GoalRecord,
+  type GoalRuntime,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+} from '@qwen-code/qwen-code-core';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
 import {
   collectGoalStatusItemsFromRecords,

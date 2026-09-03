@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactMcpServersSetting } from '../../config/mcp-server-secrets.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';

@@ -6,7 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { ideContextStore } from '@qwen-code/qwen-code-core/ide/ideContext.js';
+import { ideContextStore } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import {
   getSystemDefaultsPath,

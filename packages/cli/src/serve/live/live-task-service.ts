@@ -5,10 +5,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
-import { partToString } from '@qwen-code/qwen-code-core/utils/partUtils.js';
-import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
+import {
+  partToString,
+  stripTerminalControlSequences,
+  type ChatRecord,
+  type SessionService,
+} from '@qwen-code/qwen-code-core';
 import {
   SessionArchivedError,
   SessionNotFoundError,

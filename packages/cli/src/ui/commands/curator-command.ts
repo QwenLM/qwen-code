@@ -4,18 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   getAutoSkillCuratorStatus,
   restoreArchivedAutoSkill,
   runAutoSkillCurator,
   setAutoSkillPinned,
-} from '@qwen-code/qwen-code-core/skills/skill-curator.js';
-import type {
-  AutoSkillCuratorEntry,
-  AutoSkillCuratorRunResult,
-  AutoSkillCuratorStatus,
-} from '@qwen-code/qwen-code-core/skills/skill-curator.js';
+  type AutoSkillCuratorEntry,
+  type AutoSkillCuratorRunResult,
+  type AutoSkillCuratorStatus,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
   CommandContext,

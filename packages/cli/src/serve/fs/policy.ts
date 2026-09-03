@@ -5,8 +5,8 @@
  */
 
 import * as path from 'node:path';
-import type { Ignore } from '@qwen-code/qwen-code-core/utils/filesearch/ignore.js';
-import { isBinaryFile } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
+import type { Ignore } from '@qwen-code/qwen-code-core';
+import { isBinaryFile } from '@qwen-code/qwen-code-core';
 import { FsError } from './errors.js';
 import type { Intent, ResolvedPath } from './paths.js';
 

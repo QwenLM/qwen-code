@@ -28,7 +28,7 @@ import {
   supportsHyperlinks,
   wrapForMultiplexer,
   HYPERLINK_ENV_KEYS,
-} from '@qwen-code/qwen-code-core/utils/osc8.js';
+} from '@qwen-code/qwen-code-core';
 
 export {
   osc8Hyperlink,

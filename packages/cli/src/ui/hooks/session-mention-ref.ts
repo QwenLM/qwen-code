@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { unescapeShellSpecials } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { unescapeShellSpecials } from '@qwen-code/qwen-code-core';
 
 export const SESSION_MENTION_PREFIX = 'session:';
 

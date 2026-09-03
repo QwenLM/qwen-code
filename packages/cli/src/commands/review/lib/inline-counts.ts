@@ -20,7 +20,7 @@
 import {
   FINDING_BASELINES,
   FINDING_DIRECTIONS,
-} from '@qwen-code/qwen-code-core/tools/report-findings.js';
+} from '@qwen-code/qwen-code-core';
 import { LEDGER_ID_READBACK } from './ledger.js';
 
 /** The severity prefixes the skill mandates on every posted inline comment. */

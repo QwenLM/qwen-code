@@ -6,12 +6,14 @@
 
 import type {
   GoalControlRequest,
+  GoalRuntime,
   GoalStateResponse,
   GoalStateCause,
-} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
-import type { GoalRuntime } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
-import { emptyGoalSnapshot } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
-import { GoalPersistenceUnavailableError } from '@qwen-code/qwen-code-core/goals/goal-runtime.js';
+} from '@qwen-code/qwen-code-core';
+import {
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+} from '@qwen-code/qwen-code-core';
 import {
   CommandKind,
   type CommandContext,

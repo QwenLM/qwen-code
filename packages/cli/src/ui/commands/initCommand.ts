@@ -11,7 +11,7 @@ import type {
   SlashCommand,
   SlashCommandActionReturn,
 } from './types.js';
-import { getCurrentMemoryFilename } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
+import { getCurrentMemoryFilename } from '@qwen-code/qwen-code-core';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 

@@ -7,8 +7,7 @@
 import { access, cp, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import type { CommandModule } from 'yargs';
-import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
-import { isNodeError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isNodeError, resolveBundleDir } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 

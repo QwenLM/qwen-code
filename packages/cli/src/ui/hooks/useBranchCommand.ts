@@ -6,14 +6,14 @@
 
 import { useCallback } from 'react';
 import { randomUUID } from 'node:crypto';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
+  type Config,
+  type ChatRecord,
+  type ResumedSessionData,
+  SessionStartSource,
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
-} from '@qwen-code/qwen-code-core/services/sessionService.js';
-import type { ResumedSessionData } from '@qwen-code/qwen-code-core/services/sessionService.js';
+} from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,

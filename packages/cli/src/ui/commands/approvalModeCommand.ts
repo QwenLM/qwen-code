@@ -12,11 +12,11 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ApprovalMode as ApprovalModeEnum,
-} from '@qwen-code/qwen-code-core/config/approval-mode.js';
+} from '@qwen-code/qwen-code-core';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 
 /**

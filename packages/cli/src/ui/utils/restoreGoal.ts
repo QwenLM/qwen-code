@@ -4,21 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import {
-  setGoalTerminalObserver,
-  setLastGoalTerminal,
-} from '@qwen-code/qwen-code-core/goals/activeGoalStore.js';
-import type {
-  GoalTerminalEvent,
-  GoalTerminalKind,
-} from '@qwen-code/qwen-code-core/goals/activeGoalStore.js';
-import type { GoalRecoveryRecord } from '@qwen-code/qwen-code-core/goals/goal-persistence.js';
 import {
   registerGoalHook,
+  setGoalTerminalObserver,
+  setLastGoalTerminal,
   unregisterGoalHook,
-} from '@qwen-code/qwen-code-core/goals/goalHook.js';
-import type { SlashCommandRecordPayload } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+  type Config,
+  type GoalRecoveryRecord,
+  type GoalTerminalEvent,
+  type GoalTerminalKind,
+  type SlashCommandRecordPayload,
+} from '@qwen-code/qwen-code-core';
 import {
   isGoalStatusKind,
   isTerminalGoalStatusKind,

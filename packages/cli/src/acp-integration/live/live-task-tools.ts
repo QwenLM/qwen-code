@@ -8,16 +8,14 @@ import {
   LIVE_TASK_TOOL_NAMES,
   type LiveTaskToolName,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import type { PermissionDecision } from '@qwen-code/qwen-code-core/permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-} from '@qwen-code/qwen-code-core/tools/tools.js';
-import type {
-  ToolInvocation,
-  ToolResult,
-} from '@qwen-code/qwen-code-core/tools/tools.js';
+  type PermissionDecision,
+  type ToolInvocation,
+  type ToolResult,
+} from '@qwen-code/qwen-code-core';
 
 export { LIVE_TASK_TOOL_NAMES, type LiveTaskToolName };
 export type LiveTaskToolParams = Record<string, unknown>;

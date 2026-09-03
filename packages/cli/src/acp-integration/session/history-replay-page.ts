@@ -4,25 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import {
-  lastHistoryContentFromRecords,
-  restorableAskUserQuestionCallIds,
-} from '@qwen-code/qwen-code-core/core/ask-user-question-restore.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
-} from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import type {
-  SessionTranscriptCursorState,
-  SessionTranscriptRecordPage,
-} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
-import type { HistoryGap } from '@qwen-code/qwen-code-core/utils/conversation-chain.js';
+  lastHistoryContentFromRecords,
+  restorableAskUserQuestionCallIds,
+  type ChatRecord,
+  type Config,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type HistoryGap,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptRecordPage,
+} from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { Buffer } from 'node:buffer';

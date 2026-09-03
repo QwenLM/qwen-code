@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   isCompressionFailureStatus,
-} from '@qwen-code/qwen-code-core/core/turn.js';
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 export const formatCompressionTokenCount = (

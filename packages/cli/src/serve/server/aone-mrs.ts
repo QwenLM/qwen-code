@@ -23,10 +23,10 @@ import { promisify } from 'node:util';
 import {
   SESSION_PR_URL_MAX_LENGTH,
   canonicalSessionPrUrl,
-} from '@qwen-code/qwen-code-core/services/session-pr-service.js';
-import type { SessionPrState } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
-import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
-import { findGitRoot } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
+  findGitRoot,
+  gitEnv,
+  type SessionPrState,
+} from '@qwen-code/qwen-code-core';
 import {
   isAoneCanonicalHost,
   parseRemoteUrl,

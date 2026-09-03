@@ -21,37 +21,33 @@
  */
 
 import { appendFileSync } from 'node:fs';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   AgentResultDisplay,
+  Config,
   ToolCallConfirmationDetails,
   ToolResultDisplay,
-} from '@qwen-code/qwen-code-core/tools/tools.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
-import { CoreToolScheduler } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
-import { clampInlineMediaPart } from '@qwen-code/qwen-code-core/core/inlineMediaLimit.js';
+} from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
+  clampInlineMediaPart,
+  compactToolResultDisplayForHistory,
+  CoreToolScheduler,
   didWriteProjectContextFile,
-  refreshMemoryInstruction,
-} from '@qwen-code/qwen-code-core/memory/refresh.js';
-import {
-  hasImageParts,
-  normalizeParts,
-  splitImageParts,
-} from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
-import {
   formatFullTurnVisionNotice,
   formatVisionBridgeNotice,
+  getErrorMessage,
   getFullTurnVisionModelSelector,
+  hasImageParts,
+  isShellProgressData,
+  normalizeParts,
+  parseAndFormatApiError,
+  refreshMemoryInstruction,
   runVisionBridge,
+  SendMessageType,
   shouldRunVisionBridge,
-} from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
-import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
-import { isShellProgressData } from '@qwen-code/qwen-code-core/tools/tools.js';
-import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
-import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
-import { compactToolResultDisplayForHistory } from '@qwen-code/qwen-code-core/utils/toolResultDisplayCompaction.js';
+  splitImageParts,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   createEventMapper,

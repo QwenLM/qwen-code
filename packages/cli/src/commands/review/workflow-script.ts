@@ -34,7 +34,7 @@
 // splice host state into the script. String concatenation instead,
 // deliberately.
 
-import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 
 /** One agent, as the generated script's `AGENTS` literal carries it. */
 export interface WorkflowAgentSpec {

@@ -38,8 +38,10 @@
 // come from the environment the CLI itself exported.
 
 import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { sanitizeFilenameComponent } from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
-import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  ToolNames,
+  sanitizeFilenameComponent,
+} from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
 import { priorSessionEntries } from './run-ledger.js';
 

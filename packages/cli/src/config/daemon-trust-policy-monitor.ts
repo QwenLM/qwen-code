@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ideContextStore } from '@qwen-code/qwen-code-core/ide/ideContext.js';
+import { ideContextStore } from '@qwen-code/qwen-code-core';
 import {
   type DaemonTrustPolicySnapshot,
   readDaemonTrustPolicySnapshot,

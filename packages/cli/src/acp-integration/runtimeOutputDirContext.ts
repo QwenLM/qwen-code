@@ -1,4 +1,4 @@
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 
 export function runWithAcpRuntimeOutputDir<T>(

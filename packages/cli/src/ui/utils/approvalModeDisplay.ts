@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 export function formatApprovalModeName(mode: ApprovalMode): string {

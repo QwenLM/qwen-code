@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { buildBackgroundEntryLabel } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
-import type { TaskStatus } from '@qwen-code/qwen-code-core/agents/tasks/types.js';
-import type { WorkflowStatus } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { buildBackgroundEntryLabel } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  TaskStatus,
+  WorkflowStatus,
+} from '@qwen-code/qwen-code-core';
 import { formatDuration } from './formatters.js';
 import { stripUnsafeCharacters, truncateToWidth } from './textUtils.js';
 

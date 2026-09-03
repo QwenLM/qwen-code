@@ -9,8 +9,7 @@
  * It deliberately bypasses LlmChat so neither history nor recording is
  * read or mutated.
  */
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { getResponseText } from '@qwen-code/qwen-code-core/utils/partUtils.js';
+import { getResponseText, type Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 
 export const GENERATION_MAX_PROMPT_BYTES = 32 * 1024;

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { RequestError } from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';

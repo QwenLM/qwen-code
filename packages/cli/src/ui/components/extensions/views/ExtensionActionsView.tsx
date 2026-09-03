@@ -10,11 +10,13 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { SettingScope } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type { ExtensionScope } from '@qwen-code/qwen-code-core/extension/extensionPreferences.js';
-import { checkForExtensionUpdate } from '@qwen-code/qwen-code-core/extension/github.js';
+import {
+  type Config,
+  type Extension,
+  type ExtensionScope,
+  SettingScope,
+  checkForExtensionUpdate,
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 import {

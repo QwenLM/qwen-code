@@ -36,8 +36,10 @@
  * structured `not_wired` error so the contract stays honest.
  */
 
-import { ClientMcpRegistrar } from '@qwen-code/qwen-code-core/tools/client-mcp-registrar.js';
-import type { ClientMcpFrame } from '@qwen-code/qwen-code-core/tools/client-mcp-registrar.js';
+import {
+  ClientMcpRegistrar,
+  type ClientMcpFrame,
+} from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { isValidServerName } from '../../runtime/validate-server-name.js';
 

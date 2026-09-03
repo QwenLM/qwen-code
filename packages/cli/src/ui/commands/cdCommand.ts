@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getSingleDirPathCompletions } from './directoryCommand.js';
-import { resolvePath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { resolvePath } from '@qwen-code/qwen-code-core';
 import {
   isFolderTrustEnabled,
   loadTrustedFolders,

@@ -5,16 +5,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
+  Config,
   ServerLlmStreamEvent,
   ToolCallRequestInfo,
-} from '@qwen-code/qwen-code-core/core/turn.js';
-import type {
   McpToolProgressData,
   ShellProgressData,
-} from '@qwen-code/qwen-code-core/tools/tools.js';
-import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+} from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,

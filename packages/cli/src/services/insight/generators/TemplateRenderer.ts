@@ -5,7 +5,7 @@
  */
 
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
-import { escapeJsonTagCharacters } from '@qwen-code/qwen-code-core/utils/formatters.js';
+import { escapeJsonTagCharacters } from '@qwen-code/qwen-code-core';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {

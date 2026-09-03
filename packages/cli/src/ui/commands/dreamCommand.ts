@@ -5,8 +5,7 @@
  */
 
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { getAutoMemoryRoot, Storage } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';

@@ -13,14 +13,16 @@ import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { TextInput } from '../../shared/TextInput.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
-import { isExtensionCommittedWithWarningsError } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import { parseInstallSource } from '@qwen-code/qwen-code-core/extension/marketplace.js';
-import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
-import type { ExtensionSource } from '@qwen-code/qwen-code-core/extension/sourceRegistry.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  type Config,
+  type Extension,
+  type ExtensionSource,
+  type ClaudeMarketplaceConfig,
+  parseInstallSource,
+  redactUrlCredentials,
+  createDebugLogger,
+  isExtensionCommittedWithWarningsError,
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';

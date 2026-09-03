@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
+import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core';
 import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge';
 
 export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge';

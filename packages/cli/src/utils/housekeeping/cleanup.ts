@@ -6,9 +6,11 @@
 
 import { opendir, readdir, stat, rm, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { FILE_HISTORY_DIR } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  Storage,
+  FILE_HISTORY_DIR,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('HOUSEKEEPING');
 

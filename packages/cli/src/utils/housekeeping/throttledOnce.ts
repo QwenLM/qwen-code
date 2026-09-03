@@ -6,7 +6,7 @@
 
 import { mkdir, open, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('HOUSEKEEPING');
 

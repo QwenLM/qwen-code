@@ -10,8 +10,8 @@ import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
-import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
-import { ToolDisplayNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
+import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
 import {

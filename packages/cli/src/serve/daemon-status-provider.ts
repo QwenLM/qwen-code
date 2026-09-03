@@ -18,7 +18,7 @@
  */
 
 import { promises as fs } from 'node:fs';
-import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
+import { canUseRipgrep } from '@qwen-code/qwen-code-core';
 import {
   type DaemonStatusProvider,
   mapDomainErrorToErrorKind,

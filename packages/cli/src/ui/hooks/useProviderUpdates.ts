@@ -5,12 +5,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ProviderModelConfig } from '@qwen-code/qwen-code-core/providers/types.js';
-import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
-import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core/providers/all-providers.js';
-import { applyProviderInstallPlan } from '@qwen-code/qwen-code-core/providers/install.js';
+import type {
+  ProviderModelConfig,
+  Config,
+  ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import {
+  ALL_PROVIDERS,
+  applyProviderInstallPlan,
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
@@ -20,7 +22,7 @@ import {
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
-} from '@qwen-code/qwen-code-core/providers/provider-config.js';
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';

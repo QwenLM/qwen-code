@@ -48,7 +48,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core/utils/env.js';
+import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */

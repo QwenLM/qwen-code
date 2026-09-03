@@ -5,11 +5,13 @@
  */
 
 import * as crypto from 'node:crypto';
-import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
-import { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
-import type { ExtensionSetting } from '@qwen-code/qwen-code-core/extension/extensionSettings.js';
-import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import {
+  ExtensionManager,
+  redactUrlCredentials,
+  stripAnsiAndControl,
+  type ClaudeMarketplaceConfig,
+  type ExtensionSetting,
+} from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
 import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';

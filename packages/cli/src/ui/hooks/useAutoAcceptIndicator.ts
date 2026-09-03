@@ -7,8 +7,8 @@
 import {
   ApprovalMode,
   APPROVAL_MODES,
-} from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { useEffect, useState } from 'react';
 import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
