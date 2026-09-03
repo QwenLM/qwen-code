@@ -13,11 +13,14 @@ import {
   type GoalJournal,
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalStateRecordPayloadV2,
-  GoalTurnPermit,
+import {
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type GoalStateRecordPayloadV2,
+  type GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
@@ -797,6 +800,7 @@ describe('LlmClient Goal admission', () => {
       action: 'pause',
       expectedGoalId: appliedGoal.goalId,
       expectedRevision: appliedGoal.revision,
+      reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
     });
   });
 
@@ -1342,10 +1346,12 @@ describe('LlmClient Goal admission', () => {
       ),
     ).rejects.toThrow('hook exploded');
 
+    // The hook threw; the caller never aborted.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure('the turn was interrupted'),
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(turnMocks.run).not.toHaveBeenCalled();
@@ -1497,6 +1503,7 @@ describe('LlmClient Goal admission', () => {
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(goalStateEvents(events).map((event) => event.cause)).toEqual([
@@ -1538,10 +1545,13 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(error).toBe(setupError);
+    // Model setup threw; the caller never aborted, so this is a failure
+    // rather than a user interrupt.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure('the turn was interrupted'),
     });
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(goalStateEvents(events).map((event) => event.cause)).toEqual([
@@ -1791,10 +1801,14 @@ describe('LlmClient Goal admission', () => {
       ),
     );
 
+    // The cap is the reason the Goal stopped, and this dispatch is the
+    // one that reaches the record -- a later reasoned pause on a paused
+    // Goal throws.
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,
       expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
     });
     expect(runtime.getSnapshot()).toMatchObject({
       goal: { status: 'paused' },
@@ -1918,8 +1932,14 @@ describe('LlmClient Goal admission', () => {
     );
 
     expect(turnMocks.run).not.toHaveBeenCalled();
+    // A spent recursion budget is not a user interrupt: the caller signal is
+    // never aborted here, so this pause has to read as a turn that could not
+    // finish.
     expect(runtime.dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'pause' }),
+      expect.objectContaining({
+        action: 'pause',
+        reason: goalPauseReasonForFailure('the turn was interrupted'),
+      }),
     );
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
     expect(events).not.toContainEqual(

@@ -30,6 +30,9 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   goalRequiresExactPermit,
   PAUSED_GOAL_SYSTEM_REMINDER,
   type GoalSnapshotV2,
@@ -882,6 +885,7 @@ export class LlmClient {
           action: 'pause',
           expectedGoalId: result.goal.goalId,
           expectedRevision: result.goal.revision,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
         });
       } catch (error) {
         debugLogger.warn(
@@ -2929,7 +2933,7 @@ export class LlmClient {
       }
       return goalRuntime;
     };
-    const releaseGoalPermitOnInterruptedExit = async () => {
+    const releaseGoalPermitOnInterruptedExit = async (pauseReason?: string) => {
       if (
         goalPermitReleased ||
         !goalPermit ||
@@ -2951,10 +2955,21 @@ export class LlmClient {
 
         if (runtime.getSnapshot().goal?.status === 'active') {
           try {
+            // This is the pause that wins the race on the interactive Esc
+            // path: it runs before every host's own reasoned pause, and a
+            // second pause on a non-active Goal throws, so the reason has to
+            // ride here or it never reaches the record. The site also runs
+            // for a turn that merely failed to complete (`!normalCompletion`),
+            // which is not a user interrupt and must not read as one.
             await runtime.dispatch({
               action: 'pause',
               expectedGoalId: goalPermit.goalId,
               expectedRevision: goalPermit.revision,
+              reason:
+                pauseReason ??
+                (callerSignal.aborted
+                  ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                  : goalPauseReasonForFailure('the turn was interrupted')),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause interrupted Goal turn', error);
@@ -2975,8 +2990,8 @@ export class LlmClient {
         debugLogger.warn('Failed to release interrupted Goal turn', error);
       }
     };
-    const finalizeInterruptedGoalTurn = async () => {
-      await releaseGoalPermitOnInterruptedExit();
+    const finalizeInterruptedGoalTurn = async (pauseReason?: string) => {
+      await releaseGoalPermitOnInterruptedExit(pauseReason);
       closeGoalStateEvents();
       return takePendingGoalEvents();
     };
@@ -4359,7 +4374,9 @@ export class LlmClient {
               value: warning,
             };
             debugLogger.warn(warning);
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+            )) {
               yield goalEvent;
             }
             endCurrentInteraction('ok');
