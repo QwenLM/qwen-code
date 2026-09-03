@@ -328,6 +328,17 @@ function writeDistPackageJson(rootDir, distDir) {
       'examples',
       'bundled',
       'web-shell',
+      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+      // web-tree-sitter wasm, native render library) are intentionally NOT
+      // published in the npm package — a multi-megabyte tree dominated by the
+      // native render library — against the unpacked-size budget. An npm
+      // install also has no @opentui/core dependency to resolve the assets
+      // against: below the runtime floor (Node < 26.4.0) the renderer gate
+      // never selects opentui, and at or above it, QWEN_TUI_RENDERER=opentui
+      // selects the renderer, the boot fails on the missing asset tree, and
+      // a stderr warning falls back to ink on every startup. The opt-in Bun
+      // standalone flavor (--runtime=bun) carries the assets via
+      // create-standalone-package.js instead.
     ],
     config: rootPackageJson.config,
     dependencies: {},

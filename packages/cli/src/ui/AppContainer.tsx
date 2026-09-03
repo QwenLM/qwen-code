@@ -48,6 +48,9 @@ import {
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
+  parseCron,
+  readCronTasks,
+  taskHasLegacyCondition,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -682,6 +685,33 @@ export function mergeStartupWarnings(
   return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
+export function getScheduledTasksStartupWarning(
+  activeTaskCount: number,
+): string | null {
+  if (activeTaskCount < 1) return null;
+  const taskLabel = activeTaskCount === 1 ? 'task' : 'tasks';
+  // `/loop list` comes from the bundled loop skill (registered as a slash
+  // command by BundledSkillLoader), not from the built-in command set, so
+  // it can be absent (bare mode, skills.disabled). Flag the skill in the
+  // wording so the recommendation stays interpretable when /loop is not
+  // registered in this session.
+  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list (loop skill) to inspect.`;
+}
+
+export function countActiveScheduledTasks(
+  tasks: Awaited<ReturnType<typeof readCronTasks>>,
+): number {
+  return tasks.filter((task) => {
+    if (task.enabled === false || taskHasLegacyCondition(task)) return false;
+    try {
+      parseCron(task.cron);
+      return true;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
 /**
  * Whether the skill-review dialog should auto-open. Exported for tests.
  *
@@ -1044,6 +1074,23 @@ export const AppContainer = (props: AppContainerProps) => {
             '(session writer lease contention?); continuing with goal features degraded.',
         );
       }
+      let activeScheduledTaskCount = 0;
+      if (config.isCronEnabled()) {
+        // Count durable tasks read from disk only. The in-memory scheduler
+        // is structurally empty at this point: enableDurable() — the only
+        // TUI path that loads durable jobs into the scheduler — is gated
+        // on isConfigInitialized, which this same effect sets only below,
+        // and session-only jobs cannot exist before input is enabled.
+        try {
+          const durableTasks = await readCronTasks(config.getProjectRoot());
+          activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
+        } catch (error) {
+          debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
+        }
+      }
+      const scheduledTasksWarning = getScheduledTasksStartupWarning(
+        activeScheduledTaskCount,
+      );
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(
           currentWarnings,
@@ -1169,6 +1216,19 @@ export const AppContainer = (props: AppContainerProps) => {
             console.debug('worktree session restore failed:', error);
           }
         }
+      }
+
+      // Add this after resume restoration because loadHistory replaces the
+      // current transcript. The notice should be visible in both fresh and
+      // resumed sessions whenever durable scheduling is enabled.
+      if (scheduledTasksWarning) {
+        historyManager.addItem(
+          {
+            type: MessageType.WARNING,
+            text: scheduledTasksWarning,
+          },
+          Date.now(),
+        );
       }
     })();
 
