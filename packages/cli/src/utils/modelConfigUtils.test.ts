@@ -711,6 +711,113 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('attributes a model.reasoningEffort disable to settings', () => {
+      const settings = makeMockSettings({
+        model: { name: 'preset-model', reasoningEffort: 'none' },
+      });
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'preset-model',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { budget_tokens: 4096 },
+        },
+        sources: {
+          reasoning: {
+            kind: 'modelProviders',
+            authType: AuthType.USE_OPENAI,
+            modelId: 'preset-model',
+          },
+        },
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.sources['reasoning']).toEqual(
+        expect.objectContaining({
+          kind: 'settings',
+          settingsPath: 'model.reasoningEffort',
+        }),
+      );
+    });
+
+    it('applies a persisted tier over a preset reasoning disable', () => {
+      const settings = makeMockSettings({
+        model: { name: 'preset-model', reasoningEffort: 'low' },
+      });
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'preset-model',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: false,
+        },
+        sources: {
+          reasoning: {
+            kind: 'modelProviders',
+            authType: AuthType.USE_OPENAI,
+            modelId: 'preset-model',
+          },
+        },
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({ effort: 'low' });
+      expect(result.sources['reasoning']).toEqual(
+        expect.objectContaining({
+          kind: 'settings',
+          settingsPath: 'model.reasoningEffort',
+        }),
+      );
+    });
+
+    it('keeps a settings-authored reasoning disable over a persisted tier', () => {
+      const settings = makeMockSettings({
+        model: { name: 'preset-model', reasoningEffort: 'low' },
+      });
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'preset-model',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: false,
+        },
+        sources: {
+          reasoning: {
+            kind: 'settings',
+            settingsPath: 'model.generationConfig.reasoning',
+          },
+        },
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.sources['reasoning']).toEqual(
+        expect.objectContaining({
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.reasoning',
+        }),
+      );
+    });
+
     describe('provider disambiguation by settings.model.baseUrl', () => {
       const tokenPlan: ProviderModelConfig = {
         id: 'qwen3.7-max',

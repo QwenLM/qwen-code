@@ -5248,7 +5248,7 @@ export class Config {
       this.modelsConfig?.getGenerationConfig().reasoning;
     if (recordDefaultOverride) {
       this.reasoningOverride = { type: 'default' };
-    } else if (reasoningNow !== false) {
+    } else if (!effort || reasoningNow !== false) {
       // Clearing the tier returns the session to the untouched state — no
       // sticky default override — so a later rebuild applies the
       // model/provider default, including a preset `reasoning: false`.

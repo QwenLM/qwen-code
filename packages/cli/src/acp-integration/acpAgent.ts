@@ -5862,6 +5862,12 @@ class QwenAgent implements Agent {
             (candidate) => candidate.id === 'reasoning_effort',
           );
           const modelReasoning = this.getModelReasoningConfiguration(config);
+          const registeredModelReasoning = generation
+            ? getModelConfiguration(config.getModel(), {
+                authType: generation.authType,
+                baseUrl: generation.baseUrl,
+              })?.reasoning
+            : undefined;
           const selected = parseReasoningSelection(value);
           const choices =
             option?.options.flatMap((choice) =>
@@ -5916,21 +5922,15 @@ class QwenAgent implements Agent {
             ?.getGenerationConfig?.();
           const previousRebuildableReasoning = rebuildable?.reasoning;
           try {
-            if (modelReasoning && !modelReasoning.toggleOnly) {
+            if (
+              registeredModelReasoning &&
+              !registeredModelReasoning.toggleOnly
+            ) {
               clearReasoningRequestOverrides(generation);
             }
             applyReasoningSelection(config, selected, defaultReasoning);
-            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
-              config.setReasoningEffort?.(
-                selected === REASONING_EFFORT_DEFAULT
-                  ? defaultReasoning
-                    ? defaultReasoning.effort
-                    : undefined
-                  : selected,
-              );
-            }
-            const configOptions = this.buildConfigOptions(config);
-            const confirmedValue = configOptions.find(
+            const appliedConfigOptions = this.buildConfigOptions(config);
+            const confirmedValue = appliedConfigOptions.find(
               (candidate) => candidate.id === 'reasoning_effort',
             )?.currentValue;
             const confirmed =
@@ -5948,6 +5948,20 @@ class QwenAgent implements Agent {
             if (persist) {
               session.persistReasoningSelection(selected);
             }
+            if (selected === REASONING_EFFORT_NONE) {
+              config.setReasoningDisabled?.(true);
+            } else {
+              config.setReasoningEffort?.(
+                selected === REASONING_EFFORT_DEFAULT
+                  ? registeredModelReasoning
+                    ? undefined
+                    : defaultReasoning
+                      ? defaultReasoning.effort
+                      : undefined
+                  : selected,
+              );
+            }
+            const configOptions = this.buildConfigOptions(config);
             session.setSessionReasoningSelection(
               persist ? undefined : selected,
             );
@@ -13578,7 +13592,10 @@ class QwenAgent implements Agent {
     ) {
       return;
     }
-    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const modelReasoning = getModelConfiguration(modelId, {
+      authType: generation?.authType,
+      baseUrl: generation?.baseUrl,
+    })?.reasoning;
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
       clearReasoningRequestOverrides(generation);
     }
@@ -14276,7 +14293,10 @@ class QwenAgent implements Agent {
     if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
       return undefined;
     }
-    const generation = config.getContentGeneratorConfig();
+    const generation = config.getContentGeneratorConfig?.();
+    if (!generation) {
+      return undefined;
+    }
     const reasoning = getModelConfiguration(config.getModel(), {
       authType: generation.authType,
       baseUrl: generation.baseUrl,

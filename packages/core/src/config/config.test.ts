@@ -6611,6 +6611,42 @@ describe('Server Config (config.ts)', () => {
       expect(config.getReasoningEffort()).toBeUndefined();
     });
 
+    it('clears a stale effort override when default resolves to disabled', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'low' } },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.7-plus',
+        authType,
+        reasoning: { effort: 'low' },
+      };
+      config.setReasoningEffort('high');
+      config.getContentGeneratorConfig().reasoning = false;
+      config.getModelsConfig().getGenerationConfig().reasoning = false;
+
+      config.setReasoningEffort(undefined);
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.7-plus',
+          authType,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: { reasoning: { kind: 'modelProviders' } },
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getReasoningEffort()).toBeUndefined();
+    });
+
     it('keeps a user-cleared preset disable cleared across an auth refresh', async () => {
       // The user explicitly chose default/on ("Thinking on") for a model
       // whose preset disables reasoning. That cleared state is distinct from

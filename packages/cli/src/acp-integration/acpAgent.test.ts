@@ -6940,7 +6940,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
     innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+        authType: AuthType.USE_OPENAI,
+      },
+    ]);
     innerConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+    innerConfig.getReasoningEffort = vi.fn().mockReturnValue('max');
     const { agent, agentPromise } = await bootInitializedAcpAgent(
       makeSessionSettings(),
       'trusted-capability',
@@ -6965,6 +6974,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'model',
       ]);
       expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+        }),
+      ).rejects.toThrow('Reasoning is not supported by the current model');
 
       innerConfig.getContentGeneratorConfig.mockReturnValue({
         thinkingMandatory: true,
@@ -8732,13 +8749,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);
-    let currentEffort: string | undefined;
-    innerConfig.getReasoningEffort = vi.fn(() => currentEffort);
+    const generation: { reasoning?: false | { effort?: string } } = {};
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
     innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
-      currentEffort = effort;
+      generation.reasoning = effort ? { effort } : undefined;
     });
-    innerConfig.setReasoningDisabled = vi.fn(() => {
-      currentEffort = undefined;
+    innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
+      generation.reasoning = disabled ? false : undefined;
     });
 
     const { agent, agentPromise } = await bootAcpAgent();
@@ -8819,7 +8839,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
 
-      innerConfig.setReasoningEffort.mockImplementation(() => {});
+      generation.reasoning = false;
       await expect(
         agent.setSessionConfigOption({
           sessionId,
@@ -8829,7 +8849,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'Reasoning effort cannot be applied while thinking is disabled',
       );
-      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -9009,6 +9029,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow('settings are read-only');
       expect(generation).toEqual(before);
       expect(rebuildable.reasoning).toEqual(before.reasoning);
+      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -9137,7 +9159,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       generation.reasoning ? generation.reasoning.effort : undefined,
     );
     innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
-      generation.reasoning = effort ? { effort } : {};
+      generation.reasoning = effort ? { effort } : undefined;
     });
     innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
       generation.reasoning = disabled ? false : undefined;
@@ -9646,7 +9668,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 'none',
       })) as SetSessionConfigOptionResponse;
       expect(generation.reasoning).toBe(false);
-      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningDisabled).toHaveBeenCalledWith(true);
       expect(
         disabled.configOptions.find((item) => item.id === 'reasoning_effort')
           ?.currentValue,
@@ -9658,7 +9680,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 'default',
       })) as SetSessionConfigOptionResponse;
       expect(generation.reasoning).toBeUndefined();
-      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
       expect(
         lastSessionMock?.setSessionReasoningSelection,
       ).toHaveBeenLastCalledWith('default');
@@ -9882,7 +9904,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('keeps a configured budget when the registry surface selects default', async () => {
+  it('clears a stale override while keeping a configured budget when the registry surface selects default', async () => {
     // Toggle-only registry models take the same 'default' arm the fallback
     // surface uses; replacing the whole reasoning block (as
     // setReasoningDisabled(false) does) would silently destroy a configured
@@ -9892,12 +9914,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     const generation: {
       reasoning?: false | { effort?: string; budget_tokens?: number };
-    } = { reasoning: { budget_tokens: 32000 } };
+    } = { reasoning: { effort: 'high', budget_tokens: 32000 } };
     let reasoningOverride:
       | { type: 'disabled' }
       | { type: 'default' }
       | { type: 'effort'; effort: string }
-      | undefined;
+      | undefined = { type: 'effort', effort: 'high' };
     innerConfig.getModel = vi.fn().mockReturnValue('qwen3.7-plus');
     innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
     innerConfig.getReasoningEffort = vi.fn(() =>
@@ -9943,7 +9965,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       })) as SetSessionConfigOptionResponse;
 
       expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
-      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
       expect(generation.reasoning).toEqual({ budget_tokens: 32000 });
       expect(reasoningOverride).toBeUndefined();
       expect(
@@ -9953,6 +9975,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         reset.configOptions.find((item) => item.id === 'reasoning_effort')
           ?.currentValue,
       ).toBe('default');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('clears a stale wire effort when a registered tier uses the fallback surface', async () => {
+    const sessionId = 'registry-reasoning-sibling-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      authType: AuthType;
+      baseUrl: string;
+      reasoning: { effort?: string; budget_tokens: number };
+      extra_body: Record<string, unknown>;
+    } = {
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      reasoning: { effort: 'max', budget_tokens: 4096 },
+      extra_body: { reasoning_effort: 'low' },
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() => generation.reasoning.effort);
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      generation.reasoning = {
+        ...generation.reasoning,
+        ...(effort ? { effort } : {}),
+      };
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'high',
+      });
+
+      expect(generation.reasoning).toEqual({
+        effort: 'high',
+        budget_tokens: 4096,
+      });
+      expect(generation.extra_body).toEqual({});
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith('high');
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -10007,7 +10075,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 'max',
       });
       expect(generation.reasoning).toEqual({ effort: 'max' });
-      expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith('max');
 
       await agent.setSessionConfigOption({
         sessionId,
@@ -10015,7 +10083,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 'none',
       });
       expect(generation.reasoning).toBe(false);
-      expect(innerConfig.setReasoningDisabled).not.toHaveBeenCalled();
+      expect(innerConfig.setReasoningDisabled).toHaveBeenCalledWith(true);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;

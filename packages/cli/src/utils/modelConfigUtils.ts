@@ -428,9 +428,9 @@ export function resolveCliGenerationConfig(
   };
 
   // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
-  // set via /effort) onto the unified reasoning config. Skip when thinking is
-  // explicitly disabled (reasoning === false) so effort never silently
-  // re-enables it; provider adapters clamp the tier to the active model.
+  // set via /effort) onto the unified reasoning config. A settings-authored
+  // disable wins, while a preset disable yields to the persisted tier;
+  // provider adapters clamp the tier to the active model.
   const rawReasoningEffort = settings.model?.reasoningEffort;
   const reasoningDisabled = rawReasoningEffort === 'none';
   const reasoningEffort = reasoningDisabled
@@ -445,9 +445,14 @@ export function resolveCliGenerationConfig(
       : undefined;
   if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
     generationConfig.reasoning = false;
-  } else if (reasoningEffort && generationConfig.reasoning !== false) {
+    resolved.sources['reasoning'] = settingsSource('model.reasoningEffort');
+  } else if (
+    reasoningEffort &&
+    (generationConfig.reasoning !== false ||
+      resolved.sources['reasoning']?.kind === 'modelProviders')
+  ) {
     generationConfig.reasoning = {
-      ...(generationConfig.reasoning ?? {}),
+      ...(generationConfig.reasoning || {}),
       effort: reasoningEffort,
     };
     // The merged tier comes from settings.model.reasoningEffort even when the
