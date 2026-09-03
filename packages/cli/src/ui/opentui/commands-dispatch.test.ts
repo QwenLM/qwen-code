@@ -22,6 +22,7 @@ import {
   type SlashCommand,
   type SlashCommandActionReturn,
 } from '../commands/types.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -393,16 +394,38 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
   });
 });
 
-describe('canRunDuringStreaming (ink AppContainer fast path)', () => {
-  it('reports the command opt-in flag', () => {
+describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
+  it('defers the slash submissions a running turn must not race', () => {
     const host = createFakeHost();
     const dispatcher = new OpenTuiSlashDispatcher(host, services, [
       stub({ name: 'help', canRunDuringStreaming: true }),
       stub({ name: 'clear' }),
     ]);
-    expect(dispatcher.canRunDuringStreaming('/help')).toBe(true);
-    expect(dispatcher.canRunDuringStreaming('/clear')).toBe(false);
-    expect(dispatcher.canRunDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/help')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/clear')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('/nope')).toBe(true);
+    expect(dispatcher.mustDeferDuringStreaming('not a command')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/some/path/to/file')).toBe(
+      false,
+    );
+    expect(dispatcher.mustDeferDuringStreaming('?btw side question')).toBe(
+      false,
+    );
+  });
+
+  it('never defers quit, so a mid-turn exit stops the responding stream', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      quitCommand,
+      stub({ name: 'clear' }),
+    ]);
+    // The real built-in, reached through its altName as well: the exemption has
+    // to come from the command the parser resolved, not the typed token.
+    expect(dispatcher.mustDeferDuringStreaming('/quit')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('  /exit  ')).toBe(false);
+    expect(dispatcher.mustDeferDuringStreaming('/clear')).toBe(true);
+    // What the gate lets through is an exit, not a prompt handed to the model.
+    expect(await dispatcher.handle('/exit')).toMatchObject({ kind: 'quit' });
   });
 });
 
