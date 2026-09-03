@@ -162,12 +162,15 @@ describe('QWEN_HOME environment variable', () => {
      * 1d. Default behaviour is preserved when QWEN_HOME is unset.
      *
      * HOME is redirected to a writable temp dir so the unset-QWEN_HOME default
-     * (~/.qwen, resolved via os.homedir()) lands hermetically. On the shared
-     * pool the real $HOME can retain root-owned files from an earlier
-     * containerized job — the contamination globalSetup already isolates
-     * QWEN_HOME against (#10085, #10325) — and an unwritable ~/.qwen crashes
-     * the CLI at startup. That is an environment property, not the fallback
-     * routing under test.
+     * (~/.qwen, resolved via os.homedir()) lands hermetically. This is the one
+     * case in the file that otherwise undoes globalSetup's isolation and needs
+     * the real $HOME to be writable — the exposure #10085 and #10325 isolated
+     * QWEN_HOME against. It is fatal before any routing happens: with an
+     * unwritable $HOME the CLI dies during startup with `EACCES: permission
+     * denied, mkdir '<home>/.qwen'`.
+     *
+     * The redirected home carries no credentials, so as in 1a-1c the run may
+     * fail on auth; what this case pins is where the default global dir lands.
      */
     it('1d: CLI functions normally when QWEN_HOME is not set', async () => {
       await rig.setup('qwen-home-1d-default-behaviour');
@@ -183,9 +186,10 @@ describe('QWEN_HOME environment variable', () => {
       process.env['HOME'] = homeDir;
 
       try {
-        // A simple prompt run should succeed without errors
-        const result = await rig.run('say hello');
-        expect(result).toBeTruthy();
+        await rig.run('say hello');
+      } catch {
+        // May fail without a valid API key; that is acceptable — we only
+        // need config.initialize() to run far enough to create installation_id
       } finally {
         if (originalHome === undefined) {
           delete process.env['HOME'];
@@ -193,6 +197,14 @@ describe('QWEN_HOME environment variable', () => {
           process.env['HOME'] = originalHome;
         }
       }
+
+      // The default global dir must have materialized under the redirected
+      // HOME rather than the real one.
+      const installationIdPath = join(homeDir, '.qwen', 'installation_id');
+      expect(
+        existsSync(installationIdPath),
+        `Expected the default global dir at ${installationIdPath}`,
+      ).toBe(true);
     });
   });
 
