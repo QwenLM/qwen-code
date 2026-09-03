@@ -6823,6 +6823,86 @@ describe('DingtalkChannel outbound file projection', () => {
     }
   });
 
+  it('flushes what a dying session already produced', async () => {
+    // The buffer used to be deleted with the timer, so a session that died
+    // after segments arrived but before the terminal signal lost text the
+    // agent had already produced -- the exact case the partial card exists
+    // for. Before aggregation every segment was delivered on arrival.
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', 'Segment one.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Worker one',
+    });
+    expect(pushProactive).not.toHaveBeenCalled();
+
+    channel.onSessionDied('session-1');
+    await Promise.resolve();
+
+    expect(pushProactive).toHaveBeenCalledOnce();
+    expect(pushProactive.mock.calls[0]![1]).toContain(
+      '## ✅ Worker one（部分）',
+    );
+    expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
+  });
+
+  it('retries an aggregation whose delivery failed instead of losing it', async () => {
+    // Aggregating concentrates a whole turn into one send, so a transient
+    // failure that used to cost one segment would now cost everything.
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({ blockStreaming: 'on' });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockRejectedValueOnce(new Error('rate limited'))
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse('session-1', 'Only result.', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: true,
+        label: 'Worker one',
+      });
+
+      expect(pushProactive).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30 * 1000);
+
+      expect(pushProactive).toHaveBeenCalledTimes(2);
+      expect(pushProactive.mock.calls[1]![1]).toContain('Only result.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('feeds status presentation only projected chunks and final text', async () => {
     const channel = createChannel();
     const projected: string[] = [];
