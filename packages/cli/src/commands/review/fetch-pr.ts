@@ -281,7 +281,8 @@ type FetchPrResult = PlanReport & {
    * `(base, head)` blob pairs of everything the plan covers, plus the commit
    * anchor. Step 8 promotes it into the review cache on a clean high-effort
    * end (via `cache-commit`). Absent when the capture had no diff to
-   * describe.
+   * describe, when the blob listing failed, or when the write was refused —
+   * each said on stderr.
    *
    * PRODUCER SIDE ONLY at this commit, and the distinction matters because
    * the docs used to read as though the feature had shipped. Nothing reads
@@ -1711,6 +1712,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
               `one's rebase survival, but the review itself is unaffected.`,
           );
         }
+      } else {
+        // Out loud, like the write failure above: a listing that failed —
+        // an `ls-tree` error, or a filename the decode could not name
+        // faithfully — otherwise reads exactly like a PR with no diff.
+        writeStderrLine(
+          'WARNING: could not list the blob pairs for the cache candidate; ' +
+            "this round cannot anchor the next one's rebase survival, but " +
+            'the review itself is unaffected.',
+        );
       }
     }
 
