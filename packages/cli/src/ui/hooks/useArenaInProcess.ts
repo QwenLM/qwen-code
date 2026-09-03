@@ -16,16 +16,13 @@
  */
 
 import { useEffect, useRef } from 'react';
-import {
-  ArenaEventType,
-  ArenaSessionStatus,
-  DISPLAY_MODE,
-  type ArenaAgentStartEvent,
-  type ArenaManager,
-  type ArenaSessionCompleteEvent,
-  type Config,
-  type InProcessBackend,
-} from '@qwen-code/qwen-code-core';
+import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
+import { ArenaEventType } from '@qwen-code/qwen-code-core/agents/arena/arena-events.js';
+import type { ArenaAgentStartEvent, ArenaSessionCompleteEvent } from '@qwen-code/qwen-code-core/agents/arena/arena-events.js';
+import { ArenaSessionStatus } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import type { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends/InProcessBackend.js';
+import { DISPLAY_MODE } from '@qwen-code/qwen-code-core/agents/backends/types.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { AgentViewActions } from '../contexts/AgentViewContext.js';
 import { theme } from '../semantic-colors.js';
 

@@ -8,10 +8,8 @@ import { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
-import {
-  redactUrlCredentials,
-  type Extension,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { t } from '../../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 

@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
+import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';

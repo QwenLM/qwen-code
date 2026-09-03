@@ -19,12 +19,9 @@
 import type React from 'react';
 import { useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type Config,
-  type SavedWorkflowSource,
-  saveWorkflowScript,
-  validateWorkflowName,
-} from '@qwen-code/qwen-code-core';
+import { saveWorkflowScript, validateWorkflowName } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
+import type { SavedWorkflowSource } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';

@@ -19,12 +19,10 @@ import { SettingScope } from '../../config/settings.js';
 import { TextInput } from './shared/TextInput.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
-import type {
-  PermissionManager,
-  RuleWithSource,
-  RuleType,
-} from '@qwen-code/qwen-code-core';
-import { isPathWithinRoot, parseRule } from '@qwen-code/qwen-code-core';
+import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
+import type { RuleWithSource, RuleType } from '@qwen-code/qwen-code-core/permissions/types.js';
+import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 
 // ---------------------------------------------------------------------------
 // Types

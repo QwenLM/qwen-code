@@ -6,12 +6,10 @@
 
 import { useState } from 'react';
 import { render, Box, useApp } from 'ink';
-import {
-  getGitBranch,
-  SessionService,
-  type Config,
-  type SessionListItem,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';

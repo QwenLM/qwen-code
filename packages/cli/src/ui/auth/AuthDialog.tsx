@@ -16,16 +16,10 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
-import {
-  findProviderById,
-  findProviderByCredentials,
-  findExistingProviderModels,
-  getDefaultModelIds,
-  customProvider,
-  ALIBABA_PROVIDERS,
-  THIRD_PARTY_PROVIDERS,
-  type ProviderConfig,
-} from '@qwen-code/qwen-code-core';
+import { findProviderById, findProviderByCredentials, ALIBABA_PROVIDERS, THIRD_PARTY_PROVIDERS } from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { customProvider } from '@qwen-code/qwen-code-core/providers/presets/custom-provider.js';
+import { findExistingProviderModels, getDefaultModelIds } from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 

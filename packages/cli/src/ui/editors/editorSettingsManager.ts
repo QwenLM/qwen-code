@@ -4,11 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  allowEditorTypeInSandbox,
-  checkHasEditorType,
-  type EditorType,
-} from '@qwen-code/qwen-code-core';
+import { allowEditorTypeInSandbox, checkHasEditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 
 export interface EditorDisplay {
   name: string;

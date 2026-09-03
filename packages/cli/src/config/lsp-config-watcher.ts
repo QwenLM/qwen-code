@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP_CONFIG_WATCHER');
 

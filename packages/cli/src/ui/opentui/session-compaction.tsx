@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { CompressionStatus } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
 import { C } from './theme.js';

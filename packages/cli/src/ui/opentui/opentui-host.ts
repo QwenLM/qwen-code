@@ -25,11 +25,9 @@
  */
 
 import type { ReactNode } from 'react';
-import {
-  createDebugLogger,
-  type Config,
-  type Logger,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { Logger } from '@qwen-code/qwen-code-core/core/logger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   type ConfirmationRequest,
   type HistoryItem,

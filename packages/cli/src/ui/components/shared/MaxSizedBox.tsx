@@ -10,7 +10,7 @@ import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
 import { toCodePoints } from '../../utils/textUtils.js';
 import { useOverflowActions } from '../../contexts/OverflowContext.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 let enableDebugLog = false;
 const debugLogger = createDebugLogger('MAX_SIZED_BOX');

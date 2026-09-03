@@ -22,13 +22,7 @@
  * label as-is.
  */
 
-import {
-  osc8Hyperlink,
-  sanitizeForOsc,
-  supportsHyperlinks,
-  wrapForMultiplexer,
-  HYPERLINK_ENV_KEYS,
-} from '@qwen-code/qwen-code-core';
+import { osc8Hyperlink, sanitizeForOsc, supportsHyperlinks, wrapForMultiplexer, HYPERLINK_ENV_KEYS } from '@qwen-code/qwen-code-core/utils/osc8.js';
 
 export {
   osc8Hyperlink,

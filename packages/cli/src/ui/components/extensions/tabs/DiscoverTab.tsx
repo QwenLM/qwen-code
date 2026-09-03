@@ -12,15 +12,13 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
-import {
-  type Config,
-  type DiscoveredPlugin,
-  type ExtensionScope,
-  parseInstallSource,
-  redactUrlCredentials,
-  createDebugLogger,
-  isExtensionCommittedWithWarningsError,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { isExtensionCommittedWithWarningsError } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import type { ExtensionScope } from '@qwen-code/qwen-code-core/extension/extensionPreferences.js';
+import { parseInstallSource } from '@qwen-code/qwen-code-core/extension/marketplace.js';
+import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
+import type { DiscoveredPlugin } from '@qwen-code/qwen-code-core/extension/sourceRegistry.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 

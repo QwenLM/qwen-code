@@ -10,7 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
-import { MCPServerStatus } from '@qwen-code/qwen-code-core';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import type { ServerDetailStepProps } from '../types.js';
 import {
   getStatusColor,

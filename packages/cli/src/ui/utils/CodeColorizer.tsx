@@ -20,7 +20,7 @@ import {
   MINIMUM_MAX_HEIGHT,
 } from '../components/shared/MaxSizedBox.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   getLowlightInstance,
   isLowlightCoolingDown,

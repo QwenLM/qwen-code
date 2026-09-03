@@ -5,8 +5,8 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';

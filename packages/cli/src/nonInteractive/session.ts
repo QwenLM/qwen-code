@@ -4,16 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Config,
-  ConfigInitializeOptions,
-} from '@qwen-code/qwen-code-core';
-import {
-  createDebugLogger,
-  buildSessionRecoveryPlanFromApiHistory,
-  SendMessageType,
-  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
-} from '@qwen-code/qwen-code-core';
+import type { Config, ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';

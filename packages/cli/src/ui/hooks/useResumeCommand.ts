@@ -5,13 +5,10 @@
  */
 
 import { useState, useCallback } from 'react';
-import {
-  SessionService,
-  buildSessionRecoveryPlan,
-  type Config,
-  type ResumedSessionData,
-  type SessionListItem,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { ResumedSessionData, SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,

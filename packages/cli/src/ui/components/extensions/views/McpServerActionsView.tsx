@@ -8,19 +8,13 @@ import { useState, useCallback, useEffect } from 'react';
 import { Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { t } from '../../../../i18n/index.js';
-import {
-  type Config,
-  getMCPServerStatus,
-  removeMCPServerStatus,
-  addMCPStatusChangeListener,
-  removeMCPStatusChangeListener,
-  mcpServerRequiresOAuth,
-  MCPServerStatus,
-  DiscoveredMCPTool,
-  MCPOAuthTokenStorage,
-  createDebugLogger,
-  matchesAnyServerPattern,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
+import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
+import { getMCPServerStatus, removeMCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener, MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import { DiscoveredMCPTool } from '@qwen-code/qwen-code-core/tools/mcp-tool.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { loadSettings, SettingScope } from '../../../../config/settings.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
 import { ServerDetailStep } from '../../mcp/steps/ServerDetailStep.js';

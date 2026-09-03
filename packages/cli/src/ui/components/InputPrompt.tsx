@@ -31,12 +31,10 @@ import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { StreamingState } from '../types.js';
-import {
-  ApprovalMode,
-  type Config,
-  Storage,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,

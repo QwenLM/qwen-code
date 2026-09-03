@@ -9,15 +9,9 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import {
-  createDebugLogger,
-  FINDING_CONFIDENCES,
-  FINDING_OUTCOMES,
-  FINDING_SEVERITIES,
-  FINDING_SOURCES,
-  isVisionBridgeNoticeDisplay,
-  REPORT_FINDINGS_LEVELS,
-} from '@qwen-code/qwen-code-core';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { FINDING_CONFIDENCES, FINDING_OUTCOMES, FINDING_SEVERITIES, FINDING_SOURCES, REPORT_FINDINGS_LEVELS } from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
   type HistoryItemToolGroup,

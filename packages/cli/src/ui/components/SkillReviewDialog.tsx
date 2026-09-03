@@ -24,7 +24,7 @@ import {
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import type { PendingSkillView } from '../contexts/UIStateContext.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 type Choice = 'keep' | 'discard' | 'keepAll' | 'discardAll' | 'turnOff';
 

@@ -6,12 +6,9 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
-import {
-  redactUrlCredentials,
-  getExtensionDisplayName,
-  getExtensionDescription,
-  type Extension,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { getExtensionDisplayName, getExtensionDescription } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 
 interface ExtensionDetailStepProps {

@@ -5,12 +5,9 @@
  */
 
 import { useMemo } from 'react';
-import {
-  type EditorType,
-  isValidEditorType,
-  allowEditorTypeInSandbox,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isValidEditorType, allowEditorTypeInSandbox } from '@qwen-code/qwen-code-core/utils/editor.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 
 const debugLogger = createDebugLogger('PREFERRED_EDITOR');

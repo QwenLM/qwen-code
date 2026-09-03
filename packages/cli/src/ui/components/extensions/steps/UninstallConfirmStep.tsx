@@ -5,11 +5,9 @@
  */
 
 import { Box, Text } from 'ink';
-import {
-  type Extension,
-  createDebugLogger,
-  getExtensionDisplayName,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';

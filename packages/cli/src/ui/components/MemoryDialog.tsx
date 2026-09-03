@@ -10,14 +10,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import {
-  getAllMemoryFilenames,
-  Storage,
-  getAutoMemoryRoot,
-  getAutoMemoryProjectStateDir,
-  getUserAutoMemoryRoot,
-  AUTO_MEMORY_INDEX_FILENAME,
-} from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getAutoMemoryRoot, getAutoMemoryProjectStateDir, getUserAutoMemoryRoot, AUTO_MEMORY_INDEX_FILENAME } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { SettingScope } from '../../config/settings.js';

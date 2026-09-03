@@ -11,12 +11,10 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
 import type { AuthenticateStepProps } from '../types.js';
 import { useConfig } from '../../../contexts/ConfigContext.js';
-import {
-  MCPOAuthProvider,
-  MCPOAuthTokenStorage,
-  getErrorMessage,
-} from '@qwen-code/qwen-code-core';
-import type { OAuthDisplayPayload } from '@qwen-code/qwen-code-core';
+import { MCPOAuthProvider } from '@qwen-code/qwen-code-core/mcp/oauth-provider.js';
+import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import type { OAuthDisplayPayload } from '@qwen-code/qwen-code-core/mcp/oauth-provider.js';
 import { appEvents, AppEvent } from '../../../../utils/events.js';
 import {
   osc8Hyperlink,

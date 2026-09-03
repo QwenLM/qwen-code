@@ -19,12 +19,8 @@
 
 import { Box, Text, useStdin } from 'ink';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import {
-  AgentStatus,
-  isTerminalStatus,
-  ApprovalMode,
-  APPROVAL_MODES,
-} from '@qwen-code/qwen-code-core';
+import { AgentStatus, isTerminalStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import { ApprovalMode, APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
   useAgentViewState,
   useAgentViewActions,

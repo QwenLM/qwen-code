@@ -13,22 +13,16 @@ import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
-import {
-  type Config,
-  type Extension,
-  type ExtensionScope,
-  type MCPServerConfig,
-  SettingScope,
-  MCPServerStatus,
-  getMCPServerStatus,
-  removeMCPServerStatus,
-  addMCPStatusChangeListener,
-  removeMCPStatusChangeListener,
-  mcpServerRequiresOAuth,
-  MCPOAuthTokenStorage,
-  createDebugLogger,
-  matchesAnyServerPattern,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import type { MCPServerConfig } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { SettingScope } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import type { ExtensionScope } from '@qwen-code/qwen-code-core/extension/extensionPreferences.js';
+import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
+import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
+import { MCPServerStatus, getMCPServerStatus, removeMCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   loadSettings,
   SettingScope as CliSettingScope,

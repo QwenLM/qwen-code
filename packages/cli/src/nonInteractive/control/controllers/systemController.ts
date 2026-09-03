@@ -24,16 +24,12 @@ import type {
   CLIControlGetContextUsageRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
-import {
-  createDebugLogger,
-  MCPServerConfig,
-  AuthProviderType,
-  applyReasoningEffort,
-  normalizeReasoningEffort,
-  loadUsageDashboard,
-  type MCPOAuthConfig,
-  type ReasoningEffortOverride,
-} from '@qwen-code/qwen-code-core';
+import type { ReasoningEffortOverride } from '@qwen-code/qwen-code-core/config/config.js';
+import { MCPServerConfig, AuthProviderType } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { applyReasoningEffort, normalizeReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import type { MCPOAuthConfig } from '@qwen-code/qwen-code-core/mcp/oauth-provider.js';
+import { loadUsageDashboard } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
 

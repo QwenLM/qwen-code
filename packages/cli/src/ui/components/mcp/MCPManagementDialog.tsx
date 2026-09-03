@@ -25,22 +25,15 @@ import { ResourceDetailStep } from './steps/ResourceDetailStep.js';
 import { DisableScopeSelectStep } from './steps/DisableScopeSelectStep.js';
 import { AuthenticateStep } from './steps/AuthenticateStep.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import {
-  getMCPServerStatus,
-  removeMCPServerStatus,
-  addMCPStatusChangeListener,
-  removeMCPStatusChangeListener,
-  mcpServerRequiresOAuth,
-  MCPServerStatus,
-  DiscoveredMCPTool,
-  MCPOAuthTokenStorage,
-  isGatedMcpScope,
-  type MCPServerConfig,
-  type AnyDeclarativeTool,
-  type DiscoveredMCPPrompt,
-  createDebugLogger,
-  matchesAnyServerPattern,
-} from '@qwen-code/qwen-code-core';
+import { isGatedMcpScope, matchesAnyServerPattern } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import type { MCPServerConfig } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
+import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
+import type { DiscoveredMCPPrompt } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
+import { getMCPServerStatus, removeMCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener, MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import { DiscoveredMCPTool } from '@qwen-code/qwen-code-core/tools/mcp-tool.js';
+import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
 import { isToolValid, getToolInvalidReasons } from './utils.js';
