@@ -45,7 +45,7 @@ import {
   resolvePeerSocketCandidates,
   SOCKET_DIR_NAME,
 } from './socket-path.js';
-import { probePeerSocket } from './uds-client.js';
+import { probePeerSocketVerdict } from './uds-client.js';
 
 const debugLogger = createDebugLogger('PEER_IPC');
 
@@ -80,12 +80,13 @@ export const MAX_PEER_CONNECTIONS = 64;
  * How long a connection may go without completing a line before it is
  * dropped.
  *
- * Measured from connect to the first complete line, and then from each
- * complete line to the next — never reset by a lone byte. An idle timer
- * that any byte resets can be held open forever by a peer dribbling one
- * byte at a time under the 1 MiB cap; a deadline that only a whole
- * frame satisfies cannot. A sender writes its frame and hangs up, so a
- * legitimate connection never comes near this.
+ * Measured from connect to the auth line, and from there to each
+ * successfully parsed frame — never reset by a lone byte, and never by a
+ * line that failed to parse. An idle timer that any byte resets can be
+ * held open forever by a peer dribbling one byte at a time under the
+ * 1 MiB cap; so can a line deadline, by a peer writing one junk line per
+ * deadline. Only progress re-arms this one. A sender writes its frame
+ * and hangs up, so a legitimate connection never comes near it.
  */
 export const LINE_DEADLINE_MS = 30_000;
 
@@ -120,7 +121,12 @@ export type PeerInboxFailureCause =
 
 export interface PeerInboxStartFailure {
   cause: PeerInboxFailureCause;
-  /** The last path tried. */
+  /**
+   * The path whose failure is reported: the first candidate tried, which
+   * is the one the user configured. Later candidates are process-minted
+   * fallback directories, so naming those would point the user at a
+   * directory that exists nowhere in their configuration.
+   */
   socketPath: string;
   /** The underlying error, for logs. */
   detail: string;
@@ -361,6 +367,11 @@ function createLineReader(
  * recycled onto some unrelated process — a leftover file costs a few
  * bytes, and deleting a live session's socket would make it silently
  * unreachable.
+ *
+ * "Provably" is meant literally, because `isPidAlive` proves nothing about
+ * a PID from another namespace: the probe must come back `dead`, not merely
+ * "not alive", and liveness is re-read on the turn of the unlink so the
+ * verdict and the deletion cannot straddle a probe's round trip.
  */
 export async function sweepOrphanSockets(
   dir: string,
@@ -381,7 +392,15 @@ export async function sweepOrphanSockets(
         const fullPath = path.join(dir, name);
         if (fullPath === selfSocketPath) return;
         if (isPidAlive(pid)) return;
-        if (await probePeerSocket(fullPath)) return;
+        // Only a definitive `dead` licenses the unlink. A timed-out or
+        // unpermitted probe establishes nothing, and this path deletes a
+        // file another namespace's live session may be listening on --
+        // where `isPidAlive` is meaningless, the probe is the only guard.
+        if ((await probePeerSocketVerdict(fullPath)) !== 'dead') return;
+        // The probe yielded a full round trip, so re-read liveness on the
+        // same turn as the delete: the verdict above is about the state
+        // before that await, not the state now.
+        if (isPidAlive(pid)) return;
         try {
           await fs.unlink(fullPath);
           swept += 1;
@@ -439,7 +458,16 @@ export async function sweepOrphanSocketDirs(
           for (const file of files) {
             const pid = pidOfSocketFilename(file);
             if (pid === null || isPidAlive(pid)) return;
-            if (await probePeerSocket(path.join(dir, file))) return;
+            // Same rule as the file sweep: anything short of a definitive
+            // `dead` leaves the whole directory alone.
+            if ((await probePeerSocketVerdict(path.join(dir, file))) !== 'dead')
+              return;
+          }
+          // Re-read every PID on the turn of the delete, after the probes
+          // above have yielded; one revived socket vetoes the directory.
+          for (const file of files) {
+            const pid = pidOfSocketFilename(file);
+            if (pid === null || isPidAlive(pid)) return;
           }
           for (const file of files) await fs.unlink(path.join(dir, file));
           await fs.rmdir(dir);
@@ -504,10 +532,30 @@ export async function startPeerInbox(
       void sweepAround(candidate).catch(() => {});
       return result.inbox;
     }
-    failure = { ...result.failure, attempts: index + 1 };
+    const attempt = { ...result.failure, attempts: index + 1 };
     debugLogger.warn(
-      `peer inbox could not bind at ${candidate} (${failure.cause}): ${failure.detail}`,
+      `peer inbox could not bind at ${candidate} (${attempt.cause}): ${attempt.detail}`,
     );
+    // A machine-level refusal is decided before any filesystem call and
+    // holds for every candidate alike. Counting the rest would tell a
+    // user for whom no path can ever work to go looking for a better
+    // one, and would make the count vary with an unrelated environment
+    // variable.
+    if (attempt.cause === 'unsupported_platform') {
+      failure = { ...attempt, attempts: 1 };
+      break;
+    }
+    // Report the FIRST candidate's diagnosis, not the last. The first is
+    // the path the user configured; every later candidate is a nonce
+    // directory this process minted, which appears nowhere in their
+    // configuration and which they cannot act on. `attempts` keeps
+    // counting all of them, so the "Tried N candidate paths." sentence
+    // stays true.
+    if (failure === null) {
+      failure = attempt;
+    } else {
+      failure.attempts = index + 1;
+    }
     // A non-local or over-long path is a property of that candidate, not
     // of the machine; the next candidate is worth trying. A bind that
     // failed for another reason usually is too. Only an explicit path
@@ -559,8 +607,18 @@ async function bindAt(
     };
   }
 
+  const socketDir = path.dirname(socketPath);
+  // A candidate that fails after its directory was created leaves that
+  // directory behind, and no sweep can reach it: `sweepAround` runs only
+  // on the success path and derives its parent from the winning
+  // candidate. Empty-only, so a directory holding someone's live socket
+  // is never touched, and best-effort because losing the race to another
+  // session's sweep is not an error worth reporting.
+  const dropDirIfEmpty = async () => {
+    await fs.rmdir(socketDir).catch(() => {});
+  };
   try {
-    const dir = path.dirname(socketPath);
+    const dir = socketDir;
     await fs.mkdir(dir, { recursive: true, mode: SOCKET_DIR_MODE });
     // Both mkdir(recursive) and chmod succeed straight through a symlink,
     // and a shared temp directory is a place where another user can
@@ -587,6 +645,7 @@ async function bindAt(
     // directory already exists, so chmod is what actually enforces 0700.
     await fs.chmod(dir, SOCKET_DIR_MODE);
   } catch (error) {
+    await dropDirIfEmpty();
     return { failure: classify(error, socketPath) };
   }
 
@@ -600,9 +659,13 @@ async function bindAt(
   // — silently unreachable, which is the failure this whole path exists
   // to prevent. So a live socket is left alone and we take a sibling name
   // instead; only a dead one is removed.
-  if (await probePeerSocket(socketPath)) {
+  // Not `=== 'alive'`: an inconclusive probe must take the sibling name
+  // too. Unlinking on "could not tell" is the same mistake the sweep
+  // guards against, and the sibling costs only a filename.
+  if ((await probePeerSocketVerdict(socketPath)) !== 'dead') {
     const sibling = siblingSocketPath(socketPath);
     if (sibling === null) {
+      await dropDirIfEmpty();
       return {
         failure: classify(
           new InboxSetupError(
@@ -662,10 +725,11 @@ async function bindAt(
     const read = createLineReader(
       (line) => {
         if (refused) return;
-        // Any complete line — the auth line included — is what re-arms
-        // the deadline; a refused connection is already on its way out.
-        arm();
         if (!authed) {
+          // The auth line re-arms: presenting credentials is progress,
+          // and the sender still has its frame to write. Nothing else
+          // re-arms before a frame parses — see below.
+          arm();
           const presented = parsePeerAuthLine(line);
           if (presented !== null) {
             auth = authKindOf(options, presented);
@@ -686,8 +750,14 @@ async function bindAt(
           debugLogger.debug(
             `dropping unparseable frame: ${line.slice(0, 200)}`,
           );
+          // Deliberately no arm(): a peer that keeps writing junk lines
+          // would otherwise hold this connection, and one of the 64
+          // maxConnections slots, for the whole session at two bytes per
+          // deadline. Only progress re-arms, and an unparseable line is
+          // not progress.
           return;
         }
+        arm();
         try {
           options.onFrame(frame, auth);
         } catch (error) {
@@ -746,8 +816,15 @@ async function bindAt(
         ? siblingSocketPath(socketPath)
         : null;
     let raced = error;
+    // The path last handed to listen(), which is what a failure must
+    // name. `socketPath` is only advanced on success, so reporting it
+    // after a failed retry would put the original path in the sentence
+    // while Node's message in `detail` named the sibling -- one banner,
+    // two paths, and the user sent after the wrong one.
+    let attempted = socketPath;
     if (sibling !== null) {
       try {
+        attempted = sibling;
         await listenAt(sibling);
         socketPath = sibling;
         raced = null;
@@ -756,7 +833,8 @@ async function bindAt(
       }
     }
     if (raced !== null) {
-      const classified = classify(raced, socketPath);
+      await dropDirIfEmpty();
+      const classified = classify(raced, attempted);
       return {
         failure:
           classified.cause === 'unknown'
@@ -781,6 +859,7 @@ async function bindAt(
     } catch {
       // Best effort.
     }
+    await dropDirIfEmpty();
     return {
       failure: {
         ...classify(error, socketPath),

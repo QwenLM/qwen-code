@@ -11,7 +11,8 @@ import type { HeldMessage } from '@qwen-code/qwen-code-core';
 // from core, and pulling the barrel in drags the whole module graph
 // behind it. The wording assertions below only depend on these stubs; the
 // stubs mirror the real helpers, whose behavior is pinned by core's own
-// tests (peer-envelope.test.ts, peer-frames.test.ts).
+// tests (peer-envelope.test.ts, peer-frames.test.ts, and for the inbox
+// failure renderer, uds-inbox.test.ts).
 const inboxFailure = vi.hoisted(() => ({
   current: null as null | {
     cause: string;
@@ -24,8 +25,13 @@ const inboxFailure = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   getLastPeerInboxFailure: () => inboxFailure.current,
-  describePeerInboxFailure: (failure: { cause: string; hint: string }) =>
-    `${failure.cause}: ${failure.hint}`,
+  // Mirrors the real renderer's `foreign_owner` branch (uds-inbox.ts).
+  // The previous stub interpolated `failure.cause`, a machine token the
+  // real helper emits for no cause at all, so the assertion below could
+  // not have failed against anything production produces.
+  describePeerInboxFailure: (failure: { socketPath: string; hint: string }) =>
+    // The real branch renders the socket's *directory*, not the socket.
+    `"${failure.socketPath.replace(/\/[^/]*$/, '')}" belongs to another user. ${failure.hint}`,
   describeHoldCause: (cause: string) =>
     cause === 'mode-mismatch'
       ? 'this session can apply some actions without per-action review and the sender does not'
@@ -329,7 +335,10 @@ describe('/peers', () => {
       const result = await run(null, '', true);
       expect(result.messageType).toBe('error');
       expect(result.content).toContain('failed to bind its socket');
-      expect(result.content).toContain('foreign_owner');
+      // The prose a user actually sees, matching AppContainer.test.tsx's
+      // assertion for the same fixture -- not a cause token that only
+      // ever existed in this file's stub.
+      expect(result.content).toContain('belongs to another user');
       expect(result.content).toContain('XDG_RUNTIME_DIR');
       expect(result.content).not.toContain('Enable it with');
     } finally {

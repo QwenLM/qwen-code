@@ -209,44 +209,80 @@ export async function sendDeliveryStatus(
 }
 
 /**
- * True when something is listening on `socketPath`.
+ * What a probe of `socketPath` established.
  *
- * A full listen backlog (EAGAIN on POSIX, EBUSY on Windows named pipes)
- * counts as alive: the peer is listening but momentarily saturated, which
- * is a busy session, not a dead one. Local descriptor exhaustion is also
- * conservative: if this process cannot open the probe, the peer is not
- * proven dead. Everything else — including a socket file left behind by a
- * crashed process — is dead, which is the point: a stale socket inode still
- * stats fine, so only a dial can tell the difference.
+ * `unknown` is the load-bearing member. A probe that timed out, or that this
+ * process was not permitted to make, has established nothing at all — and a
+ * caller that deletes on the verdict must not spend "could not tell" as proof
+ * of death. Only `dead` is a definitive negative: the dial reached the path
+ * and nothing was there.
  */
-export function probePeerSocket(socketPath: string): Promise<boolean> {
+export type PeerSocketVerdict = 'alive' | 'dead' | 'unknown';
+
+/**
+ * Dial `socketPath` and report what that established.
+ *
+ * `alive` means a listener answered, or the dial hit a full listen backlog
+ * (EAGAIN on POSIX, EBUSY on Windows named pipes) — a busy session, not a
+ * dead one. `dead` means the path was reached and nothing held it: no file
+ * (ENOENT), or a socket inode a crashed process left behind (ECONNREFUSED).
+ * A stale inode still stats fine, so only a dial can tell those apart, which
+ * is the point of probing at all.
+ *
+ * Everything else is `unknown`: the 250 ms deadline (a slow peer and a
+ * stalled prober are indistinguishable from here), local descriptor
+ * exhaustion (EMFILE, and ENFILE which a neighbouring process can cause
+ * while this one is healthy), permission errors, and any errno not
+ * enumerated above.
+ */
+export function probePeerSocketVerdict(
+  socketPath: string,
+): Promise<PeerSocketVerdict> {
   return new Promise((resolve) => {
     if (!isLocalIpcPath(socketPath)) {
-      resolve(false);
+      resolve('unknown');
       return;
     }
     const socket = net.connect({ path: socketPath });
     let settled = false;
-    const settle = (alive: boolean) => {
+    const settle = (verdict: PeerSocketVerdict) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       socket.destroy();
-      resolve(alive);
+      resolve(verdict);
     };
     // An absolute deadline rather than socket.setTimeout, for the same
     // reason sendPeerFrame uses one: an idle timer is reset by any byte.
-    const deadline = setTimeout(() => settle(false), PROBE_TIMEOUT_MS);
+    const deadline = setTimeout(() => settle('unknown'), PROBE_TIMEOUT_MS);
     deadline.unref();
-    socket.on('connect', () => settle(true));
+    socket.on('connect', () => settle('alive'));
     socket.on('error', (error: NodeJS.ErrnoException) => {
       const code = error.code;
-      settle(
-        code === 'EAGAIN' ||
-          code === 'EBUSY' ||
-          code === 'EMFILE' ||
-          code === 'ENFILE',
-      );
+      if (code === 'EAGAIN' || code === 'EBUSY') {
+        settle('alive');
+        return;
+      }
+      if (code === 'ENOENT' || code === 'ECONNREFUSED') {
+        settle('dead');
+        return;
+      }
+      settle('unknown');
     });
   });
+}
+
+/**
+ * True when something is listening on `socketPath`.
+ *
+ * Only a definitive `alive` reads as true, so an inconclusive probe is not
+ * reachable — which is what a read-only listing wants. Callers that DELETE
+ * on the answer must use {@link probePeerSocketVerdict} and require `dead`:
+ * this collapse maps `unknown` and `dead` onto the same `false`, and acting
+ * destructively on that would treat "could not tell" as "provably gone".
+ */
+export function probePeerSocket(socketPath: string): Promise<boolean> {
+  return probePeerSocketVerdict(socketPath).then(
+    (verdict) => verdict === 'alive',
+  );
 }

@@ -39,27 +39,6 @@ import {
   type PeerInbox,
 } from './uds-inbox.js';
 
-/**
- * Set env vars for one test and put the real environment back afterwards.
- * Replacing `process.env` wholesale would leave the C-level environment
- * (which os.tmpdir() consults) carrying the test's values.
- */
-function withEnv(values: Record<string, string | undefined>): () => void {
-  const saved = Object.fromEntries(
-    Object.keys(values).map((key) => [key, process.env[key]]),
-  );
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  return () => {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
-}
-
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
 let received: PeerFrame[];
@@ -74,6 +53,10 @@ beforeEach(async () => {
 afterEach(async () => {
   await inbox?.close();
   inbox = null;
+  // packages/core's vitest config does not set `unstubEnvs`, so a test
+  // that throws before its own cleanup would otherwise leak TMPDIR or
+  // XDG_RUNTIME_DIR into the next test's mkdtemp.
+  vi.unstubAllEnvs();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -286,7 +269,8 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     const runtime = path.join(tmpDir, 'runtime');
     await fs.writeFile(runtime, 'not a directory');
     const tmp = await fs.mkdtemp('/tmp/qwen-inbox-fallback-');
-    const restore = withEnv({ XDG_RUNTIME_DIR: runtime, TMPDIR: tmp });
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
+    vi.stubEnv('TMPDIR', tmp);
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
       expect(started).not.toBeNull();
@@ -294,7 +278,7 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
       expect(started!.socketPath.startsWith(tmp + path.sep)).toBe(true);
       expect(getLastPeerInboxFailure()).toBeNull();
     } finally {
-      restore();
+      vi.unstubAllEnvs();
       await fs.rm(tmp, { recursive: true, force: true });
     }
   });
@@ -310,6 +294,14 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
       expect(describePeerInboxFailure(getLastPeerInboxFailure()!)).toContain(
         'not available on this platform',
       );
+      // A machine-level refusal is not a path that might have gone
+      // better. Counting candidates here would send a user for whom no
+      // path can ever work looking for a better one, with a number that
+      // moves when XDG_RUNTIME_DIR is set.
+      expect(getLastPeerInboxFailure()?.attempts).toBe(1);
+      expect(
+        describePeerInboxFailure(getLastPeerInboxFailure()!),
+      ).not.toContain('Tried');
     } finally {
       platform.mockRestore();
     }
@@ -429,6 +421,31 @@ describe.skipIf(isWindows)('framing', () => {
     expect(received).toHaveLength(0);
   });
 
+  it('drops a connection held open by junk lines shorter than the deadline', async () => {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: (frame) => received.push(frame),
+      lineDeadlineMs: 120,
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    const socket = await connectRaw(started.socketPath);
+    const closed = new Promise<void>((resolve) =>
+      socket.on('close', () => resolve()),
+    );
+    // Complete lines, so the byte-dribble guard above does not apply, but
+    // none of them parses. Two bytes every 40 ms would hold a connection
+    // -- and one of the 64 maxConnections slots -- for the whole session
+    // if an unparseable line re-armed the deadline.
+    const junk = setInterval(() => socket.write('x\n'), 40);
+    const start = Date.now();
+    await closed;
+    clearInterval(junk);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(100);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(received).toHaveLength(0);
+  });
+
   it('re-arms the deadline from each complete line, not from each byte', async () => {
     const started = await startPeerInbox({
       socketPath: path.join(tmpDir, 'socks', 'a.sock'),
@@ -515,6 +532,34 @@ describe.skipIf(isWindows)('inbox auth', () => {
     });
     await settle();
     expect(received).toHaveLength(1);
+  });
+
+  it('re-arms the deadline from the auth line, so a slow sender still lands', async () => {
+    // Only progress re-arms the deadline, and presenting credentials is
+    // progress: the sender has authenticated and still has its frame to
+    // write. Without this re-arm the deadline runs from connect, and a
+    // sender that pauses between the two lines is hung up on before its
+    // frame arrives -- a legitimate peer dropped for being slow.
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'auth.sock'),
+      requiredToken: TOKEN,
+      onFrame: (frame) => received.push(frame),
+      lineDeadlineMs: 150,
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    const socket = await connectRaw(started.socketPath);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    socket.write(buildAuthLine(TOKEN));
+    // 200 ms after connect: past the deadline armed at connect, inside
+    // the one the auth line armed.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    socket.write(encodePeerFrame(buildUserFrame({ content: 'slow' })));
+    await settle();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ message: { content: 'slow' } });
+    socket.end();
   });
 
   it('drops the connection on a wrong token, frames unread', async () => {
@@ -897,6 +942,60 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     }
   });
 
+  // Mode 000 makes connect() fail EACCES, which is a real inconclusive
+  // probe: the listener below is up and answers anyone permitted to dial
+  // it. The existing "keeps a listening socket even when its filename PID
+  // is absent" pins only the case where the probe reaches a definitive
+  // answer, and stays green whether or not `unknown` is honoured.
+  it.skipIf(process.getuid?.() === 0)(
+    'keeps a socket whose probe could not reach a verdict',
+    async () => {
+      const dir = path.join(tmpDir, 'qwen-socks');
+      await fs.mkdir(dir);
+      // Above the default pid_max, so `isPidAlive` reports dead -- which is
+      // also what it reports for a live PID from another namespace. The
+      // probe is the only thing left between this file and the unlink.
+      const live = path.join(dir, '4194303.sock');
+      const server = net.createServer((socket) => socket.end());
+      await new Promise<void>((resolve) => server.listen(live, resolve));
+      await fs.chmod(live, 0o000);
+      try {
+        expect(
+          await sweepOrphanSockets(dir, path.join(dir, '4194302.sock')),
+        ).toBe(0);
+        await expect(fs.stat(live)).resolves.toBeDefined();
+      } finally {
+        await fs.chmod(live, 0o600);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    'keeps a fallback directory whose probe could not reach a verdict',
+    async () => {
+      const parent = path.join(tmpDir, 'tmp');
+      const dir = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
+      await fs.mkdir(dir, { recursive: true });
+      const live = path.join(dir, '4194303.sock');
+      const server = net.createServer((socket) => socket.end());
+      await new Promise<void>((resolve) => server.listen(live, resolve));
+      await fs.chmod(live, 0o000);
+      try {
+        expect(
+          await sweepOrphanSocketDirs(
+            parent,
+            path.join(parent, `qwen-socks-${'b'.repeat(16)}`),
+          ),
+        ).toBe(0);
+        await expect(fs.stat(live)).resolves.toBeDefined();
+      } finally {
+        await fs.chmod(live, 0o600);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
   it('removes dead-socket and old empty fallback directories, but keeps fresh empty directories', async () => {
     const parent = path.join(tmpDir, 'tmp');
     const nonce = (n: string) =>
@@ -952,7 +1051,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const dir = path.join(runtime, 'qwen-socks');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, '4194303.sock'), '');
-    const restore = withEnv({ XDG_RUNTIME_DIR: runtime });
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
       if (!started) throw new Error('inbox failed to start');
@@ -961,7 +1060,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       await settle();
       await expect(fs.stat(path.join(dir, '4194303.sock'))).rejects.toThrow();
     } finally {
-      restore();
+      vi.unstubAllEnvs();
     }
   });
 
@@ -972,7 +1071,8 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const stale = path.join(temp, `qwen-socks-${'a'.repeat(16)}`);
     await fs.mkdir(stale, { recursive: true });
     await fs.writeFile(path.join(stale, '4194303.sock'), '');
-    const restore = withEnv({ XDG_RUNTIME_DIR: runtime, TMPDIR: temp });
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
+    vi.stubEnv('TMPDIR', temp);
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
       if (!started) throw new Error('inbox failed to start');
@@ -981,7 +1081,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       await settle();
       await expect(fs.stat(stale)).rejects.toThrow();
     } finally {
-      restore();
+      vi.unstubAllEnvs();
       await fs.rm(temp, { recursive: true, force: true });
     }
   });
@@ -1039,15 +1139,111 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
       );
       await settle();
       expect(received).toHaveLength(1);
+
+      // Shut down inside the test rather than leaving it to afterEach:
+      // close() unlinks whichever path it was handed, and handing it the
+      // *requested* path would delete the live peer's socket while our
+      // own sibling stayed on disk. Nothing observes that unless the
+      // shutdown happens where it can be asserted.
+      await started.close();
+      inbox = null;
+      await expect(fs.stat(started.socketPath)).rejects.toThrow();
+      const afterClose = await fs.lstat(taken);
+      expect(afterClose.isSocket()).toBe(true);
+      await expect(connectRaw(taken)).resolves.toBeInstanceOf(net.Socket);
     } finally {
       squatter.close();
     }
   });
 
-  it('reports a failure when a sibling name would not fit sun_path', async () => {
+  it('retries at a sibling when the path is taken between the probe and the listen', async () => {
+    // The raced-EADDRINUSE branch, which the probe branch above never
+    // reaches. A directory standing where the socket belongs reproduces
+    // that interleaving exactly and deterministically: connect() to it
+    // gives ECONNREFUSED so the probe says dead, unlink() fails EISDIR
+    // and is swallowed, and bind() then reports EADDRINUSE -- the same
+    // sequence as a peer that grabbed the name inside the window.
+    const taken = path.join(tmpDir, 'socks', '4242.sock');
+    await fs.mkdir(taken, { recursive: true });
+
+    const started = await startPeerInbox({
+      socketPath: taken,
+      onFrame: (frame) => received.push(frame),
+    });
+
+    expect(started).not.toBeNull();
+    inbox = started;
+    expect(getLastPeerInboxFailure()).toBeNull();
+    // A sibling of the requested name, not the name itself.
+    expect(started!.socketPath).not.toBe(taken);
+    expect(path.basename(started!.socketPath)).toMatch(
+      /^4242-[0-9a-f]{8}\.sock$/,
+    );
+    // And it is a working inbox, not merely a bound path.
+    await sendPeerFrame(started!.socketPath, buildUserFrame({ content: 'hi' }));
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('falls through to the next candidate when the sibling would not fit', async (ctx) => {
+    // Both path_too_long tests pass an explicit socketPath, so the
+    // candidate list has exactly one entry and the fall-through is never
+    // walked. Nothing today distinguishes "this candidate is impossible,
+    // try the next" from "give up" -- inserting an early break on this
+    // cause leaves the suite green while the session starts unreachable,
+    // blaming a path length the user never set.
+    const runtimeRoot = await fs.mkdtemp('/tmp/qs-rt-');
+    const shortTmp = await fs.mkdtemp('/tmp/qs-tm-');
+    // Pad the runtime dir so `<pid>.sock` lands inside sun_path but the
+    // 9-byte sibling suffix would push it over.
+    const suffix = path.join('qwen-socks', `${process.pid}.sock`);
+    const target = 99;
+    const padLength =
+      target - Buffer.byteLength(path.join(runtimeRoot, 'x', suffix)) + 1;
+    if (padLength < 1) {
+      ctx.skip();
+      return;
+    }
+    const runtime = path.join(runtimeRoot, 'p'.repeat(padLength));
+    const taken = path.join(runtime, suffix);
+    expect(Buffer.byteLength(taken)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+    expect(Buffer.byteLength(taken) + 9).toBeGreaterThan(MAX_SOCKET_PATH_BYTES);
+
+    // A live peer holding the PID-keyed path, so the probe says alive and
+    // a sibling is required -- but no sibling fits.
+    const squatter = await occupy(taken);
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
+    vi.stubEnv('TMPDIR', shortTmp);
+    try {
+      const started = await startPeerInbox({
+        onFrame: (frame) => received.push(frame),
+      });
+      expect(started).not.toBeNull();
+      inbox = started;
+      // Candidate 1 was impossible; the session is reachable anyway.
+      expect(started!.socketPath.startsWith(runtime)).toBe(false);
+      expect(getLastPeerInboxFailure()).toBeNull();
+      // And the live peer at candidate 1 was left alone.
+      expect((await fs.lstat(taken)).isSocket()).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      squatter.close();
+      await fs.rm(runtimeRoot, { recursive: true, force: true });
+      await fs.rm(shortTmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a failure when a sibling name would not fit sun_path', async (ctx) => {
     // A directory long enough that `<pid>.sock` fits but the 9 extra
     // bytes of a sibling do not.
-    const base = path.join(tmpDir, 'socks');
+    //
+    // The base is built under a literal `/tmp` rather than `tmpDir`: from
+    // `os.tmpdir()` the padding goes negative once TMPDIR passes ~69
+    // bytes, and the precondition below would then take the whole test
+    // out on that machine. A short fixed root keeps the budget positive
+    // everywhere.
+    const root = await fs.mkdtemp('/tmp/qs-');
+    const base = path.join(root, 'socks');
     const padding = 'p'.repeat(
       Math.max(
         0,
@@ -1056,7 +1252,13 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     );
     const dir = base + padding;
     const taken = path.join(dir, '4242.sock');
-    if (Buffer.byteLength(taken) > MAX_SOCKET_PATH_BYTES) return;
+    // A visible skip, not a silent `return`: the reporter cannot tell a
+    // bare return from a pass, so a machine where this branch stopped
+    // being exercised would look identical to one where it still is.
+    if (Buffer.byteLength(taken) > MAX_SOCKET_PATH_BYTES) {
+      ctx.skip();
+      return;
+    }
     const squatter = await occupy(taken);
     try {
       const started = await startPeerInbox({
@@ -1069,6 +1271,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
       await expect(connectRaw(taken)).resolves.toBeInstanceOf(net.Socket);
     } finally {
       squatter.close();
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 

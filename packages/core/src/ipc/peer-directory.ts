@@ -26,7 +26,7 @@ import {
   type SessionRegistryRecord,
 } from '../services/session-registry.js';
 import { flattenPeerLabel } from './peer-envelope.js';
-import { probePeerSocket } from './uds-client.js';
+import { probePeerSocketVerdict } from './uds-client.js';
 
 /** A live session that can be sent to. */
 export interface PeerSessionInfo {
@@ -97,9 +97,15 @@ export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
     .map(toPeerSessionInfo)
     .filter((peer): peer is PeerSessionInfo => peer !== null);
 
-  const reachable = await Promise.all(
-    candidates.map((peer) => probePeerSocket(peer.ipcPath)),
+  const verdicts = await Promise.all(
+    candidates.map((peer) => probePeerSocketVerdict(peer.ipcPath)),
   );
+  // Only a definitive `alive` advertises a peer. An `unknown` verdict --
+  // local descriptor exhaustion, a permission error, the 250 ms deadline --
+  // establishes nothing about the peer, and admitting it here would let a
+  // newer, unreachable twin shadow the one that answers in the dedupe
+  // below, whose tie-break is `startedAt` alone.
+  const reachable = verdicts.map((verdict) => verdict === 'alive');
   return dedupeSameNameTwins(candidates.filter((_, index) => reachable[index]));
 }
 
