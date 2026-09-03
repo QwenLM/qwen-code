@@ -297,6 +297,31 @@ describe('guards (ink handleSlashCommand parity)', () => {
       sentToModel: false,
     });
   });
+
+  it('hides only the bare /output-style invocation', async () => {
+    const commands = [
+      stub({
+        name: 'output-style',
+        action: (_context, args) =>
+          args
+            ? { type: 'message', messageType: 'info', content: args }
+            : { type: 'dialog', dialog: 'output-style' },
+      }),
+    ];
+
+    const { host: bareHost } = await dispatch('/output-style', commands);
+    expect(bareHost.items.some((item) => item.type === 'user')).toBe(false);
+
+    const { host: namedHost } = await dispatch(
+      '/output-style Concise',
+      commands,
+    );
+    expect(namedHost.items[0]).toMatchObject({
+      type: 'user',
+      text: '/output-style Concise',
+      sentToModel: false,
+    });
+  });
 });
 
 describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () => {
@@ -331,6 +356,7 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
 
   it.each([
     ['effort', ''],
+    ['output-style', ''],
     ['statusline', ''],
     ['model', ''],
     ['model', '--fast'],
@@ -345,6 +371,7 @@ describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () =
     ['model', 'qwen-max'],
     ['model', '--fast qwen3-coder-flash'],
     ['effort', 'high'],
+    ['output-style', 'Concise'],
     ['statusline', 'show'],
   ])('keeps /%s %j (work-performing)', (root, args) => {
     expect(shouldHideSlashCommandInvocation(cmd(root), [root], args)).toBe(
