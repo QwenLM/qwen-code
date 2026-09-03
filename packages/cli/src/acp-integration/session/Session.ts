@@ -9741,6 +9741,7 @@ export class Session implements SessionContext {
                 partial,
               );
               responseTurnComplete = true;
+              await this.messageRewriter?.flushTurn(ac.signal);
             } catch (error) {
               debugLogger.warn(
                 `Failed to complete background notification response: ${this.#formatError(error)}`,
@@ -10057,8 +10058,9 @@ export class Session implements SessionContext {
   ): Promise<void> {
     const rawLabel =
       item.label ??
-      item.structured?.description ??
-      item.structured?.commandLabel;
+      (item.kind === 'agent'
+        ? undefined
+        : (item.structured?.description ?? item.structured?.commandLabel));
     const label = rawLabel ? truncateNotificationLabel(rawLabel) : undefined;
     const update: SessionUpdate = {
       sessionUpdate: 'agent_message_chunk',

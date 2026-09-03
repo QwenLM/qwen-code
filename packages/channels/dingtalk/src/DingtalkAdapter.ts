@@ -826,12 +826,48 @@ type DingtalkChannelConfig = ChannelConfig & {
 
 interface BackgroundResponseAggregation {
   sessionId: string;
+  target: SessionTarget;
+  sourceLabel?: string;
   status: string;
   label?: string;
   parts: string[];
-  timer?: ReturnType<typeof setTimeout>;
-  /** Deliveries already attempted and failed, bounding the retry. */
-  retries?: number;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  turnComplete?: boolean;
+  completionPartial?: boolean;
+  retiring?: boolean;
+  flushing?: boolean;
+  delivered?: boolean;
+  delivery?: BackgroundResponseDelivery;
+}
+
+interface BackgroundResponseDelivery {
+  status: string;
+  label?: string;
+  parts: string[];
+  partial: boolean;
+  attempts: number;
+  proactivePlan?: ProactiveTextDelivery;
+}
+
+interface ProactiveTextDelivery {
+  title: string;
+  chunks: string[];
+  nextChunk: number;
+}
+
+class ProactiveTextDeliveryError extends Error {
+  readonly retryable?: boolean;
+
+  constructor(
+    readonly plan: ProactiveTextDelivery,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    if (cause instanceof DingtalkCardRequestError) {
+      this.retryable = cause.retryable;
+    }
+  }
 }
 
 export class DingtalkChannel extends ChannelBase {
@@ -1645,10 +1681,28 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (!text.trim()) return;
 
+    const plan = await this.createProactiveTextDelivery(
+      target,
+      text,
+      sourceLabel,
+    );
+    if (!plan) return;
+    try {
+      await this.deliverProactiveText(target, plan);
+    } catch (error) {
+      throw new ProactiveTextDeliveryError(plan, error);
+    }
+  }
+
+  private async createProactiveTextDelivery(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<ProactiveTextDelivery | undefined> {
     const outgoingText = await this.prepareFileOutput(text, (file, mediaId) =>
       this.sendProactiveFile(target, file, mediaId),
     );
-    if (!outgoingText.trim()) return;
+    if (!outgoingText.trim()) return undefined;
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
@@ -1659,15 +1713,22 @@ export class DingtalkChannel extends ChannelBase {
     const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
       (chunk) => `${sourcePrefix}${chunk}`,
     );
-    const title = extractTitle(outgoingText);
+    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
+  }
 
-    for (let i = 0; i < chunks.length; i++) {
+  private async deliverProactiveText(
+    target: SessionTarget,
+    plan: ProactiveTextDelivery,
+  ): Promise<void> {
+    while (plan.nextChunk < plan.chunks.length) {
+      const index = plan.nextChunk;
       await this.sendProactiveChunk(
         target,
-        i === 0 ? title : `${title} (cont.)`,
-        chunks[i]!,
-        `chunk ${i + 1}/${chunks.length}`,
+        index === 0 ? plan.title : `${plan.title} (cont.)`,
+        plan.chunks[index]!,
+        `chunk ${index + 1}/${plan.chunks.length}`,
       );
+      plan.nextChunk++;
     }
   }
 
@@ -2105,6 +2166,10 @@ export class DingtalkChannel extends ChannelBase {
     super.onSessionDied(sessionId);
   }
 
+  protected override onSessionRetiring(sessionId: string): void {
+    this.drainBackgroundResponseAggregations(sessionId);
+  }
+
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
       this.startReaction(event.chatId, event.messageId, event.sessionId);
@@ -2352,14 +2417,26 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     const key = JSON.stringify([sessionId, context.taskId]);
-    const aggregation = this.backgroundResponseAggregations.get(key);
-    if (!aggregation && text.trim().length === 0) {
+    let current = this.backgroundResponseAggregations.get(key);
+    if (!current && text.trim().length === 0) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
+    if (!current) {
+      const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+      if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
+        return;
+      }
+      current =
+        this.backgroundResponseAggregations.get(key) ??
+        this.createBackgroundResponseAggregation(
+          key,
+          sessionId,
+          context,
+          delivery.target,
+          delivery.sourceLabel,
+        );
+    }
 
-    const current =
-      aggregation ??
-      this.createBackgroundResponseAggregation(key, sessionId, context);
     current.status = context.status;
     current.label = context.label ?? current.label;
     if (text.trim().length > 0) current.parts.push(text);
@@ -2369,116 +2446,129 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
-    if (current.timer) clearTimeout(current.timer);
-    current.timer = undefined;
-    await this.flushBackgroundResponseAggregation(
-      key,
-      current,
-      context.partial === true,
-      context,
-    );
+    current.turnComplete = true;
+    current.completionPartial = context.partial === true;
+    if (current.timeoutTimer) clearTimeout(current.timeoutTimer);
+    current.timeoutTimer = undefined;
+    await this.flushBackgroundResponseAggregation(key, current);
   }
 
-  /**
-   * Delivers one aggregation and only then drops it.
-   *
-   * Deleting first meant a single transient DingTalk failure -- a
-   * flow-controlled recipient, a non-OK response, a fetch timeout -- silently
-   * lost the whole turn's aggregated text, where the pre-aggregation code
-   * would have lost at most the one segment in flight. The entry is kept on
-   * failure and re-attempted a bounded number of times; the pending retry
-   * lives in the same `timer` slot the teardown paths already cancel.
-   */
   private async flushBackgroundResponseAggregation(
     key: string,
     aggregation: BackgroundResponseAggregation,
-    partial: boolean,
-    context?: BackgroundResponseContext,
   ): Promise<void> {
-    // A newer aggregation may have replaced this one at the same key while a
-    // retry was parked.
-    if (this.backgroundResponseAggregations.get(key) !== aggregation) return;
-    const body = this.formatBackgroundResponseAggregation(aggregation, partial);
-    try {
-      await super.dispatchBackgroundResponse(
-        aggregation.sessionId,
-        body,
-        context,
-      );
-      if (this.backgroundResponseAggregations.get(key) === aggregation) {
-        if (aggregation.timer) clearTimeout(aggregation.timer);
-        this.backgroundResponseAggregations.delete(key);
-      }
-    } catch (error) {
-      const attempts = (aggregation.retries ?? 0) + 1;
-      aggregation.retries = attempts;
-      process.stderr.write(
-        `[DingTalk:${this.name}] background response delivery failed (attempt ${attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-      );
-      if (
-        attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES ||
-        this.backgroundResponseAggregations.get(key) !== aggregation
-      ) {
-        if (aggregation.timer) clearTimeout(aggregation.timer);
+    if (
+      this.backgroundResponseAggregations.get(key) !== aggregation ||
+      aggregation.flushing
+    ) {
+      return;
+    }
+    if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
+    aggregation.retryTimer = undefined;
+
+    let delivery = aggregation.delivery;
+    if (!delivery) {
+      if (aggregation.parts.length === 0) {
         this.backgroundResponseAggregations.delete(key);
         return;
       }
-      if (aggregation.timer) clearTimeout(aggregation.timer);
-      aggregation.timer = setTimeout(() => {
-        void this.flushBackgroundResponseAggregation(
-          key,
-          aggregation,
-          partial,
-          context,
-        );
-      }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
-      aggregation.timer.unref?.();
+      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
+      aggregation.timeoutTimer = undefined;
+      delivery = {
+        status: aggregation.status,
+        label: aggregation.label,
+        parts: aggregation.parts.splice(0),
+        partial:
+          aggregation.delivered === true ||
+          aggregation.retiring === true ||
+          aggregation.completionPartial === true ||
+          aggregation.turnComplete !== true,
+        attempts: 0,
+      };
+      aggregation.delivery = delivery;
     }
+
+    const body = this.formatBackgroundResponseAggregation(delivery);
+    aggregation.flushing = true;
+    let error: unknown;
+    try {
+      if (delivery.proactivePlan) {
+        await this.deliverProactiveText(
+          aggregation.target,
+          delivery.proactivePlan,
+        );
+      } else {
+        await this.deliverBackgroundResponseToTarget(
+          aggregation.sessionId,
+          body,
+          {
+            target: aggregation.target,
+            sourceLabel: aggregation.sourceLabel,
+          },
+        );
+      }
+    } catch (caught) {
+      error = caught;
+      if (caught instanceof ProactiveTextDeliveryError) {
+        delivery.proactivePlan = caught.plan;
+      }
+    } finally {
+      aggregation.flushing = false;
+    }
+
+    if (error === undefined) {
+      aggregation.delivery = undefined;
+      aggregation.delivered = true;
+      if (aggregation.parts.length === 0) {
+        this.backgroundResponseAggregations.delete(key);
+        return;
+      }
+      if (aggregation.retiring || aggregation.turnComplete) {
+        await this.flushBackgroundResponseAggregation(key, aggregation);
+      } else {
+        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
+      }
+      return;
+    }
+
+    delivery.attempts++;
+    process.stderr.write(
+      `[DingTalk:${this.name}] background response delivery failed (attempt ${delivery.attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+    );
+    if (delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES) {
+      aggregation.delivery = undefined;
+      if (aggregation.parts.length === 0) {
+        this.backgroundResponseAggregations.delete(key);
+      } else if (aggregation.retiring || aggregation.turnComplete) {
+        await this.flushBackgroundResponseAggregation(key, aggregation);
+      } else {
+        this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
+      }
+      return;
+    }
+
+    aggregation.retryTimer = setTimeout(() => {
+      aggregation.retryTimer = undefined;
+      void this.flushBackgroundResponseAggregation(key, aggregation);
+    }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
+    aggregation.retryTimer.unref?.();
   }
 
-  /**
-   * Delivers what a dying session already produced, as a partial card.
-   *
-   * Must run before `super.onSessionDied`, which removes the router's session
-   * target -- `dispatchBackgroundResponse` refuses a session that is no longer
-   * live. Failures are logged rather than propagated: this runs on a teardown
-   * path that has other work to finish.
-   */
   private drainBackgroundResponseAggregations(sessionId?: string): void {
-    for (const [key, aggregation] of [...this.backgroundResponseAggregations]) {
+    for (const [key, aggregation] of this.backgroundResponseAggregations) {
       if (sessionId !== undefined && aggregation.sessionId !== sessionId) {
         continue;
       }
-      if (aggregation.timer) clearTimeout(aggregation.timer);
-      aggregation.timer = undefined;
-      this.backgroundResponseAggregations.delete(key);
-      if (aggregation.parts.length === 0) continue;
-
-      // `dispatchBackgroundResponse` re-checks session liveness *after* an
-      // await, so running "before the super call" is not enough -- the guard
-      // lands on a later microtask, by which time the session is already
-      // gone. The target is resolved synchronously here instead and pushed
-      // straight to the chat, which is where that method would have sent it.
-      // No retry: the session is going away, so a later attempt has nothing
-      // better to find.
-      const target = this.router.getTarget(aggregation.sessionId);
-      const body = this.formatBackgroundResponseAggregation(aggregation, true);
-      if (
-        !target ||
-        target.channelName !== this.name ||
-        !this.supportsProactiveSend() ||
-        !this.supportsProactiveTarget(target)
-      ) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] dropped a partial background response: no proactive target\n`,
-        );
-        continue;
+      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
+      if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
+      aggregation.timeoutTimer = undefined;
+      aggregation.retryTimer = undefined;
+      aggregation.retiring = true;
+      aggregation.turnComplete = true;
+      aggregation.completionPartial = true;
+      if (!aggregation.flushing) {
+        void this.flushBackgroundResponseAggregation(key, aggregation);
       }
-      void this.pushProactive(target, body).catch((error: unknown) => {
-        process.stderr.write(
-          `[DingTalk:${this.name}] partial background response delivery failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
-        );
-      });
     }
   }
 
@@ -2486,9 +2576,13 @@ export class DingtalkChannel extends ChannelBase {
     key: string,
     sessionId: string,
     context: BackgroundResponseContext,
+    target: SessionTarget,
+    sourceLabel?: string,
   ): BackgroundResponseAggregation {
     const aggregation: BackgroundResponseAggregation = {
       sessionId,
+      target,
+      sourceLabel,
       status: context.status,
       label: context.label,
       parts: [],
@@ -2501,26 +2595,28 @@ export class DingtalkChannel extends ChannelBase {
     key: string,
     aggregation: BackgroundResponseAggregation,
   ): void {
-    if (aggregation.timer) clearTimeout(aggregation.timer);
-    aggregation.timer = setTimeout(() => {
-      aggregation.timer = undefined;
-      void this.flushBackgroundResponseAggregation(key, aggregation, true);
+    if (aggregation.timeoutTimer || aggregation.delivery) return;
+    aggregation.timeoutTimer = setTimeout(() => {
+      aggregation.timeoutTimer = undefined;
+      void this.flushBackgroundResponseAggregation(key, aggregation);
     }, BACKGROUND_RESPONSE_AGGREGATION_TIMEOUT_MS);
-    aggregation.timer.unref?.();
+    aggregation.timeoutTimer.unref?.();
   }
 
   private formatBackgroundResponseAggregation(
-    aggregation: BackgroundResponseAggregation,
-    partial: boolean,
+    delivery: Pick<
+      BackgroundResponseDelivery,
+      'status' | 'label' | 'parts' | 'partial'
+    >,
   ): string {
     const icon =
-      aggregation.status === 'completed'
+      delivery.status === 'completed'
         ? '✅'
-        : aggregation.status === 'failed'
+        : delivery.status === 'failed'
           ? '❌'
           : '⏹️';
-    const label = this.formatBackgroundAgentLabel(aggregation.label);
-    return `## ${icon} Agent · ${label}${partial ? '（部分）' : ''}\n\n${aggregation.parts.join('\n\n')}`;
+    const label = this.formatBackgroundAgentLabel(delivery.label);
+    return `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}\n\n${delivery.parts.join('\n\n')}`;
   }
 
   private formatBackgroundAgentResponse(text: string, label?: string): string {

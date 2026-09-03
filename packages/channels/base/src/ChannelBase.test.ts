@@ -92,6 +92,7 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     segment?: unknown;
   }> = [];
+  retiringSessions: string[] = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
@@ -228,6 +229,10 @@ class TestChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.promptStarts.push({ chatId, sessionId, messageId });
+  }
+
+  protected override onSessionRetiring(sessionId: string): void {
+    this.retiringSessions.push(sessionId);
   }
 
   protected override onPromptEnd(
@@ -8587,6 +8592,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
       expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+      expect(ch.retiringSessions).toEqual(['s-1']);
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -20978,6 +20984,7 @@ describe('ChannelBase', () => {
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
         expect(btwSignal?.aborted).toBe(true);
         expect(
           (
