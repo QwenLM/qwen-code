@@ -56,4 +56,15 @@ describe('expectWithinLatencyBudget', () => {
       expectWithinLatencyBudget(2500, 100, { poolMultiplier: 20 }),
     ).toThrow();
   });
+
+  it('keeps the full bound off the pool even when poolMultiplier is passed', () => {
+    // The multiplier relaxes only the pool lane. Applied unconditionally, it
+    // would widen every local and hosted bound too — so off the pool the
+    // option must not move the bound: 1500 breaches the 100 ms budget but
+    // sits inside 100 × 20.
+    delete process.env['QWEN_SKIP_LATENCY_BUDGETS'];
+    expect(() =>
+      expectWithinLatencyBudget(1500, 100, { poolMultiplier: 20 }),
+    ).toThrow();
+  });
 });
