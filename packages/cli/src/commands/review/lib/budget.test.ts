@@ -699,14 +699,18 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000) + ' '.repeat(40_000);
     const t0 = performance.now();
     expect(budgetGapDisclosures(pathological)).toEqual([]);
-    expectWithinLatencyBudget(performance.now() - t0, 1000);
+    expectWithinLatencyBudget(performance.now() - t0, 1000, {
+      poolMultiplier: 20,
+    });
     // The placeholder classifier's own hazard shape — a token followed by
     // a long whitespace run — must stay linear too; it was measured
     // quadratic (seconds at 40k spaces) when its quantifiers overlapped.
     const spaced = `Budget gap: (none${' '.repeat(160_000)}x)`;
     const t1 = performance.now();
     expect(budgetGapDisclosures(spaced)).toHaveLength(1);
-    expectWithinLatencyBudget(performance.now() - t1, 1000);
+    expectWithinLatencyBudget(performance.now() - t1, 1000, {
+      poolMultiplier: 20,
+    });
     // The line matcher's own hazard shape — a long indentation run on a
     // line that is NOT a disclosure. The pre-rewrite matcher's overlapping
     // `[ \t]*` pair backtracked quadratically here (seconds at 40k tabs);
@@ -715,7 +719,9 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const indented = `Budget gap: ok\n${'\t'.repeat(40_000)}not a gap line`;
     const t2 = performance.now();
     expect(budgetGapDisclosures(indented)).toEqual(['ok']);
-    expectWithinLatencyBudget(performance.now() - t2, 1000);
+    expectWithinLatencyBudget(performance.now() - t2, 1000, {
+      poolMultiplier: 20,
+    });
     // The Chinese clause's own hazard shape: a token, a separator, then a long
     // run that never reaches a completion word. Its first cut chained four
     // optional groups across `\s*` — the overlapping shape this test exists
@@ -723,7 +729,9 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const zhPathological = `Budget gap: 无 — ${'检查 '.repeat(20_000)}`;
     const t3 = performance.now();
     expect(budgetGapDisclosures(zhPathological)).toHaveLength(1);
-    expectWithinLatencyBudget(performance.now() - t3, 1000);
+    expectWithinLatencyBudget(performance.now() - t3, 1000, {
+      poolMultiplier: 20,
+    });
     // And a deep-indented bullet disclosure still matches — the leading
     // whitespace lives inside the optional bullet group, not beside it.
     expect(

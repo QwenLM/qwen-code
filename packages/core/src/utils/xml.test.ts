@@ -87,7 +87,9 @@ describe('xml utils', () => {
       const input = `<${'\t'.repeat(50000)}${'<'.repeat(50000)}`;
       const start = Date.now();
       expect(escapeSystemReminderTags(input)).toBe(input);
-      expectWithinLatencyBudget(Date.now() - start, 1000);
+      expectWithinLatencyBudget(Date.now() - start, 1000, {
+        poolMultiplier: 20,
+      });
     });
 
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {

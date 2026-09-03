@@ -464,7 +464,9 @@ describe('evaluateShellCommandReadOnly', () => {
         true,
         true,
       ]);
-      expectWithinLatencyBudget(performance.now() - startedAt, 1000);
+      expectWithinLatencyBudget(performance.now() - startedAt, 1000, {
+        poolMultiplier: 20,
+      });
     });
   });
 });

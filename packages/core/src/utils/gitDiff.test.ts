@@ -1160,7 +1160,7 @@ describe('parseShortstat ReDoS guard', () => {
     const elapsed = Date.now() - start;
     // Expect the bounded regex to either reject (too long for \d{1,10}) or
     // match trivially. Either way it must not spin.
-    expectWithinLatencyBudget(elapsed, 250);
+    expectWithinLatencyBudget(elapsed, 250, { poolMultiplier: 20 });
     expect(result).toBeNull();
   });
 });

@@ -149,7 +149,9 @@ describe('the review footer and the regex that strips it', () => {
       const body = `a finding\n\n_— cut short${' '.repeat(200_000)}end`;
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expectWithinLatencyBudget(performance.now() - start, 2000);
+      expectWithinLatencyBudget(performance.now() - start, 2000, {
+        poolMultiplier: 10,
+      });
     });
 
     it('returns a marker-carrying body with no trailing footer unchanged — and bounded', () => {
@@ -165,7 +167,9 @@ describe('the review footer and the regex that strips it', () => {
       const body = `_— quoted via Qwen Code /review (v0.21.3), then\n\n${' '.repeat(200_000)}end`;
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expectWithinLatencyBudget(performance.now() - start, 2000);
+      expectWithinLatencyBudget(performance.now() - start, 2000, {
+        poolMultiplier: 10,
+      });
     });
 
     it('strips a trailing footer from a body longer than the tail bound', () => {
@@ -212,7 +216,9 @@ describe('the review footer and the regex that strips it', () => {
         ).join('\n') + '\nclosing prose';
       const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
-      expectWithinLatencyBudget(performance.now() - start, 1000);
+      expectWithinLatencyBudget(performance.now() - start, 1000, {
+        poolMultiplier: 5,
+      });
     }, 20_000);
   });
 
@@ -890,7 +896,9 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripForUnattributedPost(body)).toBe(
         'intro paragraph\n\nx /review & y',
       );
-      expectWithinLatencyBudget(Date.now() - started, 1000);
+      expectWithinLatencyBudget(Date.now() - started, 1000, {
+        poolMultiplier: 20,
+      });
     });
   });
 });

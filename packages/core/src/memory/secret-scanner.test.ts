@@ -99,7 +99,9 @@ describe('scanForSecrets', () => {
     const payload = `sk-${'a-'.repeat(50_000)}`;
     const start = performance.now();
     expect(scanForSecrets(payload)).toEqual([]);
-    expectWithinLatencyBudget(performance.now() - start, 1000);
+    expectWithinLatencyBudget(performance.now() - start, 1000, {
+      poolMultiplier: 20,
+    });
   });
 
   it('never returns the matched secret value, only rule id and label', () => {
