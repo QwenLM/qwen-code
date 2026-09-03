@@ -2394,6 +2394,14 @@ export async function runNonInteractive(
                   goalTurnKey: goalTurn.turnKey,
                   goalSignal: goalTurn.controller.signal,
                   goalOrigin: goalTurn.origin,
+                  getInterruptedGoalPauseReason: () => {
+                    const exceeded = budgetEnforcer.getExceeded();
+                    return exceeded
+                      ? goalPauseReasonForRunBudget(exceeded.kind)
+                      : abortController.signal.aborted
+                        ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                        : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+                  },
                 }
               : {}),
           },

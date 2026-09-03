@@ -2511,7 +2511,11 @@ export class Session implements SessionContext {
       // goal hangs in `claimGoalTurn` behind the leaked permit. Settling is
       // safe to repeat -- it no-ops once the permit is no longer current,
       // and it swallows its own errors.
-      await this.#settleGoalTurn(turn, undefined, true);
+      await this.#settleGoalTurn(
+        turn,
+        undefined,
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.warn(
         `ACP Goal turn failed: ${
           error instanceof Error ? error.message : String(error)
@@ -2551,7 +2555,7 @@ export class Session implements SessionContext {
   async #settleGoalTurn(
     turn: AcpGoalTurn,
     result: PromptResponse | undefined,
-    failed: boolean,
+    failureMessage: string | undefined,
   ): Promise<void> {
     try {
       const runtime = await this.config.getGoalRuntimeReady();
@@ -2560,14 +2564,18 @@ export class Session implements SessionContext {
       }
       if (!turn.modelStarted) {
         if (
-          turn.controller.signal.reason === USER_CANCEL_ABORT_REASON &&
+          (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+            turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON) &&
           runtime.getSnapshot().goal?.status === 'active'
         ) {
           await runtime.dispatch({
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
-            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+            reason:
+              turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         } else {
           await runtime.releaseTurn(turn.turnKey);
@@ -2617,8 +2625,8 @@ export class Session implements SessionContext {
             ? GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
               ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-              : failed
-                ? goalPauseReasonForFailure('')
+              : failureMessage !== undefined
+                ? goalPauseReasonForFailure(failureMessage)
                 : undefined;
       // Same latched-write-failure hazard as the flush above, one step later:
       // `pause` and `finishTurn` both persist through
@@ -4458,14 +4466,18 @@ export class Session implements SessionContext {
     }
 
     this.todoStopGuard.suspend();
+    const abortReason =
+      this.closing || this.disposed
+        ? SESSION_DISPOSE_ABORT_REASON
+        : USER_CANCEL_ABORT_REASON;
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
+      this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
     }
 
     for (const turn of queuedGoalTurns) {
-      turn.controller.abort(USER_CANCEL_ABORT_REASON);
+      turn.controller.abort(abortReason);
     }
 
     // Cancel any in-progress cron execution
@@ -4498,7 +4510,10 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: queuedGoalTurn.permit.goalId,
             expectedRevision: queuedGoalTurn.permit.revision,
-            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+            reason:
+              abortReason === SESSION_DISPOSE_ABORT_REASON
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         }
       } catch (error) {
@@ -4833,7 +4848,7 @@ export class Session implements SessionContext {
 
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
-    let promptFailed = false;
+    let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
       const result = await this.#executePrompt(
@@ -4901,7 +4916,8 @@ export class Session implements SessionContext {
       }
       return completedResult;
     } catch (error) {
-      promptFailed = true;
+      promptFailureMessage =
+        error instanceof Error ? error.message : String(error);
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
@@ -4930,7 +4946,11 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
       if (goalTurn) {
-        await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
+        await this.#settleGoalTurn(
+          goalTurn,
+          promptResult,
+          promptFailureMessage,
+        );
       } else if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }

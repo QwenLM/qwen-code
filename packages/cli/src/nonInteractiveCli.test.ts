@@ -45,6 +45,8 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
@@ -688,12 +690,14 @@ describe('runNonInteractive', () => {
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
+    const abortController = new AbortController();
 
     await runNonInteractive(
       mockConfig,
       mockSettings,
       '/goal resume',
       'goal-resume-exact',
+      { abortController },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
@@ -718,6 +722,13 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    );
+    abortController.abort();
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_USER_INTERRUPT,
+    );
   });
 
   it('includes verifier feedback in a scheduled Goal continuation', async () => {
@@ -1370,6 +1381,9 @@ describe('runNonInteractive', () => {
         lastReason: goalPauseReasonForRunBudget('tool-calls'),
       },
     });
+    expect(
+      mockLlmClient.sendMessageStream.mock.calls[0]![3].getInterruptedGoalPauseReason(),
+    ).toBe(goalPauseReasonForRunBudget('tool-calls'));
 
     void run;
   });

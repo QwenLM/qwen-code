@@ -14,6 +14,7 @@ import {
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
 import {
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForFailure,
@@ -1559,6 +1560,40 @@ describe('LlmClient Goal admission', () => {
       'pause',
       'turn_finished',
     ]);
+  });
+
+  it('uses the host reason when an interrupted Goal send releases its permit', async () => {
+    const { client, runtime } = setupGoalClient();
+    const setupError = new Error('model setup exploded');
+    const getInterruptedGoalPauseReason = vi.fn(
+      () => GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    );
+    turnMocks.run.mockImplementationOnce(() => {
+      throw setupError;
+    });
+
+    const { error } = await collectOutcome(
+      client.sendMessageStream(
+        [{ text: 'start work' }],
+        new AbortController().signal,
+        'goal-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getInterruptedGoalPauseReason,
+        },
+      ),
+    );
+
+    expect(error).toBe(setupError);
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledOnce();
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    });
   });
 
   it('drains a concurrent pause before a blocking Stop hook recurses', async () => {

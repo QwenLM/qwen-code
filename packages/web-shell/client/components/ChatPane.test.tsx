@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  GOAL_PAUSE_REASON_COMMAND,
+} from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -829,6 +832,7 @@ describe('ChatPane', () => {
       action: 'pause',
       expectedGoalId: 'goal-1',
       expectedRevision: 9,
+      reason: GOAL_PAUSE_REASON_COMMAND,
     });
 
     // `/goal set` maps to a versioned replace against the same fresh snapshot.

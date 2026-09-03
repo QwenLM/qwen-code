@@ -4403,7 +4403,10 @@ describe('useLlmStream', () => {
       revision: 3,
       turnId: 'turn-missing',
     };
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
     const finishTurn = vi.fn().mockResolvedValue(undefined);
     const flush = vi.fn().mockResolvedValue(undefined);
     const activeSnapshot = {
@@ -4423,7 +4426,7 @@ describe('useLlmStream', () => {
       },
     };
     const runtime = {
-      permitForTurn: vi.fn(() => permit),
+      permitForTurn: vi.fn(() => currentPermit),
       dispatch,
       finishTurn,
       getSnapshot: vi.fn(() => activeSnapshot),
@@ -4528,7 +4531,7 @@ describe('useLlmStream', () => {
       expectedRevision: permit.revision,
       reason: goalPauseReasonForFailure(''),
     });
-    expect(finishTurn).toHaveBeenCalledWith(permit);
+    expect(finishTurn).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
       promptId: 'prompt-goal-missing',
@@ -4544,7 +4547,10 @@ describe('useLlmStream', () => {
       turnId: 'turn-stale',
     };
     const stalePermit: GoalTurnPermit = { ...permit, revision: 2 };
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
     const finishTurn = vi.fn().mockResolvedValue(undefined);
     const flush = vi.fn().mockResolvedValue(undefined);
     const activeSnapshot = {
@@ -4564,7 +4570,7 @@ describe('useLlmStream', () => {
       },
     };
     const runtime = {
-      permitForTurn: vi.fn(() => permit),
+      permitForTurn: vi.fn(() => currentPermit),
       dispatch,
       finishTurn,
       getSnapshot: vi.fn(() => activeSnapshot),
@@ -4669,7 +4675,7 @@ describe('useLlmStream', () => {
       expectedRevision: permit.revision,
       reason: goalPauseReasonForFailure(''),
     });
-    expect(finishTurn).toHaveBeenCalledWith(permit);
+    expect(finishTurn).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
       promptId: 'prompt-goal-stale',
@@ -4684,7 +4690,10 @@ describe('useLlmStream', () => {
       revision: 2,
       turnId: 'turn-partial-cancel',
     };
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
     const finishTurn = vi.fn().mockResolvedValue(undefined);
     const flush = vi.fn().mockResolvedValue(undefined);
     const activeSnapshot = {
@@ -4704,7 +4713,7 @@ describe('useLlmStream', () => {
       },
     };
     const runtime = {
-      permitForTurn: vi.fn(() => permit),
+      permitForTurn: vi.fn(() => currentPermit),
       dispatch,
       finishTurn,
       getSnapshot: vi.fn(() => activeSnapshot),
@@ -4866,7 +4875,7 @@ describe('useLlmStream', () => {
         reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
       });
     });
-    expect(finishTurn).toHaveBeenCalledWith(permit);
+    expect(finishTurn).not.toHaveBeenCalled();
     // Every function call in the batch is paired with a response before the
     // Goal stops, so the history the next `/goal resume` sends is well-formed.
     expect(client.addHistory).toHaveBeenCalledWith({
@@ -4894,7 +4903,10 @@ describe('useLlmStream', () => {
       revision: 2,
       turnId: 'turn-declined-tool',
     };
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
     const finishTurn = vi.fn().mockResolvedValue(undefined);
     const flush = vi.fn().mockResolvedValue(undefined);
     const activeSnapshot = {
@@ -4914,7 +4926,7 @@ describe('useLlmStream', () => {
       },
     };
     const runtime = {
-      permitForTurn: vi.fn(() => permit),
+      permitForTurn: vi.fn(() => currentPermit),
       dispatch,
       finishTurn,
       getSnapshot: vi.fn(() => activeSnapshot),
@@ -5061,7 +5073,7 @@ describe('useLlmStream', () => {
         reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
       });
     });
-    expect(finishTurn).toHaveBeenCalledWith(permit);
+    expect(finishTurn).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({
         reason: expect.stringContaining('could not finish'),
@@ -5693,7 +5705,6 @@ describe('useLlmStream', () => {
       errorMessage: 'tool continuation capacity exhausted',
       errorType: 'continuation_capacity_exhausted',
     });
-
     act(() => {
       notificationCallback?.(
         'Background agent completed.',
@@ -5746,6 +5757,151 @@ describe('useLlmStream', () => {
 
     await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
     expect(client.addHistory).not.toHaveBeenCalled();
+  });
+
+  it('uses a user-safe pause reason when Goal background capacity is exhausted', async () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-background-capacity',
+      revision: 1,
+      turnId: 'turn-background-capacity',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    let goalActive = false;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => ({
+        v: 2 as const,
+        activity: goalActive ? ('running' as const) : ('idle' as const),
+        goal: goalActive
+          ? {
+              goalId: permit.goalId,
+              revision: permit.revision,
+              objective: 'wait for the background agent',
+              status: 'active' as const,
+              evidenceCursor: { recordId: 'record-background-capacity' },
+              turnCount: 1,
+              activeTimeMs: 5,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 2,
+            }
+          : null,
+      })),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+    mockConfig.getBackgroundTaskRegistry = vi.fn(() => ({
+      canStartBackgroundAgent: vi.fn(() => false),
+      getMaxConcurrentBackgroundAgents: vi.fn(() => 1),
+      setNotificationCallback: vi.fn(),
+    })) as Config['getBackgroundTaskRegistry'];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+    const client = new MockedLlmClientClass(mockConfig);
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: {
+            callId: 'goal-agent-call',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-agent',
+            goalContext: permit,
+          },
+        };
+      })(),
+    );
+    const { result } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'launch the agent',
+        SendMessageType.UserQuery,
+        'prompt-goal-agent',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+    goalActive = true;
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'goal-agent-call',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-agent',
+            goalContext: permit,
+          },
+          status: 'success',
+          responseSubmittedToLlm: false,
+          response: {
+            callId: 'goal-agent-call',
+            responseParts: [{ text: 'agent launched' }],
+            errorType: undefined,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              taskDescription: 'Research',
+              taskPrompt: 'Inspect the code',
+              status: 'background',
+            },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: {
+            getDescription: () => 'Research',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    expect(dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: goalPauseReasonForFailure(''),
+    });
+    expect(finishTurn).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledOnce();
   });
 
   it('records mid-turn queued user messages after tool results accept them', async () => {

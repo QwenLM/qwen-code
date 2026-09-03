@@ -5231,6 +5231,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation ended without a result',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         if (
@@ -5606,6 +5607,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped after a model switch',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         endToolInteraction('cancelled');
@@ -5634,6 +5636,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped: background capacity exhausted',
+            { pauseReason: goalPauseReasonForFailure('') },
           );
         }
         endToolInteraction(
@@ -5831,6 +5834,7 @@ export const useLlmStream = (
         await failClosedGoalTurn(
           toolGoalBinding,
           'Goal tool continuation was preempted',
+          { pauseReason: GOAL_PAUSE_REASON_USER_INTERRUPT },
         );
         endToolInteraction('cancelled');
         return;

@@ -239,6 +239,8 @@ export interface SendMessageOptions {
   goalSignal?: AbortSignal;
   /** Whether this permit belongs to runtime work or a real-user turn. */
   goalOrigin?: 'runtime' | 'user';
+  /** Host-specific reason when this send has to pause an interrupted Goal. */
+  getInterruptedGoalPauseReason?: () => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
 }
@@ -2967,6 +2969,7 @@ export class LlmClient {
               expectedRevision: goalPermit.revision,
               reason:
                 pauseReason ??
+                options?.getInterruptedGoalPauseReason?.() ??
                 (callerSignal.aborted
                   ? GOAL_PAUSE_REASON_USER_INTERRUPT
                   : goalPauseReasonForFailure('the turn was interrupted')),
