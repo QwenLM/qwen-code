@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
@@ -46,7 +47,11 @@ import {
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  extractErrorCode,
+  extractErrorMessage,
+  parseSessionSource,
+} from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -106,6 +111,7 @@ import {
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
+  searchWorkspaceSessionsForResponse,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -137,6 +143,10 @@ import {
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  PERSIST_REASONING_SELECTION_META_KEY,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+} from '../../acp-integration/model-configuration.js';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
@@ -443,6 +453,31 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
+}
+
+/**
+ * Renders a prompt-turn rejection for the daemon log. Non-Error rejections
+ * (bare JSON-RPC error objects forwarded by the bridge) must not degrade to
+ * `[object Object]` — that hid the failure cause in production incidents
+ * (#10710), so extract the structured message/code instead.
+ */
+export function describePromptTurnFailure(err: unknown): string {
+  const detail = extractErrorMessage(err);
+  if (err instanceof Error) {
+    return `[${err.name}] ${detail}`;
+  }
+  const code = extractErrorCode(err);
+  // `extractErrorMessage` terminates in `String(err)`, which renders a plain
+  // object as `[object Object]`. Fall back to `inspect` for those: unlike
+  // `JSON.stringify` it never throws, so circular and non-serializable
+  // rejections stay readable instead of degrading again.
+  const rendered =
+    typeof err === 'object' &&
+    err !== null &&
+    (detail === '' || detail === String(err))
+      ? inspect(err, { depth: 2, breakLength: Infinity })
+      : detail;
+  return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
 function parseTranscriptLimitQuery(
@@ -2446,7 +2481,7 @@ export function registerSessionRoutes(
         state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
@@ -4719,6 +4754,32 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/saved-workflows/:name',
+    withOwnerReadSession(
+      'GET /session/:id/saved-workflows/:name',
+      async (req, res, sessionId, runtime) => {
+        const name = req.params['name'];
+        if (!name) {
+          res.status(400).json({
+            error: '`name` route parameter is required',
+          });
+          return;
+        }
+        // An untrusted workspace fails closed with the same envelope the
+        // child returns for an unknown name, mirroring the supported-commands
+        // redaction rather than leaking a distinguishable error.
+        res
+          .status(200)
+          .json(
+            runtime.trusted
+              ? await runtime.bridge.getSessionSavedWorkflow(sessionId, name)
+              : { v: 1, sessionId, name, workflow: null },
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/lsp',
     withOwnerReadSession(
       'GET /session/:id/lsp',
@@ -4726,6 +4787,18 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(await runtime.bridge.getSessionLspStatus(sessionId));
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/resources',
+    withOwnerReadSession(
+      'GET /session/:id/resources',
+      async (_req, res, sessionId, runtime) => {
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionResourcesStatus(sessionId));
       },
     ),
   );
@@ -5392,9 +5465,8 @@ export function registerSessionRoutes(
             },
             (err) => {
               if (daemonLog) {
-                const errName = err instanceof Error ? err.name : undefined;
                 daemonLog.warn(
-                  `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+                  `prompt turn failed: ${describePromptTurnFailure(err)}`,
                   { sessionId, promptId, clientId },
                 );
               }
@@ -5927,9 +5999,15 @@ export function registerSessionRoutes(
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                pr,
+                { ...pr, source: 'create' },
               )
             ).map(toSessionPrInfo);
+            // Reconcile the live entry to the authoritative persisted
+            // list: the bridge merge capped positionally while the
+            // sidecar caps by provenance authority — past the cap the
+            // two stores evict different entries, and every later event
+            // or rename response would serve the diverged list.
+            runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -6090,10 +6168,13 @@ export function registerSessionRoutes(
                       sessionId,
                       'active',
                     ),
-                    pr,
+                    { ...pr, source: 'create' },
                   )
                 ).map(toSessionPrInfo);
                 assertRuntimeGenerationOpen?.();
+                // Reconcile the live entry to the authoritative persisted
+                // list (see the primary metadata route).
+                runtime.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 effective = { ...effective, prs: persistedPrs };
               }
             } catch (err) {
@@ -6115,7 +6196,7 @@ export function registerSessionRoutes(
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
+                  { ...pr, source: 'create' },
                 );
                 assertRuntimeGenerationOpen?.();
                 effective.prs = persisted.map(toSessionPrInfo);
@@ -6741,6 +6822,137 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  const SESSION_SEARCH_QUERY_MAX_LENGTH = 200;
+  const SESSION_SEARCH_MAX_RESULTS_LIMIT = 50;
+
+  // Content search over persisted session transcripts. Workspace-scoped like
+  // the sessions list route above: resolved-runtime only, read-only
+  // secondaries search their persisted store, never falls back to primary.
+  const searchWorkspaceSessionsHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions/search'
+          : 'GET /workspace/:id/sessions/search';
+      const liveRuntime = await resolveLiveCatalogRuntime(req, res, paramName);
+      if (liveRuntime === null) return;
+      const runtime =
+        liveRuntime ??
+        resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        const rawQuery = req.query['q'];
+        // Cap the trimmed query, consistent with the emptiness check and
+        // the matcher — whitespace padding the scan would discard must not
+        // count against the limit.
+        const trimmedQuery =
+          typeof rawQuery === 'string' ? rawQuery.trim() : '';
+        if (
+          trimmedQuery.length === 0 ||
+          trimmedQuery.length > SESSION_SEARCH_QUERY_MAX_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`q\` must be a non-empty string of at most ${SESSION_SEARCH_QUERY_MAX_LENGTH} characters`,
+            code: 'invalid_search_query',
+          });
+          return;
+        }
+        let maxResults: number | undefined;
+        const rawMaxResults = req.query['maxResults'];
+        if (rawMaxResults !== undefined) {
+          const parsed =
+            typeof rawMaxResults === 'string' && /^\d+$/.test(rawMaxResults)
+              ? Number.parseInt(rawMaxResults, 10)
+              : Number.NaN;
+          if (
+            !Number.isSafeInteger(parsed) ||
+            parsed < 1 ||
+            parsed > SESSION_SEARCH_MAX_RESULTS_LIMIT
+          ) {
+            res.status(400).json({
+              error: `\`maxResults\` must be an integer between 1 and ${SESSION_SEARCH_MAX_RESULTS_LIMIT}`,
+              code: 'invalid_search_max_results',
+            });
+            return;
+          }
+          maxResults = parsed;
+        }
+        const controller = new AbortController();
+        const onRequestAborted = () => {
+          controller.abort(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onResponseClosed = () => {
+          if (!res.writableEnded) {
+            controller.abort(new DOMException('Response closed', 'AbortError'));
+          }
+        };
+        req.once('aborted', onRequestAborted);
+        res.once('close', onResponseClosed);
+        if (req.aborted || res.destroyed) onRequestAborted();
+        try {
+          const search = () =>
+            runWorkspaceInspectionWithLogPolicy(runtime, () =>
+              searchWorkspaceSessionsForResponse(
+                key,
+                trimmedQuery,
+                { ...(maxResults !== undefined ? { maxResults } : {}) },
+                {
+                  runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  signal: controller.signal,
+                },
+              ),
+            );
+          const result =
+            liveRuntime && deps.conversationRuntimeActivity
+              ? await deps.conversationRuntimeActivity.run(search)
+              : await search();
+          controller.signal.throwIfAborted();
+          if (res.destroyed) return;
+          res.status(200).json({ results: result.results });
+        } catch (err) {
+          if (controller.signal.aborted || res.destroyed) {
+            return;
+          }
+          throw err;
+        } finally {
+          req.off('aborted', onRequestAborted);
+          res.off('close', onResponseClosed);
+        }
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          (err as { code?: unknown }).code === 'daemon_draining'
+        ) {
+          res.status(503).json({
+            error: 'The daemon is draining and no longer accepts work.',
+            code: 'daemon_draining',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: failed to search sessions for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to search sessions',
+          code: 'session_search_failed',
+        });
+      }
+    };
+
+  app.get(
+    '/workspace/:id/sessions/search',
+    searchWorkspaceSessionsHandler('id'),
+  );
+  app.get(
+    '/workspaces/:workspace/sessions/search',
+    searchWorkspaceSessionsHandler('workspace'),
+  );
+
   // Last catalog version successfully exposed per bridge by the live-state
   // route. A newly observed version synchronously invalidates the persisted
   // catalog cache scopes before the version is answered, so a client that
@@ -6871,6 +7083,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const configId = body['configId'];
         const value = body['value'];
+        const persist = body['persist'];
         if (configId !== 'reasoning_effort') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort',
@@ -6883,11 +7096,32 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+          });
+          return;
+        }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
+          },
         );
-        res.status(200).json(response);
+        res.status(200).json({
+          configOptions: response.configOptions,
+          persisted:
+            response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
+        });
       },
     ),
   );

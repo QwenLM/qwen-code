@@ -1,5 +1,15 @@
 # Standalone Daemon Sessions
 
+> **Proposed cross-daemon update (2026-09-02):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) would
+> supersede this document's process-global ownership requirement and related
+> `conversation_runtime_in_use` behavior between updated daemons. A live legacy
+> owner retains that response during migration. Updated daemons may host
+> different sessions concurrently, while the same session remains fenced by
+> its writer lease. Other isolation, persistence, and lifecycle requirements
+> remain in force.
+
 ## Status
 
 This document is the versioned architecture companion to
@@ -118,6 +128,18 @@ The entry-point behavior is fixed:
 | Goals and Git entry points                       | `workspace`              |
 | Current-session **New Chat**                     | Inherit explicit context |
 | Live Voice                                       | `live`                   |
+
+> **Amended 2026-09-02.** The WebShell sidebar's top-level **New Chat** is
+> project navigation rather than a global entry point, so it inherits the
+> current explicit context: a workspace chat stays in its workspace and a cold
+> draft lands on the primary workspace. Standalone creation is an option of the
+> composer's workspace picker ("No workspace (standalone)"), offered while the
+> daemon advertises the capability, no workspace is locked and no projectless
+> session is attached; the picker stays enabled for projectless drafts so the
+> target can be changed before the first prompt. The workspace navigation tree
+> also stays rendered inside a standalone chat — the hiding rule below applies
+> to the chat surface and to project-only controls, and dropping the tree left
+> a standalone chat with no way back to a workspace.
 
 Standalone sessions appear in a top-level **Recents** group separate from Live
 and project groups. Their chat surface hides workspace selection, Git status,
@@ -1327,7 +1349,11 @@ the daemon contract.
 
 - Global/Home New Chat creates standalone on a capable daemon; project,
   locked-project, Goals, and Git New Chat remain workspace-bound;
-  current-session New Chat inherits explicit context.
+  current-session New Chat inherits explicit context. Amended 2026-09-02: the
+  WebShell sidebar's top-level New Chat inherits as well, leaving the host API
+  and missing-session recovery as the remaining global entry points, and
+  standalone creation moved to the composer workspace picker's no-workspace
+  option (draft state only).
 - An old daemon without capability preserves legacy primary behavior, and an old
   client against a new daemon retains generic primary behavior.
 - Capable-daemon errors, owner contention, and compromised roots never silently

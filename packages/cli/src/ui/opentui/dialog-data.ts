@@ -650,6 +650,49 @@ export function deletePermissionRule(
   }
 }
 
+/** Parity of PermissionsDialog's add-directory commit (path validated upstream). */
+export function addWorkspaceDirectory(
+  config: Config | null | undefined,
+  settings: LoadedSettings,
+  resolvedDir: string,
+): void {
+  config?.getWorkspaceContext()?.addDirectory(resolvedDir);
+  const key = 'context.includeDirectories';
+  const current =
+    (
+      (settings.merged as Record<string, unknown>)['context'] as
+        | Record<string, string[]>
+        | undefined
+    )?.['includeDirectories'] ?? [];
+  if (!current.includes(resolvedDir)) {
+    settings.setValue(SettingScope.Workspace, key, [...current, resolvedDir]);
+  }
+}
+
+/** Parity of PermissionsDialog's remove-directory commit. */
+export function removeWorkspaceDirectory(
+  config: Config | null | undefined,
+  settings: LoadedSettings,
+  dir: string,
+): void {
+  config?.getWorkspaceContext()?.removeDirectory(dir);
+  for (const scope of [SettingScope.User, SettingScope.Workspace] as const) {
+    const scopeDirs = (
+      (settings.forScope(scope).settings as Record<string, unknown>)[
+        'context'
+      ] as Record<string, string[]> | undefined
+    )?.['includeDirectories'];
+    if (scopeDirs?.includes(dir)) {
+      settings.setValue(
+        scope,
+        'context.includeDirectories',
+        scopeDirs.filter((entry) => entry !== dir),
+      );
+      break;
+    }
+  }
+}
+
 /** MCP server inventory parity of MCPManagementDialog's fetchServerData. */
 export function buildMcpServers(
   config: Config | null | undefined,
