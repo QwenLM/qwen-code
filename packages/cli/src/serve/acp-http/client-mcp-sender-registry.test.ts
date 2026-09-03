@@ -18,6 +18,17 @@ const msg = (id: number): JSONRPCMessage => ({
   method: 'ping',
 });
 
+function setupBridge(
+  addResult: Awaited<ReturnType<ClientMcpBridge['addRuntimeMcpServer']>>,
+) {
+  return {
+    addRuntimeMcpServer: vi.fn(async () => addResult),
+    removeRuntimeMcpServer: vi.fn(async () => ({})),
+    addSessionRuntimeMcpServer: vi.fn(async () => addResult),
+    removeSessionRuntimeMcpServer: vi.fn(async () => ({})),
+  } satisfies ClientMcpBridge;
+}
+
 describe('ClientMcpSenderRegistry', () => {
   it('lookup routes to the registered sender; undefined for unknown server', async () => {
     const reg = new ClientMcpSenderRegistry();
@@ -120,15 +131,6 @@ describe('ClientMcpSenderRegistry', () => {
 });
 
 describe('createClientMcpServerProvider', () => {
-  function setupBridge(
-    addResult: Awaited<ReturnType<ClientMcpBridge['addRuntimeMcpServer']>>,
-  ) {
-    return {
-      addRuntimeMcpServer: vi.fn(async () => addResult),
-      removeRuntimeMcpServer: vi.fn(async () => ({})),
-    } satisfies ClientMcpBridge;
-  }
-
   it('rolls back the sender when bridge add is skipped', async () => {
     const registry = new ClientMcpSenderRegistry();
     const bridge = setupBridge({ skipped: true, reason: 'disabled' });
@@ -168,6 +170,10 @@ describe('createClientMcpServerProvider', () => {
         throw new Error('boom');
       }),
       removeRuntimeMcpServer: vi.fn(async () => ({})),
+      addSessionRuntimeMcpServer: vi.fn(async () => {
+        throw new Error('boom');
+      }),
+      removeSessionRuntimeMcpServer: vi.fn(async () => ({})),
     } satisfies ClientMcpBridge;
     const provider = createClientMcpServerProvider(registry, bridge, 'connA');
 
@@ -196,5 +202,151 @@ describe('createClientMcpServerProvider', () => {
 
     expect(registry.serverNames()).toEqual(['srv']);
     expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('createClientMcpServerProvider (session scope)', () => {
+  const SESSION = 'session-1';
+
+  it('adds to the one session only, never to the workspace, and eager-loads tools', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 2 });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    const result = await provider.registerClientMcpServer(
+      'local-files',
+      vi.fn(async () => msg(1)),
+      { sessionId: SESSION },
+    );
+
+    expect(result).toEqual({ toolCount: 2 });
+    expect(bridge.addRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(bridge.addSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      SESSION,
+      'local-files',
+      // alwaysLoadTools: without it the tools sit behind tool_search and the
+      // agent has to guess their names before it can use the bridge at all.
+      expect.objectContaining({ type: 'sdk', alwaysLoadTools: true }),
+      'connA',
+    );
+    // The workspace-wide name list stays empty — nothing leaked to siblings.
+    expect(registry.serverNames()).toEqual([]);
+  });
+
+  it('routes the bound session and hard-rejects every other caller', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+    const sender = vi.fn(async () => msg(1));
+    await provider.registerClientMcpServer('local-files', sender, {
+      sessionId: SESSION,
+    });
+
+    const bound = registry.lookup('local-files');
+    expect(bound).toBeTypeOf('function');
+
+    await bound!(msg(7), { sessionId: SESSION });
+    expect(sender).toHaveBeenCalledWith('local-files', msg(7));
+
+    // A sibling session — including one created after the registration — must
+    // not reach the client's machine through this server.
+    await expect(bound!(msg(8), { sessionId: 'session-2' })).rejects.toThrow(
+      /No session-scoped MCP sender/,
+    );
+    // Nor may a caller with no session context at all.
+    await expect(bound!(msg(9))).rejects.toThrow(/requires a session context/);
+    expect(sender).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes the session server on scoped unregister', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+    await provider.registerClientMcpServer(
+      'local-files',
+      vi.fn(async () => msg(1)),
+      {
+        sessionId: SESSION,
+      },
+    );
+
+    await provider.unregisterClientMcpServer('local-files', {
+      sessionId: SESSION,
+    });
+
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      SESSION,
+      'local-files',
+      'connA',
+    );
+    expect(bridge.removeRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(registry.lookup('local-files')).toBeUndefined();
+  });
+
+  it('leaves a session route a peer re-registered untouched', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    registry.setSession(
+      'local-files',
+      SESSION,
+      vi.fn(async () => msg(2)),
+      'connB',
+    );
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await provider.unregisterClientMcpServer('local-files', {
+      sessionId: SESSION,
+    });
+
+    // connA never owned it: tearing the child server down by name would kill
+    // connB's live tools.
+    expect(bridge.removeSessionRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(registry.lookup('local-files')).toBeTypeOf('function');
+  });
+
+  it('rolls the session sender back when the add is skipped', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ skipped: true, reason: 'disabled' });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'local-files',
+        vi.fn(async () => msg(1)),
+        {
+          sessionId: SESSION,
+        },
+      ),
+    ).rejects.toThrow(/runtime MCP add skipped: disabled/);
+
+    expect(registry.lookup('local-files')).toBeUndefined();
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      SESSION,
+      'local-files',
+      'connA',
+    );
+  });
+
+  it('rolls the session sender back when settings already define the name', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1, shadowedSettings: true });
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    await expect(
+      provider.registerClientMcpServer(
+        'local-files',
+        vi.fn(async () => msg(1)),
+        {
+          sessionId: SESSION,
+        },
+      ),
+    ).rejects.toThrow(/conflicts with a configured MCP server/);
+
+    expect(registry.lookup('local-files')).toBeUndefined();
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      SESSION,
+      'local-files',
+      'connA',
+    );
   });
 });

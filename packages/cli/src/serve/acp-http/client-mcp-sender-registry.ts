@@ -212,6 +212,110 @@ export interface ClientMcpBridge {
     name: string,
     originatorClientId: string,
   ): Promise<unknown>;
+  /**
+   * Session-scoped twins of the two above: add/remove a runtime MCP server in
+   * ONE live session, without touching workspace bootstrap state, sibling
+   * sessions, or sessions created later.
+   */
+  addSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId?: string,
+  ): Promise<
+    | { toolCount: number; [k: string]: unknown }
+    | { skipped: true; reason: string; [k: string]: unknown }
+  >;
+  removeSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    originatorClientId?: string,
+  ): Promise<unknown>;
+}
+
+/**
+ * Register a client-hosted server into ONE live session. Mirrors the channel
+ * worker's production sequence (`serve/channel-worker-group.ts`): record the
+ * session sender, add the session-scoped runtime server, then confirm this
+ * connection still owns the route.
+ *
+ * Session scope is what keeps a browser-connected filesystem (or any other
+ * client-hosted capability) out of sibling sessions: the workspace-scoped add
+ * fans out to every active session AND is copied onto every session created
+ * later (`acp-integration/acpAgent.ts`), so a channel-driven or background
+ * session would otherwise inherit tools that read the connecting user's
+ * machine. `ClientMcpSenderRegistry.lookup` additionally hard-rejects a call
+ * whose `context.sessionId` has no sender for a session-scoped name.
+ */
+async function registerSessionScopedClientMcpServer(
+  registry: ClientMcpSenderRegistry,
+  bridge: ClientMcpBridge,
+  originatorClientId: string,
+  serverName: string,
+  sendSdkMcpMessage: WsClientMcpSender,
+  sessionId: string,
+): Promise<{ toolCount: number }> {
+  registry.setSession(
+    serverName,
+    sessionId,
+    (payload) =>
+      sendSdkMcpMessage(
+        serverName,
+        payload as JSONRPCMessage,
+      ) as Promise<unknown>,
+    originatorClientId,
+  );
+  try {
+    const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
+      type: 'sdk',
+      [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+      // The user connected this server on purpose, for this session. Left
+      // deferred, its tools sit behind tool_search and the agent has to guess
+      // their names before it can use the bridge at all. The daemon's
+      // chrome-devtools registration sets the same flag for the same reason.
+      alwaysLoadTools: true,
+    };
+    const result = await bridge.addSessionRuntimeMcpServer(
+      sessionId,
+      serverName,
+      runtimeConfig,
+      originatorClientId,
+    );
+    if ((result as { skipped?: boolean }).skipped) {
+      throw new Error(
+        `runtime MCP add skipped: ${(result as { reason?: string }).reason ?? 'unknown'}`,
+      );
+    }
+    // Refuse to let a browser-hosted client shadow a server the user configured
+    // in settings: the runtime overlay would otherwise reroute that server's
+    // discovery and tool calls back through this WS client.
+    if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+      throw new Error(
+        `client MCP server '${serverName}' conflicts with a configured MCP server`,
+      );
+    }
+    // A peer may have re-registered the same (server, session) while we awaited.
+    if (!registry.ownsSession(serverName, sessionId, originatorClientId)) {
+      throw new Error(
+        `client MCP registration for '${serverName}' was superseded`,
+      );
+    }
+    return { toolCount: (result as { toolCount: number }).toolCount };
+  } catch (err) {
+    // Owner-scoped on purpose: only tear the child-side server down while THIS
+    // connection still owns the sender route. After a supersession the peer owns
+    // the live tools, and removal is keyed by name — it would kill them.
+    if (registry.deleteSession(serverName, sessionId, originatorClientId)) {
+      await bridge
+        .removeSessionRuntimeMcpServer(
+          sessionId,
+          serverName,
+          originatorClientId,
+        )
+        .catch(() => {});
+    }
+    throw err;
+  }
 }
 
 /**
@@ -231,7 +335,17 @@ export function createClientMcpServerProvider(
   originatorClientId: string,
 ): ClientMcpServerProvider {
   return {
-    async registerClientMcpServer(serverName, sendSdkMcpMessage) {
+    async registerClientMcpServer(serverName, sendSdkMcpMessage, scope) {
+      if (scope?.sessionId !== undefined) {
+        return registerSessionScopedClientMcpServer(
+          registry,
+          bridge,
+          originatorClientId,
+          serverName,
+          sendSdkMcpMessage,
+          scope.sessionId,
+        );
+      }
       // Record the sender FIRST so the child's discovery handshake — which the
       // bridge add triggers synchronously — can route `client_mcp/message`
       // frames back to this WS. Owned by this connection's client id so a peer
@@ -276,7 +390,25 @@ export function createClientMcpServerProvider(
         throw err;
       }
     },
-    async unregisterClientMcpServer(serverName) {
+    async unregisterClientMcpServer(serverName, scope) {
+      const sessionId = scope?.sessionId;
+      if (sessionId !== undefined) {
+        // Owner-scoped for the same reason as the workspace path below: a peer
+        // that re-registered this (server, session) owns the live tools now.
+        if (
+          !registry.deleteSession(serverName, sessionId, originatorClientId)
+        ) {
+          return;
+        }
+        await bridge
+          .removeSessionRuntimeMcpServer(
+            sessionId,
+            serverName,
+            originatorClientId,
+          )
+          .catch(() => {});
+        return;
+      }
       // Only tear down if THIS connection still owns the route. A later
       // connection may have re-registered the same name (last-writer-wins), and
       // `Config.removeRuntimeMcpServer` is NOT owner-scoped — removing the
