@@ -1996,6 +1996,41 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs a saved workflow definition with encoded ids', async () => {
+      const status = {
+        v: 1 as const,
+        sessionId: 'with/slash',
+        name: 'deep review',
+        workflow: {
+          v: 1 as const,
+          sessionId: 'with/slash',
+          name: 'deep review',
+          source: 'project' as const,
+          scriptPath: '/work/a/.qwen/workflows/deep review.js',
+          script: 'export const meta = { name: "deep review" }',
+          meta: null,
+          metaError: 'missing description',
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/session/with%2Fslash/saved-workflows/deep%20review')
+          ? jsonResponse(200, status)
+          : jsonResponse(500, { error: `unexpected ${req.url}` }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionSavedWorkflow('with/slash', 'deep review', 'client-1'),
+      ).resolves.toEqual(status);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/saved-workflows/deep%20review',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('GETs session status routes with encoded session ids', async () => {
       const context: DaemonSessionContextStatus = {
         v: 1,
