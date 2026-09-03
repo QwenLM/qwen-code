@@ -1942,12 +1942,26 @@ export class BridgeClient implements Client {
       );
     }
     const model = params['model'];
+    const groupId = params['groupId'];
+    if (
+      groupId !== undefined &&
+      (!isScheduledTaskRunSource(source) ||
+        typeof groupId !== 'string' ||
+        groupId.length === 0 ||
+        groupId.length > 128)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`groupId` must be a non-empty string of at most 128 characters and is only supported for scheduled-task runs',
+      );
+    }
     const result = await this.onCreateSubSession({
       prompt,
       completion,
       ...(typeof model === 'string' && model.length > 0 && model.length <= 128
         ? { model }
         : {}),
+      ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...source,
       callerSessionId,

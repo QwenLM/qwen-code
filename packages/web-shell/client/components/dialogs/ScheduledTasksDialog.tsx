@@ -34,12 +34,15 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
   DaemonSessionSummary,
+  DaemonSessionGroup,
+  DaemonSessionGroupPresetColor,
 } from '@qwen-code/sdk/daemon';
 import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
 import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
@@ -146,6 +149,7 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 const MAX_PROMPT_LENGTH = 100_000;
+const CREATE_GROUP_VALUE = '__create_group__';
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_.-]/gu;
 const PROMPT_REFERENCE_TOKEN =
   /(^|[\s])(@(?:ext|mcp):(?:\\.[^\s\\]*|[^\s\\])+|\/(?:\\.[^\s\\/]*|[^\s\\/])+)(?=$|\s)/gu;
@@ -612,6 +616,31 @@ export function ScheduledTasksDialog({
   const [runDestination, setRunDestination] = useState<
     'per_run' | 'dedicated' | 'current'
   >('per_run');
+  const [modelServiceId, setModelServiceId] = useState('');
+  const [groupChoice, setGroupChoice] = useState('');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupColor, setNewGroupColor] =
+    useState<DaemonSessionGroupPresetColor>('blue');
+  const [sessionGroups, setSessionGroups] = useState<DaemonSessionGroup[]>([]);
+  const [groupColors, setGroupColors] = useState<
+    DaemonSessionGroupPresetColor[]
+  >([]);
+  const [modelOptions, setModelOptions] = useState<
+    Array<{ id: string; label: string }>
+  >([]);
+  const [routingOptionsLoading, setRoutingOptionsLoading] = useState(false);
+  const [routingOptionsError, setRoutingOptionsError] = useState<string | null>(
+    null,
+  );
+  const formWorkspaceCwd = useMemo(() => {
+    if (lockedWorkspace) return lockedWorkspace.cwd;
+    if (formWorkspaceId) {
+      return operableWorkspaces.find(
+        (workspace) => workspace.id === formWorkspaceId,
+      )?.cwd;
+    }
+    return operableWorkspaces.find((workspace) => workspace.primary)?.cwd;
+  }, [formWorkspaceId, lockedWorkspace, operableWorkspaces]);
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   useEffect(() => {
     if (!currentSessionSchedulingAvailable) {
@@ -653,12 +682,63 @@ export function ScheduledTasksDialog({
   // stale data. Only the latest reload is allowed to apply its result.
   const reloadSeqRef = useRef(0);
   const referenceLoadSeqRef = useRef(0);
+  const routingOptionsLoadSeqRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!showForm || runDestination !== 'per_run') return;
+    const seq = ++routingOptionsLoadSeqRef.current;
+    setRoutingOptionsLoading(true);
+    setRoutingOptionsError(null);
+    setSessionGroups([]);
+    setGroupColors([]);
+    setModelOptions([]);
+    void Promise.all([
+      actions.listSessionGroups(formWorkspaceCwd),
+      actions.loadProviders(formWorkspaceCwd),
+    ])
+      .then(
+        ([catalog, providers]) => {
+          if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
+            return;
+          setSessionGroups(catalog.groups);
+          setGroupColors(catalog.colorOptions);
+          setNewGroupColor(catalog.colorOptions[0] ?? 'blue');
+          const seen = new Set<string>();
+          setModelOptions(
+            providers.providers.flatMap((provider) =>
+              provider.models.flatMap((model) => {
+                if (seen.has(model.modelId)) return [];
+                seen.add(model.modelId);
+                return [
+                  {
+                    id: model.modelId,
+                    label: getModelDisplayName(model.name || model.baseModelId),
+                  },
+                ];
+              }),
+            ),
+          );
+        },
+        (error) => {
+          if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
+            return;
+          setRoutingOptionsError(
+            error instanceof Error ? error.message : String(error),
+          );
+        },
+      )
+      .finally(() => {
+        if (mountedRef.current && seq === routingOptionsLoadSeqRef.current) {
+          setRoutingOptionsLoading(false);
+        }
+      });
+  }, [actions, formWorkspaceCwd, runDestination, showForm]);
 
   const reload = useCallback(async () => {
     const seq = ++reloadSeqRef.current;
@@ -963,6 +1043,9 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setRunDestination('per_run');
+    setModelServiceId('');
+    setGroupChoice('');
+    setNewGroupName('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(false);
@@ -979,6 +1062,9 @@ export function ScheduledTasksDialog({
     setName('');
     setPrompt('');
     setRunDestination('per_run');
+    setModelServiceId('');
+    setGroupChoice('');
+    setNewGroupName('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     resetReferenceState();
@@ -996,6 +1082,9 @@ export function ScheduledTasksDialog({
       setRunDestination(
         task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
       );
+      setModelServiceId(task.modelServiceId ?? '');
+      setGroupChoice(task.groupId ?? '');
+      setNewGroupName('');
       // Reverse the cron back onto the pickers; an expression the pickers can't
       // represent lands in the `custom` field, never silently rewritten.
       setBuilder(parseCronToBuilder(task.cron));
@@ -1033,9 +1122,30 @@ export function ScheduledTasksDialog({
         return;
       }
     }
+    if (
+      runDestination === 'per_run' &&
+      groupChoice === CREATE_GROUP_VALUE &&
+      newGroupName.trim().length === 0
+    ) {
+      setFormError(t('scheduledTasks.group.nameRequired'));
+      return;
+    }
     setSubmitting(true);
     setFormError(null);
     try {
+      let resolvedGroupId =
+        runDestination === 'per_run' && groupChoice !== CREATE_GROUP_VALUE
+          ? groupChoice
+          : '';
+      if (runDestination === 'per_run' && groupChoice === CREATE_GROUP_VALUE) {
+        const group = await actions.createSessionGroup(
+          { name: newGroupName.trim(), color: newGroupColor },
+          formWorkspaceCwd,
+        );
+        resolvedGroupId = group.id;
+        setSessionGroups((current) => [...current, group]);
+        setGroupChoice(group.id);
+      }
       if (editingId) {
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
@@ -1048,6 +1158,10 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             sessionMode:
               runDestination === 'per_run' ? 'per_run' : 'persistent',
+            modelServiceId:
+              runDestination === 'per_run' ? modelServiceId || null : null,
+            groupId:
+              runDestination === 'per_run' ? resolvedGroupId || null : null,
           },
           formWorkspaceId,
         );
@@ -1061,6 +1175,12 @@ export function ScheduledTasksDialog({
             enabled: true,
             sessionMode:
               runDestination === 'per_run' ? 'per_run' : 'persistent',
+            ...(runDestination === 'per_run' && modelServiceId
+              ? { modelServiceId }
+              : {}),
+            ...(runDestination === 'per_run' && resolvedGroupId
+              ? { groupId: resolvedGroupId }
+              : {}),
             ...(runDestination === 'current' && currentSession?.sessionId
               ? { sessionId: currentSession.sessionId }
               : {}),
@@ -1083,8 +1203,13 @@ export function ScheduledTasksDialog({
     currentSession,
     currentSessionDisabledReason,
     editingId,
+    formWorkspaceCwd,
     formWorkspaceId,
+    groupChoice,
+    modelServiceId,
     name,
+    newGroupColor,
+    newGroupName,
     prompt,
     reload,
     resetForm,
@@ -1322,9 +1447,12 @@ export function ScheduledTasksDialog({
                   // so the picker is fixed while editing and when only one
                   // workspace is operable (nothing to choose).
                   disabled={!!editingId || operableWorkspaces.length <= 1}
-                  onChange={(e) =>
-                    setFormWorkspaceId(e.target.value || undefined)
-                  }
+                  onChange={(e) => {
+                    setFormWorkspaceId(e.target.value || undefined);
+                    setModelServiceId('');
+                    setGroupChoice('');
+                    setNewGroupName('');
+                  }}
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
@@ -1439,6 +1567,122 @@ export function ScheduledTasksDialog({
                     )}
               </span>
             </label>
+
+            {runDestination === 'per_run' && (
+              <div className={styles.routingFields}>
+                <label className={styles.field}>
+                  <span className={styles.fieldLabel}>
+                    {t('scheduledTasks.model')}
+                  </span>
+                  <select
+                    className={styles.select}
+                    value={modelServiceId}
+                    disabled={routingOptionsLoading}
+                    onChange={(event) => setModelServiceId(event.target.value)}
+                  >
+                    <option value="">
+                      {t('scheduledTasks.model.workspaceDefault')}
+                    </option>
+                    {modelServiceId &&
+                      !modelOptions.some(
+                        (option) => option.id === modelServiceId,
+                      ) && (
+                        <option value={modelServiceId}>{modelServiceId}</option>
+                      )}
+                    {modelOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.model.hint')}
+                  </span>
+                </label>
+
+                <label className={styles.field}>
+                  <span className={styles.fieldLabel}>
+                    {t('scheduledTasks.group')}
+                  </span>
+                  <select
+                    className={styles.select}
+                    value={groupChoice}
+                    disabled={routingOptionsLoading}
+                    onChange={(event) => setGroupChoice(event.target.value)}
+                  >
+                    <option value="">{t('scheduledTasks.group.none')}</option>
+                    {groupChoice &&
+                      groupChoice !== CREATE_GROUP_VALUE &&
+                      !sessionGroups.some(
+                        (group) => group.id === groupChoice,
+                      ) && <option value={groupChoice}>{groupChoice}</option>}
+                    {sessionGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                    <option value={CREATE_GROUP_VALUE}>
+                      {t('scheduledTasks.group.create')}
+                    </option>
+                  </select>
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.group.hint')}
+                  </span>
+                </label>
+
+                {groupChoice === CREATE_GROUP_VALUE && (
+                  <div className={styles.newGroupFields}>
+                    <label className={styles.field}>
+                      <span className={styles.fieldLabel}>
+                        {t('scheduledTasks.group.name')}
+                      </span>
+                      <input
+                        className={styles.input}
+                        value={newGroupName}
+                        maxLength={64}
+                        onChange={(event) =>
+                          setNewGroupName(event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className={styles.field}>
+                      <span className={styles.fieldLabel}>
+                        {t('scheduledTasks.group.color')}
+                      </span>
+                      <select
+                        className={styles.select}
+                        value={newGroupColor}
+                        onChange={(event) =>
+                          setNewGroupColor(
+                            event.target.value as DaemonSessionGroupPresetColor,
+                          )
+                        }
+                      >
+                        {(groupColors.length > 0
+                          ? groupColors
+                          : (['blue'] as DaemonSessionGroupPresetColor[])
+                        ).map((color) => (
+                          <option key={color} value={color}>
+                            {t(`sidebar.groupColor.${color}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+
+                {routingOptionsLoading && (
+                  <div className={styles.fieldHint}>
+                    {t('scheduledTasks.routing.loading')}
+                  </div>
+                )}
+                {routingOptionsError && (
+                  <div className={styles.inlineError}>
+                    {routingOptionsError}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>

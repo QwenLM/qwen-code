@@ -1338,7 +1338,12 @@ describe('CronScheduler', () => {
 
     it('attributes a per-run fire to its fresh session after dispatch', async () => {
       await writeCronTasks(tmpDir, [
-        { ...diskTask('fresh1'), sessionMode: 'per_run' },
+        {
+          ...diskTask('fresh1'),
+          sessionMode: 'per_run',
+          modelServiceId: 'qwen-max(openai)',
+          groupId: 'group-1',
+        },
       ]);
       await scheduler.enableDurable('session-1');
       const fired: CronJob[] = [];
@@ -1352,6 +1357,8 @@ describe('CronScheduler', () => {
         ]);
       });
       expect(fired[0]?.sessionMode).toBe('per_run');
+      expect(fired[0]?.modelServiceId).toBe('qwen-max(openai)');
+      expect(fired[0]?.groupId).toBe('group-1');
 
       await scheduler.annotateRunSession('fresh1', minute, {
         sessionId: 'child-1',

@@ -1499,6 +1499,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           prompt: string;
           completion: 'sent' | 'first-turn';
           model?: string;
+          groupId?: string;
           name?: string;
           sourceType?: string;
           sourceId?: string;
@@ -1544,6 +1545,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       name: 'digest',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
       callerSessionId: 'caller-1',
     });
 
@@ -1554,6 +1556,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       name: 'digest',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
       callerSessionId: 'caller-1',
     });
     expect(res).toEqual({

@@ -40,6 +40,7 @@ import {
   createDebugLogger,
   escapeXml,
   SessionService,
+  Storage,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -58,6 +59,7 @@ import {
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import { createSessionOrganizationService } from './session-organization-helpers.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -140,6 +142,7 @@ export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   getStandaloneSessionService?: () => StandaloneSubSessionService | undefined;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
   notifySentCompletion?: boolean;
@@ -726,6 +729,7 @@ export function createSubSessionLauncher(
     getBridge,
     getStandaloneSessionService,
     boundWorkspace,
+    runtimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
   } = opts;
@@ -915,6 +919,28 @@ export function createSubSessionLauncher(
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
+      }
+
+      if (info.groupId) {
+        try {
+          const assign = () =>
+            createSessionOrganizationService(
+              boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              groupId: info.groupId,
+              color: null,
+            });
+          if (runtimeBaseDir) {
+            await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, assign);
+          } else {
+            await assign();
+          }
+          bridge.markSessionCatalogChanged();
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: scheduled-task session ${sessionId} could not be assigned to group ${info.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
 
       if (!standalone) {

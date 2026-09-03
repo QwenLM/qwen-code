@@ -164,3 +164,46 @@ describe('scheduled-tasks workspace actions', () => {
     });
   });
 });
+
+describe('scheduled-task routing workspace actions', () => {
+  it('uses an explicit workspace even when no current workspace is bound', async () => {
+    const qualified = {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const client = {
+      workspaceByCwd: vi.fn().mockReturnValue(qualified),
+      listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
+      workspaceProviders: vi.fn(),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/secondary');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/secondary',
+    );
+    await actions.loadProviders('/repo/secondary');
+
+    expect(client.workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/repo/secondary');
+    expect(qualified.listSessionGroups).toHaveBeenCalledOnce();
+    expect(qualified.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Automations',
+      color: 'blue',
+    });
+    expect(qualified.workspaceProviders).toHaveBeenCalledOnce();
+    expect(client.listSessionGroups).not.toHaveBeenCalled();
+    expect(client.createSessionGroup).not.toHaveBeenCalled();
+    expect(client.workspaceProviders).not.toHaveBeenCalled();
+  });
+});

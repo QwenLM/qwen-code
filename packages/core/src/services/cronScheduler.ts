@@ -97,6 +97,10 @@ export interface CronJob {
   /** Whether a daemon-backed consumer should execute this fire in the bound
    * task session or dispatch it into a fresh child session. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for a fresh per-run session. */
+  modelServiceId?: string;
+  /** Named group assigned to a fresh per-run session. */
+  groupId?: string;
   /** Human-readable task label used to name a fresh per-run session. */
   name?: string;
   delivery?: CronTaskDelivery;
@@ -1697,6 +1701,8 @@ function durableTaskToJob(
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
     ...(task.sessionMode ? { sessionMode: task.sessionMode } : {}),
+    ...(task.modelServiceId ? { modelServiceId: task.modelServiceId } : {}),
+    ...(task.groupId ? { groupId: task.groupId } : {}),
     ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
@@ -1712,6 +1718,12 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     lastFiredAt: job.lastFiredAt ?? null,
     ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
     ...(job.sessionMode ? { sessionMode: job.sessionMode } : {}),
+    ...(job.sessionMode === 'per_run' && job.modelServiceId
+      ? { modelServiceId: job.modelServiceId }
+      : {}),
+    ...(job.sessionMode === 'per_run' && job.groupId
+      ? { groupId: job.groupId }
+      : {}),
     ...(job.name ? { name: job.name } : {}),
     ...(job.delivery ? { delivery: job.delivery } : {}),
   };

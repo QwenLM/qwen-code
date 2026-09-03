@@ -115,6 +115,11 @@ export interface DurableCronTask {
   /** Where executions run. Absent defaults to the historical behavior:
    * every fire reuses the task's bound session. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. Absent uses the
+   * workspace default. */
+  modelServiceId?: string;
+  /** Named session group assigned to each fresh per-run session. */
+  groupId?: string;
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -527,6 +532,13 @@ function isValidTask(value: unknown): value is DurableCronTask {
       typeof obj['sessionOwnedByTask'] === 'boolean') &&
     (obj['sessionMode'] === undefined ||
       obj['sessionMode'] === 'persistent' ||
+      obj['sessionMode'] === 'per_run') &&
+    (obj['modelServiceId'] === undefined ||
+      (typeof obj['modelServiceId'] === 'string' &&
+        obj['modelServiceId'].length > 0)) &&
+    (obj['groupId'] === undefined ||
+      (typeof obj['groupId'] === 'string' && obj['groupId'].length > 0)) &&
+    ((obj['modelServiceId'] === undefined && obj['groupId'] === undefined) ||
       obj['sessionMode'] === 'per_run') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))

@@ -10,9 +10,15 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
-const { stderrLines } = vi.hoisted(() => ({ stderrLines: [] as string[] }));
+const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
+  stderrLines: [] as string[],
+  updateSessionOrganization: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderrLines.push(line),
+}));
+vi.mock('./session-organization-helpers.js', () => ({
+  createSessionOrganizationService: () => ({ updateSessionOrganization }),
 }));
 
 const {
@@ -323,6 +329,7 @@ describe('sub-session launcher', () => {
 
   beforeEach(() => {
     stderrLines.length = 0;
+    updateSessionOrganization.mockClear();
   });
 
   it('sent: spawns a thread-scoped session, dispatches, returns the id (background subscribe holds slot)', async () => {
@@ -395,6 +402,29 @@ describe('sub-session launcher', () => {
     });
     expect(fake.names[0]?.displayName).toBe('Hourly review');
     expect(fake.names[0]?.titleSource).toBe('auto');
+  });
+
+  it('assigns a scheduled-task run session to its selected group', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(updateSessionOrganization).toHaveBeenCalledWith('sub-1', {
+      groupId: 'group-1',
+      color: null,
+    });
+    expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalled();
   });
 
   it('rejects a scheduled-task run when prompt admission fails', async () => {

@@ -77,6 +77,7 @@ import {
   scheduledTaskRunSourceId,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -86,6 +87,7 @@ const MAX_SCHEDULED_TASKS = MAX_JOBS;
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
+const MAX_ROUTING_ID_LENGTH = 128;
 
 /**
  * The slice of the session bridge this route needs. Narrowed to a structural
@@ -94,6 +96,7 @@ const MAX_CRON_LENGTH = 200;
 export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
+    modelServiceId?: string;
     sessionScope?: 'single' | 'thread';
     parentSessionId?: string;
     sourceType?: string;
@@ -190,6 +193,8 @@ export interface ExistingSessionScheduledTaskCreateInput {
   recurring: boolean;
   enabled?: boolean;
   sessionMode?: 'persistent' | 'per_run';
+  modelServiceId?: string;
+  groupId?: string;
   name?: string;
   delivery?: CronTaskDelivery;
 }
@@ -399,6 +404,12 @@ export async function createScheduledTaskWithExistingSession(
     sessionId: input.sessionId,
     sessionOwnedByTask: false,
     sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
+    ...(input.sessionMode === 'per_run' && input.modelServiceId !== undefined
+      ? { modelServiceId: input.modelServiceId }
+      : {}),
+    ...(input.sessionMode === 'per_run' && input.groupId !== undefined
+      ? { groupId: input.groupId }
+      : {}),
     ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
   };
@@ -541,6 +552,7 @@ async function dispatchTaskToFreshSession(
   const child = await runWithScheduledTaskTarget(target, () =>
     bridge.spawnOrAttach({
       workspaceCwd: target.workspaceCwd,
+      ...(task.modelServiceId ? { modelServiceId: task.modelServiceId } : {}),
       sessionScope: 'thread',
       parentSessionId: task.sessionId,
       sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
@@ -557,6 +569,23 @@ async function dispatchTaskToFreshSession(
     });
   } catch {
     // The prompt can still run with the generated session id as its label.
+  }
+  if (task.groupId) {
+    try {
+      await runWithScheduledTaskTarget(target, () =>
+        createSessionOrganizationService(
+          target.workspaceCwd,
+        ).updateSessionOrganization(child.sessionId, {
+          groupId: task.groupId,
+          color: null,
+        }),
+      );
+      bridge.markSessionCatalogChanged?.();
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: scheduled-task session ${child.sessionId} could not be assigned to group ${task.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
   try {
     let markPromptAdmitted!: () => void;
@@ -704,6 +733,8 @@ interface ScheduledTaskView {
   nextRunAt: number | null;
   sessionId: string | null;
   sessionMode: 'persistent' | 'per_run';
+  modelServiceId: string | null;
+  groupId: string | null;
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
 }
@@ -746,6 +777,8 @@ function toView(task: DurableCronTask): ScheduledTaskView {
         ? task.sessionId
         : null,
     sessionMode: task.sessionMode === 'per_run' ? 'per_run' : 'persistent',
+    modelServiceId: task.modelServiceId ?? null,
+    groupId: task.groupId ?? null,
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -942,6 +975,55 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      const modelServiceId = body['modelServiceId'];
+      if (
+        modelServiceId !== undefined &&
+        (typeof modelServiceId !== 'string' ||
+          modelServiceId.length === 0 ||
+          modelServiceId.length > MAX_ROUTING_ID_LENGTH)
+      ) {
+        res.status(400).json({
+          error: `\`modelServiceId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+          code: 'invalid_model_service_id',
+        });
+        return;
+      }
+      const groupId = body['groupId'];
+      if (
+        groupId !== undefined &&
+        (typeof groupId !== 'string' ||
+          groupId.length === 0 ||
+          groupId.length > MAX_ROUTING_ID_LENGTH)
+      ) {
+        res.status(400).json({
+          error: `\`groupId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+          code: 'invalid_group_id',
+        });
+        return;
+      }
+      if (
+        sessionMode !== 'per_run' &&
+        (modelServiceId !== undefined || groupId !== undefined)
+      ) {
+        res.status(400).json({
+          error:
+            '`modelServiceId` and `groupId` are only supported when `sessionMode` is "per_run"',
+          code: 'session_routing_requires_per_run',
+        });
+        return;
+      }
+      if (typeof groupId === 'string') {
+        const groups = await runWithScheduledTaskTarget(target, () =>
+          createSessionOrganizationService(workspaceCwd).listGroups(),
+        );
+        if (!groups.groups.some((group) => group.id === groupId)) {
+          res.status(400).json({
+            error: `Group not found: ${groupId}`,
+            code: 'group_not_found',
+          });
+          return;
+        }
+      }
       const parsedSessionId = parseCallerSuppliedSessionId(body['sessionId']);
       if (parsedSessionId.kind === 'invalid') {
         res.status(400).json({
@@ -1000,6 +1082,8 @@ function registerScheduledTaskCrudRoutes(
               recurring,
               enabled,
               sessionMode,
+              ...(typeof modelServiceId === 'string' ? { modelServiceId } : {}),
+              ...(typeof groupId === 'string' ? { groupId } : {}),
               ...(delivery !== undefined ? { delivery } : {}),
               ...(nameResult.value !== undefined
                 ? { name: nameResult.value }
@@ -1112,6 +1196,8 @@ function registerScheduledTaskCrudRoutes(
         lastFiredAt: now - (now % 60_000),
         enabled,
         sessionMode,
+        ...(typeof modelServiceId === 'string' ? { modelServiceId } : {}),
+        ...(typeof groupId === 'string' ? { groupId } : {}),
         ...(delivery !== undefined ? { delivery } : {}),
         ...(boundSessionId !== undefined
           ? {
@@ -1225,6 +1311,8 @@ function registerScheduledTaskCrudRoutes(
       const patch: Partial<DurableCronTask> = {};
       let clearName = false;
       let clearDelivery = false;
+      let clearModelServiceId = false;
+      let clearGroupId = false;
 
       const removedPatchField = findRemovedTaskField(body);
       if (removedPatchField) {
@@ -1314,6 +1402,50 @@ function registerScheduledTaskCrudRoutes(
         // fresh-session dispatch is unavailable.
         patch.sessionMode = body['sessionMode'];
       }
+      if ('modelServiceId' in body) {
+        const value = body['modelServiceId'];
+        if (value === null || value === '') {
+          clearModelServiceId = true;
+        } else if (
+          typeof value !== 'string' ||
+          value.length > MAX_ROUTING_ID_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`modelServiceId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+            code: 'invalid_model_service_id',
+          });
+          return;
+        } else {
+          patch.modelServiceId = value;
+        }
+      }
+      if ('groupId' in body) {
+        const value = body['groupId'];
+        if (value === null || value === '') {
+          clearGroupId = true;
+        } else if (
+          typeof value !== 'string' ||
+          value.length > MAX_ROUTING_ID_LENGTH
+        ) {
+          res.status(400).json({
+            error: `\`groupId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+            code: 'invalid_group_id',
+          });
+          return;
+        } else {
+          const groups = await runWithScheduledTaskTarget(target, () =>
+            createSessionOrganizationService(workspaceCwd).listGroups(),
+          );
+          if (!groups.groups.some((group) => group.id === value)) {
+            res.status(400).json({
+              error: `Group not found: ${value}`,
+              code: 'group_not_found',
+            });
+            return;
+          }
+          patch.groupId = value;
+        }
+      }
       if ('delivery' in body) {
         if (body['delivery'] === null) {
           clearDelivery = true;
@@ -1327,7 +1459,13 @@ function registerScheduledTaskCrudRoutes(
           }
         }
       }
-      if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
+      if (
+        Object.keys(patch).length === 0 &&
+        !clearName &&
+        !clearDelivery &&
+        !clearModelServiceId &&
+        !clearGroupId
+      ) {
         res.status(400).json({
           error: 'No updatable fields provided',
           code: 'empty_patch',
@@ -1401,6 +1539,12 @@ function registerScheduledTaskCrudRoutes(
               // so toView reports it as unnamed and isValidTask never sees a "".
               if (clearName) delete next.name;
               if (clearDelivery) delete next.delivery;
+              if (clearModelServiceId) delete next.modelServiceId;
+              if (clearGroupId) delete next.groupId;
+              if (next.sessionMode !== 'per_run') {
+                delete next.modelServiceId;
+                delete next.groupId;
+              }
               if (next.sessionMode === 'per_run' && next.delivery) {
                 blockedSessionModeDelivery = true;
                 return tasks;

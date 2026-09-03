@@ -229,6 +229,8 @@ describe('cronTasksFile', () => {
     it('round-trips per-run session mode and dispatch failures', async () => {
       const task = makeTask({
         sessionMode: 'per_run',
+        modelServiceId: 'qwen-max(openai)',
+        groupId: 'group-1',
         runs: [
           {
             at: 1718000240000,
@@ -246,6 +248,17 @@ describe('cronTasksFile', () => {
         tmpDir,
         JSON.stringify([{ ...makeTask(), sessionMode: 'new' }]),
       );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects routing fields on a persistent task', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), sessionMode: 'persistent', groupId: 'group-1' },
+        ]),
+      );
+
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 

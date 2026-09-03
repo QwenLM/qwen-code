@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
   SessionService,
+  SessionOrganizationService,
   Storage,
   getCronFilePath,
   readCronTasks,
@@ -49,6 +50,7 @@ const SECONDARY_SESSION_ID = '10000000-0000-4000-8000-000000000005';
 interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
+    modelServiceId?: string;
     sessionScope?: 'single' | 'thread';
     parentSessionId?: string;
     sourceType?: string;
@@ -95,6 +97,7 @@ interface StubBridge {
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   spawnParents: Array<string | undefined>;
+  spawnModels: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
   persisted: string[];
@@ -114,6 +117,7 @@ function makeStubBridge(): StubBridge {
     spawnScopes: [],
     spawnSources: [],
     spawnParents: [],
+    spawnModels: [],
     prompts: [],
     closed: [],
     persisted: [],
@@ -130,6 +134,7 @@ function makeStubBridge(): StubBridge {
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
       bridge.spawnParents.push(req.parentSessionId);
+      bridge.spawnModels.push(req.modelServiceId);
       bridge.spawnSources.push({
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
         ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
@@ -495,6 +500,87 @@ describe('scheduled-tasks routes', () => {
     const stored = await readCronTasks(h.workspace);
     expect(stored[0]?.sessionMode).toBe('per_run');
     expect(stored[0]?.runs?.at(-1)?.sessionId).toBe(childSessionId);
+  });
+
+  it('applies the saved model and group to each manual per-run session', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.spawnModels[1]).toBe('qwen-max(openai)');
+    expect(
+      (await organization.readSnapshot()).sessions.get(childSessionId),
+    ).toMatchObject({ groupId: group.id });
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('rejects a missing group before creating the task session', async () => {
+    const res = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'missing-group',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('group_not_found');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('updates and clears per-run model and group routing', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+
+    const updated = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        modelServiceId: 'qwen-max(openai)',
+        groupId: group.id,
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    const persistent = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ sessionMode: 'persistent' });
+    expect(persistent.status).toBe(200);
+    expect(persistent.body).toMatchObject({
+      sessionMode: 'persistent',
+      modelServiceId: null,
+      groupId: null,
+    });
   });
 
   it('restores a per-run one-shot when fresh-session admission fails', async () => {
