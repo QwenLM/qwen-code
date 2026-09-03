@@ -155,9 +155,16 @@ ordinary user-selected workspace. The implementation retains:
 - Live-start admission that accepts only the exact stable locator publisher.
 
 Daemon-local create admission, live owner indexes, lifecycle coordinators,
-directory state, reconciliation singleflight, and cache invalidation are not
-cross-process authorities. They may make remote live state appear inactive or
-delay catalog freshness, but they do not decide write ownership. The
+reconciliation singleflight, and cache invalidation are not cross-process
+authorities. They may make remote live state appear inactive or delay catalog
+freshness, but they do not decide write ownership. A working-directory identity
+pin is authoritative only while its matching local bridge session generation
+remains resident, or for one lifecycle mutation after that mutation acquires
+the session lease. A pin with no matching local generation is discarded before
+the directory is inspected again; it cannot turn a directory safely recreated
+by another daemon into `working_directory_compromised`. An identity change
+while the matching generation is resident, or after a leased lifecycle
+operation captures its operation-local identity, still fails closed. The
 cross-process writer lease remains authoritative for each transcript and its
 lifecycle, scheduled-task file mutations retain their existing cross-process
 file lock, deletion reconciliation acquires the affected session's lease, and
@@ -318,6 +325,32 @@ reports successful creation or restore. It retains the lease until session
 shutdown and uses the existing `session_writer_conflict`,
 `session_writer_lost`, `session_transcript_changed`, and
 `session_writer_unavailable` mappings.
+
+Scope each `StandaloneSessionService` working-directory identity pin to one
+locally resident bridge session generation. Use the existing
+`agentBound.eventEpoch` to reuse a pin as an `expected` identity only while the
+bridge still reports the same standalone session and epoch. A bare `{ pinned }`
+entry left by a terminal close, an absent session after idle reap, or a
+different epoch is orphaned and must be removed before restore, repair,
+deletion inspection, or another maintenance path inspects the directory. A
+detach that leaves the same generation resident keeps its pin. Check this
+lazily before each reuse rather than adding another bridge-close callback. A
+foreign session summary or an indeterminate bridge probe keeps the existing
+conflict or fail-closed result; only definite local-generation absence or
+replacement invalidates the old pin.
+
+When no matching local generation remains, open and repair apply the existing
+exact-root, direct-child, ownership, non-symlink, and permission checks without
+the stale `expected` identity and adopt the current safe directory identity.
+The ACP child must then acquire the writer lease, and the existing managed-CWD
+binding and identity rechecks must still confirm that adopted identity before
+restore succeeds. A lifecycle operation that closes a local session drops the
+session pin, acquires the parent-side lifecycle lease, and only then captures a
+fresh operation-local directory identity for any filesystem mutation. A change
+to either a still-resident generation's pin or that operation-local identity
+remains `working_directory_compromised`; only an orphaned daemon-local pin may
+be replaced. This keeps replacement detection for live work without treating a
+past daemon observation as proof against a later cooperating writer.
 
 `StandaloneSessionService` selects the same hardened `local` policy for its
 parent-side lifecycle and maintenance acquisitions, including deletion-journal
@@ -585,21 +618,23 @@ mixed-mode compatibility problem without serving the requested default.
 
 ## Error contract
 
-| Condition                                                                        | Result                                                                                                                                                    |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Another updated daemon has a different session loaded                            | Listing, new-session creation, and operations on the different session continue                                                                           |
-| Another updated daemon has the session loaded for open, rename, or repair        | `409 session_writer_conflict` for that session                                                                                                            |
-| A batch archive or delete includes a session loaded by another updated daemon    | Existing `200` batch envelope with that item's `errors[].code` set to `session_writer_conflict`                                                           |
-| A well-formed active owner is provably dead in the same local identity domain    | Reclaim, authoritative transcript reload, then continue                                                                                                   |
-| The active owner is live, stalled, foreign, or missing required reclaim identity | `409 session_writer_conflict` for that session                                                                                                            |
-| The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                                                                         |
-| A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                                                                                   |
-| A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                                                                         |
-| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose a new candidate, or terminally quarantine an existing runtime; every request remains non-retryable `503 conversation_root_compromised` |
-| A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                                                                             |
-| Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response                                                      |
-| A daemon that is not the stable Live locator publisher attempts to start Live    | `503 conversation_runtime_in_use` for `/live/start` or `/live/new`; standalone remains available                                                          |
-| Stable Live locator state is missing, unreadable, malformed, or unsafe at start  | Fail Live start closed with the existing unavailable or ownership-compromised mapping; standalone remains available                                       |
+| Condition                                                                                                                           | Result                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Another updated daemon has a different session loaded                                                                               | Listing, new-session creation, and operations on the different session continue                                                                           |
+| Another updated daemon has the session loaded for open, rename, or repair                                                           | `409 session_writer_conflict` for that session                                                                                                            |
+| A batch archive or delete includes a session loaded by another updated daemon                                                       | Existing `200` batch envelope with that item's `errors[].code` set to `session_writer_conflict`                                                           |
+| A well-formed active owner is provably dead in the same local identity domain                                                       | Reclaim, authoritative transcript reload, then continue                                                                                                   |
+| The active owner is live, stalled, foreign, or missing required reclaim identity                                                    | `409 session_writer_conflict` for that session                                                                                                            |
+| The writer record is malformed or non-regular, or a transition claim remains                                                        | `503 session_writer_unavailable` for that session                                                                                                         |
+| A valid sealed record has matching transcript proof                                                                                 | Certified takeover, authoritative reload, then continue                                                                                                   |
+| A sealed record's transcript proof no longer matches                                                                                | `409 session_transcript_changed` for that session                                                                                                         |
+| A Conversations bridge lacks the mandatory-lease attestation                                                                        | Reject and dispose a new candidate, or terminally quarantine an existing runtime; every request remains non-retryable `503 conversation_root_compromised` |
+| A safe working directory has a new identity and no matching local session generation remains                                        | Discard the orphaned pin, adopt the current identity, and continue through the normal writer or lifecycle lease                                           |
+| A working-directory identity changes while its local generation remains resident, or after a leased lifecycle operation captures it | Existing `working_directory_compromised` response                                                                                                         |
+| A live legacy runtime-owner record exists                                                                                           | `503 conversation_runtime_in_use` for the standalone surface during migration                                                                             |
+| Legacy ownership state is malformed, unsafe, or uncertain                                                                           | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response                                                      |
+| A daemon that is not the stable Live locator publisher attempts to start Live                                                       | `503 conversation_runtime_in_use` for `/live/start` or `/live/new`; standalone remains available                                                          |
+| Stable Live locator state is missing, unreadable, malformed, or unsafe at start                                                     | Fail Live start closed with the existing unavailable or ownership-compromised mapping; standalone remains available                                       |
 
 For every writer-state row, a batch lifecycle route preserves the same error
 kind in its existing `200` per-item result rather than changing the batch's
@@ -655,6 +690,9 @@ Release notes must state that:
 - active sessions are daemon-local;
 - different session IDs may be active concurrently across updated daemons,
   while a second writer or lifecycle mutation for the same session is fenced;
+- a safe working directory recreated after its local session generation exits
+  is adopted on the next open, while replacement during a resident generation
+  still fails closed;
 - same-session conflicts reuse `session_writer_conflict`, including in the
   existing per-item error of a batch lifecycle response;
 - standalone sessions always use the writer lease, even when the experimental
@@ -749,33 +787,47 @@ Conversations root and verifies:
 6. after an explicit close releases A's lease, B restores S through
    ordinary acquisition; independently, after graceful shutdown seals another
    session owned by A, B restores it through certified takeover;
-7. after A's lock-owning ACP writer is killed in a steady active state, B in the
+7. after A closes S or S is idle-reaped, B can safely recreate its working
+   directory with a new identity and release S, after which A can open, repair,
+   or delete S without treating A's orphaned pin as compromise; replacing the
+   directory while A's matching session generation remains resident still
+   fails closed;
+8. after A's lock-owning ACP writer is killed in a steady active state, B in the
    same local identity domain reclaims the lock, authoritatively reloads the
    transcript, and continues it without manual cleanup; killing only A's parent
    while that writer remains live still returns a conflict;
-8. a matching live or stalled A, and records from a foreign host, boot, or PID
+9. a matching live or stalled A, and records from a foreign host, boot, or PID
    namespace, remain `409 session_writer_conflict`; identity-less and residual
    claim states remain fail closed;
-9. shutting down either daemon does not remove or invalidate the other's local
-   runtime;
-10. two otherwise idle daemons that simultaneously rehydrate the same
+10. shutting down either daemon does not remove or invalidate the other's local
+    runtime;
+11. two otherwise idle daemons that simultaneously rehydrate the same
     scheduled-task-bound session elect one resident session through the writer
     lease; the loser records a restore failure and backs off, and only the
     winner fires the bound task for that slot;
-11. two keepalive workers that observe the same unbound task may mint competing
+12. two keepalive workers that observe the same unbound task may mint competing
     controller sessions, but no Conversations session fires it while unbound;
     the task-file transaction commits exactly one binding, cleans up the losing
     orphan, and only the bound controller becomes eligible to fire;
-12. two daemons reconciling the same prepared deletion elect one lease holder;
+13. two daemons reconciling the same prepared deletion elect one lease holder;
     the contender skips that UUID without failing the unrelated triggering
     operation or reporting journal compromise;
-13. with Live enabled on both daemons, only the exact stable locator publisher
+14. with Live enabled on both daemons, only the exact stable locator publisher
     can activate a call: the other daemon's `/live/start`, `/live/new`, Host
     toggle, and Host new paths fail before the Live session coordinator or
     capture devices start; that daemon still serves a different standalone
     session, and standalone routes continue to reject the Live record;
-14. root compromise and unavailable generations still fail closed without
+15. root compromise and unavailable generations still fail closed without
     falling back to the primary workspace.
+
+Focused `StandaloneSessionService` coverage verifies that terminal close leaves
+no reusable generation pin, detach retains the same generation's pin, an
+idle-reaped or replaced event epoch is discarded lazily before reuse, and
+deletion reconciliation never supplies an orphaned pin. The same tests retain
+`working_directory_compromised` for a replacement observed while the matching
+local generation is resident and for an identity change after a leased
+lifecycle operation captures its fresh identity; a foreign summary or
+indeterminate bridge probe never authorizes re-pinning.
 
 Live regression coverage verifies that Live discovery still has at most one
 publisher, that the publication path performs the existing validated handoff
