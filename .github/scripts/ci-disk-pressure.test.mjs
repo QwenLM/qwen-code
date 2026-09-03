@@ -64,11 +64,13 @@ describe('ci.yml disk-pressure evidence', () => {
     // The samples carry host occupancy, not just this job's disk. A shard of
     // identical work measures 6.7min or 36min on this fleet depending only on
     // which host it lands on (#10490), and nothing in the logs said how busy
-    // that host was. `cpus` sizes the machine, `load` and `hosttests` say how
-    // many neighbours were competing for it at each 10-second tick.
-    // The pattern is bracketed so the sampler's own shell — whose command
-    // line contains this very script — does not match itself and inflate
-    // the count on every runner.
+    // that host was. `cpus` sizes the machine, `load` shows the pressure, and
+    // `hosttests` counts how many vitest processes were running on the host
+    // at each 10-second tick — this job's own vitest tree included, not only
+    // neighbours. The pattern is bracketed so the sampler's own shell — whose
+    // command line contains this very script — does not match itself and
+    // inflate the count on every runner; the job's own test tree has `vitest`
+    // in its command line, so its churn is part of the measured occupancy.
     assert.match(tests, /echo "DISKCONTEXT [^"]*cpus\[\$\(nproc /);
     assert.match(tests, /load\[\$\(cut -d' ' -f1-3 \/proc\/loadavg /);
     // Capture-then-default, not `$(pgrep ... || echo 0)`: procps pgrep
