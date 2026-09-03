@@ -878,8 +878,16 @@ export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
-  /** Per-client releases of in-flight connect-logging suppression holds. */
-  private readonly connectSuppressionReleases = new Map<
+  /**
+   * Per-client releases of in-flight connect-logging suppression holds. A
+   * WeakMap rather than a Map: manager-mode reconnects create one client per
+   * attempt, and strong entries would pin every retired client (config,
+   * listener closures, socket state) for the channel's lifetime. Only
+   * `.set`/`.get` are used, and a client is still strongly reachable wherever
+   * its entry is read back (connect in flight or abandoned-but-unsettled), so
+   * nothing loses its holds.
+   */
+  private readonly connectSuppressionReleases = new WeakMap<
     DWClient,
     Set<() => void>
   >();
