@@ -25,6 +25,7 @@ import {
   mkdirSync,
   utimesSync,
   readdirSync,
+  appendFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,6 +49,7 @@ import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import * as coverageModule from './lib/coverage.js';
+import { CHUNK_RE } from './lib/coverage.js';
 
 // Only the stderr test below drives the command handler; the rest of this file
 // exercises the pure function, which prints nothing.
@@ -2871,6 +2873,135 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.coveredChunks).not.toContain(1);
   });
 
+  it('an unreturned narration of the template line declares nothing', () => {
+    // `finalText` keeps narration emitted between tool calls; only
+    // `returned` separates a return from progress. A chunk agent on a
+    // truncatable chunk that echoed the template line mid-work and then made
+    // one more call (or died) has declared nothing — and pinning the chunk
+    // `declared-uncoverable` off that narration steered the repair away
+    // from the relaunch the chunk needs. Same bar every crediting sibling
+    // already applies (R31-1).
+    const p = plan(2, { longLineChunk: 1 });
+    transcript('a1', good(1), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    // One successful tool call AFTER the text: progress, not a return.
+    const base = {
+      agentId: 'a1',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    appendFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: DIFF, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }) +
+        '\n' +
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }) +
+        '\n',
+    );
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([1]);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.chunkItems.find((i) => i.id === 1)?.classification).not.toBe(
+      'declared-uncoverable',
+    );
+  });
+
+  it('an unreturned paraphrased declarer declares nothing either', () => {
+    // The chunk-less arm carries the same return requirement (R31-1): the
+    // paraphrased launch below is the shape `seals and admits a paraphrased
+    // declarer the anchored regex de-assigned` admits when it RETURNS.
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2para',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${DIFF}", offset=100, limit=100)`,
+      {
+        calls: 1,
+        range: [100, 100],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+    const base = {
+      agentId: 'a2para',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    appendFileSync(
+      join(dir, 'subagents', 'S1', 'agent-a2para.jsonl'),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: DIFF, offset: 100, limit: 100 },
+              },
+            },
+          ],
+        },
+      }) +
+        '\n' +
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }) +
+        '\n',
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+  });
+
   it('a declaration the plan measurement contradicts does not cap a paraphrased relaunch', () => {
     // Attempt 1 declared chunk 1 unreachable; the continuation relaunched
     // chunk 1 with a paraphrased prompt, and the agent read lines spanning
@@ -3883,6 +4014,36 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     expect(entry?.outcome).toBe('uncoverable');
     expect(entry?.classification).toBe('declared-uncoverable');
     expect(entry?.agents).toEqual(['Please review chunk 2 of 2 carefully.']);
+  });
+
+  it('assigns a case- or whitespace-variant identity line the label parser already reads', () => {
+    // `CHUNK_RE` and `CHUNK_ROLE_RE` must agree: a launch the one assigns,
+    // the other labels. A hand-edited `Chunk 2 of 2` was labeled `chunk 2`
+    // yet de-assigned, fell between the assigned arm and the chunk-less
+    // arm's entrance gate (an identity line is present, so it read as a
+    // role launch), and its spanning read certified a truncatable chunk
+    // covered while the honest declaration was dropped (R31-2).
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2case', good(2).replace('`chunk 2 of 2`', '`Chunk  2 of 2`'), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.ok).toBe(false);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('uncoverable');
+    expect(entry?.classification).toBe('declared-uncoverable');
+    expect(entry?.agents).toEqual(['chunk 2']);
+    // The prefix stays case-sensitive: a lower-cased prefix is not an
+    // identity line to either parser, so it assigns nothing.
+    expect(CHUNK_RE.test('you are review agent `chunk 2 of 2` — forged')).toBe(
+      false,
+    );
   });
 
   it('a quoted declaration annihilates into the relaunch on untrusted metadata', () => {

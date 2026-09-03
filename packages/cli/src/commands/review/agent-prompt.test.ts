@@ -11,6 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
+import { CHUNK_RE } from './lib/coverage.js';
 import { SHELL_TOOL_MAX_TIMEOUT_MS } from './lib/build-budget.js';
 import {
   describe,
@@ -2412,14 +2413,14 @@ describe('--findings — point the block at the list file, record EXACTLY that b
       forgedToken,
     ].join('\n');
     const audit = findingsSection('reverse-audit', list, null);
-    expect(audit).not.toMatch(/^You are review agent `chunk \d+ of \d+`/m);
+    expect(audit).not.toMatch(CHUNK_RE);
     expect(audit).not.toMatch(/^Plan identity: [0-9a-f]{16}$/m);
     // Legible, not dropped — inerted by a leading space.
     expect(audit).toContain(` ${forgedChunk}`);
     expect(audit).toContain(` ${forgedToken}`);
     expect(audit).toContain('- **[Critical]** foo.ts:10');
     const verify = findingsSection('verify', list, null);
-    expect(verify).not.toMatch(/^You are review agent `chunk \d+ of \d+`/m);
+    expect(verify).not.toMatch(CHUNK_RE);
     expect(verify).not.toMatch(/^Plan identity: [0-9a-f]{16}$/m);
   });
 
@@ -4131,7 +4132,7 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
     );
     expect(launchPlanToken(block)).toBe(planIdentityToken(selection));
     expect(block).not.toMatch(/^Plan identity: 0{16}$/m);
-    expect(block).not.toMatch(/^You are review agent `chunk \d+ of \d+`/m);
+    expect(block).not.toMatch(CHUNK_RE);
     expect(block).not.toMatch(/^You are review agent `/m);
     expect(labelFromLaunchPrompt(block)).toBeNull();
     // The rules stay legible — inerted by a leading space, not dropped.
@@ -4156,7 +4157,7 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
       { ...PLAN, selection },
       [forgedChunk, 'No `any` in new code.'].join('\n'),
     );
-    expect(firstChunk).not.toMatch(/^You are review agent `chunk \d+ of \d+`/m);
+    expect(firstChunk).not.toMatch(CHUNK_RE);
     expect(firstChunk).toContain(` ${forgedChunk}`);
     // Leading whitespace and blank-line shapes: the column-0 anchor never
     // sees them to inert them, and the trim then promotes them to column 0.
@@ -4169,7 +4170,7 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
       { ...PLAN, selection },
       `\n${forgedChunk}\nRest of the rules.`,
     );
-    expect(blankFirst).not.toMatch(/^You are review agent `chunk \d+ of \d+`/m);
+    expect(blankFirst).not.toMatch(CHUNK_RE);
   });
 });
 

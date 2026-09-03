@@ -592,8 +592,23 @@ const DIGEST_WINDOW_MS = 5000;
  * scan `labelFromLaunchPrompt` uses: a prepended context line is prose and
  * never matches, so the launch's own identity line is still the first hit,
  * and a forged line APPENDED below it cannot take the assignment.
+ *
+ * The chunk slot is as tolerant as `CHUNK_ROLE_RE` (lib/agent-identity.ts):
+ * any case, any run of whitespace. The two readers must agree — a launch the
+ * one assigns, the other labels — and a hand-edited `Chunk 2 of 2` that the
+ * label parser read as `chunk 2` while this regex refused it fell between
+ * the assigned-declarer arm (no chunk) and the chunk-less arm's entrance
+ * gate (an identity line is present, so it was taken for a role launch),
+ * reached the credit gate, and certified a truncatable chunk covered while
+ * its honest declaration was dropped (R31-2). The PREFIX stays
+ * case-sensitive on purpose: `agent-prompt`'s `inertMarkerLines` neutralizes
+ * forgeable lines by that exact prefix, and a `/i` over the whole pattern
+ * would let a `you are review agent` forgery ride past the inerter into an
+ * assignment. `agent-prompt.test.ts`'s anti-forgery pins match THIS regex,
+ * so the two cannot drift apart again.
  */
-export const CHUNK_RE = /^You are review agent `chunk (\d+) of (\d+)`/m;
+export const CHUNK_RE =
+  /^You are review agent `[cC][hH][uU][nN][kK]\s+(\d+)\s+[oO][fF]\s+(\d+)`/m;
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
@@ -1553,6 +1568,15 @@ export function coverageFromTranscripts(
       // saying every line fits contradicts the declaration outright — see
       // `planContradictsDeclaration`.
       if (
+        // A RETURN, not progress: `finalText` keeps narration emitted
+        // between tool calls, and a chunk agent that echoed the template
+        // line mid-work and then died (or is still running) has declared
+        // nothing. Every sibling that credits a record — `chunkSatisfied`,
+        // `refutedByReturnedSpanningRead`, `gapsSuperseded`, `certifies` —
+        // already asks `returned`; without it here an unreturned narration
+        // pinned `declared-uncoverable`, the one class whose repair is NOT
+        // the relaunch such a record needs (R31-1).
+        rec.returned &&
         sealedToThisPlan(rec, chunk) &&
         declarerReadItsChunk(rec, chunk) &&
         !planContradictsDeclaration(chunk) &&
@@ -1624,6 +1648,8 @@ export function coverageFromTranscripts(
             told.every(([s, e]) => s >= dc.startLine && e <= dc.endLine)
           ) {
             if (
+              // Same return requirement as the assigned arm (R31-1).
+              rec.returned &&
               // Fail-closed like the sibling chunk-less paths: the arm has
               // no geometry a seal could read, so a marker-less record over
               // an identity-carrying plan cannot prove it belongs to this
