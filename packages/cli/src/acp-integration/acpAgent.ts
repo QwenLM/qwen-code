@@ -5948,16 +5948,20 @@ class QwenAgent implements Agent {
             if (persist) {
               session.persistReasoningSelection(selected);
             }
-            if (selected === REASONING_EFFORT_NONE) {
-              config.setReasoningDisabled?.(true);
-            } else {
+            if (registeredModelReasoning) {
+              if (selected === REASONING_EFFORT_NONE) {
+                config.setReasoningDisabled?.(true);
+              } else {
+                config.setReasoningEffort?.(
+                  selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
+                );
+              }
+            } else if (selected !== REASONING_EFFORT_NONE) {
               config.setReasoningEffort?.(
                 selected === REASONING_EFFORT_DEFAULT
-                  ? registeredModelReasoning
-                    ? undefined
-                    : defaultReasoning
-                      ? defaultReasoning.effort
-                      : undefined
+                  ? defaultReasoning
+                    ? defaultReasoning.effort
+                    : undefined
                   : selected,
               );
             }
