@@ -37,12 +37,8 @@ export type MonitorStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 /**
  * Resolves a per-monitor reserved output path.
  *
- * Today no writer is attached at this path — monitors deliver their
- * events through the parent's chat record via the notification callback.
- * The path is reserved on every `MonitorTask` so the `TaskBase` contract
- * ("every task has a path it would write to if it produces a primary
- * stream") holds, and so a future per-monitor file writer can land
- * without changing the type signature.
+ * Monitor stdout and stderr are captured at this path while notifications
+ * continue to deliver throttled line events to the owning agent.
  */
 export function getMonitorOutputPath(
   projectDir: string,
@@ -60,8 +56,7 @@ export function getMonitorOutputPath(
 /**
  * Monitor kind of `TaskState`. Tracks one long-running monitor process
  * whose stdout lines are pushed to the parent agent as event
- * notifications. `outputFile` is reserved on registration but no writer
- * is attached today — events stream into the parent's chat record.
+ * notifications. Its stdout and stderr are also captured in `outputFile`.
  */
 export interface MonitorTask extends TaskBase {
   kind: 'monitor';

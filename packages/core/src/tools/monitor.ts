@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -325,6 +326,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
     const ownerAgentId = getCurrentAgentId() ?? undefined;
+    const outputFile = getMonitorOutputPath(
+      this.config.storage.getProjectDir(),
+      this.config.getSessionId(),
+      monitorId,
+    );
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
@@ -352,16 +358,31 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
-      // Reserved path for a future per-monitor writer; no file is created
-      // today (events stream into the parent's chat record via the
-      // notification callback).
-      outputFile: getMonitorOutputPath(
-        this.config.storage.getProjectDir(),
-        this.config.getSessionId(),
-        monitorId,
-      ),
+      outputFile,
       ...(ownerAgentId ? { ownerAgentId } : {}),
     };
+
+    try {
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    } catch (err) {
+      return {
+        llmContent: `Monitor failed to create its output directory: ${getErrorMessage(err)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+      };
+    }
+
+    const outputStream = fs.createWriteStream(outputFile, { flags: 'w' });
+    let outputStreamClosed = false;
+    const closeOutputStream = (): void => {
+      if (outputStreamClosed) return;
+      outputStreamClosed = true;
+      outputStream.end();
+    };
+    outputStream.on('error', (err) => {
+      debugLogger.warn(
+        `Monitor ${monitorId} output write error: ${getErrorMessage(err)}`,
+      );
+    });
 
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
@@ -383,6 +404,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         },
       });
     } catch (err) {
+      outputStreamClosed = true;
+      outputStream.destroy();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -506,6 +529,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // line(s) the child wrote between the abort signal and process exit.
     const abortHandler = (): void => {
       flushPartialLineBuffers();
+      closeOutputStream();
       killChildProcessGroup();
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
@@ -526,6 +550,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child.removeListener('error', captureEarlySpawnError);
       child.on('error', () => {});
+      outputStreamClosed = true;
+      outputStream.destroy();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -536,6 +562,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       if (registration.status !== 'running') return;
 
       const text = stripAnsi(data.toString('utf-8'));
+      outputStream.write(text);
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits
@@ -589,6 +616,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       cleanedUp = true;
 
       flushPartialLineBuffers();
+      closeOutputStream();
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
@@ -661,6 +689,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `description: ${description}\n` +
         `max_events: ${maxEvents}\n` +
         `idle_timeout: ${idleTimeoutMs}ms\n` +
+        `output file: ${outputFile}\n` +
         `Events will be delivered as notifications. ` +
         `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates).`,

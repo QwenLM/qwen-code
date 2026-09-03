@@ -123,6 +123,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
+  session_task_output: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },

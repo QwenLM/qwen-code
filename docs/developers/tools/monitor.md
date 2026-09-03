@@ -45,9 +45,10 @@ Usage:
 monitor(command="tail -f logs/app.log", description="app log stream")
 ```
 
-Monitor output is visible in the conversation as task notifications. You can
-also inspect running and completed monitors with `/tasks` or the interactive
-Background tasks dialog.
+Monitor output is delivered to the owning agent as task notifications. The Web
+Shell task detail independently shows the latest captured output when the
+connected daemon advertises that capability. You can inspect running and
+completed monitors with `/tasks` or the interactive Background tasks dialog.
 
 To stop a running monitor, use the `task_stop` tool with the monitor ID:
 
@@ -133,12 +134,14 @@ commands without backgrounding instead.
   session as a single shared pool. Monitors started by subagents count against
   the same cap as monitors started by the main agent. Stop an existing monitor
   before starting another if the limit is reached.
-- **Output handling:** Stdout and stderr are merged into a single notification
-  stream with no stream prefix. Empty lines are ignored, ANSI color and control
+- **Output handling:** Stdout and stderr are merged without stream prefixes and
+  captured in the task output file. The Web Shell shows the latest 64 KiB of
+  that file. For notifications, empty lines are ignored, ANSI color and control
   characters are stripped, and individual lines longer than 2000 characters are
-  truncated. High-volume output is rate-limited with a burst of 5 events and
-  about 1 event per second after that; lines beyond the rate limit are dropped,
-  not buffered. Monitor output flows into the agent context as
+  truncated. High-volume notification output is rate-limited with a burst of 5
+  events and about 1 event per second after that; lines beyond the rate limit
+  are dropped from notifications but remain in the output file. Monitor
+  notifications flow into the agent context as
   `<task-notification>` content. Structural notification tags are defanged, but
   the model still reads each line's text, so avoid monitoring streams that
   external parties can write to unless you trust the model to ignore embedded

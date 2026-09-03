@@ -8,6 +8,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockOsPlatform = vi.hoisted(() =>
   vi.fn<() => NodeJS.Platform>(() => 'linux'),
@@ -191,6 +194,7 @@ describe('MonitorTool', () => {
   let monitorRegistry: MonitorRegistry;
   let mockChild: ReturnType<typeof createMockChild>;
   let mockIsPathWithinWorkspace: ReturnType<typeof vi.fn>;
+  let tempProjectDir: string;
   let originalPager: string | undefined;
   let originalGitPager: string | undefined;
 
@@ -204,6 +208,7 @@ describe('MonitorTool', () => {
     mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();
+    tempProjectDir = mkdtempSync(join(tmpdir(), 'qwen-monitor-tool-'));
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
     mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
     mockExtractCommandRules.mockImplementation(async (command: string) => {
@@ -224,7 +229,7 @@ describe('MonitorTool', () => {
         getUserSkillsDirs: vi
           .fn()
           .mockReturnValue(['/home/user/.claude/skills']),
-        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
+        getProjectDir: vi.fn().mockReturnValue(tempProjectDir),
       },
     } as unknown as Config;
 
@@ -234,8 +239,10 @@ describe('MonitorTool', () => {
     mockSpawn.mockReturnValue(mockChild);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     monitorRegistry.abortAll();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rmSync(tempProjectDir, { recursive: true, force: true });
 
     if (originalPager === undefined) {
       delete process.env['PAGER'];
@@ -690,6 +697,24 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('captures stdout and stderr in the task output file', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      mockChild.stdout.emit('data', Buffer.from('stdout line\n'));
+      mockChild.stderr.emit(
+        'data',
+        Buffer.from('\u001b[31mstderr line\u001b[0m\n'),
+      );
+      mockChild._emitClose(0);
+      await vi.waitFor(() => {
+        expect(readFileSync(task.outputFile, 'utf8')).toBe(
+          'stdout line\nstderr line\n',
+        );
+      });
     });
 
     it('uses default pager env for spawned processes when pager is unset', async () => {

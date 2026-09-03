@@ -214,6 +214,7 @@ export {
   type DaemonSessionLspStatus,
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionTaskOutputStatus,
   type DaemonSessionWorkflowTaskStatus,
   type DaemonWorkflowApprovalStatusEntry,
   type DaemonWorkflowDispatchStatus,

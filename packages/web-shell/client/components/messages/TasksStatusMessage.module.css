@@ -330,6 +330,36 @@
   white-space: pre-wrap;
 }
 
+.taskOutputSection {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  min-height: 0;
+}
+
+.taskOutput {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: min(360px, 40vh);
+  min-height: 120px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.taskOutputState,
+.taskOutputNotice {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 .monitorError {
   color: var(--error-color);
   font-size: 12px;

@@ -580,6 +580,24 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  lastTaskOutput:
+    | { sessionId: string; taskId: string; kind: 'shell' | 'monitor' }
+    | undefined;
+  async getSessionTaskOutputStatus(
+    sessionId: string,
+    taskId: string,
+    kind: 'shell' | 'monitor',
+  ) {
+    this.lastTaskOutput = { sessionId, taskId, kind };
+    return {
+      v: 1 as const,
+      sessionId,
+      taskId,
+      kind,
+      output: 'latest output',
+      truncated: false,
+    };
+  }
   lastCancelledTask:
     | {
         sessionId: string;
@@ -8666,6 +8684,42 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(bridge.lastSessionTasksOptions).toEqual({
         includeWorkflows: true,
+      });
+    });
+
+    it('_qwen/session/tasks/output returns process output', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/output',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'monitor-1',
+          taskKind: 'monitor',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          taskId: 'monitor-1',
+          kind: 'monitor',
+          output: 'latest output',
+        },
+      });
+      expect(bridge.lastTaskOutput).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'monitor-1',
+        kind: 'monitor',
       });
     });
 

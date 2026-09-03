@@ -1766,6 +1766,23 @@ describe('createDaemonSessionActions', () => {
     expect(session.workflowTasks).toHaveBeenCalledOnce();
   });
 
+  it('loads process task output through the session adapter', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.getTaskOutput('monitor-1', 'monitor'),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId: 'session-a',
+      taskId: 'monitor-1',
+      kind: 'monitor',
+      output: 'latest output',
+      truncated: false,
+    });
+    expect(session.taskOutput).toHaveBeenCalledWith('monitor-1', 'monitor');
+  });
+
   it('reports getTasks failures by default', async () => {
     const session = createMockSession('session-a');
     const addNotice = vi.fn((notice) => notice);
@@ -4161,6 +4178,14 @@ function createMockSession(
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
+    taskOutput: vi.fn(async (taskId: string, kind: 'shell' | 'monitor') => ({
+      v: 1 as const,
+      sessionId,
+      taskId,
+      kind,
+      output: 'latest output',
+      truncated: false,
+    })),
     workflowTasks: vi.fn(async () => ({
       v: 1 as const,
       sessionId,

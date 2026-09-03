@@ -35,6 +35,7 @@ import { escapeXml } from '../utils/xml.js';
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
+export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 function stripOutputControlChars(text: string): string {
   let out = '';
@@ -54,12 +55,15 @@ function stripOutputControlChars(text: string): string {
   return out;
 }
 
-type OutputTailResult =
+export type TaskOutputTailResult =
   | { text: string; truncated: boolean }
   | { error: string }
   | undefined;
 
-function readOutputTail(outputFile: string): OutputTailResult {
+export function readTaskOutputTail(
+  outputFile: string,
+  maxBytes = MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+): TaskOutputTailResult {
   let fd: number | undefined;
   try {
     // O_NOFOLLOW (or the compensating identity check where the flag does
@@ -69,7 +73,7 @@ function readOutputTail(outputFile: string): OutputTailResult {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
-    const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
+    const length = Math.min(stat.size, maxBytes, MAX_TASK_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
     const buffer = Buffer.allocUnsafe(length);
     const bytesRead = fs.readSync(fd, buffer, 0, length, start);
@@ -96,7 +100,7 @@ function readOutputTail(outputFile: string): OutputTailResult {
       truncated: start > 0,
     };
   } catch (error) {
-    debugLogger.warn(`Failed to read shell output tail:`, error);
+    debugLogger.warn(`Failed to read task output tail:`, error);
     return {
       error: error instanceof Error ? error.message : String(error),
     };
@@ -517,7 +521,7 @@ export class BackgroundShellRegistry {
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
       );
     }
-    const outputTail = readOutputTail(entry.outputFile);
+    const outputTail = readTaskOutputTail(entry.outputFile);
     if (outputTail) {
       if ('error' in outputTail) {
         xmlParts.push(`<output-tail error="unreadable" />`);

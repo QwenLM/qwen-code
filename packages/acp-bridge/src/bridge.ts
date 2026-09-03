@@ -81,6 +81,7 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
+  type ServeSessionTaskOutputStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
@@ -12033,6 +12034,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
         { includeWorkflows: opts?.includeWorkflows === true },
+      );
+    },
+
+    async getSessionTaskOutputStatus(sessionId, taskId, taskKind) {
+      return requestSessionStatus<ServeSessionTaskOutputStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionTaskOutput,
+        { taskId, taskKind },
       );
     },
 

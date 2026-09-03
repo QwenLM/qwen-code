@@ -16,6 +16,7 @@ export const SESSION_TRANSCRIPT_PAGINATION_FEATURE =
   'session_transcript_pagination';
 export const SESSION_MONITOR_TOOL_CORRELATION_FEATURE =
   'session_monitor_tool_correlation';
+export const SESSION_TASK_OUTPUT_FEATURE = 'session_task_output';
 export const SESSION_SIDE_TASK_FEATURE = 'session_side_task';
 export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
 export const WEB_SHELL_SIDE_TASK_SOURCE_TYPE = 'side_task';

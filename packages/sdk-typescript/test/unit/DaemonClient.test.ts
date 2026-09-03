@@ -2041,6 +2041,14 @@ describe('DaemonClient', () => {
           },
         ],
       };
+      const taskOutput = {
+        v: 1 as const,
+        sessionId: 'with/slash',
+        taskId: 'shell/1',
+        kind: 'shell' as const,
+        output: 'latest output',
+        truncated: false,
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
@@ -2055,6 +2063,13 @@ describe('DaemonClient', () => {
           req.url.endsWith('/session/with%2Fslash/tasks?includeWorkflows=true')
         ) {
           return jsonResponse(200, tasks);
+        }
+        if (
+          req.url.endsWith(
+            '/session/with%2Fslash/tasks/shell%2F1/output?kind=shell',
+          )
+        ) {
+          return jsonResponse(200, taskOutput);
         }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
@@ -2076,6 +2091,9 @@ describe('DaemonClient', () => {
         client.sessionWorkflowTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
+        client.sessionTaskOutput('with/slash', 'shell/1', 'shell', 'client-1'),
+      ).resolves.toEqual(taskOutput);
+      await expect(
         client.sessionLspStatus('with/slash', 'client-1'),
       ).resolves.toEqual(lsp);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
@@ -2086,9 +2104,14 @@ describe('DaemonClient', () => {
           'GET',
           'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
         ],
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/tasks/shell%2F1/output?kind=shell',
+        ],
         ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',

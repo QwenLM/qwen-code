@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail,
   MAX_RETAINED_TERMINAL_SHELLS,
   statusFilePathFor,
   type ShellTaskRegistration,
@@ -68,6 +69,17 @@ function makeTempDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+describe('readTaskOutputTail', () => {
+  it('returns the sanitized tail and reports truncation', () => {
+    const outputFile = makeOutputFile('prefix\u001b[31msafe\u001b[0m-tail');
+
+    expect(readTaskOutputTail(outputFile, 5)).toEqual({
+      text: '-tail',
+      truncated: true,
+    });
+  });
+});
 
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
@@ -605,7 +617,7 @@ describe('BackgroundShellRegistry', () => {
     );
 
     it('skips output-tail when the output file does not exist', () => {
-      // Guards the catch branch in `readOutputTail`. If the try/catch
+      // Guards the catch branch in `readTaskOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the
       // error and the entry would never reach a terminal status.
       const reg = new BackgroundShellRegistry();
@@ -628,7 +640,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('skips output-tail when outputPath is a directory (not a regular file)', () => {
-      // Guards the `!stat.isFile()` early-return in `readOutputTail`.
+      // Guards the `!stat.isFile()` early-return in `readTaskOutputTail`.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
@@ -647,7 +659,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('skips output-tail when the output file is empty (stat.size === 0)', () => {
-      // Guards the `stat.size <= 0` early-return in `readOutputTail`.
+      // Guards the `stat.size <= 0` early-return in `readTaskOutputTail`.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const outputPath = makeOutputFile('');

@@ -77,6 +77,7 @@ import type {
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -3428,6 +3429,28 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionTaskOutput(
+    sessionId: string,
+    taskId: string,
+    kind: 'shell' | 'monitor',
+    clientId?: string,
+  ): Promise<DaemonSessionTaskOutputStatus> {
+    const query = new URLSearchParams({ kind });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/output?${query.toString()}`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/tasks/:taskId/output',
+          );
+        }
+        return (await res.json()) as DaemonSessionTaskOutputStatus;
       },
     );
   }

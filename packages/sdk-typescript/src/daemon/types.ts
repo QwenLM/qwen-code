@@ -2722,6 +2722,16 @@ export interface DaemonSessionMonitorTaskStatus {
   toolUseId?: string;
 }
 
+export interface DaemonSessionTaskOutputStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  kind: 'shell' | 'monitor';
+  output: string;
+  truncated: boolean;
+  error?: string;
+}
+
 export interface DaemonWorkflowPhaseVisit {
   id: string;
   index: number;

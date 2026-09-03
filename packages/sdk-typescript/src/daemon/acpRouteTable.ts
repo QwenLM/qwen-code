@@ -446,6 +446,20 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+  // GET /session/:id/tasks/:taskId/output?kind=shell|monitor
+  //   → _qwen/session/tasks/output
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/output$/,
+    mapping: {
+      method: '_qwen/session/tasks/output',
+      extractParams: (segs, _body, _method, query) => ({
+        sessionId: segs[0],
+        taskId: segs[1],
+        taskKind: query?.get('kind') ?? undefined,
+      }),
+    },
+  },
   // POST /session/:id/tasks/:taskId/cancel → _qwen/session/tasks/cancel
   {
     httpMethod: 'POST',

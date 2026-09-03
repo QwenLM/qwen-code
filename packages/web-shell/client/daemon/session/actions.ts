@@ -2332,6 +2332,15 @@ export function createDaemonSessionActions({
       }
     },
 
+    async getTaskOutput(taskId, kind) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return await withActionTimeout(
+        session.taskOutput(taskId, kind),
+        'Get task output timed out',
+      );
+    },
+
     async getWorkflowTasks(opts) {
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');

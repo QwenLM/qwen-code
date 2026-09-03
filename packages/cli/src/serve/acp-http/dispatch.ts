@@ -3769,6 +3769,40 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/tasks/output`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const taskId = String(params['taskId'] ?? '');
+          if (!taskId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+              );
+            }
+            return;
+          }
+          const taskKind = params['taskKind'];
+          if (taskKind !== 'shell' && taskKind !== 'monitor') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`taskKind` must be "shell" or "monitor"',
+                ),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionTaskOutputStatus(
+            sessionId,
+            taskId,
+            taskKind,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
         case `${QWEN_METHOD_NS}session/tasks/cancel`: {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {

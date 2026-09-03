@@ -4754,6 +4754,49 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/tasks/:taskId/output',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/output',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        const kind = req.query['kind'];
+        if (!taskId) {
+          res.status(400).json({
+            v: 1,
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: '`taskId` route parameter is required',
+              field: 'taskId',
+            },
+          });
+          return;
+        }
+        if (kind !== 'shell' && kind !== 'monitor') {
+          res.status(400).json({
+            v: 1,
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: '`kind` must be "shell" or "monitor"',
+              field: 'kind',
+            },
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .json(
+            await runtime.bridge.getSessionTaskOutputStatus(
+              sessionId,
+              taskId,
+              kind,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/lsp',
     withOwnerReadSession(
       'GET /session/:id/lsp',

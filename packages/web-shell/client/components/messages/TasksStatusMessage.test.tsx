@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
@@ -14,24 +15,46 @@ import { I18nProvider } from '../../i18n';
 // The panel only needs getTasks/cancelTask from the daemon SDK; mock the
 // hook so the unit test doesn't pull the whole connection graph. Hoisted
 // so tests can assert on / reprogram the mocks across renders.
-const { getTasksMock, cancelTaskMock } = vi.hoisted(() => ({
-  getTasksMock: vi.fn(),
-  cancelTaskMock: vi.fn(),
-}));
+const {
+  getTasksMock,
+  cancelTaskMock,
+  getTaskOutputMock,
+  actionsMock,
+  connectionMock,
+} = vi.hoisted(() => {
+  const getTasksMock = vi.fn();
+  const cancelTaskMock = vi.fn();
+  const getTaskOutputMock = vi.fn();
+  return {
+    getTasksMock,
+    cancelTaskMock,
+    getTaskOutputMock,
+    actionsMock: {
+      getTasks: getTasksMock,
+      cancelTask: cancelTaskMock,
+      getTaskOutput: getTaskOutputMock,
+    },
+    connectionMock: { capabilities: { features: [] as string[] } },
+  };
+});
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useActions: () => ({
-    getTasks: getTasksMock,
-    cancelTask: cancelTaskMock,
-  }),
+  useActions: () => actionsMock,
+  useConnection: () => connectionMock,
 }));
 
-const { TasksStatusMessage } = await import('./TasksStatusMessage');
+const { MonitorTaskDetail, ShellTaskDetail, TasksStatusMessage } = await import(
+  './TasksStatusMessage'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+beforeEach(() => {
+  connectionMock.capabilities.features = [];
+});
 
 afterEach(() => {
   for (const { root, container } of mounted) {
@@ -41,6 +64,7 @@ afterEach(() => {
   mounted.length = 0;
   getTasksMock.mockReset();
   cancelTaskMock.mockReset();
+  getTaskOutputMock.mockReset();
 });
 
 function agentTask(
@@ -60,6 +84,133 @@ function agentTask(
     ...overrides,
   };
 }
+
+function shellTask(): DaemonSessionShellTaskStatus {
+  return {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'shell-label',
+    description: 'run build',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run build',
+    cwd: '/workspace',
+  };
+}
+
+function renderTaskDetail(
+  task: DaemonSessionMonitorTaskStatus | DaemonSessionShellTaskStatus,
+): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        {task.kind === 'monitor' ? (
+          <MonitorTaskDetail task={task} />
+        ) : (
+          <ShellTaskDetail task={task} />
+        )}
+      </I18nProvider>,
+    );
+  });
+  return container;
+}
+
+describe('process task output', () => {
+  it.each([
+    ['monitor', monitorTask()],
+    ['shell', shellTask()],
+  ] as const)(
+    'shows %s output when the daemon supports it',
+    async (_, task) => {
+      connectionMock.capabilities.features = ['session_task_output'];
+      getTaskOutputMock.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        taskId: task.id,
+        kind: task.kind,
+        output: 'first line\nlatest line',
+        truncated: true,
+      });
+
+      const container = renderTaskDetail(task);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(getTaskOutputMock).toHaveBeenCalledWith(task.id, task.kind);
+      expect(container.textContent).toContain('first line\nlatest line');
+      expect(container.textContent).toContain('Showing the latest 64 KiB');
+    },
+  );
+
+  it('refreshes output when the task snapshot advances', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock
+      .mockResolvedValueOnce({
+        output: 'first snapshot',
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        output: 'second snapshot',
+        truncated: false,
+      });
+    const task = monitorTask();
+    const container = renderTaskDetail(task);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('first snapshot');
+
+    await act(async () => {
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('second snapshot');
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an output read failure inside the task detail', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockRejectedValue(new Error('read failed'));
+
+    const container = renderTaskDetail(monitorTask());
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Output is unavailable');
+    expect(container.textContent).toContain('watch server log');
+  });
+
+  it('shows a stable empty state before a task emits output', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({ output: '', truncated: false });
+
+    const container = renderTaskDetail(shellTask());
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('No output yet');
+  });
+
+  it('keeps the metadata-only view for older daemons', () => {
+    const container = renderTaskDetail(monitorTask());
+
+    expect(getTaskOutputMock).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('Output is unavailable');
+  });
+});
 
 function monitorTask(
   overrides: Partial<DaemonSessionMonitorTaskStatus> = {},

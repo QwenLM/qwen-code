@@ -15,6 +15,7 @@ import {
 } from './agentForest';
 import {
   useActions,
+  useConnection,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
@@ -30,6 +31,7 @@ import {
   sanitizeControlChars,
 } from './toolFormatting';
 import { Badge } from '../ui/badge';
+import { SESSION_TASK_OUTPUT_FEATURE } from '../../constants/sessions';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -927,6 +929,11 @@ export function MonitorTaskDetail({
           <div>{currentTask.error}</div>
         </div>
       )}
+      <ProcessTaskOutput
+        key={`${currentTask.kind}:${currentTask.id}`}
+        task={currentTask}
+        actions={actions}
+      />
     </div>
   );
 }
@@ -1071,6 +1078,81 @@ export function ShellTaskDetail({
             {t('tasks.detail.error')}
           </div>
           <div>{currentTask.error}</div>
+        </div>
+      )}
+      <ProcessTaskOutput
+        key={`${currentTask.kind}:${currentTask.id}`}
+        task={currentTask}
+        actions={actions}
+      />
+    </div>
+  );
+}
+
+function ProcessTaskOutput({
+  task,
+  actions,
+}: {
+  task: DaemonSessionShellTaskStatus | DaemonSessionMonitorTaskStatus;
+  actions: DaemonSessionActions;
+}) {
+  const { t } = useI18n();
+  const connection = useConnection();
+  const supported =
+    connection.capabilities?.features.includes(SESSION_TASK_OUTPUT_FEATURE) ===
+    true;
+  const [output, setOutput] = useState('');
+  const [truncated, setTruncated] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    if (!supported) return;
+    let active = true;
+    void actions
+      .getTaskOutput(task.id, task.kind)
+      .then((result) => {
+        if (!active) return;
+        setOutput(result.output);
+        setTruncated(result.truncated);
+        setUnavailable(Boolean(result.error));
+      })
+      .catch(() => {
+        if (active) setUnavailable(true);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [actions, supported, task.id, task.kind, task.runtimeMs, task.status]);
+
+  if (!supported) return null;
+
+  return (
+    <div className={styles.taskOutputSection}>
+      <div className={styles.monitorSectionLabel}>
+        {t('tasks.detail.output')}
+      </div>
+      {loading ? (
+        <div className={styles.taskOutputState}>{t('common.loading')}</div>
+      ) : unavailable ? (
+        <div className={styles.taskOutputState}>
+          {t('tasks.detail.outputUnavailable')}
+        </div>
+      ) : output ? (
+        <>
+          {truncated && (
+            <div className={styles.taskOutputNotice}>
+              {t('tasks.detail.outputTruncated')}
+            </div>
+          )}
+          <pre className={styles.taskOutput}>{output}</pre>
+        </>
+      ) : (
+        <div className={styles.taskOutputState}>
+          {t('tasks.detail.outputEmpty')}
         </div>
       )}
     </div>

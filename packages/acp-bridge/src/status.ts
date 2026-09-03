@@ -140,6 +140,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionTaskOutput: 'qwen/status/session/task_output',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
   sessionTranscript: 'qwen/status/session/transcript',
@@ -766,6 +767,16 @@ export interface ServeSessionMonitorTaskStatus {
   error?: string;
   ownerAgentId?: string;
   toolUseId?: string;
+}
+
+export interface ServeSessionTaskOutputStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  taskId: string;
+  kind: 'shell' | 'monitor';
+  output: string;
+  truncated: boolean;
+  error?: string;
 }
 
 export interface ServeWorkflowPhaseVisit {
