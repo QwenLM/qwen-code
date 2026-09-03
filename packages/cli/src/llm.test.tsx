@@ -34,7 +34,7 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -1243,9 +1243,170 @@ describe('llm.tsx main function', () => {
     );
   });
 
+  it('seeds the resumed headless prompt id past the persisted identities', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      memoryFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
+
+    const resumedSessionId = 'resume-uuid-0123';
+    const resumedSessionData = {
+      conversation: {
+        sessionId: resumedSessionId,
+        messages: [
+          { type: 'user', promptId: `${resumedSessionId}########0` },
+          { type: 'assistant' },
+          { type: 'user', promptId: `${resumedSessionId}########1` },
+          { type: 'user', promptId: `${resumedSessionId}########2` },
+        ],
+      },
+      filePath: '/tmp/resumed-session.jsonl',
+      lastCompletedUuid: null,
+    } as unknown as ResumedSessionData;
+    let resumedData: ResumedSessionData | undefined = resumedSessionData;
+
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'keep going',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => resumedSessionId,
+      getProxy: () => undefined,
+      getResumedSessionData: () => resumedData,
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+      configStub,
+    );
+
+    const runMain = async () => {
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) {
+          throw error;
+        }
+      }
+    };
+
+    try {
+      // Resumed `-p` run: the promptId that ends up on the appended user
+      // record must land one past the largest persisted suffix, never
+      // re-mint a persisted identity.
+      await runMain();
+      expect(runNonInteractiveSpy).toHaveBeenLastCalledWith(
+        configStub,
+        expect.any(Object),
+        'keep going',
+        `${resumedSessionId}########3`,
+      );
+
+      // Fresh headless runs keep minting `########0`.
+      resumedData = undefined;
+      await runMain();
+      expect(runNonInteractiveSpy).toHaveBeenLastCalledWith(
+        configStub,
+        expect.any(Object),
+        'keep going',
+        `${resumedSessionId}########0`,
+      );
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+  });
+
   it('creates non-interactive prompt ids that preserve session correlation', () => {
     expect(createNonInteractivePromptId('test-session-id')).toBe(
       'test-session-id########0',
+    );
+    expect(createNonInteractivePromptId('test-session-id', 3)).toBe(
+      'test-session-id########3',
     );
   });
 
