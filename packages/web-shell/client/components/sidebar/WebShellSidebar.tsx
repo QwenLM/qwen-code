@@ -140,6 +140,7 @@ import {
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
+import { LocalFilesControl } from '../LocalFilesControl';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -217,6 +218,7 @@ export type WebShellSidebarFooterItem =
   | 'workspacesOverview'
   | 'splitView'
   | 'daemonStatus'
+  | 'localFiles'
   | 'collapse';
 
 export interface WebShellSidebarBranding {
@@ -263,6 +265,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'sessionsOverview',
   'splitView',
   'daemonStatus',
+  'localFiles',
   'collapse',
 ];
 
@@ -6101,6 +6104,9 @@ export function WebShellSidebar({
                 >
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
+              )}
+              {footerItems.has('localFiles') && (
+                <LocalFilesControl triggerClassName={styles.collapseButton} />
               )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button

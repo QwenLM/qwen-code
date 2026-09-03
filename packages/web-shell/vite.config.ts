@@ -131,6 +131,13 @@ export default defineConfig(({ command }) => ({
       // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
       // HTTP upgrade to the daemon, same as `/voice/stream`.
       '/terminal': { ...daemonProxy, ws: true },
+      // ACP WebSocket (`/acp`): the local-files bridge upgrades here to host
+      // its client-side MCP server. Exact-path regex, so the prefix cannot
+      // shadow a client source module (same reasoning as `/voice/stream`).
+      // Without it the dev server answers the upgrade itself and the bridge
+      // hangs in `connecting`; production needs no proxy because the daemon
+      // serves the page and `/acp` is then same-origin.
+      '^/acp/?$': { ...daemonProxy, ws: true },
     },
   },
 }));
