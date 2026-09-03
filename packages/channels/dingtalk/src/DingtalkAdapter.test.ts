@@ -5322,6 +5322,68 @@ describe('DingtalkChannel connect logging', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps suppression engaged when an abandoned connect settles late during a retry', async () => {
+    const channel = createChannel();
+    const abandonedConnect = deferredPromise<void>();
+    dingtalkSdkMock.nextConnect = () => abandonedConnect.promise;
+    const originalConsoleLog = console.log;
+
+    vi.useFakeTimers();
+    try {
+      // Connect A stalls; the manager abandons it after the connect timeout
+      // and its hold is released early, restoring logging.
+      const firstConnect = channel.connect().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await firstConnect;
+      expect(console.log).toBe(originalConsoleLog);
+
+      // The retry connects with client B, re-engaging suppression.
+      const retryConnect = deferredPromise<void>();
+      dingtalkSdkMock.nextConnect = () => retryConnect.promise;
+      const secondConnect = channel.connect();
+      expect(console.log).not.toBe(originalConsoleLog);
+
+      // A's SDK connect finally settles; its wrapper releases a second time.
+      // The abandonment already released A, so without the release closure's
+      // idempotency guard this would restore console.log while B is still in
+      // flight — reopening the leak for B's gateway response.
+      abandonedConnect.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(console.log).not.toBe(originalConsoleLog);
+
+      retryConnect.resolve();
+      await secondConnect;
+      expect(console.log).toBe(originalConsoleLog);
+    } finally {
+      channel.disconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops suppression holds once their connect settles or is abandoned', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    const client = latestMockClient();
+    const releases = (
+      channel as unknown as {
+        connectSuppressionReleases: WeakMap<object, Set<() => void>>;
+      }
+    ).connectSuppressionReleases;
+    const holdsForClient = (): number => releases.get(client)?.size ?? 0;
+
+    // A settled connect removes its own hold from the client's set; a stale
+    // entry would let a later release pass re-invoke a dead release.
+    await channel.connect();
+    expect(holdsForClient()).toBe(0);
+
+    // Abandonment releases the pending connect's hold and clears the set, so
+    // a later disconnect/reconnect cycle starts from a clean slate.
+    dingtalkSdkMock.nextConnect = () => new Promise<void>(() => {});
+    void channel.connect();
+    expect(holdsForClient()).toBe(1);
+    channel.disconnect();
+    expect(holdsForClient()).toBe(0);
+  });
 });
 /* eslint-enable no-console */
 

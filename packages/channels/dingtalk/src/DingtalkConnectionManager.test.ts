@@ -333,6 +333,24 @@ describe('DingtalkConnectionManager', () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it('reports a connect attempt as abandoned when stopped mid-connect', async () => {
+    vi.useFakeTimers();
+    const pendingConnect = deferredPromise<void>();
+    const initialClient = new FakeClient();
+    initialClient.connect = vi.fn(() => pendingConnect.promise);
+    const onConnectAbandoned = vi.fn();
+    const manager = createManager(initialClient, { onConnectAbandoned });
+
+    void manager.start().catch(() => undefined);
+    manager.stop();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onConnectAbandoned).toHaveBeenCalledOnce();
+    expect(onConnectAbandoned).toHaveBeenCalledWith(initialClient);
+    pendingConnect.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   it('does not report settled connect attempts as abandoned', async () => {
     const initialClient = new FakeClient();
     const onConnectAbandoned = vi.fn();
