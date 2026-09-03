@@ -510,7 +510,14 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    # A cap has to clear the slowest honest shard, not the healthy one:
+    # release run 33713579913 lost shards to 45m in both attempts — attempt
+    # 2 cancelled shard 2 at the cap while shard 1 finished green at 44.0m.
+    # A shard measures 6-14 min on a quiet host and 34-45 min on a contended
+    # one, and the lane's retry re-runs each failing test twice more inside
+    # that window. 90 is the hosted-to-pool doubling ci.yml already gives
+    # this suite's Test job (60/120) and its neighbours (45/90, 30/60).
+    timeout-minutes: 90
     needs:
       - 'prepare'
       - 'quality_build'

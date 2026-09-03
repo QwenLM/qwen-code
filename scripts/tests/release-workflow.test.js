@@ -1334,7 +1334,10 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      workspace_tests: 45,
+      // Sized for the contended pool the lane runs on: run 33713579913 had
+      // a green shard finish at 44.0 min and another cancelled at the old
+      // 45 min cap in both attempts.
+      workspace_tests: 90,
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,
