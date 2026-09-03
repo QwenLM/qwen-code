@@ -95,19 +95,28 @@ describe('main CI failure issue workflow', () => {
     // dedupe on, so the issue falls back to one per commit — and without the job
     // list the fallback body named nothing but the commit, which is what made a
     // standing red lane undiagnosable from its own issue.
-    expect(workflow).toContain('failed-jobs.tsv');
     expect(workflow).toContain('--jobs "${RUNNER_TEMP}/failed-jobs.tsv"');
-    // The two pins above are also satisfied by the `--jobs` flag line, so on
-    // their own they stay green when the producer goes: deleting the fetch
-    // returns the body to the contentless stub, and mutating the projection
-    // names a step as the job or lists every step as failed.
+    // That pin is satisfied by the reader's own flag line, so on its own it
+    // stays green when the producer goes: deleting the fetch returns the body to
+    // the contentless stub, and mutating the projection names a step as the job
+    // or lists every step as failed.
     expect(
       (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
         .length,
     ).toBe(1);
-    expect(workflow).toContain('> "${RUNNER_TEMP}/failed-jobs.tsv"');
+    // `|| true` is part of the producer, not decoration: an errored jobs
+    // response makes this jq exit non-zero, which under `bash -e` aborts the
+    // step before the issue is planned at all.
+    expect(workflow).toContain('> "${RUNNER_TEMP}/failed-jobs.tsv" || true');
     expect(workflow).toContain(
       '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv',
+    );
+    // The TSV projection above pins the same `select`, so only the trailing
+    // `| .id` makes this pin specific to the log-download one: flipping its
+    // select downloads no failed log, and naming jobs instead 404s every
+    // download.
+    expect(workflow).toContain(
+      '.jobs[] | select(.conclusion == "failure") | .id',
     );
     // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
     // fetch has to stay non-fatal AND say so: an errored call that lands in the
@@ -115,6 +124,11 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       '::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}',
     );
+    // The warning string alone stays green when its echo moves out of the
+    // conditional, and a bare fetch aborts the whole step under `bash -e` — no
+    // warning, no issue. `--paginate` rides the same pin because this one fetch
+    // feeds both projections, so dropping it silently caps a wide run at page 1.
+    expect(workflow).toContain('--paginate > "${jobs_json}"; then');
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
