@@ -167,6 +167,10 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './qwen-live-m4-acp-call.test.ts',
+        './qwen-live-m4-acp-permission.test.ts',
+        './qwen-live-m4-acp-steering.test.ts',
+        './qwen-live-m4-acp-multibackend.test.ts',
         './qwen-live-m1-call.test.ts',
         './qwen-live-m2-inject.test.ts',
         './qwen-live-m2-permission.test.ts',
@@ -202,6 +206,7 @@ describe('no-AK integration CI wiring', () => {
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
+    const classifyJob = getWorkflowJob(workflow, 'classify_pr');
     const permissionsIndex = workflow.indexOf('\npermissions:');
     expect(permissionsIndex).toBeGreaterThan(0);
     const workflowTriggers = workflow.slice(0, permissionsIndex);
@@ -238,14 +243,90 @@ describe('no-AK integration CI wiring', () => {
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
       "format('refs/pull/{0}/head', github.event.pull_request.number)",
     );
-    // The profile gate is classified in this job: depending on `test` for
-    // its ci_profile output would queue the check behind the hour-long unit
-    // run. Pin the wrapper so the two classifiers cannot drift.
-    const classify = getWorkflowStep(gateJob, 'Classify CI profile');
-    expect(classify).toContain(
-      '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    const trustedClassifierCheckout = getWorkflowStep(
+      classifyJob,
+      'Checkout trusted CI classifier',
     );
-    expect(classify).toContain("id: 'ci_profile'");
+    expect(classifyJob).toContain(
+      "ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'",
+    );
+    // The classifier wrapper calls `repos/{}/pulls/{}/files` and
+    // `repos/{}/pulls/{}`, so the job token needs `pull-requests` scope:
+    // the workflow-level grant lists none, and without a job-level block a
+    // same-repo PR's file listing 403s and classification falls back to
+    // `full` — a regression against the base lane that classified under
+    // `pull-requests: 'write'` (#10548 verify F1).
+    expect(classifyJob).toContain(
+      "    permissions:\n      contents: 'read'\n      pull-requests: 'read'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "repository: '${{ github.repository }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "ref: '${{ github.event.pull_request.base.sha }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "path: 'trusted-ci-classifier'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "sparse-checkout: '.github/scripts/ci'",
+    );
+    expect(trustedClassifierCheckout).toContain('persist-credentials: false');
+    expect(trustedClassifierCheckout).not.toContain('head.sha');
+
+    const trustedClassifier = getWorkflowStep(
+      classifyJob,
+      'Classify CI profile from trusted base',
+    );
+    expect(trustedClassifier).toContain(
+      'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    );
+    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain('profile=full');
+    // The classify_pr job output resolves against the step ID: renaming it
+    // empties the output and every consumer silently falls back to `full` —
+    // fail-safe direction, but a silent perf regression nothing would notice.
+    expect(trustedClassifier).toContain("id: 'ci_profile'");
+    expect(trustedClassifier).toContain(
+      'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
+    expect(classifyJob).not.toContain('CI_BOT_PAT');
+
+    // Both consumers use the profile that was already computed from the
+    // base checkout. Neither may execute a classifier from the PR checkout.
+    for (const profileStep of [
+      getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(gateJob, 'Use trusted CI profile'),
+    ]) {
+      expect(profileStep).toContain("id: 'ci_profile'");
+      expect(profileStep).toContain(
+        "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
+      );
+      expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      // The allowlist case line and the output write are load-bearing in
+      // the consumers too: dropping the echo empties
+      // steps.ci_profile.outputs.ci_profile, so every downstream profile
+      // gate mis-compares; dropping the case line lets an unexpected
+      // profile value pass through unnormalized.
+      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      expect(profileStep).toContain(
+        'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+      );
+      // Degraded path (classify_pr failed or was skipped, so the output is
+      // empty) must not log a byte-identical line to a legitimate `full`
+      // classification: the breadcrumb is the only signal that distinguishes a
+      // producer failure from a PR that really is full-profile.
+      expect(profileStep).toContain('if [ -z "${TRUSTED_CI_PROFILE}" ]; then');
+      expect(profileStep).toContain(
+        'echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."',
+      );
+      expect(profileStep).not.toContain('classify-pr-profile.sh');
+      expect(profileStep).not.toContain('GH_TOKEN');
+    }
     for (const stepName of [
       'Setup Node.js (hosted)',
       'Use pre-installed Node.js (self-hosted)',

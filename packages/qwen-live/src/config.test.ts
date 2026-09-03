@@ -74,7 +74,14 @@ describe('loadConfig', () => {
     });
     expect(defaults.realtime.model).toBe('qwen3.5-omni-plus-realtime');
     expect(defaults.realtime.endpoint).toBe('https://dashscope.aliyuncs.com');
-    expect(defaults.serve.baseUrl).toBe('http://127.0.0.1:4170');
+    expect(defaults.backends).toEqual([
+      {
+        name: 'qwen-code',
+        kind: 'qwen-code',
+        baseUrl: 'http://127.0.0.1:4170',
+        isDefault: true,
+      },
+    ]);
     expect(defaults.port).toBe(0);
   });
 
