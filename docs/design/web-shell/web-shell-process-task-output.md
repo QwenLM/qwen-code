@@ -21,6 +21,10 @@ panels without relying on Monitor task notifications reaching the Web Shell.
 - Render the output below the existing metadata in `MonitorTaskDetail` and
   `ShellTaskDetail`. Refresh it when the existing task snapshot changes, so no
   additional polling loop is introduced.
+- When an overflowing output box is already at the bottom, keep it pinned to
+  the bottom as new output arrives. Preserve the user's scroll position after
+  they scroll upward.
+- Provide a copy action for the currently displayed output snapshot.
 - Preserve the final output after the task reaches a terminal state. Empty and
   temporarily unavailable output use explicit, non-fatal UI states.
 
@@ -37,7 +41,8 @@ panels without relying on Monitor task notifications reaching the Web Shell.
   validation, missing tasks, truncation, symlink refusal, and the new status
   method.
 - SDK tests cover REST and ACP route mapping.
-- Web Shell tests cover Shell and Monitor output, refresh, truncation, empty
-  output, read failure, and capability fallback.
+- Web Shell tests cover Shell and Monitor output, refresh, conditional
+  auto-scroll, copying, truncation, empty output, read failure, and capability
+  fallback.
 - E2E verifies running output appears in the task detail and remains after the
   task stops.

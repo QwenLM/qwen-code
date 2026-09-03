@@ -337,6 +337,38 @@
   min-height: 0;
 }
 
+.taskOutputHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 20px;
+}
+
+.taskOutputCopyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.taskOutputCopyButton:hover,
+.taskOutputCopyButton:focus-visible {
+  background: var(--secondary);
+  outline: none;
+}
+
+.taskOutputCopyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
 .taskOutput {
   background: var(--muted);
   border: 1px solid var(--border);

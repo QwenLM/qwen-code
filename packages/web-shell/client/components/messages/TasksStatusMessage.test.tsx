@@ -19,6 +19,8 @@ const {
   getTasksMock,
   cancelTaskMock,
   getTaskOutputMock,
+  writeClipboardTextMock,
+  warnClipboardWriteFailureMock,
   actionsMock,
   connectionMock,
 } = vi.hoisted(() => {
@@ -29,6 +31,8 @@ const {
     getTasksMock,
     cancelTaskMock,
     getTaskOutputMock,
+    writeClipboardTextMock: vi.fn(),
+    warnClipboardWriteFailureMock: vi.fn(),
     actionsMock: {
       getTasks: getTasksMock,
       cancelTask: cancelTaskMock,
@@ -40,6 +44,10 @@ const {
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => actionsMock,
   useConnection: () => connectionMock,
+}));
+vi.mock('../../utils/clipboard', () => ({
+  writeClipboardText: writeClipboardTextMock,
+  warnClipboardWriteFailure: warnClipboardWriteFailureMock,
 }));
 
 const { MonitorTaskDetail, ShellTaskDetail, TasksStatusMessage } = await import(
@@ -65,6 +73,8 @@ afterEach(() => {
   getTasksMock.mockReset();
   cancelTaskMock.mockReset();
   getTaskOutputMock.mockReset();
+  writeClipboardTextMock.mockReset();
+  warnClipboardWriteFailureMock.mockReset();
 });
 
 function agentTask(
@@ -177,6 +187,113 @@ describe('process task output', () => {
 
     expect(container.textContent).toContain('second snapshot');
     expect(getTaskOutputMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows new output when the overflowing output box is at the bottom', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock
+      .mockResolvedValueOnce({
+        output: 'first snapshot',
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        output: 'second snapshot',
+        truncated: false,
+      });
+    const task = monitorTask();
+    const container = renderTaskDetail(task);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const outputBox = container.querySelector<HTMLElement>(
+      '[data-testid="task-output"]',
+    )!;
+    Object.defineProperties(outputBox, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: {
+        configurable: true,
+        get: () => (outputBox.textContent === 'first snapshot' ? 200 : 300),
+      },
+      scrollTop: { configurable: true, value: 100, writable: true },
+    });
+
+    await act(async () => {
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(outputBox.scrollTop).toBe(300);
+  });
+
+  it.each([
+    ['the user scrolls away from the bottom', 200, 40],
+    ['the output box is not overflowing', 100, 0],
+  ])(
+    'does not follow new output when %s',
+    async (_, scrollHeight, scrollTop) => {
+      connectionMock.capabilities.features = ['session_task_output'];
+      getTaskOutputMock
+        .mockResolvedValueOnce({
+          output: 'first snapshot',
+          truncated: false,
+        })
+        .mockResolvedValueOnce({
+          output: 'second snapshot',
+          truncated: false,
+        });
+      const task = monitorTask();
+      const container = renderTaskDetail(task);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const outputBox = container.querySelector<HTMLElement>(
+        '[data-testid="task-output"]',
+      )!;
+      Object.defineProperties(outputBox, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: scrollHeight },
+        scrollTop: { configurable: true, value: scrollTop, writable: true },
+      });
+
+      await act(async () => {
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+          </I18nProvider>,
+        );
+        await Promise.resolve();
+      });
+
+      expect(outputBox.scrollTop).toBe(scrollTop);
+    },
+  );
+
+  it('copies the visible output snapshot', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({
+      output: 'output to copy',
+      truncated: false,
+    });
+    writeClipboardTextMock.mockResolvedValue(undefined);
+    const container = renderTaskDetail(shellTask());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const copyButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Copy"]',
+    )!;
+    await act(async () => {
+      copyButton.click();
+      await Promise.resolve();
+    });
+
+    expect(writeClipboardTextMock).toHaveBeenCalledWith('output to copy');
+    expect(copyButton.querySelector('.lucide-check')).not.toBeNull();
   });
 
   it('keeps an output read failure inside the task detail', async () => {

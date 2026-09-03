@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
+import { CheckIcon, CopyIcon } from 'lucide-react';
 import { isSessionDisconnectedError } from '../../utils/sessionErrors';
 import {
   computeAgentTreeInfo,
@@ -19,6 +27,7 @@ import {
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
@@ -32,6 +41,10 @@ import {
 } from './toolFormatting';
 import { Badge } from '../ui/badge';
 import { SESSION_TASK_OUTPUT_FEATURE } from '../../constants/sessions';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -1105,6 +1118,19 @@ function ProcessTaskOutput({
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);
+  const outputElementRef = useRef<HTMLPreElement>(null);
+  const outputValueRef = useRef('');
+  const followNextOutputRef = useRef(false);
+  const [copied, flashCopied] = useCopiedFlash();
+
+  useLayoutEffect(() => {
+    const shouldFollow = followNextOutputRef.current;
+    followNextOutputRef.current = false;
+    if (shouldFollow && outputElementRef.current) {
+      outputElementRef.current.scrollTop =
+        outputElementRef.current.scrollHeight;
+    }
+  }, [output]);
 
   useEffect(() => {
     if (!supported) return;
@@ -1113,6 +1139,14 @@ function ProcessTaskOutput({
       .getTaskOutput(task.id, task.kind)
       .then((result) => {
         if (!active) return;
+        const outputElement = outputElementRef.current;
+        followNextOutputRef.current =
+          result.output !== outputValueRef.current &&
+          outputElement !== null &&
+          outputElement.scrollHeight > outputElement.clientHeight &&
+          outputElement.scrollTop + outputElement.clientHeight >=
+            outputElement.scrollHeight - 1;
+        outputValueRef.current = result.output;
         setOutput(result.output);
         setTruncated(result.truncated);
         setUnavailable(Boolean(result.error));
@@ -1128,12 +1162,35 @@ function ProcessTaskOutput({
     };
   }, [actions, supported, task.id, task.kind, task.runtimeMs, task.status]);
 
+  const handleCopy = useCallback(() => {
+    void writeClipboardText(output)
+      .then(flashCopied)
+      .catch(warnClipboardWriteFailure);
+  }, [flashCopied, output]);
+
   if (!supported) return null;
 
   return (
     <div className={styles.taskOutputSection}>
-      <div className={styles.monitorSectionLabel}>
-        {t('tasks.detail.output')}
+      <div className={styles.taskOutputHeader}>
+        <div className={styles.monitorSectionLabel}>
+          {t('tasks.detail.output')}
+        </div>
+        {output && !unavailable && (
+          <button
+            type="button"
+            className={styles.taskOutputCopyButton}
+            title={t('common.copy')}
+            aria-label={t('common.copy')}
+            onClick={handleCopy}
+          >
+            {copied ? (
+              <CheckIcon aria-hidden="true" />
+            ) : (
+              <CopyIcon aria-hidden="true" />
+            )}
+          </button>
+        )}
       </div>
       {loading ? (
         <div className={styles.taskOutputState}>{t('common.loading')}</div>
@@ -1148,7 +1205,13 @@ function ProcessTaskOutput({
               {t('tasks.detail.outputTruncated')}
             </div>
           )}
-          <pre className={styles.taskOutput}>{output}</pre>
+          <pre
+            ref={outputElementRef}
+            className={styles.taskOutput}
+            data-testid="task-output"
+          >
+            {output}
+          </pre>
         </>
       ) : (
         <div className={styles.taskOutputState}>
