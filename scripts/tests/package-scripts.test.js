@@ -515,11 +515,7 @@ describe('package scripts', () => {
     expect(verifyPackageStep).toContain('npm run bundle');
     expect(verifyPackageStep).toContain('dist/review-sources.sha256');
     expect(verifyPackageStep).toContain('npm run prepare:package');
-    // The wrapper runs test:release:workspaces for the job; what matters here
-    // is that the release lane still does not fall back to the CI script.
-    expect(workspaceTestStep).toContain(
-      'node scripts/run-release-workspace-tests.js',
-    );
+    expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
     expect(scriptsTestStep).toContain('npm run test:scripts');
     for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {

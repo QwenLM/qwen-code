@@ -59,22 +59,8 @@ export function readOptionValue(argv, index, optionName) {
 }
 
 export function isMainModule(importMetaUrl) {
-  if (!process.argv[1]) return false;
-  // path.resolve keeps symlinks, but Node realpath-resolves the ESM entry
-  // module — compared as-is, any invocation through a symlinked path (stock
-  // macOS, where os.tmpdir() links into /private/var, is one) makes the
-  // guard false and the caller's entry point silently never runs.
-  try {
-    return (
-      fs.realpathSync(path.resolve(process.argv[1])) ===
-      fs.realpathSync(fileURLToPath(importMetaUrl))
-    );
-  } catch {
-    // An entry that no longer resolves (removed after startup, permissions,
-    // a symlink loop) is not the main module. The guard's contract is a
-    // boolean, never a throw: six release scripts call it at import time.
-    return false;
-  }
+  const filename = fileURLToPath(importMetaUrl);
+  return process.argv[1] && path.resolve(process.argv[1]) === filename;
 }
 
 /**
@@ -135,18 +121,4 @@ export function parseArgs(argv, definitions) {
   }
 
   return args;
-}
-
-/**
- * Escapes a value for a GitHub Actions workflow command payload.
- *
- * `%` goes first: escaping CR/LF before it would re-escape the `%` this
- * function just introduced. Leaving either unescaped lets a value carrying a
- * newline close the command and forge a second one.
- */
-export function escapeWorkflowCommand(text) {
-  return String(text)
-    .replace(/%/g, '%25')
-    .replace(/\r/g, '%0D')
-    .replace(/\n/g, '%0A');
 }

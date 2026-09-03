@@ -9,11 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import {
-  escapeWorkflowCommand,
-  isMainModule,
-  parseArgs,
-} from './release-script-utils.js';
+import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
   /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+(?:\[bot\])?)((?:\s+with\s+@[A-Za-z0-9-]+(?:\[bot\])?)*)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
@@ -1361,6 +1357,13 @@ async function main() {
       `Wrote ${baseEntries.length} pull requests to ${output}${result.usedAi ? ' with AI summaries' : ''}.`,
     );
   }
+}
+
+export function escapeWorkflowCommand(text) {
+  return String(text)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A');
 }
 
 export function tryAppendDegradedStepSummary(result, summaryPath) {

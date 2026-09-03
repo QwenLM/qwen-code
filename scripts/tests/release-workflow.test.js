@@ -19,11 +19,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { isMainModule } from '../release-script-utils.js';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -539,12 +537,10 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    // Through the wrapper, which reports a non-zero exit that no failing test
-    // explains; the sharding, --passWithNoTests and --retry it forwards are
-    // what the suite itself still receives.
     expect(testStep.run).toContain(
-      'node scripts/run-release-workspace-tests.js -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
+    expect(testStep.run).toContain('::error title=Workspace tests failed::');
     // Every release schedule retries, stable included: running the stable
     // lane with no retry let one flaky test out of ~30k red a release whose
     // other gates were all green. The default is pinned here so a silent
@@ -568,70 +564,89 @@ describe('release workflow', () => {
     }
   });
 
-  // Bash-driven: the stub npm is a '#!/bin/sh' script and the step body
-  // itself uses a bash array. On Windows the wrapper spawns npm.cmd through
-  // cmd.exe, which resolves the REAL npm via PATHEXT past the extensionless
-  // stub and runs the actual suite inside the test — so win32 skips it and
-  // Linux CI remains the authoritative coverage.
-  it.skipIf(process.platform === 'win32')(
-    'passes --retry unless the operator switched it off',
-    () => {
-      // The flag reaches every workspace's vitest, where a command line option
-      // outranks the config. Every schedule now retries by default; the only
-      // way off is the operator sentinel, and it must omit the flag rather
-      // than zero it — --retry=0 would switch off a workspace's own retry
-      // (packages/sdk-typescript) on this lane alone.
-      const testStep = releaseYaml.jobs.workspace_tests.steps.find(
-        (step) => step.name === 'Run Workspace Tests',
-      );
-      const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+  it('passes --retry unless the operator switched it off', () => {
+    // The flag reaches every workspace's vitest, where a command line option
+    // outranks the config. Every schedule now retries by default; the only
+    // way off is the operator sentinel, and it must omit the flag rather
+    // than zero it — --retry=0 would switch off a workspace's own retry
+    // (packages/sdk-typescript) on this lane alone.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
 
-      for (const [retry, expected] of [
-        ['2', '--retry=2'],
-        ['', null],
-        // 'off' must omit the flag, not pass --retry=0: that would outrank a
-        // workspace's own config-level retry.
-        ['off', null],
-      ]) {
-        const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
-        try {
-          const stub = join(dir, 'npm');
-          writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
-          chmodSync(stub, 0o755);
+    for (const [retry, expected] of [
+      ['2', '--retry=2'],
+      ['', null],
+      // 'off' must omit the flag, not pass --retry=0: that would outrank a
+      // workspace's own config-level retry.
+      ['off', null],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+      try {
+        const stub = join(dir, 'npm');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
+        chmodSync(stub, 0o755);
 
-          const result = spawnSync(
-            'bash',
-            ['-e', '-o', 'pipefail', '-c', script],
-            {
-              env: {
-                ...process.env,
-                PATH: `${dir}:${process.env['PATH']}`,
-                VITEST_RETRY: retry,
-              },
-              encoding: 'utf8',
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: retry,
             },
-          );
+            encoding: 'utf8',
+          },
+        );
 
-          expect(result.status, result.stderr).toBe(0);
-          const args = result.stdout.split('\0');
-          expect(args.pop()).toBe('');
-          expect(args, retry).toContain('--passWithNoTests');
-          // An empty positional would reach vitest as a test-name filter.
-          expect(args, retry).not.toContain('');
-          if (expected) {
-            expect(args, retry).toContain(expected);
-          } else {
-            expect(
-              args.some((arg) => arg.startsWith('--retry')),
-              retry,
-            ).toBe(false);
-          }
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
+        expect(result.status, result.stderr).toBe(0);
+        const args = result.stdout.split('\0');
+        expect(args.pop()).toBe('');
+        expect(args, retry).toContain('--passWithNoTests');
+        // An empty positional would reach vitest as a test-name filter.
+        expect(args, retry).not.toContain('');
+        if (expected) {
+          expect(args, retry).toContain(expected);
+        } else {
+          expect(
+            args.some((arg) => arg.startsWith('--retry')),
+            retry,
+          ).toBe(false);
         }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
-    },
-  );
+    }
+  });
+
+  it('annotates a workspace test failure without changing its exit code', () => {
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+    const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
+    try {
+      const stub = join(dir, 'npm');
+      writeFileSync(stub, '#!/bin/sh\nexit 7\n');
+      chmodSync(stub, 0o755);
+
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env['PATH']}`,
+          VITEST_RETRY: '2',
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(7);
+      expect(result.stdout).toContain('::error title=Workspace tests failed::');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('discovers at least one test file in every test:ci workspace', () => {
     // --passWithNoTests lets a shard that received no files exit 0, but it
@@ -1347,7 +1362,7 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      workspace_tests: 75,
+      workspace_tests: 45,
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,
@@ -1718,47 +1733,5 @@ describe('release lane runner routing', () => {
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
-  });
-});
-
-describe('isMainModule', () => {
-  it('returns false without throwing when the entry path does not resolve', () => {
-    const argv1 = process.argv[1];
-    process.argv[1] = join(tmpdir(), 'qwen-release-guard-missing', 'gone.js');
-    try {
-      expect(isMainModule(import.meta.url)).toBe(false);
-    } finally {
-      process.argv[1] = argv1;
-    }
-  });
-
-  it('returns false for an entry that is a different existing file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-release-guard-'));
-    const other = join(dir, 'other.js');
-    writeFileSync(other, '');
-    const argv1 = process.argv[1];
-    process.argv[1] = other;
-    try {
-      expect(isMainModule(import.meta.url)).toBe(false);
-    } finally {
-      process.argv[1] = argv1;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('matches an entry invoked through a symlinked path', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-release-guard-'));
-    const real = join(dir, 'entry.js');
-    writeFileSync(real, '');
-    const linked = join(dir, 'entry-link.js');
-    symlinkSync(real, linked);
-    const argv1 = process.argv[1];
-    process.argv[1] = linked;
-    try {
-      expect(isMainModule(pathToFileURL(real).href)).toBe(true);
-    } finally {
-      process.argv[1] = argv1;
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
