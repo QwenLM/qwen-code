@@ -257,6 +257,18 @@ main 上有 **138 个** cli 测试写了 `vi.mock('@qwen-code/qwen-code-core', f
 
 2. **Prettier 从仓库外的路径调用会静默空转**。以仓库根为 cwd、对 cwd 之外的绝对路径调用 `prettier --write`，文件会被跳过，且 `--check` 依然报告成功。必须让 cwd 落在被格式化文件所在的树内，并用绝对路径指向仓库锁定的那个 prettier 二进制（否则可能解析到全局的其它版本，会连无关代码一起重排）。
 
+### 6.8 分批推进时，stacked PR 拿不到 CI
+
+`.github/workflows/ci.yml` 的触发条件是 `pull_request: branches: [main, 'release/**']`。**base 指向其它特性分支的 PR 不会运行任何单元测试和 lint**，只会跑 TUI 门禁和机器人任务（`assign` / `authorize` / `label` / `triage` / `review-pr`）。
+
+这一条对本方案是致命的：整套论据建立在「写错的说明符会在 CI 里大声失败」之上，而 CI 不跑的话，几百个文件的机械改动就是完全未验证的。实测中 130 文件和 114 文件两个 PR 都以「7-8 项检查全绿」的样子挂着，一个单元测试都没跑过。
+
+**做法**：为可审阅性而分层是对的，但要把**栈顶** PR 的 base 设成 `main`，让累积状态拿到完整运行；下层 PR 合并后它的 diff 会自动缩小。另外，**只改 base 不会重新触发 workflow**（GitHub 发的是 `pull_request: edited`，不在默认触发类型里），需要 `gh pr close` 再 `gh pr reopen`。
+
+判断某个 PR 到底跑了什么，用 `gh pr checks <n> --json name,bucket` 按名字确认 `Test` 系列是否存在——不要凭「全绿」下结论。
+
+---
+
 ### 6.7 esbuild 的 chunk 分割 —— 已排除
 
 早期担心：改变导入粒度会让模块在 chunk 之间移动，可能破坏靠 `import.meta.url` 找同级资源的代码。查证后**不成立**。`resolveBundleDir` 的实现对 chunk 形状免疫：
