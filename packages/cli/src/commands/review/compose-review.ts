@@ -54,7 +54,11 @@ import {
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
-import { isFixAuditRound, LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
+import {
+  interactionEntryOf,
+  isFixAuditRound,
+  LARGE_REVERSE_AUDIT_ROUNDS,
+} from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   HOSTNAME_RE,
@@ -3324,12 +3328,17 @@ function ledgerMarkerFor(
       // ABSENT floor reads as `auto` in the REPORTING reading (a present but
       // unrecognisable one reads as nothing at all — see
       // `criticalFloorKind`), and `auto` resolves determinately from the
-      // round number and the context state. The ENFORCEMENT reading folds
+      // round number, the context state, and the plan's fix-audit posture
+      // record (#10104) — the last is the one that holds the posture
+      // through a context-unavailable round, so a stamp reading `c` on a
+      // round-3 context-unavailable compose is the record resolving, not a
+      // corrupt stamp. The ENFORCEMENT reading folds
       // nothing and fails open on both; the gap between the two is what the
       // mechanism-health check discloses. Recording it only when the state NAMED a floor
       // left the guard blind under the DEFAULT configuration — where the
-      // posture genuinely transitions at round 6 and again on a transient
-      // context failure — so a real posture change read as loop divergence,
+      // posture genuinely transitions at round 6 and, absent a fix-audit
+      // plan record, again on a transient context failure — so a real
+      // posture change read as loop divergence,
       // which is the misreading the field exists to prevent. What must not
       // be invented is a posture nobody can derive; this one is derived from
       // the same fold the advice and the enforcement backstop already use.
@@ -3476,9 +3485,14 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
  */
 function fixAuditShapeFacts(planPath: string | undefined): {
   cause: 'explicit' | 'round' | 'flat-trend' | null;
+  /** Interaction entries the brief builder would render — one admission. */
+  interactionFiles: number;
+  /** Entries whose census sheds at least one hunk (`kept < total`). */
   seamFiles: number;
   seamKept: number;
   seamTotal: number;
+  /** Entries whose census kept every hunk (`kept === total`). */
+  wholeFiles: number;
 } | null {
   try {
     if (!planPath) return null;
@@ -3497,27 +3511,28 @@ function fixAuditShapeFacts(planPath: string | undefined): {
     };
     const scope = rec.scope;
     const interaction = (scope as { interaction?: unknown }).interaction;
+    let interactionFiles = 0;
     let seamFiles = 0;
     let seamKept = 0;
     let seamTotal = 0;
+    let wholeFiles = 0;
     if (Array.isArray(interaction)) {
-      for (const e of interaction) {
-        const seam = (e as { seam?: unknown } | null)?.seam;
-        if (typeof seam !== 'object' || seam === null) continue;
-        const kept = (seam as { kept?: unknown }).kept;
-        const total = (seam as { total?: unknown }).total;
-        // The same admission the brief builder applies (`incrementalScopeOf`):
-        // a census that cannot be true ("5 of 2 republished") is silenced,
+      for (const raw of interaction) {
+        // The SAME admission the brief builder applies — `interactionEntryOf`,
+        // called, not restated (#10136): an entry the briefs would not render
+        // (no path, no surviving edge) counts for nothing here either, and a
+        // census that cannot be true ("5 of 2 republished") is silenced,
         // never rendered into a posted body.
-        if (
-          Number.isInteger(kept) &&
-          Number.isInteger(total) &&
-          (kept as number) >= 0 &&
-          (total as number) >= (kept as number)
-        ) {
+        const e = interactionEntryOf(raw);
+        if (e === null) continue;
+        interactionFiles += 1;
+        if (e.seam === undefined) continue;
+        if (e.seam.kept < e.seam.total) {
           seamFiles += 1;
-          seamKept += kept as number;
-          seamTotal += total as number;
+          seamKept += e.seam.kept;
+          seamTotal += e.seam.total;
+        } else {
+          wholeFiles += 1;
         }
       }
     }
@@ -3527,7 +3542,14 @@ function fixAuditShapeFacts(planPath: string | undefined): {
       rec.postureCause === 'flat-trend'
         ? rec.postureCause
         : null;
-    return { cause, seamFiles, seamKept, seamTotal };
+    return {
+      cause,
+      interactionFiles,
+      seamFiles,
+      seamKept,
+      seamTotal,
+      wholeFiles,
+    };
   } catch {
     return null;
   }
@@ -3698,7 +3720,9 @@ function composeReviewBody(
   // A floor the module does not recognise — absent, null, or a
   // model-transcribed spelling drift ("Critical", "auto ", "") — is folded
   // into ONE state: unknown. It caps as unlicensed when a deferral list
-  // exists (fail-closed, disclosed) and is inert when it does not — a
+  // exists and no fix-audit plan record licenses it (#10104 — the record
+  // is the licence in that state, see `unlicensedDeferral`), fail-closed
+  // and disclosed, and is inert when no list exists — a
   // refusal here would lose the whole round over a field that changes no
   // output on a zero-deferral run, the exact outcome the licence block is
   // written to avoid. Model-transcribed prose is not a NaN count.
@@ -6358,36 +6382,76 @@ function composeReviewBody(
   // posture IS the floor resolution — so beside the list the sentence owns
   // what the open arm DID (the backstop moved nothing) and routes the
   // deferrals to the posture, never to a resolved floor (#10136). The
-  // empty-list arm keeps the universal.
+  // empty-list arm keeps the universal. Beside an explicit `suggestion`
+  // floor the deferrals have NO posture to be routed by — the operator
+  // turned it off, and the licence chain above stamps them unlicensed
+  // (`unlicensedDeferral`) — so that arm says exactly that, in the same
+  // body the licence sentence caps (#10136 R13-1).
   const fixAuditOpenTailEn =
     deferredSuggestions.length > 0
-      ? ', so the mechanical backstop moved nothing — the deferrals listed ' +
-        'below were routed by the convergence posture, not moved by a ' +
-        'resolved floor; only the narrowed shape above applied.'
+      ? floorRaw === 'suggestion'
+        ? ', so the mechanical backstop moved nothing — the deferrals ' +
+          'listed below carry no posture licence (the operator turned the ' +
+          'posture off), and this verdict is capped for them; only the ' +
+          'narrowed shape above applied.'
+        : ', so the mechanical backstop moved nothing — the deferrals listed ' +
+          'below were routed by the convergence posture, not moved by a ' +
+          'resolved floor; only the narrowed shape above applied.'
       : ', so no finding was withheld by a floor — only the narrowed shape ' +
         'above applied.';
   const fixAuditOpenTailZh =
     deferredSuggestions.length > 0
-      ? '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
+      ? floorRaw === 'suggestion'
+        ? '，机械兜底未移动任何内容——下方列出的延后没有姿态授权（操作者关闭了该姿态），本判定因此受限；只有上述收窄形态生效。'
+        : '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
       : '，没有任何发现被下限扣留——只有上述收窄形态生效。';
+  // The engaged arm asserts a deferral only beside a deferral list: with
+  // nothing deferred this round, "were recorded and deferred" names
+  // findings that do not exist (#10136). Beside an empty list the floor
+  // either saw nothing below Critical at all, or only the pre-confirmed
+  // deterministic findings it leaves inline — which is what
+  // `suggestionsInline` counts once enforcement has moved everything else.
   const fixAuditFloorEn = fixAuditFloorEngaged
-    ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+    ? deferredSuggestions.length > 0
+      ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+      : suggestionsInline > 0
+        ? 'The floor was engaged; the only findings below Critical this round are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor — nothing else reached it, so nothing was deferred.'
+        : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
     : 'The posting floor itself resolved OPEN at compose time this round ' +
       fixAuditOpenCauseEn +
       fixAuditOpenTailEn;
   const fixAuditFloorZh = fixAuditFloorEngaged
-    ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+    ? deferredSuggestions.length > 0
+      ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+      : suggestionsInline > 0
+        ? '下限已生效；本轮低于 Critical 的发现只有预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内——没有其它发现触及下限，因此没有延后。'
+        : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
       fixAuditOpenTailZh;
+  // The census names a REDUCTION only where one happened (#10136): a file
+  // whose every hunk displays a seam line republished whole, and counting
+  // it among the seam-bounded ones claimed a shed that never was. Files
+  // the scan kept whole are named as such; files with no census at all
+  // (a doubt state) republished in full and are not counted either way.
   const fixAuditSeamEn =
     fixAudit && fixAudit.seamFiles > 0
-      ? ` (interaction files seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished)`
-      : '';
+      ? ` (${fixAudit.seamFiles} seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished` +
+        (fixAudit.wholeFiles > 0
+          ? `; ${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+          : ')')
+      : fixAudit && fixAudit.wholeFiles > 0
+        ? ` (${fixAudit.wholeFiles} republished whole, every hunk on the seam)`
+        : '';
   const fixAuditSeamZh =
     fixAudit && fixAudit.seamFiles > 0
-      ? `（interaction 文件按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk）`
-      : '';
+      ? `（${fixAudit.seamFiles} 个按接缝收窄：重发 ${fixAudit.seamKept}/${fixAudit.seamTotal} 个 hunk` +
+        (fixAudit.wholeFiles > 0
+          ? `；${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+          : '）')
+      : fixAudit && fixAudit.wholeFiles > 0
+        ? `（${fixAudit.wholeFiles} 个整体重发，其每个 hunk 都在接缝上）`
+        : '';
   const fixAuditShapeBlock: Bi[] = fixAudit
     ? [
         {
@@ -6395,15 +6459,25 @@ function composeReviewBody(
           en:
             `Round shape: this re-review ran as a fix-audit round under the critical ` +
             `posting posture (engaged by ${fixAuditCauseEn}) — the territory fan-out ` +
-            `covered the commits since the previous round plus their import-seam ` +
-            `interaction files${fixAuditSeamEn}, and the reverse-audit waves ` +
-            `re-launched only delta territories and chunks whose previous wave ` +
-            `yielded. ${fixAuditFloorEn}`,
+            `covered the commits since the previous round` +
+            (fixAudit.interactionFiles > 0
+              ? ` plus their import-seam interaction files${fixAuditSeamEn}`
+              : ' (no still-clean importer re-entered the scope)') +
+            `, and the reverse-audit waves ` +
+            `re-launched only delta territories and non-delta chunks the ` +
+            `previous waves could not certify dry (a yield, an uncertified ` +
+            `receipt, no audit history, or a dry receipt stale against a ` +
+            `same-digest yield keeps a chunk in the wave). ${fixAuditFloorEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
-            `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits 及其 ` +
-            `import 接缝 interaction 文件${fixAuditSeamZh}，反向审计各波只重发 delta ` +
-            `领地与上一波出过发现的 chunk。${fixAuditFloorZh}`,
+            `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
+            (fixAudit.interactionFiles > 0
+              ? `及其 import 接缝 interaction 文件${fixAuditSeamZh}`
+              : '（没有仍然干净的 importer 重新进入范围）') +
+            `，反向审计各波只重发 delta ` +
+            `领地与此前各波未能证实干燥的非 delta chunk（出过发现、收据未认证、` +
+            `无审计历史、或干燥收据对同摘要的发现已过时，都会让 chunk 留在波内）。` +
+            `${fixAuditFloorZh}`,
         },
       ]
     : [];

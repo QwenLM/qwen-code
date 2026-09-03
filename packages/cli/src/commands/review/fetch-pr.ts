@@ -114,6 +114,7 @@ import {
   type CriticalPostureCause,
 } from './lib/posture.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
+import { parseRemoteUrl } from './lib/remote-match.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -133,6 +134,12 @@ interface FetchPrArgs {
   remote: string;
   out: string;
   host?: string;
+  /**
+   * The review's recorded-arguments file, for the posture's recorded-floor
+   * recovery (#10136) — honoured only when no session id is present, the
+   * same rule compose and submit apply to their own `--skill-args`.
+   */
+  skillArgs?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
@@ -1321,15 +1328,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         recordedFloor: recordedSeverityFloor({
           callerPr: Number(prNumber),
           callerRepo: ownerRepo,
-          // The same host formula the compose/submit boundary uses
-          // (`resolveGhHost`: flag, else GH_HOST): an asymmetric axis here
-          // let a URL-shaped record recover at one boundary and not the
-          // other — and the miss this side matters for is the operator's
-          // explicit `suggestion`, which must turn the posture OFF.
-          callerHost: resolveGhHost(
-            typeof args.host === 'string' ? args.host : undefined,
-          ),
+          // The SAME evidence chain submit binds the recorded floor's host
+          // axis to (#10136): the explicit flag, else the host of the
+          // remote under review (the cwd origin submit's chain reads — the
+          // one already selected this fetch's platform above), else the gh
+          // fallback (GH_HOST, else github.com). `resolveGhHost` alone
+          // never yields a recorded Aone or GHE host, so a flagless capture
+          // of a URL-shaped record missed the operator's explicit
+          // `suggestion` — the one miss that spends the narrowed shape
+          // against an instruction to keep the full one.
+          callerHost:
+            (typeof args.host === 'string' && args.host.trim()) ||
+            (remoteUrl ? parseRemoteUrl(remoteUrl)?.host : undefined) ||
+            resolveGhHost(undefined),
           defaultSeverityFloor: operatorReviewSettings().severityFloor,
+          // The caller-supplied record seam compose and submit honour when
+          // no session id is present — the sessionless scripted review.
+          skillArgs: args.skillArgs,
         })?.floor,
         sideLedger,
       });
@@ -2064,6 +2079,11 @@ export const fetchPrCommand: CommandModule = {
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('skill-args', {
+        type: 'string',
+        describe:
+          "Path of the review's recorded-arguments file, read for the operator's recorded severity floor when the round's posture is resolved. Honoured only when no session id is present (a sessionless scripted review); inside a session the session's own record is read, exactly as compose-review and submit do.",
+      })
       .option('since', {
         type: 'string',
         describe:

@@ -2730,7 +2730,14 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     ];
     const r = composeReview(input);
     expect(r.floorEnforced).toEqual([]);
-    expect(r.body).toContain('recorded and deferred, never posted — except');
+    // Beside an EMPTY deferral list the sentence may not claim findings
+    // "were recorded and deferred" (#10136): it names the deterministic
+    // exemption as the only sub-Critical finding and claims no deferral.
+    expect(r.body).toContain(
+      'only findings below Critical this round are pre-confirmed',
+    );
+    expect(r.body).toContain('stay inline at any floor');
+    expect(r.body).not.toContain('were recorded and deferred');
   });
 
   it('an RC body owns the reduced shape, cause and seam census', () => {
@@ -2740,7 +2747,221 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
       'fix-audit round under the critical posting posture',
     );
     expect(r.body).toContain('engaged by the round schedule');
-    expect(r.body).toContain('2 of 7 hunk(s) republished');
+    expect(r.body).toContain('1 seam-bounded: 2 of 7 hunk(s) republished');
+    // The wave sentence states the scheduler's INCLUSION rule (#10136
+    // R12-2) — true of delta ∪ non-dry ∪ stale-dry ∪ no-history on every
+    // wave, engaged narrowing or not — never the past-tense "only delta
+    // territories and chunks whose previous wave yielded".
+    expect(r.body).toContain(
+      'non-delta chunks the previous waves could not certify dry',
+    );
+    expect(r.body).toContain('an uncertified receipt, no audit history');
+    expect(r.body).not.toContain('chunks whose previous wave yielded');
+  });
+
+  it('the Chinese half carries the same shape, rule, cause, census and licence tail', () => {
+    // The zh twin of every round-shape string, rendered through the same
+    // bilingual switch the posted body uses (a Han-description PR).
+    const hanInput = (
+      incremental: Record<string, unknown>,
+    ): ReturnType<typeof base> => {
+      const input = base({ criticalsInline: 1 });
+      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+        han: true,
+        incremental: incremental as never,
+      });
+      return input;
+    };
+    const r = composeReview(hanInput(POSTURE));
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain(
+      '轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行',
+    );
+    expect(r.body).toContain('由轮次日程触发');
+    expect(r.body).toContain('此前各波未能证实干燥的非 delta chunk');
+    expect(r.body).toContain('1 个按接缝收窄：重发 2/7 个 hunk');
+    expect(r.body).not.toContain('上一波出过发现的 chunk');
+
+    const explicit = composeReview(
+      hanInput({ ...POSTURE, postureCause: 'explicit' }),
+    );
+    expect(explicit.body).toContain('由操作者显式设置的 critical 下限触发');
+
+    const off = hanInput(POSTURE);
+    off.criticalsInline = 0;
+    off.severityFloor = 'suggestion';
+    off.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r2 = composeReview(off);
+    expect(r2.body).toContain('没有姿态授权（操作者关闭了该姿态）');
+    expect(r2.body).not.toContain('由收敛姿态路由');
+
+    const none = composeReview(
+      hanInput({ ...POSTURE, scope: { ...POSTURE.scope, interaction: [] } }),
+    );
+    expect(none.body).toContain('（没有仍然干净的 importer 重新进入范围）');
+  });
+
+  it('renders the explicit-floor cause by name', () => {
+    const r = composeReview(rcInput({ ...POSTURE, postureCause: 'explicit' }));
+    expect(r.body).toContain('engaged by the operator-set critical floor');
+  });
+
+  it('a census that kept every hunk is named as kept whole, never as a shed (#10136 R1-7)', () => {
+    const r = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          interaction: [
+            {
+              path: 'src/b.ts',
+              importsChanged: ['src/a.ts'],
+              seam: { kept: 3, total: 3 },
+            },
+            {
+              path: 'src/c.ts',
+              importsChanged: ['src/a.ts'],
+              seam: { kept: 1, total: 4 },
+            },
+          ],
+        },
+      }),
+    );
+    expect(r.body).toContain(
+      '1 seam-bounded: 1 of 4 hunk(s) republished; 1 republished whole, every hunk on the seam',
+    );
+    expect(r.body).not.toContain('4 of 7');
+    // Every file kept whole: no seam-bounded count at all.
+    const whole = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          interaction: [
+            {
+              path: 'src/b.ts',
+              importsChanged: ['src/a.ts'],
+              seam: { kept: 3, total: 3 },
+            },
+          ],
+        },
+      }),
+    );
+    expect(whole.body).toContain(
+      '(1 republished whole, every hunk on the seam)',
+    );
+    expect(whole.body).not.toContain('seam-bounded:');
+  });
+
+  it('claims interaction files only when the scope has some (#10136)', () => {
+    const r = composeReview(
+      rcInput({ ...POSTURE, scope: { ...POSTURE.scope, interaction: [] } }),
+    );
+    expect(r.body).toContain(
+      'covered the commits since the previous round (no still-clean importer re-entered the scope)',
+    );
+    expect(r.body).not.toContain('import-seam interaction files');
+  });
+
+  it('counts a seam census only on an entry the briefs would render — one admission (#10136)', () => {
+    // An entry with no surviving edge is one `incrementalScopeOf` drops; its
+    // census must not reach the body either, or the disclosure counts a
+    // reduction on a file no brief described.
+    const r = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          interaction: [
+            {
+              path: 'src/b.ts',
+              importsChanged: [],
+              seam: { kept: 1, total: 9 },
+            },
+            {
+              path: '',
+              importsChanged: ['src/a.ts'],
+              seam: { kept: 0, total: 5 },
+            },
+          ],
+        },
+      }),
+    );
+    expect(r.body).not.toContain('seam-bounded');
+    expect(r.body).toContain('no still-clean importer re-entered the scope');
+  });
+
+  it('an approving fix-audit round still owns its reduced shape (#10136 R1-6)', () => {
+    // The common successful fix round: no new Critical, the survivors
+    // deferred — composes through the APPROVE branch, and the body must
+    // carry the round-shape disclosure there too.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.severityFloor = 'critical';
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues');
+    expect(r.body).toContain(
+      'fix-audit round under the critical posting posture',
+    );
+    expect(r.body).toContain('recorded and deferred, never posted');
+  });
+
+  it('an engaged floor beside an empty deferral list claims no deferral (#10136)', () => {
+    const input = rcInput(POSTURE);
+    input.severityFloor = 'critical';
+    const r = composeReview(input);
+    expect(r.body).toContain('nothing below Critical reached it this round');
+    expect(r.body).not.toContain('were recorded and deferred');
+  });
+
+  it('an explicit suggestion floor beside a postured plan and a deferral list: the deferrals are unlicensed, never posture-routed (#10136 R13-1)', () => {
+    // The boundary state the licence chain and the open-arm tail must
+    // agree on: the operator turned the posture off, the plan still
+    // records one, and the model deferred anyway. The licence caps the
+    // verdict as unlicensed-deferral; the tail may not attribute the same
+    // deferrals to the posture the operator disabled.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.severityFloor = 'suggestion';
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.cappedBy).toContain('unlicensed-deferral');
+    expect(r.body).toContain('the operator turned the posture off');
+    expect(r.body).toContain('deferred without a posture licence');
+    expect(r.body).toContain('carry no posture licence');
+    expect(r.body).not.toContain('routed by the convergence posture');
+    // The SAME state with an `auto` floor routes them to the posture —
+    // the plan record is the licence there.
+    input.severityFloor = 'auto';
+    const auto = composeReview(input);
+    expect(auto.cappedBy).not.toContain('unlicensed-deferral');
+    expect(auto.body).not.toContain('carry no posture licence');
   });
 
   it('renders the flat-trend cause by name', () => {

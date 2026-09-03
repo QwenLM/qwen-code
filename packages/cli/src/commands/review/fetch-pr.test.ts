@@ -1579,6 +1579,150 @@ describe('fetch-pr report assembly', () => {
     expect(report.budget.reverseAuditRounds).toBe(5);
   });
 
+  // The capture-time recovery of the operator's RECORDED floor (#10136
+  // R1-5): the same record compose and submit read, bound to the same
+  // identity axes. Each test plants the CLI's own args record beside a side
+  // file that would otherwise resolve the posture.
+  function postureSideFile(path: unknown): string | null {
+    if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+      return JSON.stringify({ round: 7, findings: [], posted: 1, floor: 'c' });
+    }
+    return null;
+  }
+
+  it('a recorded `--severity-floor suggestion` turns the posture off at capture (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const B_SOURCE =
+      '//x\n//y\nconst pad = 1;\n' +
+      "import { added } from './a.js';\nadded();\n";
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return B_SOURCE;
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      // The session's own record: this PR, posture explicitly off.
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    // The side file alone would resolve `round`; the record wins, and the
+    // round keeps the full shape: no posture, the interaction file
+    // republished in full with no seam census.
+    expect(report.incremental.posture).toBeUndefined();
+    expect(report.incremental.postureCause).toBeUndefined();
+    expect(report.incremental.scope.interaction).toEqual([
+      { path: 'b.ts', importsChanged: ['a.ts'] },
+    ]);
+    expect(writtenDiff() ?? '').toContain('+y2');
+  });
+
+  it('a recorded `--severity-floor critical` engages the posture on an early anchored re-review (#10136)', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      // Round 2 — years short of the schedule, no streak.
+      if (String(path).endsWith('qwen-review-pr-42-prev-ledger.json')) {
+        return JSON.stringify({ round: 1, findings: [], posted: 1 });
+      }
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return '42 --severity-floor critical';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental.posture).toBe('critical');
+    expect(report.incremental.postureCause).toBe('explicit');
+    expect(report.budget.reverseAuditRounds).toBe(5);
+  });
+
+  it("binds a URL-shaped record's host to the remote under review, as submit does (#10136 R1-12)", async () => {
+    // The record names a GHE host; no `--host` flag and no GH_HOST reach
+    // this capture. `resolveGhHost` alone reads github.com and the record
+    // would not bind — the operator's posture-off would be missed and the
+    // narrowed shape spent against it. The remote under review carries the
+    // host, and the chain reads it.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@ghe.example.com:acme/widgets.git\n'
+          : '',
+    );
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) {
+        return "import { added } from './a.js';\nadded();\n";
+      }
+      const side = postureSideFile(path);
+      if (side !== null) return side;
+      if (String(path).endsWith('qwen-skill-args-review.txt')) {
+        return 'https://ghe.example.com/acme/widgets/pull/42 --severity-floor suggestion';
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const savedHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBeUndefined();
+      expect(report.incremental.postureCause).toBeUndefined();
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+
+    // The control: the same record with a remote on ANOTHER host does not
+    // bind, and the side file resolves the posture — the axis is live.
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse'
+        ? 'f00df00df00d'
+        : args[0] === 'remote' && args[1] === 'get-url'
+          ? 'git@github.com:acme/widgets.git\n'
+          : '',
+    );
+    delete process.env['GH_HOST'];
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental.posture).toBe('critical');
+      expect(report.incremental.postureCause).toBe('round');
+    } finally {
+      if (savedHost !== undefined) process.env['GH_HOST'] = savedHost;
+    }
+  });
+
   it('keeps a heavy interaction file unbounded so its invariant agents launch (#10136)', async () => {
     // Heaviness is classified from the PUBLISHED slice. If the seam bound
     // trimmed a file whose FULL-RANGE slice clears the heavy bar, the plan

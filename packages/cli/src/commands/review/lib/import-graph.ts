@@ -283,9 +283,14 @@ const CLAUSE_NOISE = new Set(['type', 'typeof', 'default', 'as']);
  */
 function clauseBindings(clause: string): string[] | null {
   const out: string[] = [];
+  // The noise filter applies where the words ARE keywords — a brace entry's
+  // `type`/`typeof`/`default`/`as`. In the star and default positions the
+  // name is the binding itself, keyword-shaped or not (`import * as type`,
+  // `import type from`): filtering there dropped a real binding with no
+  // doubt (#10136), so those positions bind whatever the grammar admits.
   const push = (raw: string) => {
     const name = raw.trim();
-    if (IDENT_RE.test(name) && !CLAUSE_NOISE.has(name)) out.push(name);
+    if (IDENT_RE.test(name)) out.push(name);
   };
   const star = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause);
   if (star) push(star[1]);
@@ -305,13 +310,69 @@ function clauseBindings(clause: string): string[] | null {
   }
   // The default import: the first identifier after the keyword, outside any
   // braces (`import a, { b } from …` — `a`; `import { b } from …` — none).
+  // `type`/`typeof` right after the keyword is the type-only MODIFIER when a
+  // name, a brace or a star follows it (`import type X`, `import type {`)
+  // and the default binding itself otherwise (`import type from`,
+  // `import type, { x } from`) — a name the grammar admits, not noise.
   const head = clause.split('{')[0];
-  const def = /^\s*(?:import|export)\s+(?:type\s+)?([A-Za-z_$][\w$]*)/.exec(
-    head,
-  );
-  if (def) push(def[1]);
+  const def =
+    /^\s*(?:import|export)\s+([A-Za-z_$][\w$]*)(?:\s+([A-Za-z_$][\w$]*)|\s*(,))?/.exec(
+      head,
+    );
+  if (def) {
+    const [, first, second, comma] = def;
+    if (first !== 'type' && first !== 'typeof') push(first);
+    else if (second !== undefined) push(second);
+    else if (comma !== undefined || !/[{*]/.test(clause)) push(first);
+  }
   return [...new Set(out)];
 }
+
+/** Words after which a `/` opens a regex literal, never a division. */
+const REGEX_AFTER_WORDS = new Set([
+  'return',
+  'typeof',
+  'instanceof',
+  'in',
+  'of',
+  'new',
+  'delete',
+  'void',
+  'throw',
+  'case',
+  'do',
+  'else',
+  'yield',
+  'await',
+  'extends',
+]);
+/** Punctuator characters after which a `/` opens a regex literal. */
+const REGEX_AFTER_PUNCT = new Set([
+  '(',
+  ',',
+  '=',
+  ':',
+  '[',
+  '!',
+  '&',
+  '|',
+  '?',
+  '{',
+  ';',
+  '+',
+  '-',
+  '*',
+  '%',
+  '<',
+  '>',
+  '~',
+  '^',
+]);
+/** Words that open a block statement's `{` (its `}` ends a statement). */
+const BLOCK_AFTER_WORDS = new Set(['else', 'try', 'finally', 'do']);
+/** Words whose `(…)` is a control head: a `/` after its `)` opens a regex. */
+const CONTROL_PAREN_WORDS = new Set(['if', 'while', 'for', 'with']);
+const IDENT_CHAR_RE = /[\w$]/;
 
 /**
  * A comment-stripped view of `source`, length- and newline-preserving:
@@ -320,60 +381,274 @@ function clauseBindings(clause: string): string[] | null {
  * The seam scans run on THIS, because a keyword inside a comment used to
  * displace the clause-bound scan and parse the clause to the wrong bindings
  * (#10136) — comment-awareness is the scan's job, and one strip gives it to
- * every pattern at once. The walk is string-aware (#10136): a quote or a
- * backtick opens a literal whose bytes stay intact — the specifier scan
- * needs its quotes, and a `//` inside `'https://x'`, or an open-block
- * marker in one string beside a close-block marker in a later one, used to
- * blank real seam statements off their lines — and quote marks inside a
- * comment never open a literal. An unterminated quote ends at the line; a
- * template spans lines.
+ * every pattern at once.
+ *
+ * The walk is a lexer over the JavaScript lexical grammar, not a
+ * comment-marker scan (#10136): a marker is a comment only in the CODE
+ * state, and every other state is tracked, never guessed — string literals
+ * with their escapes (an unterminated quote ends at its line), template
+ * literals with `${…}` interpolations nested to any depth (the interpolation
+ * is code again, braces and all, and a backtick inside it opens a NESTED
+ * template, never closes the outer one), regex literals with their escapes
+ * and character classes, and the shebang line. Whether a `/` opens a regex
+ * or is a division is decided by the token before it, the standard rule: a
+ * regex after an operator, a control-flow keyword, a statement boundary, a
+ * control head's `)` or a block's `}`; a division after an operand — a
+ * name, a number, a literal, a `]`, a call's or grouping's `)`, an object
+ * literal's `}`.
+ *
+ * Returns `null` — the DOUBT state — wherever the walk cannot prove the
+ * state it is in: a `/` after a `}` whose `{` it could not class as block or
+ * object literal, or after a punctuator the rule does not list; a `)` or
+ * `}` with no opener; a block comment, regex literal, template or
+ * interpolation still open at end of input (the walk lost sync). The seam
+ * oracle republishes such a file in full. Nothing here is guessed, so a
+ * miss cannot blank a real seam statement — the one error the seam bound
+ * must not make. Known residual, documented rather than modelled: JSX is
+ * not a lexical state of this walk — a closing tag's `</` is an
+ * unterminated regex literal to the JS grammar, so a JSX file doubts at
+ * its first closing tag and republishes in full (measured: no `.ts` source
+ * in this repository doubts; most `.tsx` files do) — and a `/` after a
+ * generic's `>` reads as a regex, which only ever costs an unblanked
+ * comment on that line — over-collection, the budgeted direction.
  */
-function stripComments(source: string): string {
+export function stripComments(source: string): string | null {
   const out = source.split('');
   const n = source.length;
+  const at = (k: number): string => (k < n ? source.charAt(k) : '');
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to && k < n; k++) {
+      if (out[k] !== '\n') out[k] = ' ';
+    }
+  };
+  // The token before the cursor, as the regex/division rule reads it: its
+  // last character, the word it ended (for the keyword lists), whether it
+  // was a postfix `++`/`--` (an operand whatever `+` says), and — when it
+  // was a `)` or `}` — the class of what it closed.
+  let prevChar = '';
+  let prevWord = '';
+  let prevPostfix = false;
+  let prevClose: boolean | null = null;
+  // Every open `{`, classed when it opened: `true` for a block (statement
+  // position — its `}` ends a statement), `false` for an object literal
+  // (operand — its `}` ends an expression), `null` when the walk could not
+  // tell. Every open `(`: `true` for a control head (`if (…)`), `false` for
+  // a call or a grouping. Every open template interpolation: the brace
+  // depth it was entered at, so its own `}` is told apart from the code's.
+  const braces: Array<boolean | null> = [];
+  const parens: boolean[] = [];
+  const tplFrames: number[] = [];
+  const setPunct = (c: string): void => {
+    prevPostfix =
+      (c === '+' || c === '-') &&
+      prevChar === c &&
+      !prevPostfix &&
+      prevWord === '';
+    prevChar = c;
+    prevWord = '';
+    prevClose = null;
+  };
+  const setOperand = (): void => {
+    prevChar = '`';
+    prevWord = '';
+    prevPostfix = false;
+    prevClose = null;
+  };
+  // Walk a template body from `from`: the index after the closing backtick,
+  // or the index of a `${` (the caller enters code), or -1 when the input
+  // ends inside the template.
+  const walkTemplate = (from: number): number => {
+    let k = from;
+    while (k < n) {
+      const d = at(k);
+      if (d === '\\') k += 2;
+      else if (d === '`') return k + 1;
+      else if (d === '$' && at(k + 1) === '{') return k;
+      else k++;
+    }
+    return -1;
+  };
+  // Enter code at a `${`, or land after a closing backtick. Returns false
+  // when the template never closes.
+  const resumeTemplate = (from: number): boolean => {
+    const next = walkTemplate(from);
+    if (next < 0) return false;
+    if (at(next) === '$') {
+      tplFrames.push(braces.length);
+      i = next + 2;
+      setPunct('(');
+    } else {
+      i = next;
+      setOperand();
+    }
+    return true;
+  };
+
   let i = 0;
+  if (at(0) === '#' && at(1) === '!') {
+    // The shebang: a comment by the host's grammar, never the lexer's.
+    while (i < n && at(i) !== '\n') {
+      out[i] = ' ';
+      i++;
+    }
+  }
   while (i < n) {
-    const c = source.charAt(i);
-    if (c === "'" || c === '"' || c === '`') {
+    const c = at(i);
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
       i++;
       while (i < n) {
-        const d = source.charAt(i);
+        const d = at(i);
         if (d === '\\') i += 2;
         else if (d === c) {
           i++;
           break;
-        } else if (c !== '`' && d === '\n') break;
+        } else if (d === '\n') break;
         else i++;
       }
+      setOperand();
       continue;
     }
-    if (c === '/' && source.charAt(i + 1) === '/') {
-      while (i < n && source.charAt(i) !== '\n') {
-        out[i] = ' ';
+    if (c === '`') {
+      if (!resumeTemplate(i + 1)) return null;
+      continue;
+    }
+    if (c === '/' && at(i + 1) === '/') {
+      const from = i;
+      while (i < n && at(i) !== '\n') i++;
+      blank(from, i);
+      continue;
+    }
+    if (c === '/' && at(i + 1) === '*') {
+      const close = source.indexOf('*/', i + 2);
+      if (close < 0) return null;
+      blank(i, close + 2);
+      i = close + 2;
+      continue;
+    }
+    if (c === '/') {
+      let regex: boolean | null;
+      if (prevChar === '') regex = true;
+      else if (prevPostfix) regex = false;
+      else if (IDENT_CHAR_RE.test(prevChar)) {
+        regex = REGEX_AFTER_WORDS.has(prevWord);
+      } else if (prevChar === ')' || prevChar === '}') regex = prevClose;
+      else if (prevChar === ']' || prevChar === '`' || prevChar === '/') {
+        regex = false;
+      } else regex = REGEX_AFTER_PUNCT.has(prevChar) ? true : null;
+      if (regex === null) return null;
+      if (!regex) {
         i++;
+        setPunct('/');
+        continue;
       }
+      i++;
+      let inClass = false;
+      let closed = false;
+      while (i < n) {
+        const d = at(i);
+        if (d === '\n') break;
+        if (d === '\\') i += 2;
+        else if (d === '[') {
+          inClass = true;
+          i++;
+        } else if (d === ']') {
+          inClass = false;
+          i++;
+        } else if (d === '/' && !inClass) {
+          i++;
+          closed = true;
+          break;
+        } else i++;
+      }
+      if (!closed) return null;
+      while (i < n && IDENT_CHAR_RE.test(at(i))) i++;
+      setOperand();
       continue;
     }
-    if (c === '/' && source.charAt(i + 1) === '*') {
-      out[i] = ' ';
-      out[i + 1] = ' ';
-      i += 2;
-      while (
-        i < n &&
-        !(source.charAt(i) === '*' && source.charAt(i + 1) === '/')
+    if (c === '{') {
+      // Classed by the token before it. A block: after a `)` (a control
+      // head's or a signature's), a `=>`, a block keyword, a name (`class
+      // X {`, `function f() {` reaches here via `)`), a statement boundary,
+      // or another block's `{`. An object literal: after an operator, an
+      // opener, a separator, a `return`-like word, or an object literal's
+      // own `{`. Unknowable otherwise.
+      let block: boolean | null;
+      if (
+        prevChar === '' ||
+        prevChar === ')' ||
+        prevChar === ';' ||
+        prevChar === '}' ||
+        prevChar === '>'
       ) {
-        if (source.charAt(i) !== '\n') out[i] = ' ';
-        i++;
+        block = true;
+      } else if (IDENT_CHAR_RE.test(prevChar)) {
+        block =
+          BLOCK_AFTER_WORDS.has(prevWord) || !REGEX_AFTER_WORDS.has(prevWord);
+      } else if (prevChar === '{') {
+        block = braces.length > 0 && braces[braces.length - 1] === true;
+      } else if (REGEX_AFTER_PUNCT.has(prevChar) || prevChar === '`') {
+        block = false;
+      } else {
+        block = null;
       }
-      if (i < n) {
-        out[i] = ' ';
-        out[i + 1] = ' ';
-        i += 2;
+      braces.push(block);
+      i++;
+      setPunct('{');
+      continue;
+    }
+    if (c === '}') {
+      const frame = tplFrames[tplFrames.length - 1];
+      if (frame !== undefined && braces.length === frame) {
+        // The interpolation's own close: back into the template body.
+        tplFrames.pop();
+        if (!resumeTemplate(i + 1)) return null;
+        continue;
       }
+      // A `}` with no opener may close a block the walk never saw: refuse.
+      if (braces.length === 0) return null;
+      const closed = braces.pop();
+      i++;
+      prevChar = '}';
+      prevWord = '';
+      prevPostfix = false;
+      prevClose = closed === undefined ? null : closed;
+      continue;
+    }
+    if (c === '(') {
+      parens.push(
+        IDENT_CHAR_RE.test(prevChar) && CONTROL_PAREN_WORDS.has(prevWord),
+      );
+      i++;
+      setPunct('(');
+      continue;
+    }
+    if (c === ')') {
+      if (parens.length === 0) return null;
+      const control = parens.pop() === true;
+      i++;
+      prevChar = ')';
+      prevWord = '';
+      prevPostfix = false;
+      prevClose = control;
+      continue;
+    }
+    if (IDENT_CHAR_RE.test(c)) {
+      const from = i;
+      while (i < n && IDENT_CHAR_RE.test(at(i))) i++;
+      prevWord = source.slice(from, i);
+      prevChar = at(i - 1);
+      prevPostfix = false;
+      prevClose = null;
       continue;
     }
     i++;
+    setPunct(c);
   }
+  if (tplFrames.length > 0) return null;
   return out.join('');
 }
 
@@ -411,7 +686,13 @@ export function seamLines(
   changed: ReadonlySet<string>,
   packages: readonly WorkspacePackage[] = [],
 ): number[] {
-  const stripped = stripComments(source);
+  const lexed = stripComments(source);
+  if (lexed === null) {
+    // The lexer could not prove its state (#10136): the doubt shape,
+    // exactly as an unreadable clause below — every line, the file in full.
+    return Array.from({ length: source.split('\n').length }, (_, i) => i + 1);
+  }
+  const stripped = lexed;
   const lineOf = (index: number): number => {
     let line = 1;
     for (let i = 0; i < index && i < stripped.length; i++) {

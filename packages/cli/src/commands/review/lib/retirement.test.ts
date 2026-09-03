@@ -270,6 +270,38 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('one dry receipt narrows a non-delta chunk that YIELDED the wave before (#10136 R1-4)', () => {
+    // The distinguishing fixture: chunk 14 yielded in round 1 and returned
+    // a substantive dry receipt in round 2, each against its OWN findings
+    // digest (the serial shape — round 2 was built after round 1's
+    // findings entered the list). Ordinary retirement needs two dry
+    // audits and would keep it hot; the posture narrowing prices it out
+    // on the single dry receipt. Delta chunk 13 with the same history
+    // stays hot — the narrowing never touches a delta territory.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk', 'd1'), YIELD);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk', 'd2'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'd1'), YIELD);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'd2'), DRY);
+
+    const r3 = scheduleReverseAuditRound(plan, [13, 14], 3, process.env, diff, {
+      deltaChunkIds: new Set([13]),
+    });
+    expect(r3.due).toEqual([13]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.coldChecks).toEqual([]);
+    // Without the narrowing context the same history keeps BOTH hot — the
+    // one-receipt bar is the posture's alone.
+    const plain = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      3,
+      process.env,
+      diff,
+    );
+    expect(plain.due).toEqual([13, 14]);
+    expect(plain.narrowed).toEqual([]);
+  });
+
   it('a dry receipt sharing its digest with a yield does not narrow the chunk out (#10136)', () => {
     // The convergence-pair shape: a fix-audit round's first two waves run
     // against the SAME findings digest. Chunk 14's round-1 member YIELDED;

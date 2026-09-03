@@ -10,6 +10,10 @@
 // and the fail-quiet misses, because a resolver that silently resolved OUTSIDE
 // the membership set would widen the scope with files nobody planned.
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { describe, it, expect } from 'vitest';
 import {
   scanImportSpecifiers,
@@ -17,6 +21,7 @@ import {
   dependentsOfChanged,
   discoverWorkspacePackages,
   seamLines,
+  stripComments,
 } from './import-graph.js';
 
 describe('scanImportSpecifiers', () => {
@@ -621,5 +626,256 @@ describe('seamLines', () => {
   it('marks nothing for a file whose imports all resolve elsewhere', () => {
     const source = ["import { a } from './stable.js';", 'a();'].join('\n');
     expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
+  });
+
+  // The three entrances round 15 probe-executed (#10136 R9-1): each used
+  // to return a short NON-doubt array — a certified census that shed the
+  // seam — because the comment walk did not track the lexical state the
+  // source was in. Every one now reads the seam it displays, or doubts.
+  it('a regex literal beside a same-line require is not a comment (R9-1)', () => {
+    const source = [
+      "const URL_RE = /https?:\\/\\//; const { moved } = require('./changed.js');", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+  });
+
+  it('a template nested inside an interpolation does not flip the string state (R9-1)', () => {
+    const source = [
+      'const u = `${`https://`}x`;', // 1
+      "const { moved } = require('./changed.js');", // 2
+      'moved();', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([2, 3]);
+    // …and a `/*` inside the nested template beside a `*/` two lines
+    // later — the pair a misaligned walk blanked everything between.
+    const pair = [
+      'const a = `${`/*`}`;', // 1
+      "const { moved } = require('./changed.js');", // 2
+      'const b = `*/`;', // 3
+      'moved();', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', pair, changed)).toEqual([2, 4]);
+  });
+
+  it('a keyword-shaped binding in star or default position is a binding (R9-1)', () => {
+    const star = [
+      "import * as type from './changed.js';", // 1
+      'type.moved();', // 2
+      'const other = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', star, changed)).toEqual([1, 2]);
+    const def = [
+      "import type from './changed.js';", // 1
+      'type();', // 2
+      'const other = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', def, changed)).toEqual([1, 2]);
+    const defWithBraces = [
+      "import type, { moved } from './changed.js';", // 1
+      'type();', // 2
+      'moved();', // 3
+      'const other = 1;', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', defWithBraces, changed)).toEqual([1, 2, 3]);
+    // The MODIFIER reading stays: `import type { X }` binds X alone, and
+    // `import type X` binds X — neither marks the word `type`.
+    const modifier = [
+      "import type { Moved } from './changed.js';", // 1
+      'let x: Moved;', // 2
+      'type Other = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', modifier, changed)).toEqual([1, 2]);
+    const defaultTyped = [
+      "import type Moved from './changed.js';", // 1
+      'let x: Moved;', // 2
+      'type Other = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', defaultTyped, changed)).toEqual([1, 2]);
+  });
+
+  it('a division is a division: the comment after it is blanked (R9-1)', () => {
+    // If the `/` were lexed as a regex, the walk would run to the next
+    // `/` and leave the trailing comment unblanked — and its `import …
+    // from './changed.js'` would mark a seam the code does not have.
+    const source = [
+      "const r = a / b; // import { moved } from './changed.js'", // 1
+      'const s = arr.length / 2; // see moved', // 2
+      "const t = (a + b) / 2; // import * as x from './changed.js'", // 3
+      'const u = f(a) / 2; // moved', // 4
+      "const v = x++ / 2; // import { moved } from './changed.js'", // 5
+      'const w = obj.k / 2;', // 6
+      "const z = (x ?? {}) / 2; // import { moved } from './changed.js'", // 7
+      "const q = { k: 1 } / 2; // import { moved } from './changed.js'", // 8
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
+  });
+
+  it('a regex after a keyword, an operator or a control head is a regex (R9-1)', () => {
+    const source = [
+      'function f(x) {', // 1
+      "  if (x) /https?:\\/\\//.test(x); const { moved } = require('./changed.js');", // 2
+      '  return /https?:\\/\\//.test(x) || moved();', // 3
+      '}', // 4
+      "const re = x ? /a\\/[/]b/ : /c\\//; const { other } = require('./changed.js');", // 5
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([2, 3, 5]);
+  });
+
+  it('a state the lexer cannot prove fails closed to the whole file (R9-1)', () => {
+    // A `}` or `)` with no opener may close a construct the walk never
+    // saw: doubt.
+    for (const stray of ['}', ')']) {
+      const source = [
+        stray, // 1
+        "const { moved } = require('./changed.js');", // 2
+        'const other = 1;', // 3
+      ].join('\n');
+      expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+    }
+    // An unterminated block comment, regex or template: the walk lost sync.
+    for (const source of [
+      "const { moved } = require('./changed.js'); /* open",
+      "const { moved } = require('./changed.js'); const r = /open",
+      "const { moved } = require('./changed.js'); const t = `open",
+      "const { moved } = require('./changed.js'); const t = `${ open`",
+    ]) {
+      expect(seamLines('src/imp.ts', source, changed)).toEqual([1]);
+    }
+    const twoLines = [
+      "const { moved } = require('./changed.js');", // 1
+      'const t = `open', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', twoLines, changed)).toEqual([1, 2]);
+  });
+
+  it('a shebang line is a comment, and a plain-declaration require binds its name', () => {
+    const source = [
+      "#!/usr/bin/env node // import { x } from './changed.js'", // 1
+      "const moved = require('./changed.js');", // 2
+      'moved.run();', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([2, 3]);
+  });
+
+  it('a side-effect import marks its own line and binds nothing', () => {
+    const source = [
+      "import './changed.js';", // 1
+      'const moved = 1;', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1]);
+  });
+
+  it('a default import binds its name', () => {
+    const source = [
+      "import moved, { other } from './changed.js';", // 1
+      'moved();', // 2
+      'other();', // 3
+      'const x = 1;', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+  });
+
+  it('resolves a workspace-package specifier through the packages argument', () => {
+    const packages = [
+      { name: '@w/pkg', dir: 'packages/pkg', entry: 'index.ts' },
+    ];
+    const pkgChanged = new Set(['packages/pkg/src/changed.ts']);
+    const source = [
+      "import { moved } from '@w/pkg/src/changed.js';", // 1
+      'moved();', // 2
+      'const x = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, pkgChanged)).toEqual([]);
+    expect(seamLines('src/imp.ts', source, pkgChanged, packages)).toEqual([
+      1, 2,
+    ]);
+  });
+});
+
+describe('stripComments — the lexer (#10136)', () => {
+  it('is length- and newline-preserving across a multi-line block comment', () => {
+    const source = 'a /* one\n two\n three */ b\n// tail\nc';
+    const out = stripComments(source);
+    expect(out).not.toBeNull();
+    expect(out).toHaveLength(source.length);
+    expect(out?.split('\n')).toHaveLength(source.split('\n').length);
+    expect(out).toBe('a       \n    \n          b\n       \nc');
+  });
+
+  it('keeps escaped quotes inside strings and escapes inside regexes', () => {
+    const source = "const s = 'it\\'s // not'; const r = /\\/[/]x/; // gone";
+    const out = stripComments(source);
+    expect(out).toBe("const s = 'it\\'s // not'; const r = /\\/[/]x/;        ");
+  });
+
+  // The oracle for the lexer is TypeScript's own scanner, a dev dependency
+  // this package already carries: over every source file of the review
+  // command — thousands of regex literals, template interpolations and
+  // comment shapes written without this walk in mind — a non-doubt strip
+  // must blank exactly the byte ranges TypeScript classifies as comment
+  // trivia, and nothing else. A hand-lexer whose state tracking drifted on
+  // any construct in this corpus fails here; a walk that doubted its way
+  // through the corpus fails the ceiling.
+  it("agrees with the TypeScript scanner over the review command's own sources", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const dirs = [join(here, '..'), here];
+    const files: string[] = [];
+    for (const dir of dirs) {
+      for (const name of readdirSync(dir)) {
+        if (name.endsWith('.ts') && !name.endsWith('.d.ts')) {
+          files.push(join(dir, name));
+        }
+      }
+    }
+    expect(files.length).toBeGreaterThan(50);
+    const oracle = (text: string): string => {
+      const sf = ts.createSourceFile(
+        'x.ts',
+        text,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      const out = text.split('');
+      const blank = (pos: number, end: number): void => {
+        for (let k = pos; k < end; k++) if (out[k] !== '\n') out[k] = ' ';
+      };
+      const visit = (node: ts.Node): void => {
+        const kids = node.getChildren(sf);
+        if (kids.length === 0) {
+          for (const r of ts.getLeadingCommentRanges(
+            text,
+            node.getFullStart(),
+          ) ?? []) {
+            blank(r.pos, r.end);
+          }
+          for (const r of ts.getTrailingCommentRanges(text, node.getEnd()) ??
+            []) {
+            blank(r.pos, r.end);
+          }
+          return;
+        }
+        kids.forEach(visit);
+      };
+      visit(sf);
+      return out.join('');
+    };
+    const doubted: string[] = [];
+    const mismatched: string[] = [];
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8');
+      const got = stripComments(text);
+      if (got === null) {
+        doubted.push(file);
+        continue;
+      }
+      if (got !== oracle(text)) mismatched.push(file);
+    }
+    expect(mismatched).toEqual([]);
+    // The doubt states are the grammar's genuine ambiguities, which real
+    // code rarely spells; a walk that refused a fifth of the corpus would
+    // be a walk that guessed nothing because it tracked nothing.
+    expect(doubted.length).toBeLessThanOrEqual(Math.floor(files.length / 5));
   });
 });

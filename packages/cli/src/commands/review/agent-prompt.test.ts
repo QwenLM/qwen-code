@@ -5113,6 +5113,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
             {
               path: 'bundle.min.js',
               importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              seam: { kept: 2, total: 2 },
             },
           ],
         },
@@ -5137,6 +5138,113 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('posture-narrowed chunk(s) skipped');
     expect(out).toContain('posture narrowing (#10104)');
     expect(out).toContain('chunk 14 — not a delta territory, dry in round 2');
+    // The note states the scheduler's inclusion rule — a non-delta chunk
+    // whose latest receipt is uncertified stays hot too (#10136 R1-13) —
+    // and the preamble's tail grammar announces the note (R1-17).
+    expect(out).toContain(
+      'every non-delta chunk the previous waves could not certify dry',
+    );
+    expect(out).toContain('uncertified (unknown)');
+    expect(out).not.toContain('re-launches only the delta territories');
+    expect(out).toContain(
+      'followed by the retirement and posture-narrowing notes, when there are any',
+    );
+    // The reverse-auditor's territory bullet for chunk 15's interaction
+    // file: a census that kept every hunk is named as such, never as a
+    // shed (#10136 R1-7).
+    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-3--'),
+    );
+    if (key15 === undefined) throw new Error('chunk 15 was not built');
+    const brief = readFileSync(briefPath(plan, key15), 'utf8');
+    expect(brief).toContain(
+      'all 2 hunk(s) display a seam line and are republished',
+    );
+    expect(brief).not.toContain('not re-shown');
+  });
+
+  it('a round that converges through narrowing names the narrowed chunks in CONVERGED (#10136 R1-10)', () => {
+    // The cleanest fix-audit run: the delta chunk retires on two dry
+    // receipts, the interaction chunks narrow out on their single one, and
+    // round 3 builds nothing. No round output carries the `posture
+    // narrowing:` note for it, so the CONVERGED explanation must — chunk by
+    // chunk, exactly as a built round would have.
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
+    expect(msg).not.toContain('chunk 13 — not a delta territory');
+  });
+
+  it('a chunk the scope record never classified restores the ordinary schedule (#10136 R12-1)', () => {
+    // The scope covers chunk 13's delta file and names NO interaction
+    // files, yet chunks 14 and 15 hold files — a state an honest capture
+    // cannot produce (the published sections tile touched ∪ interaction).
+    // Narrowing would price 14 and 15 out of the wave on one dry receipt
+    // each; the containment check reads the plan as corrupted and runs the
+    // ordinary schedule instead: every chunk audited, nothing narrowed.
+    const corrupt = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    answerRound(1, { 13: YIELD, 14: null, 15: null });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(out).not.toContain('posture narrowing');
+    expect(out).not.toContain('posture-narrowed');
   });
 
   it('a delta list no chunk covers degrades to the ordinary schedule, never an empty narrowing (#10104)', () => {
@@ -7083,6 +7191,33 @@ describe('incremental-scope briefs', () => {
     const plain = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
     expect(plain).not.toContain('Fix-audit round');
     expect(plain).not.toContain('SEAM-BOUNDED');
+  });
+
+  it('a census that kept every hunk is briefed as complete, never as seam-bounded (#10136 R1-7)', () => {
+    const whole = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        since: 'abc1234def5678900000',
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          ...INCREMENTAL_PLAN.incremental.scope,
+          interaction: [
+            {
+              path: 'src/caller.ts',
+              importsChanged: ['src/changed.ts'],
+              seam: { kept: 4, total: 4 },
+            },
+          ],
+        },
+      },
+    };
+    const seam = buildChunkAgentPrompt(whole, 2);
+    expect(seam).not.toContain('SEAM-BOUNDED');
+    expect(seam).not.toContain('not re-shown');
+    expect(seam).toContain('The seam scan kept every one of its 4 hunk(s)');
+    expect(seam).toContain('its diff here is complete');
   });
 
   it('a malformed seam census renders no seam clause', () => {

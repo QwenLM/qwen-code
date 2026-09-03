@@ -18,6 +18,7 @@ import {
   reviewBudget,
   isFixAuditRound,
   isTerritoryFanOut,
+  interactionEntryOf,
 } from './budget.js';
 import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
 
@@ -1337,5 +1338,54 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
       reviewBudget(small, { incremental: POSTURE.incremental })
         .reverseAuditRounds,
     ).toBe(5);
+  });
+});
+
+describe('interactionEntryOf — one admission for every census reader (#10136)', () => {
+  it('admits a well-formed entry with its census', () => {
+    expect(
+      interactionEntryOf({
+        path: 'src/b.ts',
+        importsChanged: ['src/a.ts', '', 7],
+        seam: { kept: 1, total: 3 },
+      }),
+    ).toEqual({
+      path: 'src/b.ts',
+      importsChanged: ['src/a.ts'],
+      seam: { kept: 1, total: 3 },
+    });
+  });
+
+  it('keeps the entry and drops a census that cannot be true', () => {
+    for (const seam of [
+      { kept: 5, total: 2 },
+      { kept: -1, total: 2 },
+      { kept: 1.5, total: 2 },
+      { kept: '1', total: 2 },
+      null,
+      'garbled',
+    ]) {
+      expect(
+        interactionEntryOf({
+          path: 'src/b.ts',
+          importsChanged: ['src/a.ts'],
+          seam,
+        }),
+      ).toEqual({ path: 'src/b.ts', importsChanged: ['src/a.ts'] });
+    }
+  });
+
+  it('refuses an entry the briefs would not render', () => {
+    for (const raw of [
+      null,
+      'src/b.ts',
+      { importsChanged: ['src/a.ts'] },
+      { path: '', importsChanged: ['src/a.ts'] },
+      { path: 'src/b.ts' },
+      { path: 'src/b.ts', importsChanged: [] },
+      { path: 'src/b.ts', importsChanged: ['', 3] },
+    ]) {
+      expect(interactionEntryOf(raw)).toBeNull();
+    }
   });
 });

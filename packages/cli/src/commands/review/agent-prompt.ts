@@ -51,7 +51,11 @@ import {
   MAX_RESUME_CALLS,
   SHELL_TOOL_MAX_TIMEOUT_MS,
 } from './lib/build-budget.js';
-import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
+import {
+  interactionEntryOf,
+  launchToolBudget,
+  reverseAuditRoundCap,
+} from './lib/budget.js';
 import {
   clearBudgetStop,
   claimRetirementDegradeNote,
@@ -227,10 +231,16 @@ function chunkScopeBullets(
         `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
         `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
         `Review that seam, not the rest of its diff.` +
-        (e.seam
+        // The shed clause renders only where a shed happened (#10136): a
+        // census with `kept === total` republished the section whole, and
+        // telling the agent a remainder was withheld sent it hunting for
+        // hunks that were never hidden.
+        (e.seam && e.seam.kept < e.seam.total
           ? ` (seam-bounded: ${e.seam.kept} of ${e.seam.total} hunk(s) republished; ` +
             `the rest were cleared by an earlier round and are not re-shown)`
-          : ''),
+          : e.seam
+            ? ` (seam scan: all ${e.seam.total} hunk(s) display a seam line and are republished)`
+            : ''),
     ),
   ];
 }
@@ -304,40 +314,14 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
     Array.isArray(v)
       ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
       : [];
+  // ONE admission per entry, shared with the roster and compose's
+  // round-shape disclosure (`interactionEntryOf`, #10136): an entry IS its
+  // edge, and a census that cannot be true is dropped from an entry that
+  // is otherwise kept.
   const interaction = Array.isArray(raw.interaction)
     ? raw.interaction
-        .filter(
-          (e): e is { path: string; importsChanged?: unknown } =>
-            !!e &&
-            typeof (e as { path?: unknown }).path === 'string' &&
-            (e as { path: string }).path.length > 0 &&
-            // An interaction entry IS its edge: with no surviving
-            // importsChanged the brief would read "because it imports ,
-            // which changed" — a seam pointing at nothing.
-            strings((e as { importsChanged?: unknown }).importsChanged).length >
-              0,
-        )
-        .map((e) => {
-          const rawSeam = (e as { seam?: unknown }).seam;
-          const seam =
-            typeof rawSeam === 'object' &&
-            rawSeam !== null &&
-            Number.isInteger((rawSeam as { kept?: unknown }).kept) &&
-            Number.isInteger((rawSeam as { total?: unknown }).total) &&
-            ((rawSeam as { kept: number }).kept as number) >= 0 &&
-            ((rawSeam as { total: number }).total as number) >=
-              ((rawSeam as { kept: number }).kept as number)
-              ? {
-                  kept: (rawSeam as { kept: number }).kept,
-                  total: (rawSeam as { total: number }).total,
-                }
-              : undefined;
-          return {
-            path: e.path,
-            importsChanged: strings(e.importsChanged),
-            ...(seam ? { seam } : {}),
-          };
-        })
+        .map(interactionEntryOf)
+        .filter((e): e is NonNullable<typeof e> => e !== null)
     : [];
   // The SAME validity notion the roster applies
   // (`incrementalInteractionPaths`): a partially corrupt delta list
@@ -816,12 +800,16 @@ export function buildChunkAgentPrompt(
             `now that the imported side moved? Read the changed side from the worktree to ` +
             `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
             `do not report defects in it that the change it imports does not affect.` +
-            (e.seam
+            (e.seam && e.seam.kept < e.seam.total
               ? ` Its diff here is SEAM-BOUNDED: ${e.seam.kept} of ${e.seam.total} hunk(s) ` +
                 `republished — only the ones displaying a line that imports or uses what ` +
                 `changed; the rest were cleared by an earlier round and are not re-shown. ` +
                 `The seam question above is still yours in full, from the worktree.`
-              : ''),
+              : e.seam
+                ? ` The seam scan kept every one of its ${e.seam.total} hunk(s): each ` +
+                  `displays a line that imports or uses what changed, so its diff here ` +
+                  `is complete.`
+                : ''),
         ),
       );
       lines.push(
@@ -2770,8 +2758,26 @@ function admitReverseAuditRound(
  * compose-review splice that dedups it no longer runs — only this
  * instruction removes it.
  */
-function refuseConverged(planPath: string): void {
+function refuseConverged(
+  planPath: string,
+  narrowed: ReadonlyArray<{ chunkId: number; dryRound: number }> = [],
+): void {
   clearBudgetStop(planPath);
+  // The round that converges through narrowing prints no round output, so
+  // its `posture narrowing:` note would never appear (#10136): the trade
+  // is named here instead, chunk by chunk, exactly as a built round names
+  // it — the cleanest run must disclose no less than the others.
+  const narrowedNote =
+    narrowed.length === 0
+      ? ''
+      : ' Posture-narrowed this round (#10104): ' +
+        narrowed
+          .map(
+            (n) =>
+              `chunk ${n.chunkId} — not a delta territory, dry in round ${n.dryRound}`,
+          )
+          .join('; ') +
+        '.';
   writeStderrLine(
     'CONVERGED: every chunk has left the wave — retired territories hold ' +
       'two consecutive substantive dry audits, and on a fix-audit round a ' +
@@ -2781,7 +2787,8 @@ function refuseConverged(planPath: string): void {
       'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
       'budget refusal told you to add its stop entry to ' +
       'unreviewedDimensions, remove it now — this convergence supersedes ' +
-      'it.',
+      'it.' +
+      narrowedNote,
   );
   process.exitCode = 5;
 }
@@ -2829,6 +2836,10 @@ function postureNarrowing(
   const scope = incrementalScopeOf(report);
   if (scope === null) return null;
   const delta = new Set(scope.deltaFiles);
+  const classified = new Set([
+    ...scope.deltaFiles,
+    ...scope.interaction.map((e) => e.path),
+  ]);
   const ids = new Set<number>();
   const chunks = Array.isArray(report.chunks)
     ? (report.chunks as Array<{ id?: unknown; files?: unknown }>)
@@ -2838,6 +2849,19 @@ function postureNarrowing(
     const files = Array.isArray(c.files)
       ? (c.files as Array<{ path?: unknown }>)
       : [];
+    // Containment (#10136 R12-1): a chunk holding a file the scope record
+    // classifies as NEITHER delta nor interaction is a chunk the record
+    // never ruled on. An honest capture cannot produce it (`widenScope`
+    // publishes exactly touched ∪ interaction, and the sections are tiled
+    // from that), so the input is a hand-edited or corrupted plan — and
+    // narrowing such a chunk out on one dry receipt would fail it toward
+    // LESS coverage. Null restores the ordinary schedule, like every
+    // sibling reader of malformed input.
+    if (
+      files.some((f) => typeof f?.path === 'string' && !classified.has(f.path))
+    ) {
+      return null;
+    }
     if (files.some((f) => typeof f?.path === 'string' && delta.has(f.path))) {
       ids.add(c.id as number);
     }
@@ -2986,7 +3010,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged(planPath);
+    refuseConverged(planPath, schedule.narrowed);
     return;
   }
 
@@ -3112,10 +3136,13 @@ function runAllChunks(
       ? []
       : [
           `posture narrowing (#10104): on this critical-posture round the ` +
-            `wave re-launches only the delta territories and whatever the ` +
-            `previous wave surfaced findings in — a chunk holding no delta ` +
-            `file leaves the schedule after one substantive dry audit and ` +
-            `takes no cold checks. Narrowed out this round:\n` +
+            `wave re-launches the delta territories and every non-delta ` +
+            `chunk the previous waves could not certify dry — one that ` +
+            `yielded, one whose latest receipt is uncertified (unknown), ` +
+            `one with no audit history, or one whose dry receipt is stale ` +
+            `against a same-digest yield; a chunk holding no delta file ` +
+            `leaves the schedule after one substantive dry audit and takes ` +
+            `no cold checks. Narrowed out this round:\n` +
             narrowedOut
               .map(
                 (n) =>
@@ -3132,7 +3159,8 @@ function runAllChunks(
         `deliverable, and a launch reconstructed from a sample matches no ` +
         `record. Blocks are numbered \`auditor k of ${dueChunks.length}\`, and ` +
         `the output ends with an end-of-round line — followed by the ` +
-        `retirement note, when there is one. If either the numbering or the ` +
+        `retirement and posture-narrowing notes, when there are any. If ` +
+        `either the numbering or the ` +
         `end-of-round line is missing, the output was truncated in transit; ` +
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
@@ -3586,7 +3614,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       const schedule = read.schedule;
       scheduleNote = read.scheduleNote;
       if (!roundAdmitted && schedule !== null && schedule.converged) {
-        refuseConverged(args.plan);
+        refuseConverged(args.plan, schedule.narrowed);
         return;
       }
       // The round builder's diagnostic, narrowed to this chunk (#9213 on

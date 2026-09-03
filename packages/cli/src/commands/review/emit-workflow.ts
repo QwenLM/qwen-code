@@ -81,7 +81,13 @@ export function fanOutBlocker(plan: RosterPlan): string | null {
   // plus the whole-diff agents, so it grows with the diff toward them without
   // bound. This blocks on the roster's growth, not on the topology name, so
   // it lifts the moment the runtime's caps grow with the fan-out.
-  if (isTerritoryFanOut(plan)) {
+  // The growth premise is a SIZE fact: a fix-audit round (#10104) reads as
+  // a territory fan-out whatever its narrowed sizes say, but its roster is
+  // one agent per chunk of a delta the same size fields bound — so the
+  // ruling here is the size gate alone, the posture flip set aside; a
+  // fix-audit round whose narrowed diff would fan out by size is still
+  // refused, one that would not is served.
+  if (isTerritoryFanOut({ ...plan, incremental: undefined })) {
     return (
       'this plan is a territory fan-out (Step 3B), whose roster grows one ' +
       'agent per chunk while a workflow run is wall-clock capped end to ' +

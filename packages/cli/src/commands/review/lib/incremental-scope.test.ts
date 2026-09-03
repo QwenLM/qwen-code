@@ -235,6 +235,170 @@ describe('widenScope seam bound (#10104)', () => {
     ).toBe(true);
   });
 
+  it('records a census that kept every hunk, and sheds nothing (#10136)', () => {
+    // Both hunks display a seam line: the census says so (`kept === total`)
+    // and the section republishes exactly as the unbounded widening would —
+    // no `hunkKeep` entry, byte-identical diff. The readers render this
+    // census as "kept whole", never as a shed.
+    const source = [
+      "import { moved } from './changed.js';", // 1
+      'const a = moved();', // 2
+      '//', // 3
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'function unrelated() {', // 10
+      '  return moved(1);', // 11
+      '}', // 12
+      '',
+    ].join('\n');
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 2, total: 2 });
+    expect(widened.hunkKeep).toBeUndefined();
+    expect(
+      assembleSections(selection, widened.paths, widened.hunkKeep)?.toString(
+        'utf8',
+      ),
+    ).toBe(assembleSections(selection, widened.paths)?.toString('utf8'));
+  });
+
+  it('sheds the FIRST hunk and keeps the second — the reassembled section still tiles', () => {
+    // The seam sits in the second hunk only; the first is shed. The
+    // reassembly must keep the header, drop hunk 0 and keep hunk 1 with its
+    // own `@@` line intact — a planner reading it must find one hunk.
+    const source = [
+      'const a = 1;', // 1
+      'const b = 2;', // 2
+      '//', // 3
+      '',
+      '',
+      '',
+      '',
+      '',
+      "import { moved } from './changed.js';", // 9
+      'function unrelated() {', // 10
+      '  return moved(1);', // 11
+      '}', // 12
+      '',
+    ].join('\n');
+    const selection = seamSelection();
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
+    expect([...(widened.hunkKeep?.get('src/imp.ts') ?? [])]).toEqual([1]);
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('diff --git a/src/imp.ts b/src/imp.ts');
+    expect(diff).not.toContain('+const a = moved();');
+    expect(diff).toContain('@@ -10,3 +10,3 @@');
+    expect(diff).toContain('+  return 1;');
+    const parsed = parseDiff(diff ?? '');
+    const imp = parsed.files.find((f) => f.path === 'src/imp.ts');
+    expect(imp?.hunks).toHaveLength(1);
+    expect(() => buildDiffPlan(diff ?? '', 400)).not.toThrow();
+  });
+
+  it('a hunk-less interaction section is a doubt state: no census, nothing shed', () => {
+    // A section the PR's diff carries with no hunks (a mode change, a
+    // rename) has nothing to bound; the scan is skipped and the entry
+    // carries no seam record, exactly like an unreadable source.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      'old mode 100644',
+      'new mode 100755',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? IMP_SOURCE : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction).toEqual([
+      { path: 'src/imp.ts', importsChanged: ['src/changed.ts'] },
+    ]);
+    expect(widened.hunkKeep).toBeUndefined();
+  });
+
+  it('a heavy full-range slice is exempt from the bound at the unit level (#10136)', () => {
+    // The heavy classification reads the FULL-RANGE section — added +
+    // removed lines against the post-image line count — not the slice the
+    // bound would leave. A section past the heavy bar keeps every hunk with
+    // NO census, so `heavyFiles()` and the invariant agents still see it.
+    const bulk = Array.from({ length: 800 }, (_, i) => `+heavy ${i}`);
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,1 +1,2 @@',
+      " import { moved } from './changed.js';",
+      '+const a = moved();',
+      '@@ -100,2 +101,802 @@',
+      ' ctx',
+      ...bulk,
+      ' ctx2',
+      '',
+    ].join('\n');
+    const source =
+      "import { moved } from './changed.js';\nconst a = moved();\n" +
+      Array.from({ length: 1100 }, (_, i) => `filler ${i}`).join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toBeUndefined();
+    expect(widened.hunkKeep).toBeUndefined();
+    // The same section below the heavy bar IS bounded — the exemption is
+    // the heaviness, not the shape.
+    const light = impSection.replace(
+      '@@ -100,2 +101,802 @@\n ctx\n' + bulk.join('\n') + '\n ctx2\n',
+      '@@ -100,2 +101,3 @@\n ctx\n+light\n ctx2\n',
+    );
+    const lightSel = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + light, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (lightSel === null)
+      throw new Error('the narrowing refused this fixture');
+    const bounded = widenScope({
+      anchor: 'a'.repeat(40),
+      selection: lightSel,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(bounded.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
+  });
+
   it('republishes in full when the seam scan cannot read the source', () => {
     // The edge was found on the first read; the seam read failing is a doubt
     // state, and every doubt state republishes what the unbounded widening

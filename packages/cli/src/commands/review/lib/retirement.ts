@@ -113,14 +113,20 @@ export interface RoundSchedule {
   /**
    * Chunks the fix-audit posture narrowed out of the wave (#10104): not a
    * delta territory, and the most recent audit on record is a substantive
-   * dry receipt. Unlike a retired chunk they get no alternating cold check —
-   * on a critical-posture round the wave re-launches only the delta
-   * territories and whatever yielded in the previous wave, and the note
-   * disclosing that IS this list. Empty whenever the caller passed no
-   * narrowing context.
+   * dry receipt not stale against a same-digest yield. Unlike a retired
+   * chunk they get no alternating cold check — on a critical-posture round
+   * the wave re-launches the delta territories and every non-delta chunk
+   * the previous waves could not certify dry (a yield, an uncertified
+   * receipt, no history, a stale dry receipt), and the note disclosing the
+   * narrowing IS this list. Empty whenever the caller passed no narrowing
+   * context.
    */
   narrowed: Array<{ chunkId: number; dryRound: number }>;
-  /** Every chunk is retired and none is due: the audit has converged. */
+  /**
+   * No chunk is due: retired chunks are between cold checks, posture-narrowed
+   * chunks have left the wave (#10104 — on a fix-audit round a non-delta
+   * chunk converges on its single dry receipt), and the audit has converged.
+   */
   converged: boolean;
   /**
    * One line per chunk whose two most recent audits are NEITHER dry enough
