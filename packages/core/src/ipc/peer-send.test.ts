@@ -167,6 +167,37 @@ describe('sendToPeer', () => {
     });
   });
 
+  it('authenticates with the target token and offers its own for receipts', async () => {
+    readOwnSessionRecord.mockResolvedValue({ ...SELF, ipcToken: 'own-token' });
+    listMessageablePeers.mockResolvedValue([
+      { ...peer('s1', 'app-ab'), ipcToken: 'target-token' },
+    ]);
+
+    await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    const [, frame, options] = sendPeerFrame.mock.calls[0];
+    expect(frame).toMatchObject({ replyToken: 'own-token' });
+    expect(options).toEqual({ authToken: 'target-token' });
+  });
+
+  it('omits tokens for records written before tokens existed', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+
+    await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    const [, frame, options] = sendPeerFrame.mock.calls[0];
+    expect(frame).not.toHaveProperty('replyToken');
+    expect(options).toEqual({});
+  });
+
   it('asserts bypass when this session no longer reviews its actions', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     for (const mode of [
