@@ -234,22 +234,16 @@ export function nestedTasksForTool(
 }
 
 /**
- * Keyed on the tool object, which is sound because a tool whose `subTools` are
- * still being appended to (`transcriptToMessages`' `appendSubTool` mutates in
- * place) is always rebuilt: `useMessages` only reuses a projected message when
- * every preceding transcript block is reference-identical and the sole change
- * is a streaming text append on the tail, so a reused tool's subtree is final.
+ * Deliberately uncached. Keying on the tool object would be wrong the moment
+ * a reused object gains a sub-tool — `appendSubTool` mutates `subTools` in
+ * place — and the only thing standing between that and a stale render is
+ * `useMessages`' prefix-reuse rule in another module. The callers' own
+ * derivations are memoized, so the repetition this would remove is bounded to
+ * a single derivation; a silent wrong subtree is not worth that.
  */
-const nestedAgentToolsCache = new WeakMap<
-  ACPToolCall,
-  Array<{ tool: ACPToolCall; depth: number }>
->();
-
 export function nestedAgentToolsForTool(
   tool: ACPToolCall,
 ): Array<{ tool: ACPToolCall; depth: number }> {
-  const cached = nestedAgentToolsCache.get(tool);
-  if (cached) return cached;
   const result: Array<{ tool: ACPToolCall; depth: number }> = [];
   const visit = (parent: ACPToolCall, depth: number) => {
     for (const child of parent.subTools ?? []) {
@@ -259,7 +253,6 @@ export function nestedAgentToolsForTool(
     }
   };
   visit(tool, 1);
-  nestedAgentToolsCache.set(tool, result);
   return result;
 }
 
