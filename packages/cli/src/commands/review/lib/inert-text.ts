@@ -38,7 +38,6 @@
  * `cache-commit`'s refusals over a candidate its own intake comment calls
  * tamperable, `capture-local`'s warnings, and the symlink guards.
  */
-// eslint-disable-next-line no-control-regex
 export const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
@@ -52,7 +51,6 @@ export const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
  * job. One class still decides WHETHER to quote; this one decides what the
  * quoting cannot express by itself.
  */
-// eslint-disable-next-line no-misleading-character-class
 const NEEDS_PRE_ESCAPE = /[\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 /**
