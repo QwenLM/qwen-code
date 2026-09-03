@@ -112,7 +112,10 @@ const DEFAULT_JOBS = jobsFixture({
 describe('ECS runner qwen update workflow', () => {
   it('installs without the selected runner npm prefix', () => {
     expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
-    expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
+    expect(workflow).toContain('INSTALL=(sudo env -u NPM_CONFIG_PREFIX)');
+    expect(workflow).toContain(
+      '"${INSTALL[@]}" npm install -g --prefix /usr/local',
+    );
   });
 
   it('runs only when this workflow changes on main', () => {
