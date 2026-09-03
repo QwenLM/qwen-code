@@ -285,12 +285,13 @@ function fileExistsError(message: string): NodeJS.ErrnoException {
 }
 
 /**
- * Exclusive creates are the only writes that can meet a record this side keeps
- * but can never resolve: callers read first, so a live local record is already
- * reported as a conflict and a dead one is swept before the write. What is left
- * was written before a reboot, or by another machine or PID namespace sharing
- * this home. It is kept on purpose and no retry clears it, so name the file
- * instead of letting callers report a concurrent startup.
+ * Exclusive creates meet a record the caller's own earlier read did not: seconds
+ * of startup pass between the two, so a record that was live then can be dead
+ * now. Re-run the read path's sweep decision under the lock this call already
+ * holds, once — only a live record, or one this side can never verify, blocks
+ * the write. The latter was written before a reboot, or by another machine or
+ * PID namespace sharing this home; it is kept on purpose, no retry clears it,
+ * so name the file instead of letting callers report a concurrent startup.
  */
 function writeInfoExclusive(info: ServiceInfo): void {
   const filePath = pidFilePath();
@@ -305,15 +306,25 @@ function writeInfoExclusive(info: ServiceInfo): void {
     } catch {
       throw err;
     }
-    if (!existing || isLocalIdentity(existing)) throw err;
 
-    // The code serve's channel routes already answer with a 409 carrying this
-    // message; an unmapped one would be replaced by a generic failure.
-    const conflict = new Error(
-      `Channel service pidfile ${filePath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no channel service is running, then delete that file to start again.`,
-    ) as NodeJS.ErrnoException;
-    conflict.code = 'channel_service_conflict';
-    throw conflict;
+    if (existing && !isLocalIdentity(existing)) {
+      // The code serve's channel routes already answer with a 409 carrying this
+      // message; an unmapped one would be replaced by a generic failure.
+      const conflict = new Error(
+        `Channel service pidfile ${filePath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no channel service is running, then delete that file to start again.`,
+      ) as NodeJS.ErrnoException;
+      conflict.code = 'channel_service_conflict';
+      throw conflict;
+    }
+
+    if (existing && isSameProcess(existing.pid, existing.procStart)) {
+      throw err; // A live record this side wrote: a genuine concurrent startup.
+    }
+
+    // A dead or invalid local record is transient: sweep it and retry the
+    // exclusive create once, still under the lock this call already holds.
+    unlinkPidFile(filePath);
+    writeInfo(info, 'wx');
   }
 }
 
@@ -330,13 +341,28 @@ function readPidfileProcessToken(pid: number): string | null {
   );
 }
 
+function readPidfileNamespaceId(): number | null {
+  let pidNs = readPidNamespaceId();
+  if (process.platform !== 'linux' || pidNs !== null) return pidNs;
+
+  // Retried and refused exactly like the token above: `isLocalIdentity` never
+  // resolves a namespace-less Linux record, so writing one leaves litter no
+  // reader can sweep and not even its own writer can remove.
+  pidNs = readPidNamespaceId();
+  if (pidNs !== null) return pidNs;
+
+  throw new Error(
+    'Unable to read the PID namespace id; refusing to write an unreclaimable Channel pidfile.',
+  );
+}
+
 /** Write PID file with current standalone channel process info. */
 export function writeServiceInfo(channels: string[]): void {
   const info: ServiceInfo = {
     owner: 'channel',
     pid: process.pid,
     procStart: readPidfileProcessToken(process.pid),
-    pidNs: readPidNamespaceId(),
+    pidNs: readPidfileNamespaceId(),
     startedAt: new Date().toISOString(),
     channels,
   };
@@ -362,7 +388,7 @@ export function writeServeServiceInfo({
     owner: 'serve',
     pid: servePid,
     procStart,
-    pidNs: readPidNamespaceId(),
+    pidNs: readPidfileNamespaceId(),
     startedAt,
     channels,
     servePid,
@@ -424,7 +450,7 @@ export function reserveServeServiceInfo({
     owner: 'serve',
     pid: servePid,
     procStart: readPidfileProcessToken(servePid),
-    pidNs: readPidNamespaceId(),
+    pidNs: readPidfileNamespaceId(),
     startedAt: new Date().toISOString(),
     channels,
     servePid,

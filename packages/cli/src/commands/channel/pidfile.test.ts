@@ -28,6 +28,7 @@ const processIdentity = vi.hoisted(() => ({
   tokenReads: [] as Array<string | null>,
   localBootId: 'boot-id' as string | null,
   pidNamespace: 4026531836 as number | null,
+  namespaceReads: [] as Array<number | null>,
 }));
 
 vi.mock('node:fs', () => {
@@ -134,7 +135,10 @@ vi.mock('@qwen-code/qwen-code-core', () => {
     },
     readProcStartToken: () => nextToken(),
     readLocalBootId: () => processIdentity.localBootId,
-    readPidNamespaceId: () => processIdentity.pidNamespace,
+    readPidNamespaceId: () =>
+      processIdentity.namespaceReads.length > 0
+        ? processIdentity.namespaceReads.shift()!
+        : processIdentity.pidNamespace,
     isSameProcess: (pid: number, procStart: string | null | undefined) => {
       if (!Number.isInteger(pid) || pid <= 0) return false;
       try {
@@ -199,6 +203,7 @@ beforeEach(() => {
   processIdentity.tokenReads.length = 0;
   processIdentity.localBootId = 'boot-id';
   processIdentity.pidNamespace = 4026531836;
+  processIdentity.namespaceReads.length = 0;
 });
 
 afterEach(() => {
@@ -251,6 +256,45 @@ describe('writeServiceInfo + readServiceInfo', () => {
 
     expect(() => writeServiceInfo(['dingtalk'])).toThrow('process start token');
     expect(getPidFilePath() in fsStore).toBe(false);
+  });
+
+  it('retries a transient Linux PID namespace read before writing', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    processIdentity.namespaceReads.push(null);
+
+    writeServiceInfo(['dingtalk']);
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      pidNs: 4026531836,
+    });
+  });
+
+  it('refuses to write an unreclaimable Linux pidfile', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    processIdentity.pidNamespace = null;
+
+    for (const create of [
+      () => writeServiceInfo(['dingtalk']),
+      () => reserveServeServiceInfo({ channels: ['dingtalk'], servePid: 4321 }),
+      () => writeServeServiceInfo({ channels: ['dingtalk'], servePid: 4321 }),
+    ]) {
+      expect(create).toThrow('PID namespace id');
+      expect(getPidFilePath() in fsStore).toBe(false);
+    }
+  });
+
+  it('keeps writing a namespace-less pidfile on non-Linux platforms', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    processIdentity.pidNamespace = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServiceInfo(['dingtalk']);
+
+    expect(JSON.parse(fsStore[getPidFilePath()]!)).toMatchObject({
+      pidNs: null,
+    });
+    expect(readServiceInfo()).toMatchObject({ pidNs: null });
   });
 
   it('keeps the tokenless fallback on non-Linux platforms', () => {
@@ -779,6 +823,47 @@ describe('writeServiceInfo + readServiceInfo', () => {
     }
 
     expect(filePath in fsStore).toBe(true);
+  });
+
+  it('replaces a dead local record blocking an exclusive create', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      owner: 'channel',
+      pid: 1234,
+      procStart: 'boot-id:current-start',
+      pidNs: 4026531836,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+    process.kill = vi.fn((pid: number) => {
+      if (pid === 1234) throw new Error('ESRCH');
+      return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    writeServiceInfo(['telegram']);
+
+    expect(JSON.parse(fsStore[filePath]!)).toMatchObject({
+      owner: 'channel',
+      pid: process.pid,
+      channels: ['telegram'],
+    });
+  });
+
+  it('replaces an invalid local record blocking an exclusive create', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      pid: 0,
+      startedAt: '2026-08-26T08:35:25.541Z',
+      channels: ['dingtalk'],
+    });
+
+    writeServiceInfo(['telegram']);
+
+    expect(JSON.parse(fsStore[filePath]!)).toMatchObject({
+      pid: process.pid,
+      channels: ['telegram'],
+    });
   });
 
   it('returns null when no PID file exists', () => {
