@@ -3695,7 +3695,7 @@ export function registerSessionRoutes(
       }
       let restoredStorageSessionId = sessionId;
       try {
-        const sessionService = new SessionService(workspaceCwd);
+        const sessionService = createWorkspaceRuntimeSessionService(runtime);
         const metadata = await sessionService.readCreationMetadata(sessionId);
         let source = metadata;
         try {

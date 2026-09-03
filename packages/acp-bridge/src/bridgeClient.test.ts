@@ -4585,6 +4585,7 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    */
   function makeClientWithRegistrar(
     registrar: ClientMcpRegistrar,
+    source?: { sourceType?: string; sourceId?: string },
   ): BridgeClient {
     const sender: ClientMcpMessageSender = (serverName: string) =>
       registrar.hasServer(serverName)
@@ -4592,7 +4593,10 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
             registrar.sendSdkMcpMessage(serverName, payload as JSONRPCMessage)
         : undefined;
     return new BridgeClient(
-      (() => undefined) as never, // resolveEntry: client_mcp/message is sessionless
+      ((sessionId: string | undefined) =>
+        sessionId === 'extension-session'
+          ? ({ ...source } as never)
+          : undefined) as never, // resolveEntry: paired extension session carries its source
       (() => undefined) as never, // resolvePendingRestoreEvents
       { request: thrower } as never,
       0,
