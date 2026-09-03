@@ -141,6 +141,28 @@ describe('ECS runner qwen update workflow', () => {
     );
   });
 
+  it('keeps the resolve job timeout above the shipped wait budget', () => {
+    // The replay harness injects its own timeout values, so nothing else
+    // guards the shipped budget: a merge resolution that lowered the job
+    // timeout below the wait would let GitHub kill the poll while the
+    // registry is still propagating, silently restoring the v0.23.0
+    // failure this PR fixes.
+    const resolveJob = workflow.slice(
+      workflow.indexOf('\n  resolve:'),
+      workflow.indexOf('\n  update:'),
+    );
+    expect(resolveJob).toContain("RESOLVE_TIMEOUT_SECONDS: '5400'");
+    const timeoutMinutes = Number(
+      resolveJob.match(/timeout-minutes: (\d+)/)?.[1] ?? 0,
+    );
+    const budgetSeconds = Number(
+      resolveJob.match(/RESOLVE_TIMEOUT_SECONDS: '(\d+)'/)?.[1] ?? 0,
+    );
+    expect(budgetSeconds).toBe(5400);
+    // The job must outlive the whole wait plus the final poll's npm call.
+    expect(timeoutMinutes * 60).toBeGreaterThanOrEqual(budgetSeconds + 600);
+  });
+
   it('runs only when this workflow changes on main', () => {
     expect(workflow).toContain(
       "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
