@@ -575,6 +575,30 @@ function registerIpc(): void {
     });
     publishState();
   });
+  ipcMain.on('live:audio:playback-started', (event, epoch: unknown) => {
+    if (
+      !isTrustedSender(event) ||
+      typeof epoch !== 'number' ||
+      !Number.isSafeInteger(epoch) ||
+      epoch !== daemon.getEpoch()
+    ) {
+      return;
+    }
+    daemon.sendPlaybackStarted(epoch);
+  });
+
+  ipcMain.on('live:audio:playback-completed', (event, epoch: unknown) => {
+    if (
+      !isTrustedSender(event) ||
+      typeof epoch !== 'number' ||
+      !Number.isSafeInteger(epoch) ||
+      epoch !== daemon.getEpoch()
+    ) {
+      return;
+    }
+    daemon.sendPlaybackCompleted(epoch);
+  });
+
   ipcMain.handle('live:set-output-muted', (event, muted: unknown) => {
     if (!isTrustedSender(event) || typeof muted !== 'boolean') return;
     const inputMuted = live.inputMuted ?? false;
@@ -970,12 +994,13 @@ void app.whenReady().then(() => {
     },
     onOutputAudio: (audio) => {
       if (nativeServicesActive && !live.outputMuted) {
-        appendHostAudio(audio, daemon.getEpoch());
+        const epoch = daemon.getEpoch();
+        appendHostAudio(audio, epoch);
         writeLiveDiagnostic('output_frame_received', {
-          epoch: daemon.getEpoch(),
+          epoch,
           bytes: audio.byteLength,
         });
-        sendAudioCommand('live:audio:play', audio);
+        sendAudioCommand('live:audio:play', { audio, epoch });
       }
     },
     onClearOutput: () => {
