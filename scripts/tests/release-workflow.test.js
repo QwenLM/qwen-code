@@ -33,6 +33,9 @@ const hasGnuRealpath =
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const releaseYaml = parse(workflow);
+const audioCapturePrebuildsYaml = parse(
+  readFileSync('.github/workflows/audio-capture-prebuilds.yml', 'utf8'),
+);
 const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
@@ -767,7 +770,7 @@ describe('release workflow', () => {
     // !cancelled() overrides the needs gate and turns five skipped lanes
     // into a quality failure that opens notify_failure on a fork dispatch.
     expect(quality.if).toBe(
-      "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}",
+      "${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}",
     );
     expect(quality.steps[0].run).toContain(
       'if [[ "${result}" != \'success\' ]]',
@@ -814,6 +817,62 @@ describe('release workflow', () => {
         "github.event.inputs.force_skip_tests != 'true'",
       );
     }
+  });
+
+  it('only reuses validation from an explicitly verified nightly', () => {
+    expect(releaseYaml.on.workflow_dispatch.inputs.promote_nightly.type).toBe(
+      'string',
+    );
+    expect(releaseYaml.jobs.prepare.permissions.actions).toBe('read');
+    expect(releaseYaml.jobs.prepare.outputs.reuse_validation).toBe(
+      '${{ steps.promotion.outputs.reuse_validation }}',
+    );
+
+    const source = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'source',
+    );
+    expect(source.run).toContain('release-source.txt');
+    const sourceEvidence = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.name === 'Record release source',
+    );
+    expect(sourceEvidence.with.name).toBe(
+      'release-source-${{ steps.source.outputs.release_sha }}',
+    );
+    expect(sourceEvidence.with.overwrite).toBe(true);
+
+    const promotion = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'promotion',
+    );
+    expect(promotion.run).toContain('verify-nightly-promotion.js');
+    expect(promotion.run).toContain('reuse_validation=true');
+    expect(promotion.run).toContain('force_skip_tests');
+
+    for (const id of [
+      'quality_static',
+      'quality_build',
+      'quality_typecheck',
+      'workspace_tests',
+      'quality_scripts',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(releaseYaml.jobs[id].if, id).toContain(
+        "needs.prepare.outputs.reuse_validation != 'true'",
+      );
+    }
+    expect(releaseYaml.jobs.publish.if).toContain(
+      "needs.prepare.outputs.reuse_validation == 'true'",
+    );
+    expect(releaseYaml.jobs.audio_capture_prebuilds.with.source_ref).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    expect(
+      audioCapturePrebuildsYaml.on.workflow_call.inputs.source_ref.type,
+    ).toBe('string');
+    expect(audioCapturePrebuildsYaml.jobs.build.steps[0].with.ref).toBe(
+      '${{ inputs.source_ref || github.sha }}',
+    );
   });
 
   it('keeps workspace cleanup from inspecting or signaling host processes', () => {

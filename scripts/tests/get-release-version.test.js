@@ -371,20 +371,46 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
-    it('should throw when no nightly dist-tag exists (promote-nightly)', () => {
-      const mockWithNoNightly = (command) => {
-        if (command.includes('npm view') && command.includes('--tag=nightly')) {
+    it('promotes an exact nightly version without changing its stable base', () => {
+      const absent = new Error('not found');
+      absent.status = 2;
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.startsWith('npm view') && command.endsWith('version')) {
           throw new Error('npm error code E404');
         }
-        if (command.includes('npm view') && command.includes('versions --json'))
-          return JSON.stringify(['0.6.0', '0.6.1']);
-
+        if (command.startsWith('git ls-remote')) throw absent;
         return mockExecSync(command);
-      };
-      vi.mocked(execSync).mockImplementation(mockWithNoNightly);
+      });
 
+      const result = getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+      });
+      expect(result.releaseVersion).toBe('0.8.0');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('rejects promotion without an exact nightly version', () => {
+      vi.mocked(execSync).mockImplementation(mockExecSync);
       expect(() => getVersion({ type: 'promote-nightly' })).toThrow(
-        'Unable to determine baseline version for nightly',
+        'Invalid nightly version',
+      );
+    });
+
+    it('rejects promotion below the published latest version', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('--tag=latest')) return '0.9.0';
+        return mockExecSync(command);
+      });
+
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        }),
+      ).toThrow(
+        'Promoted stable version 0.8.0 is lower than published latest 0.9.0',
       );
     });
 

@@ -12,6 +12,7 @@ import semver from 'semver';
 import {
   getArgs,
   isExpectedMissingGitHubRelease,
+  parseNightlyVersion,
   readJson,
   validateVersion,
 } from './lib/release-helpers.js';
@@ -390,23 +391,22 @@ function getLatestStableReleaseTag() {
   }
 }
 
-function promoteNightlyVersion() {
-  const result = getAndVerifyTags('nightly', 'v*-nightly*');
-  if (!result) {
+function promoteNightlyVersion(args) {
+  const { stableVersion } = parseNightlyVersion(args.promote_nightly_version);
+  const latestStable = getVersionFromNPM('latest');
+  if (
+    latestStable &&
+    semver.valid(latestStable) &&
+    semver.gt(latestStable, stableVersion)
+  ) {
     throw new Error(
-      'Unable to determine baseline version for nightly (required for promote-nightly)',
+      `Promoted stable version ${stableVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
     );
   }
-  const baseVersion = result.latestVersion.split('-')[0];
-  const versionParts = baseVersion.split('.');
-  const major = versionParts[0];
-  const minor = versionParts[1] ? parseInt(versionParts[1]) : 0;
-  const nextMinor = minor + 1;
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const gitShortHash = execSync('git rev-parse --short HEAD').toString().trim();
+  assertVersionUnreleased(stableVersion);
   return {
-    releaseVersion: `${major}.${nextMinor}.0-nightly.${date}.${gitShortHash}`,
-    npmTag: 'nightly',
+    releaseVersion: stableVersion,
+    npmTag: 'latest',
   };
 }
 
@@ -572,7 +572,7 @@ export function getVersion(options = {}) {
       }
       break;
     case 'promote-nightly':
-      versionData = promoteNightlyVersion();
+      versionData = promoteNightlyVersion(args);
       break;
     case 'stable':
       versionData = getStableVersion(args);

@@ -50,6 +50,24 @@ export function validateVersion(version, format, name) {
   }
 }
 
+export function parseNightlyVersion(value) {
+  const version = String(value ?? '').replace(/^v/, '');
+  const match = /^(\d+\.\d+\.\d+)-nightly\.(\d{8})\.([0-9a-f]{7,40})$/.exec(
+    version,
+  );
+  if (!match) {
+    throw new Error(
+      `Invalid nightly version: ${value || '<empty>'}. Must be in X.Y.Z-nightly.YYYYMMDD.GITSHA format.`,
+    );
+  }
+  return {
+    nightlyVersion: version,
+    nightlyTag: `v${version}`,
+    stableVersion: match[1],
+    sourceShaPrefix: match[3],
+  };
+}
+
 /**
  * Check whether an error from `gh release view` indicates the release
  * simply doesn't exist (as opposed to an unexpected failure).

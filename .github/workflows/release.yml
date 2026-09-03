@@ -36,6 +36,10 @@ on:
         required: false
         type: 'boolean'
         default: false
+      promote_nightly:
+        description: 'Promote this exact validated nightly tag to its stable version. The ref input is ignored; leave version empty.'
+        required: false
+        type: 'string'
       force_skip_tests:
         description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
         required: false
@@ -66,6 +70,7 @@ jobs:
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
+      actions: 'read'
       contents: 'read'
     outputs:
       release_sha: '${{ steps.source.outputs.release_sha }}'
@@ -76,6 +81,7 @@ jobs:
       is_nightly: '${{ steps.vars.outputs.is_nightly }}'
       is_preview: '${{ steps.vars.outputs.is_preview }}'
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
+      reuse_validation: '${{ steps.promotion.outputs.reuse_validation }}'
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -237,7 +243,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: "${{ github.event.inputs.promote_nightly != '' && github.sha || github.event.inputs.ref || github.sha }}"
           fetch-depth: 0
 
       - name: 'Set booleans for simplified logic'
@@ -245,9 +251,15 @@ jobs:
         env:
           CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
           CRON: '${{ github.event.schedule }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         run: |-
+          if [[ -n "${PROMOTE_NIGHTLY}" && ( "${CREATE_NIGHTLY_RELEASE}" == "true" || "${CREATE_PREVIEW_RELEASE}" == "true" ) ]]; then
+            echo "::error::promote_nightly cannot be combined with nightly or preview release mode"
+            exit 1
+          fi
+
           is_nightly="false"
           if [[ "${CRON}" == "0 21 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
             is_nightly="true"
@@ -266,10 +278,6 @@ jobs:
           fi
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Resolve release commit'
-        id: 'source'
-        run: 'echo "release_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"'
-
       - name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -285,6 +293,47 @@ jobs:
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+
+      - name: 'Verify nightly promotion'
+        id: 'promotion'
+        if: "${{ github.event.inputs.promote_nightly != '' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
+          FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
+        run: |-
+          if [[ "${FORCE_SKIP_TESTS}" == "true" ]]; then
+            echo "::error::promote_nightly cannot be combined with force_skip_tests"
+            exit 1
+          fi
+          PROMOTION_JSON="$(node scripts/verify-nightly-promotion.js "${PROMOTE_NIGHTLY}")"
+          echo "source_sha=$(jq -r .sourceSha <<<"${PROMOTION_JSON}")" >> "${GITHUB_OUTPUT}"
+          echo "stable_version=$(jq -r .stableVersion <<<"${PROMOTION_JSON}")" >> "${GITHUB_OUTPUT}"
+          echo "reuse_validation=true" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Nightly promotion"
+            echo
+            echo "- Nightly: \`$(jq -r .nightlyTag <<<"${PROMOTION_JSON}")\`"
+            echo "- Source: \`$(jq -r .sourceSha <<<"${PROMOTION_JSON}")\`"
+            echo "- Validation: $(jq -r .validationRunUrl <<<"${PROMOTION_JSON}")"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: 'Resolve release commit'
+        id: 'source'
+        env:
+          PROMOTION_SHA: '${{ steps.promotion.outputs.source_sha }}'
+        run: |-
+          release_sha="${PROMOTION_SHA:-$(git rev-parse HEAD)}"
+          echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "${release_sha}" > "${RUNNER_TEMP}/release-source.txt"
+
+      - name: 'Record release source'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-source-${{ steps.source.outputs.release_sha }}'
+          path: '${{ runner.temp }}/release-source.txt'
+          if-no-files-found: 'error'
+          overwrite: true
 
       - name: 'Install Dependencies'
         env:
@@ -303,10 +352,18 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
+          PROMOTED_STABLE_VERSION: '${{ steps.promotion.outputs.stable_version }}'
           MANUAL_VERSION: '${{ inputs.version }}'
         run: |-
           VERSION_ARGS=()
-          if [[ "${IS_NIGHTLY}" == "true" ]]; then
+          if [[ -n "${PROMOTE_NIGHTLY}" ]]; then
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              echo "::error::version cannot be combined with promote_nightly; the stable version is derived from the nightly tag"
+              exit 1
+            fi
+            VERSION_ARGS+=(--type=promote-nightly "--promote_nightly_version=${PROMOTE_NIGHTLY}")
+          elif [[ "${IS_NIGHTLY}" == "true" ]]; then
             VERSION_ARGS+=(--type=nightly)
           elif [[ "${IS_PREVIEW}" == "true" ]]; then
             VERSION_ARGS+=(--type=preview)
@@ -329,6 +386,10 @@ jobs:
           fi
 
           VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
+          if [[ -n "${PROMOTE_NIGHTLY}" && "$(jq -r .releaseVersion <<<"${VERSION_JSON}")" != "${PROMOTED_STABLE_VERSION}" ]]; then
+            echo "::error::Promoted stable version changed while preparing the release"
+            exit 1
+          fi
           echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
@@ -340,7 +401,7 @@ jobs:
     timeout-minutes: 30
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: &release_test_env
@@ -404,7 +465,7 @@ jobs:
     timeout-minutes: 45
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -480,7 +541,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -518,7 +579,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -604,7 +665,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -647,7 +708,7 @@ jobs:
     # (forks): without it, !cancelled() would aggregate five skipped lanes
     # into a quality 'failure' and open notify_failure on a fork dispatch.
     if: |-
-      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions: {}
     steps:
       - name: 'Verify quality results'
@@ -676,7 +737,7 @@ jobs:
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -711,7 +772,7 @@ jobs:
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -808,6 +869,8 @@ jobs:
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     uses: './.github/workflows/audio-capture-prebuilds.yml'
+    with:
+      source_ref: '${{ needs.prepare.outputs.release_sha }}'
 
   publish:
     name: 'Publish Release'
@@ -829,6 +892,7 @@ jobs:
           needs.audio_capture_prebuilds.result == 'success'
         ) &&
         (
+          needs.prepare.outputs.reuse_validation == 'true' ||
           github.event.inputs.force_skip_tests == 'true' ||
           (
             needs.quality.result == 'success' &&
