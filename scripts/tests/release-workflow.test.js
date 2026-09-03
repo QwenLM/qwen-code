@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { REQUIRED_JOBS } from '../verify-nightly-promotion.js';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -840,12 +841,48 @@ describe('release workflow', () => {
     );
     expect(sourceEvidence.with.overwrite).toBe(true);
 
+    // Evidence for a later, optional promotion must not be able to fail a
+    // release: a flaky upload here would otherwise fail prepare and open a
+    // "Release Failed" issue.
+    expect(sourceEvidence['continue-on-error']).toBe(true);
+
     const promotion = releaseYaml.jobs.prepare.steps.find(
       (step) => step.id === 'promotion',
     );
     expect(promotion.run).toContain('verify-nightly-promotion.js');
     expect(promotion.run).toContain('reuse_validation=true');
     expect(promotion.run).toContain('force_skip_tests');
+
+    // The nightly tag selects the source revision; the stable version is a
+    // release decision taken from the `version` input (or derived from the
+    // `latest` dist-tag), because the tag's own numeric base is published by
+    // the ordinary stable path.
+    const version = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'version',
+    );
+    expect(version.run).toContain('--promote_nightly_stable_version=');
+    expect(version.run).not.toContain(
+      'version cannot be combined with promote_nightly',
+    );
+
+    // promote_nightly ignores `ref`, which is a required input with a
+    // default: refuse a non-default value rather than releasing a different
+    // revision than the operator chose.
+    const vars = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'vars',
+    );
+    expect(vars.run).toContain('promote_nightly ignores the ref input');
+  });
+
+  // The promotion check matches these by display name, so a rename would
+  // silently make every promotion fail closed forever.
+  it('keeps the promotion check bound to jobs that exist', () => {
+    const jobNames = new Set(
+      Object.values(releaseYaml.jobs).map((job) => job.name),
+    );
+    for (const required of REQUIRED_JOBS) {
+      expect(jobNames, required).toContain(required);
+    }
 
     for (const id of [
       'quality_static',

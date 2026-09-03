@@ -50,6 +50,14 @@ export function validateVersion(version, format, name) {
   }
 }
 
+/**
+ * Split a canonical nightly version into its parts. `baseVersion` is the
+ * numeric prefix main's package.json carried when the nightly was cut — it is
+ * deliberately NOT named as a promotion target: the ordinary stable path
+ * publishes that same number, so promoting a nightly picks its stable version
+ * separately (see promoteNightlyVersion). `sourceShaPrefix` is a label, not
+ * evidence; the source binding lives in the release-source artifact.
+ */
 export function parseNightlyVersion(value) {
   const version = String(value ?? '').replace(/^v/, '');
   const match = /^(\d+\.\d+\.\d+)-nightly\.(\d{8})\.([0-9a-f]{7,40})$/.exec(
@@ -63,7 +71,7 @@ export function parseNightlyVersion(value) {
   return {
     nightlyVersion: version,
     nightlyTag: `v${version}`,
-    stableVersion: match[1],
+    baseVersion: match[1],
     sourceShaPrefix: match[3],
   };
 }

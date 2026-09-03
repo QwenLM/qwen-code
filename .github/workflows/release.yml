@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases.'
+        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases. With promote_nightly, the stable version to publish (X.Y.Z).'
         required: false
         type: 'string'
       ref:
@@ -37,7 +37,7 @@ on:
         type: 'boolean'
         default: false
       promote_nightly:
-        description: 'Promote this exact validated nightly tag to its stable version. The ref input is ignored; leave version empty.'
+        description: 'Promote this exact validated nightly tag to a stable release. Leave ref at its default; set version to the stable version to publish, or leave version empty to use the next minor after the latest release.'
         required: false
         type: 'string'
       force_skip_tests:
@@ -252,11 +252,21 @@ jobs:
           CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
           PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
+          REF_INPUT: '${{ github.event.inputs.ref }}'
           CRON: '${{ github.event.schedule }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         run: |-
           if [[ -n "${PROMOTE_NIGHTLY}" && ( "${CREATE_NIGHTLY_RELEASE}" == "true" || "${CREATE_PREVIEW_RELEASE}" == "true" ) ]]; then
             echo "::error::promote_nightly cannot be combined with nightly or preview release mode"
+            exit 1
+          fi
+
+          # `ref` is a required input with a default, so the form gives no
+          # hint that promotion ignores it — the source revision comes from
+          # the nightly tag. Refuse a non-default value instead of silently
+          # releasing a different revision than the operator selected.
+          if [[ -n "${PROMOTE_NIGHTLY}" && -n "${REF_INPUT}" && "${REF_INPUT}" != "main" ]]; then
+            echo "::error::promote_nightly ignores the ref input; leave it at the default ('main'). The source revision is taken from the nightly tag."
             exit 1
           fi
 
@@ -308,7 +318,6 @@ jobs:
           fi
           PROMOTION_JSON="$(node scripts/verify-nightly-promotion.js "${PROMOTE_NIGHTLY}")"
           echo "source_sha=$(jq -r .sourceSha <<<"${PROMOTION_JSON}")" >> "${GITHUB_OUTPUT}"
-          echo "stable_version=$(jq -r .stableVersion <<<"${PROMOTION_JSON}")" >> "${GITHUB_OUTPUT}"
           echo "reuse_validation=true" >> "${GITHUB_OUTPUT}"
           {
             echo "### Nightly promotion"
@@ -316,6 +325,7 @@ jobs:
             echo "- Nightly: \`$(jq -r .nightlyTag <<<"${PROMOTION_JSON}")\`"
             echo "- Source: \`$(jq -r .sourceSha <<<"${PROMOTION_JSON}")\`"
             echo "- Validation: $(jq -r .validationRunUrl <<<"${PROMOTION_JSON}")"
+            jq -r '.warnings[]? | "- :warning: " + .' <<<"${PROMOTION_JSON}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: 'Resolve release commit'
@@ -327,7 +337,13 @@ jobs:
           echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
           printf '%s\n' "${release_sha}" > "${RUNNER_TEMP}/release-source.txt"
 
+      # Evidence for a possible future promotion, not a release requirement:
+      # a flaky artifact upload must not fail a release that is otherwise
+      # fine (and open a "Release Failed" issue). A missing record only makes
+      # this run's source unpromotable later, which the promotion check
+      # already treats as a fail-closed rejection.
       - name: 'Record release source'
+        continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'release-source-${{ steps.source.outputs.release_sha }}'
@@ -353,16 +369,20 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
-          PROMOTED_STABLE_VERSION: '${{ steps.promotion.outputs.stable_version }}'
           MANUAL_VERSION: '${{ inputs.version }}'
         run: |-
           VERSION_ARGS=()
           if [[ -n "${PROMOTE_NIGHTLY}" ]]; then
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              echo "::error::version cannot be combined with promote_nightly; the stable version is derived from the nightly tag"
-              exit 1
-            fi
+            # The nightly tag names the source revision, not the version:
+            # its numeric base is main's package.json version, which the
+            # ordinary stable path publishes on its own, so it is either
+            # already released or behind the `latest` dist-tag by the time a
+            # promotion runs. `version` names the stable release; left empty,
+            # the script derives the next minor after `latest`.
             VERSION_ARGS+=(--type=promote-nightly "--promote_nightly_version=${PROMOTE_NIGHTLY}")
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--promote_nightly_stable_version=${MANUAL_VERSION}")
+            fi
           elif [[ "${IS_NIGHTLY}" == "true" ]]; then
             VERSION_ARGS+=(--type=nightly)
           elif [[ "${IS_PREVIEW}" == "true" ]]; then
@@ -386,10 +406,6 @@ jobs:
           fi
 
           VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
-          if [[ -n "${PROMOTE_NIGHTLY}" && "$(jq -r .releaseVersion <<<"${VERSION_JSON}")" != "${PROMOTED_STABLE_VERSION}" ]]; then
-            echo "::error::Promoted stable version changed while preparing the release"
-            exit 1
-          fi
           echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"

@@ -391,21 +391,45 @@ function getLatestStableReleaseTag() {
   }
 }
 
+/**
+ * A nightly tag names the source revision to promote; it does NOT name the
+ * stable version to publish. Its numeric base comes from main's
+ * package.json (see getNightlyVersion), which the ordinary stable path
+ * publishes on its own — 0.22.0-nightly.* shipped as 0.22.0, 0.22.3-nightly.*
+ * as 0.22.3 — so stripping the suffix always lands on a number that has
+ * either already shipped or fallen behind the `latest` dist-tag. The version
+ * is therefore a release decision: the maintainer names it, or it is derived
+ * as the next minor after `latest`.
+ */
 function promoteNightlyVersion(args) {
-  const { stableVersion } = parseNightlyVersion(args.promote_nightly_version);
+  // Validates the tag's shape before anything else consumes it.
+  parseNightlyVersion(args.promote_nightly_version);
   const latestStable = getVersionFromNPM('latest');
-  if (
-    latestStable &&
-    semver.valid(latestStable) &&
-    semver.gt(latestStable, stableVersion)
-  ) {
+  const hasLatest = Boolean(latestStable) && semver.valid(latestStable);
+
+  let releaseVersion;
+  if (args.promote_nightly_stable_version) {
+    releaseVersion = String(args.promote_nightly_stable_version).replace(
+      /^v/,
+      '',
+    );
+    validateVersion(releaseVersion, 'X.Y.Z', 'version (with promote_nightly)');
+  } else if (hasLatest) {
+    releaseVersion = semver.inc(latestStable, 'minor');
+  } else {
     throw new Error(
-      `Promoted stable version ${stableVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+      'Cannot derive a promotion version: the "latest" dist-tag is unavailable. Pass an explicit stable version in the workflow\'s "version" input.',
     );
   }
-  assertVersionUnreleased(stableVersion);
+
+  if (hasLatest && semver.lt(releaseVersion, latestStable)) {
+    throw new Error(
+      `Promoted stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+    );
+  }
+  assertVersionUnreleased(releaseVersion);
   return {
-    releaseVersion: stableVersion,
+    releaseVersion,
     npmTag: 'latest',
   };
 }

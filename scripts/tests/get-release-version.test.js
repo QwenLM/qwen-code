@@ -371,24 +371,44 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
-    it('promotes an exact nightly version without changing its stable base', () => {
+    // A nightly's numeric base is main's package.json version, which the
+    // ordinary stable path publishes on its own, so it cannot double as the
+    // promotion's version: by the time a nightly is promoted that number has
+    // shipped or fallen behind `latest`. The tag selects the source; the
+    // version is named by the maintainer or derived from `latest`.
+    const mockUnreleased = (command) => {
       const absent = new Error('not found');
       absent.status = 2;
-      vi.mocked(execSync).mockImplementation((command) => {
-        if (command.startsWith('npm view') && command.endsWith('version')) {
-          throw new Error('npm error code E404');
-        }
-        if (command.startsWith('git ls-remote')) throw absent;
-        return mockExecSync(command);
-      });
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        throw new Error('npm error code E404');
+      }
+      if (command.startsWith('git ls-remote')) throw absent;
+      return mockExecSync(command);
+    };
+
+    it('derives the promotion version as the next minor after latest', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
 
       const result = getVersion({
         type: 'promote-nightly',
         promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
       });
-      expect(result.releaseVersion).toBe('0.8.0');
+      // latest is 0.6.1, so the nightly's own 0.8.0 base is not reused.
+      expect(result.releaseVersion).toBe('0.7.0');
       expect(result.npmTag).toBe('latest');
       expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('promotes to the stable version the maintainer named', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+
+      const result = getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        promote_nightly_stable_version: 'v0.9.0',
+      });
+      expect(result.releaseVersion).toBe('0.9.0');
+      expect(result.npmTag).toBe('latest');
     });
 
     it('rejects promotion without an exact nightly version', () => {
@@ -398,9 +418,36 @@ describe('getVersion', () => {
       );
     });
 
+    it('rejects a malformed explicit promotion version', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+          promote_nightly_stable_version: '0.9.0-preview.1',
+        }),
+      ).toThrow('Invalid version (with promote_nightly)');
+    });
+
     it('rejects promotion below the published latest version', () => {
+      vi.mocked(execSync).mockImplementation(mockUnreleased);
+
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+          promote_nightly_stable_version: '0.5.0',
+        }),
+      ).toThrow(
+        'Promoted stable version 0.5.0 is lower than published latest 0.6.1',
+      );
+    });
+
+    it('refuses to promote a version that already shipped', () => {
       vi.mocked(execSync).mockImplementation((command) => {
-        if (command.includes('--tag=latest')) return '0.9.0';
+        if (command.startsWith('npm view') && command.endsWith('version')) {
+          return '0.7.0';
+        }
         return mockExecSync(command);
       });
 
@@ -409,9 +456,23 @@ describe('getVersion', () => {
           type: 'promote-nightly',
           promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
         }),
-      ).toThrow(
-        'Promoted stable version 0.8.0 is lower than published latest 0.9.0',
-      );
+      ).toThrow('has already shipped');
+    });
+
+    it('refuses to promote when the latest dist-tag is unavailable', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest')) {
+          throw new Error('npm error code E404');
+        }
+        return mockUnreleased(command);
+      });
+
+      expect(() =>
+        getVersion({
+          type: 'promote-nightly',
+          promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        }),
+      ).toThrow('the "latest" dist-tag is unavailable');
     });
 
     it('should throw when no dist-tag exists (patch)', () => {
