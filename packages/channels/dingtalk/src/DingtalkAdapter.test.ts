@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { inspect } from 'node:util';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
@@ -34,6 +35,9 @@ const dingtalkSdkMock = vi.hoisted(() => ({
   instances: [] as unknown[],
   nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
+  // Stands in for the gateway stream ticket that the SDK's ungated connect
+  // logging writes to stdout (dist/client.mjs, getEndpoint).
+  streamTicket: 'stream-ticket-1a2b3c',
 }));
 
 const PNG_DATA = Buffer.from([
@@ -93,6 +97,18 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
     );
     send = vi.fn();
     connect = vi.fn(() => {
+      // Reproduces the SDK's ungated getEndpoint() logging (dist/client.mjs):
+      // the resolved config, then the gateway response carrying the ticket.
+      /* eslint-disable no-console -- this is the SDK behaviour under test */
+      console.log({ ...this.options });
+      console.log(
+        'res.data',
+        JSON.stringify({
+          endpoint: 'wss://wss-open-connection.dingtalk.test/connect',
+          ticket: dingtalkSdkMock.streamTicket,
+        }),
+      );
+      /* eslint-enable no-console */
       const connect = dingtalkSdkMock.nextConnect;
       dingtalkSdkMock.nextConnect = undefined;
       return connect?.() ?? Promise.resolve();
@@ -5141,6 +5157,107 @@ describe('DingtalkChannel downstream logging', () => {
     expect(client.onCallback).not.toHaveBeenCalled();
   });
 });
+
+function formatLoggedArgs(calls: unknown[][]): string {
+  return calls
+    .map((call) => call.map((arg) => inspect(arg)).join(' '))
+    .join('\n');
+}
+
+/* eslint-disable no-console -- console.log is the subject of these tests */
+describe('DingtalkChannel connect logging', () => {
+  afterEach(() => {
+    dingtalkSdkMock.nextConnect = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it('keeps clientSecret and the stream ticket off console.log on connect', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await channel.connect();
+    } finally {
+      channel.disconnect();
+    }
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('keeps a connection-manager replacement client silent on reconnect', async () => {
+    const firstIndex = dingtalkSdkMock.instances.length;
+    const channel = createChannel();
+    await channel.connect();
+    const firstClient = mockClientAt(firstIndex);
+
+    const replacementGate = deferredPromise<void>();
+    let replacementConnectStarted = false;
+    dingtalkSdkMock.nextConnect = () => {
+      replacementConnectStarted = true;
+      return replacementGate.promise;
+    };
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      firstClient.onDownStream(
+        JSON.stringify({
+          type: 'SYSTEM',
+          headers: { topic: 'disconnect', messageId: 'system-message' },
+          data: '',
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(replacementConnectStarted).toBe(true);
+      });
+      replacementGate.resolve();
+      await vi.waitFor(() => {
+        expect(firstClient.disconnect).toHaveBeenCalledOnce();
+      });
+    } finally {
+      replacementGate.resolve();
+      channel.disconnect();
+    }
+
+    expect(dingtalkSdkMock.instances.length).toBe(firstIndex + 2);
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).not.toContain('client-secret');
+    expect(logged).not.toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log once overlapping connects settle', async () => {
+    createChannel({ useConnectionManager: false });
+    const client = latestMockClient() as { connect(): Promise<void> };
+    const originalConsoleLog = console.log;
+
+    const firstGate = deferredPromise<void>();
+    const secondGate = deferredPromise<void>();
+    dingtalkSdkMock.nextConnect = () => firstGate.promise;
+    const firstConnect = client.connect();
+    dingtalkSdkMock.nextConnect = () => secondGate.promise;
+    const secondConnect = client.connect();
+
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    dingtalkSdkMock.nextConnect = undefined;
+    firstGate.resolve();
+    await firstConnect;
+    // The second connect is still in flight, so logging must stay suppressed:
+    // restoring here would reopen the leak for the remainder of that connect.
+    expect(console.log).not.toBe(originalConsoleLog);
+
+    secondGate.resolve();
+    await secondConnect;
+
+    expect(console.log).toBe(originalConsoleLog);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    console.log('logging works again');
+    expect(logSpy).toHaveBeenCalledWith('logging works again');
+  });
+});
+/* eslint-enable no-console */
 
 describe('DingtalkChannel sender attribution', () => {
   it('falls back to senderStaffId when senderNick is absent', () => {

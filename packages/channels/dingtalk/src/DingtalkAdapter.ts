@@ -808,6 +808,36 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+/* eslint-disable no-console -- swapping console.log out is the whole job here */
+let connectLogDepth = 0;
+let unsuppressedConsoleLog: typeof console.log | undefined;
+
+/**
+ * Runs `connect` with `console.log` silenced. Nested connects share one depth
+ * counter — the manager can start a replacement client while another connect is
+ * still in flight, and either may settle first — so only the depth 1→0
+ * transition restores logging, to the function the 0→1 transition saved.
+ * Restoring from an inner call's own scope would put the no-op back and leave
+ * `console.log` disabled process-wide.
+ */
+async function withConnectLoggingSuppressed<T>(
+  connect: () => Promise<T>,
+): Promise<T> {
+  if (connectLogDepth++ === 0) {
+    unsuppressedConsoleLog = console.log;
+    console.log = () => {};
+  }
+  try {
+    return await connect();
+  } finally {
+    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
+      console.log = unsuppressedConsoleLog;
+      unsuppressedConsoleLog = undefined;
+    }
+  }
+}
+/* eslint-enable no-console */
+
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
@@ -1015,6 +1045,14 @@ export class DingtalkChannel extends ChannelBase {
     client.onDownStream = (raw: unknown) => {
       this.onDownStream(raw, client);
     };
+    // The SDK's getEndpoint() logs the resolved config (clientId and
+    // clientSecret) and the gateway response (endpoint and ticket) through
+    // console.log calls that ignore its own `debug` flag, so every connect
+    // writes credentials into the channel log. Silence the whole call rather
+    // than redact enumerated keys, which would stay open to any future SDK
+    // debug output. console.error and console.warn keep surfacing failures.
+    const sdkConnect = client.connect.bind(client);
+    client.connect = () => withConnectLoggingSuppressed(sdkConnect);
   }
 
   private registerMessageHandler(client: DWClient): void {
