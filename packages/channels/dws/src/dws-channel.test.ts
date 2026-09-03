@@ -2848,6 +2848,41 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('routes a slash command after the leading bot mention to /btw', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'Today is September 3, 2026.',
+    });
+    bridge.btw = btw;
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'btw-after-mention',
+        '@QwenBot(QwenBot)  /btw what day is it?',
+      ),
+    );
+
+    expect(btw).toHaveBeenCalledWith(
+      'session-1',
+      'what day is it?',
+      expect.any(AbortSignal),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(client.sendImMessage).toHaveBeenCalledTimes(2),
+    );
+    expect(client.sendImMessage.mock.calls[0]?.[1]).toMatch(
+      /^BTW #[a-f0-9]{8} received\./u,
+    );
+    expect(client.sendImMessage.mock.calls[1]?.[1]).toMatch(
+      /^BTW #[a-f0-9]{8}\n\nToday is September 3, 2026\.$/u,
+    );
+  });
+
   it('deduplicates a mention delivered by history and the live stream', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

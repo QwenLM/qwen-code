@@ -1768,7 +1768,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    const text = message.content.trim();
+    // DWS keeps the leading bot mention in group-message text. Remove it only
+    // when it prefixes a slash command so ChannelBase can parse the command.
+    const text =
+      source.kind === 'at'
+        ? message.content
+            .replace(
+              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:@\S+)?(?:\s|$))/u,
+              '',
+            )
+            .trim()
+        : message.content.trim();
     if (!text) {
       this.markProcessedMessage(key);
       this.saveCursor();
