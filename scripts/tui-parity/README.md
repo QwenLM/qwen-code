@@ -76,6 +76,7 @@ artifacts and reports:
     "fixed": { "argv": ["argv..."], "pty": "fixture" }
   },
   "thresholds": { "maxFullScreenClears": 0 },
+  "expectBaseFailure": false,
   "proves": "what a passing run proves",
   "doesNotProve": "what it cannot prove"
 }
@@ -84,6 +85,11 @@ artifacts and reports:
 `commands.<side>` is either a plain argv array (native PTY capture) or an
 object with `argv` and optional `pty` (`"fixture"` or `"wrapped"`). Any other
 per-side key is rejected.
+
+`expectBaseFailure` (optional boolean, default `false`) declares that the base
+side is a defect fixture rather than a clean reference. Such a scenario passes
+only when the base side fails: a `both-pass` there means the fixture emitted no
+defect, so the comparison would report success while proving nothing.
 
 Thresholds (all optional, evaluated per side): `maxFullScreenClears`,
 `maxPartialScreenErases`, `maxLineErases`, `maxDuplicateEvents`,
@@ -149,7 +155,8 @@ run-summary.json
 Outcomes: `base-fails-fixed-passes` (evidence that the fix removes the
 defect), `both-pass` (no base-side defect exhibited), `fixed-fails`
 (threshold violation), `capture-error` (spawn failure, refusal, or timeout).
-The run passes only on the first two.
+The run passes only on the first two — and for a scenario with
+`expectBaseFailure`, only on `base-fails-fixed-passes`.
 
 ## Fixtures and tests
 
