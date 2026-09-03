@@ -14216,7 +14216,10 @@ describe('ChannelBase', () => {
             kind: `run_shell_command\n${'k'.repeat(100)}`,
             title: `Run shell command: echo $SECRET\n${'x'.repeat(100)}`,
             status: `running\n${'s'.repeat(100)}`,
-            rawInput: { command: 'echo $SECRET' },
+            rawInput: {
+              command: 'echo $SECRET',
+              description: 'Check disk health\nwithout exposing commands',
+            },
           });
           return Promise.resolve('done');
         },
@@ -14234,6 +14237,7 @@ describe('ChannelBase', () => {
           toolCallId: 'tool-1',
         }),
       });
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('description');
       expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
       expect(lifecycleToolCall!.toolCall.kind).not.toContain('\n');
       expect(lifecycleToolCall!.toolCall.status).not.toContain('\n');
@@ -14248,7 +14252,10 @@ describe('ChannelBase', () => {
         Array.from(lifecycleToolCall!.toolCall.title).length,
       ).toBeLessThanOrEqual(81);
       expect(ch.toolCalls[0]!.event).toMatchObject({
-        rawInput: { command: 'echo $SECRET' },
+        rawInput: {
+          command: 'echo $SECRET',
+          description: 'Check disk health\nwithout exposing commands',
+        },
       });
     });
 

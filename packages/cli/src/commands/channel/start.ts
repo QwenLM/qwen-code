@@ -11,6 +11,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   AcpBridge,
@@ -90,11 +91,14 @@ function channelMemoryOptions(
   };
 }
 
-function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
+async function writeServiceInfoOrExit(
+  channels: string[],
+  cleanup: () => Promise<void>,
+): Promise<void> {
   try {
     writeServiceInfo(channels);
   } catch (err) {
-    cleanup();
+    await cleanup();
     if (isFileExistsError(err)) {
       writeStderrLine(
         'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
@@ -109,10 +113,11 @@ function cleanupStartedChannels(
   channels: Iterable<ChannelBase>,
   bridge: AcpBridge,
   router: SessionRouter,
-): void {
+): Promise<void> {
+  const disconnections: Array<Promise<void>> = [];
   for (const channel of channels) {
     try {
-      channel.disconnect();
+      disconnections.push(Promise.resolve(channel.disconnect()));
     } catch {
       // best-effort
     }
@@ -127,6 +132,7 @@ function cleanupStartedChannels(
   } catch {
     // best-effort
   }
+  return Promise.allSettled(disconnections).then(() => undefined);
 }
 
 function createBridgeReadinessGate(): {
@@ -240,7 +246,7 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
             `[Channel] Bridge crashed ${recentCrashCount} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
           );
           scheduler?.stop();
-          cleanupStartedChannels(channels.values(), getBridge(), router);
+          await cleanupStartedChannels(channels.values(), getBridge(), router);
           removeServiceInfo();
           process.exit(1);
         }
@@ -269,12 +275,12 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
         );
       } while (recoveryRequested && !isShuttingDown());
     })()
-      .catch((err) => {
+      .catch(async (err) => {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
         scheduler?.stop();
-        cleanupStartedChannels(channels.values(), getBridge(), router);
+        await cleanupStartedChannels(channels.values(), getBridge(), router);
         removeServiceInfo();
         process.exit(1);
       })
@@ -315,6 +321,7 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -375,6 +382,7 @@ async function startSingle(
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
+    ...(displayLanguage ? { displayLanguage } : {}),
     ...channelMemoryOptions(() => bridge, config.cwd),
     ...(loopController ? { loopController } : {}),
     bridgeRecovery: bridgeReadiness.current,
@@ -401,7 +409,7 @@ async function startSingle(
     bridge.stop();
     process.exit(1);
   }
-  writeServiceInfoOrExit([name], () =>
+  await writeServiceInfoOrExit([name], () =>
     cleanupStartedChannels([channel], bridge, router),
   );
   // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
@@ -422,13 +430,12 @@ async function startSingle(
   });
   attachDisconnectHandler(bridge);
 
-  const shutdown = () => {
+  const shutdown = async () => {
+    if (shuttingDown) return;
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
     scheduler?.stop();
-    channel.disconnect();
-    bridge.stop();
-    router.clearAll();
+    await cleanupStartedChannels([channel], bridge, router);
     removeServiceInfo();
     process.exit(0);
   };
@@ -442,6 +449,7 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -510,6 +518,7 @@ async function startAll(
       await createChannel(name, config, bridge, {
         router,
         proxy,
+        ...(displayLanguage ? { displayLanguage } : {}),
         ...channelMemoryOptions(() => bridge, config.cwd),
         ...(loopController ? { loopController } : {}),
         bridgeRecovery: bridgeReadiness.current,
@@ -549,7 +558,7 @@ async function startAll(
         nextFireTime,
       })
     : undefined;
-  writeServiceInfoOrExit(
+  await writeServiceInfoOrExit(
     parsed.map((p) => p.name),
     () => cleanupStartedChannels(channels.values(), bridge, router),
   );
@@ -573,14 +582,19 @@ async function startAll(
   });
   attachDisconnectHandler(bridge);
 
-  const shutdown = () => {
+  const shutdown = async () => {
+    if (shuttingDown) return;
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
     scheduler?.stop();
+    const disconnections: Array<Promise<void>> = [];
     for (const [name, channel] of channels) {
       try {
-        channel.disconnect();
-        writeStdoutLine(`[Channel] "${name}" disconnected.`);
+        disconnections.push(
+          Promise.resolve(channel.disconnect()).then(() => {
+            writeStdoutLine(`[Channel] "${name}" disconnected.`);
+          }),
+        );
       } catch {
         // best-effort
       }
@@ -588,6 +602,7 @@ async function startAll(
     bridge.stop();
     router.clearAll();
     removeServiceInfo();
+    await Promise.allSettled(disconnections);
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
@@ -611,10 +626,15 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
+    const displayLanguage = resolveLanguage(
+      resolveLanguageSetting(
+        settings.merged.general?.language as string | undefined,
+      ),
+    );
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled);
+      await startSingle(argv.name, proxy, cronEnabled, displayLanguage);
     } else {
-      await startAll(proxy, cronEnabled);
+      await startAll(proxy, cronEnabled, displayLanguage);
     }
   },
 };

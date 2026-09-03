@@ -223,6 +223,8 @@ interface ChannelMemoryRecallSelection {
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  /** Qwen UI language used by adapter-owned presentation. */
+  displayLanguage?: string;
   /** Adapter-owned persistent state directory. */
   stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
@@ -1217,7 +1219,7 @@ export abstract class ChannelBase {
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
-  abstract disconnect(): void;
+  abstract disconnect(): void | Promise<void>;
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments

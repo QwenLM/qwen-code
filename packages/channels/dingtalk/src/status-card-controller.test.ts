@@ -67,6 +67,7 @@ function deferred<T>() {
 function createHarness(
   options: {
     model?: string;
+    language?: string;
     onError?(operation: string, error: unknown): void;
   } = {},
 ) {
@@ -103,6 +104,8 @@ describe('StatusCardController', () => {
         outTrackId: expect.stringMatching(/^qwen-status-/),
         target: { chatId: 'cid-1', isGroup: true },
         cardParamMap: expect.objectContaining({
+          content: '🤔 Thinking\n\nfirst',
+          statusLine: '0s',
           hasAction: 'true',
           stop_action: 'true',
         }),
@@ -111,10 +114,29 @@ describe('StatusCardController', () => {
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: 'first',
+          content: '🤔 Thinking\n\nfirst',
           finalize: false,
         }),
       ),
+    );
+  });
+
+  it('projects localized granular phases without tool details', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness({ language: 'zh-CN' });
+
+    controller.replace(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    await controller.updateRunPhase('run-1', 'fetching');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🌐 获取中\n\nanswer',
+        finalize: false,
+      }),
     );
   });
 
@@ -127,14 +149,14 @@ describe('StatusCardController', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '@Alice',
+            content: '🤔 Thinking\n\n@Alice',
           }),
         }),
       ),
     );
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: '@Alice',
+        content: '🤔 Thinking\n\n@Alice',
         finalize: false,
       }),
     );
@@ -184,7 +206,7 @@ describe('StatusCardController', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toEqual(['latest', 'latest']);
+    ).toEqual(['🤔 Thinking\n\nlatest', '🤔 Thinking\n\nlatest']);
 
     await vi.advanceTimersByTimeAsync(1_000);
     await expect(controller.flushPending('segment-1')).resolves.toBe(true);
@@ -212,7 +234,7 @@ describe('StatusCardController', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toEqual(['second', 'third']);
+    ).toEqual(['🤔 Thinking\n\nsecond', '🤔 Thinking\n\nthird']);
   });
 
   it('does not re-arm a flush after writing the latest content', async () => {
@@ -247,7 +269,9 @@ describe('StatusCardController', () => {
       .mocked(client.openOrUpdateStream)
       .mock.calls.map(([request]) => request.content);
     expect(streamContents.join('\n')).not.toContain('/Users/ben/private');
-    expect(streamContents.at(-1)).toBe('before [Image pending] after');
+    expect(streamContents.at(-1)).toBe(
+      '🤔 Thinking\n\nbefore [Image pending] after',
+    );
   });
 
   it('hides image paths when a streaming card is cancelled', async () => {
@@ -293,7 +317,7 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · qwen3.7-max · 0s',
+          statusLine: 'qwen3.7-max · 0s',
         }),
       }),
     );
@@ -305,7 +329,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 2s',
+          statusLine: 'qwen3.7-max · 2s',
         },
       }),
     );
@@ -315,7 +339,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 3s',
+          statusLine: 'qwen3.7-max · 3s',
         },
       }),
     );
@@ -346,8 +370,8 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          content: 'latest [Image pending]',
-          statusLine: 'Running · 5s',
+          content: '🤔 Thinking\n\nlatest [Image pending]',
+          statusLine: '5s',
         },
       }),
     );
@@ -357,7 +381,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · 6s',
+          statusLine: '6s',
         },
       }),
     );
@@ -367,8 +391,8 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          content: 'latest [Image pending]',
-          statusLine: 'Running · 10s',
+          content: '🤔 Thinking\n\nlatest [Image pending]',
+          statusLine: '10s',
         },
       }),
     );
@@ -396,8 +420,8 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          content: 'latest',
-          statusLine: 'Running · 5s',
+          content: '🤔 Thinking\n\nlatest',
+          statusLine: '5s',
         },
       }),
     );
@@ -411,8 +435,8 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          content: 'latest',
-          statusLine: 'Running · 6s',
+          content: '🤔 Thinking\n\nlatest',
+          statusLine: '6s',
         },
       }),
     );
@@ -477,7 +501,7 @@ describe('StatusCardController', () => {
     expect(client.createAndDeliver).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          statusLine: 'Running · 0s',
+          statusLine: '0s',
         }),
       }),
     );
@@ -487,7 +511,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · 2s',
+          statusLine: '2s',
         },
       }),
     );
@@ -520,7 +544,7 @@ describe('StatusCardController', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: 'firstsecond',
+        content: '🤔 Thinking\n\nfirstsecond',
         finalize: false,
       }),
     );
@@ -798,7 +822,7 @@ describe('StatusCardController', () => {
     );
     const gate = deferred<void>();
     vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
-      if (request.content === 'first more') await gate.promise;
+      if (request.content.endsWith('first more')) await gate.promise;
     });
     controller.replace(segment(), target, 'first more');
 
@@ -814,7 +838,7 @@ describe('StatusCardController', () => {
       vi
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
-    ).toContain('first more second');
+    ).toContain('🤔 Thinking\n\nfirst more second');
   });
 
   it('awaits in-flight creation before reporting liveness', async () => {
@@ -912,7 +936,9 @@ describe('StatusCardController', () => {
     expect(secondCreate).toEqual(
       expect.objectContaining({
         outTrackId: firstCreate.outTrackId,
-        cardParamMap: expect.objectContaining({ content: 'first more' }),
+        cardParamMap: expect.objectContaining({
+          content: '🤔 Thinking\n\nfirst more',
+        }),
       }),
     );
     await vi.advanceTimersByTimeAsync(1_999);
@@ -927,7 +953,7 @@ describe('StatusCardController', () => {
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
         outTrackId: firstCreate.outTrackId,
-        content: 'first more',
+        content: '🤔 Thinking\n\nfirst more',
         finalize: false,
       }),
     );
@@ -1104,12 +1130,40 @@ describe('StatusCardController', () => {
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(3);
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content: 'latest after recovery',
+        content: '🤔 Thinking\n\nlatest after recovery',
         finalize: false,
       }),
     );
     await expect(controller.isCardLive('segment-1')).resolves.toBe(true);
     expect(onError).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not bypass stream retry backoff for a phase update', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream died'),
+    );
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+
+    await controller.updateRunPhase('run-1', 'fetching');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        content: '🌐 Fetching\n\nfirst more',
+        finalize: false,
+      }),
+    );
   });
 
   it('recovers terminal state after content and finalization failures', async () => {
@@ -1286,7 +1340,9 @@ describe('StatusCardController', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(4);
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
-      expect.objectContaining({ content: 'first more second' }),
+      expect.objectContaining({
+        content: '🤔 Thinking\n\nfirst more second',
+      }),
     );
   });
 

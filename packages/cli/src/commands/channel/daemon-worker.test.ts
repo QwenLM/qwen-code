@@ -946,8 +946,14 @@ describe('runChannelDaemonWorker', () => {
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
-    const settings = { merged: { proxy: 'http://settings-proxy:8080' } };
+    const settings = {
+      merged: {
+        proxy: 'http://settings-proxy:8080',
+        general: { language: 'en' },
+      },
+    };
     mockLoadSettings.mockReturnValueOnce(settings);
+    vi.stubEnv('QWEN_CODE_LANG', 'zh');
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1006,6 +1012,7 @@ describe('runChannelDaemonWorker', () => {
         },
         stateDir:
           '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
+        displayLanguage: 'zh',
       }),
     );
     expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
@@ -2416,6 +2423,41 @@ describe('runChannelDaemonWorker', () => {
     await expect(handle.close()).rejects.toThrow('stop boom');
     expect(mockRouterDispose).toHaveBeenCalled();
     expect(mockRouterClearAll).not.toHaveBeenCalled();
+  });
+
+  it('waits for asynchronous channel cleanup before closing', async () => {
+    const sdk = createSdk();
+    let finishDisconnect!: () => void;
+    const disconnect = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      name: 'telegram',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    let closed = false;
+    const closing = handle.close().then(() => {
+      closed = true;
+    });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledOnce());
+    expect(closed).toBe(false);
+
+    finishDisconnect();
+    await closing;
+
+    expect(closed).toBe(true);
   });
 
   it('runs webhook tasks on the matching channel handle', async () => {

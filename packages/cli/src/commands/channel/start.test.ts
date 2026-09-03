@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ChannelBaseOptions } from '@qwen-code/channel-base';
@@ -230,6 +230,10 @@ beforeEach(() => {
   delete process.env['QWEN_CODE_DISABLE_CRON'];
 });
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('resolveProxy', () => {
   it('prefers the CLI proxy over settings and environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
@@ -371,8 +375,14 @@ describe('startCommand.handler', () => {
     const envProxy = 'http://env.example.com:8080';
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({
-      merged: { channels, proxy: settingsProxy },
+      merged: {
+        channels,
+        proxy: settingsProxy,
+        general: { language: 'auto' },
+      },
     });
+    vi.stubEnv('QWEN_CODE_LANG', '');
+    vi.stubEnv('LANG', 'zh_CN.UTF-8');
     process.env['HTTPS_PROXY'] = envProxy;
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
@@ -401,6 +411,7 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         proxy: settingsProxy,
+        displayLanguage: 'zh',
         loopController: expect.objectContaining({
           create: expect.any(Function),
           createForTarget: expect.any(Function),
@@ -618,6 +629,46 @@ describe('startCommand.handler', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('started concurrently'),
     );
+  });
+
+  it('waits for asynchronous channel cleanup before standalone exit', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    let finishDisconnect!: () => void;
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockChannelDisconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(() => process);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    try {
+      void invokeStartHandler({ name: 'telegram' });
+      await vi.waitFor(() => expect(mockWriteServiceInfo).toHaveBeenCalled());
+      const shutdown = processOnSpy.mock.calls.find(
+        ([eventName]) => eventName === 'SIGTERM',
+      )?.[1] as (() => void | Promise<void>) | undefined;
+      expect(shutdown).toBeDefined();
+
+      const shuttingDown = Promise.resolve(shutdown!());
+      await vi.waitFor(() => expect(mockChannelDisconnect).toHaveBeenCalled());
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      finishDisconnect();
+      await shuttingDown;
+
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      processOnSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
   });
 
   it('cleans up all connected channels when pidfile creation races', async () => {

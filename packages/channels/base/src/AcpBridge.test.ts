@@ -117,6 +117,7 @@ type TestableAcpBridge = AcpBridge & {
   };
   knownSessionIds: Set<string>;
   sessionBindingTokens: Map<string, object | undefined>;
+  toolCallKindsBySession: Map<string, Map<string, string>>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -1063,6 +1064,216 @@ describe('AcpBridge', () => {
 
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
+    );
+  });
+
+  it('forwards standard initial ACP tool kinds unchanged', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    bridge.on('toolCall', toolCall);
+
+    const kinds = [
+      'read',
+      'edit',
+      'delete',
+      'move',
+      'search',
+      'execute',
+      'think',
+      'fetch',
+      'switch_mode',
+      'other',
+    ];
+    for (const kind of kinds) {
+      bridge.handleSessionUpdate({
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: `tool-${kind}`,
+          kind,
+          title: kind,
+          status: 'in_progress',
+        },
+      });
+    }
+
+    expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual(kinds);
+  });
+
+  it('forwards a refined tool update without creating another response boundary', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-web-fetch',
+        kind: 'other',
+        title: 'web_fetch',
+        status: 'pending',
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-web-fetch',
+        kind: 'fetch',
+        title: 'WebFetch: weather',
+        status: 'in_progress',
+      },
+    });
+
+    expect(toolCall.mock.calls.map(([event]) => event.kind)).toEqual([
+      'other',
+      'fetch',
+    ]);
+    expect(responseBoundary).toHaveBeenCalledOnce();
+  });
+
+  it('restores the initial kind on a kindless terminal tool update', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-shell',
+        kind: 'execute',
+        title: 'Run shell: echo $SECRET',
+        status: 'in_progress',
+        rawInput: { command: 'echo $SECRET' },
+      },
+    });
+    toolCall.mockClear();
+    responseBoundary.mockClear();
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-shell',
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'secret' } },
+        ],
+        rawOutput: 'secret',
+      },
+    });
+
+    expect(toolCall).toHaveBeenCalledOnce();
+    expect(toolCall).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      toolCallId: 'tool-shell',
+      kind: 'execute',
+      title: '',
+      status: 'completed',
+      rawInput: undefined,
+    });
+    expect(responseBoundary).not.toHaveBeenCalled();
+  });
+
+  it('does not retain kinds from terminal initial tool calls', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-search',
+        kind: 'search',
+        title: 'Search',
+        status: 'completed',
+      },
+    });
+
+    expect(bridge.toolCallKindsBySession.has('session-1')).toBe(false);
+  });
+
+  it('ignores meta-only shell progress heartbeats', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('toolCall', toolCall);
+    bridge.on('responseBoundary', responseBoundary);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-shell',
+        kind: 'execute',
+        title: 'Run shell',
+        status: 'in_progress',
+      },
+    });
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-shell',
+        status: 'in_progress',
+        _meta: {
+          toolName: 'run_shell_command',
+          shellProgress: { type: 'shell_progress', elapsedMs: 1_000 },
+        },
+      },
+    });
+
+    expect(toolCall).toHaveBeenCalledOnce();
+    expect(toolCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: 'execute', title: 'Run shell' }),
+    );
+    expect(responseBoundary).toHaveBeenCalledOnce();
+  });
+
+  it('forwards kindful terminal updates that carry shell progress metadata', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const toolCall = vi.fn();
+    bridge.on('toolCall', toolCall);
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-shell',
+        kind: 'execute',
+        status: 'completed',
+        _meta: {
+          shellProgress: { type: 'shell_progress', elapsedMs: 1_000 },
+        },
+      },
+    });
+
+    expect(toolCall).toHaveBeenCalledOnce();
+    expect(toolCall).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'execute', status: 'completed' }),
     );
   });
 

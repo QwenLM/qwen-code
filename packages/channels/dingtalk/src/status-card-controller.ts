@@ -9,7 +9,13 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
+import { escapeDingTalkMarkdown } from './markdown.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
+import {
+  isChinesePresentationLanguage,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
@@ -39,6 +45,8 @@ interface StatusRecord {
   target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   content: string;
+  sourcePrefix?: string;
+  phase: DingtalkPresentationPhase;
   startedAt: number;
   lastStatusSecond: number;
   lastContentSyncSecond: number;
@@ -73,6 +81,7 @@ export interface StatusCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
   model?: string;
+  language?: string;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -80,6 +89,36 @@ function boundContent(content: string): string {
   if (content.length <= CONTENT_LIMIT) return content;
   return `${TRUNCATION_MARKER}${content.slice(
     content.length - (CONTENT_LIMIT - TRUNCATION_MARKER.length),
+  )}`;
+}
+
+function activeContent(
+  phase: DingtalkPresentationPhase,
+  content: string,
+  language?: string,
+  sourcePrefix?: string,
+): string {
+  const label = presentationPhaseLabel(phase, language);
+  const sanitized = sanitizeStreamingImageMarkers(content);
+  const renderedSourcePrefix =
+    sourcePrefix &&
+    (sanitized === sourcePrefix || sanitized.startsWith(`${sourcePrefix}\n\n`))
+      ? sourcePrefix
+      : undefined;
+  const body = renderedSourcePrefix
+    ? sanitized.slice(
+        renderedSourcePrefix.length +
+          (sanitized.length === renderedSourcePrefix.length ? 0 : 2),
+      )
+    : sanitized;
+  const prefix = [label, renderedSourcePrefix].filter(Boolean).join('\n\n');
+  if (!body) return prefix;
+
+  const separator = '\n\n';
+  const available = CONTENT_LIMIT - prefix.length - separator.length;
+  if (body.length <= available) return `${prefix}${separator}${body}`;
+  return `${prefix}${separator}${TRUNCATION_MARKER}${body.slice(
+    body.length - (available - TRUNCATION_MARKER.length),
   )}`;
 }
 
@@ -213,6 +252,10 @@ export class StatusCardController {
       target,
       outTrackId,
       content: boundContent(initialContent),
+      ...(segment.sourceLabel
+        ? { sourcePrefix: escapeDingTalkMarkdown(segment.sourceLabel) }
+        : {}),
+      phase: 'thinking',
       startedAt: Date.now(),
       lastStatusSecond: 0,
       lastContentSyncSecond: 0,
@@ -257,6 +300,25 @@ export class StatusCardController {
       false,
       retainedContent,
     );
+  }
+
+  updateRunPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    if (this.disposed) return;
+    for (const segmentId of this.segmentIdsByRun.get(runId) ?? []) {
+      const record = this.recordsBySegment.get(segmentId);
+      if (
+        !record ||
+        record.terminal ||
+        record.streamFailed ||
+        record.phase === phase
+      ) {
+        continue;
+      }
+      record.phase = phase;
+      record.contentVersion++;
+      record.hasPendingWrite = true;
+      this.scheduleFlush(record);
+    }
   }
 
   fail(segmentId: string, error: string): void {
@@ -328,9 +390,14 @@ export class StatusCardController {
           outTrackId: record.outTrackId,
           target,
           cardParamMap: {
-            content: sanitizeStreamingImageMarkers(record.content),
+            content: activeContent(
+              record.phase,
+              record.content,
+              this.options.language,
+              record.sourcePrefix,
+            ),
             flowStatus: 2,
-            statusLine: this.statusLine(record, 'Running').text,
+            statusLine: this.statusLine(record).text,
             hasAction: 'true',
             stop_action: 'true',
           },
@@ -357,7 +424,12 @@ export class StatusCardController {
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content: sanitizeStreamingImageMarkers(record.content),
+        content: activeContent(
+          record.phase,
+          record.content,
+          this.options.language,
+          record.sourcePrefix,
+        ),
         finalize: false,
       });
     } catch (error) {
@@ -422,7 +494,12 @@ export class StatusCardController {
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
-          content: sanitizeStreamingImageMarkers(record.content),
+          content: activeContent(
+            record.phase,
+            record.content,
+            this.options.language,
+            record.sourcePrefix,
+          ),
           finalize: false,
         });
         contentWritten = true;
@@ -638,7 +715,7 @@ export class StatusCardController {
 
   private statusLine(
     record: StatusRecord,
-    state: StatusState,
+    state?: Exclude<StatusState, 'Running'>,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -646,14 +723,32 @@ export class StatusCardController {
     );
     const model = this.options.model?.trim();
     return {
-      text: [state, model, `${second}s`].filter(Boolean).join(' · '),
+      text: [
+        state ? this.statusStateLabel(state) : undefined,
+        model,
+        `${second}s`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
       second,
     };
   }
 
+  private statusStateLabel(state: Exclude<StatusState, 'Running'>): string {
+    if (!isChinesePresentationLanguage(this.options.language)) return state;
+    return (
+      {
+        Completed: '已完成',
+        Failed: '已失败',
+        Stopped: '已终止',
+        Cancelled: '已取消',
+      }[state] ?? state
+    );
+  }
+
   private async updateRunningStatus(record: StatusRecord): Promise<void> {
     if (this.disposed || record.terminal || record.streamFailed) return;
-    const status = this.statusLine(record, 'Running');
+    const status = this.statusLine(record);
     if (status.second === record.lastStatusSecond) return;
     const syncContent =
       status.second - record.lastContentSyncSecond >=
@@ -663,7 +758,14 @@ export class StatusCardController {
         outTrackId: record.outTrackId,
         cardParamMap: {
           ...(syncContent
-            ? { content: sanitizeStreamingImageMarkers(record.content) }
+            ? {
+                content: activeContent(
+                  record.phase,
+                  record.content,
+                  this.options.language,
+                  record.sourcePrefix,
+                ),
+              }
             : {}),
           statusLine: status.text,
         },

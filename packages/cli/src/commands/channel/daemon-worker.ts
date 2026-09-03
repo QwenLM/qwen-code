@@ -12,6 +12,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
@@ -486,6 +487,11 @@ export async function runChannelDaemonWorker(
     undefined,
     settings.merged.proxy as string | undefined,
   );
+  const displayLanguage = resolveLanguage(
+    resolveLanguageSetting(
+      settings.merged.general?.language as string | undefined,
+    ),
+  );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
   const parsed = await abortableStartup(
@@ -572,14 +578,16 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = () => {
+  const disconnectAll = async (): Promise<void> => {
+    const disconnections: Array<Promise<void>> = [];
     for (const channel of channels.values()) {
       try {
-        channel.disconnect();
+        disconnections.push(Promise.resolve(channel.disconnect()));
       } catch {
         // best-effort
       }
     }
+    await Promise.allSettled(disconnections);
   };
 
   let router: SessionRouter | undefined;
@@ -621,6 +629,7 @@ export async function runChannelDaemonWorker(
         await abortableStartup(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
+            ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
@@ -678,7 +687,7 @@ export async function runChannelDaemonWorker(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
         try {
-          channel.disconnect();
+          await channel.disconnect();
         } catch {
           // best-effort
         }
@@ -806,23 +815,25 @@ export async function runChannelDaemonWorker(
       },
       async close() {
         scheduler?.stop();
-        disconnectAll();
+        const disconnecting = disconnectAll();
         try {
           bridge.stop();
         } finally {
           createdRouter.dispose();
+          await disconnecting;
         }
       },
     };
   } catch (err) {
     scheduler?.stop();
-    disconnectAll();
+    const disconnecting = disconnectAll();
     try {
       bridge.stop();
     } catch {
       // best-effort during startup rollback
     } finally {
       router?.dispose();
+      await disconnecting;
     }
     throw err;
   }

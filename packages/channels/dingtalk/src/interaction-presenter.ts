@@ -10,6 +10,7 @@ import type {
 import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
+import type { DingtalkPresentationPhase } from './presentation-phase.js';
 import {
   CONTENT_LIMIT,
   TRUNCATION_MARKER,
@@ -120,6 +121,14 @@ export class DingtalkInteractionPresenter {
         this.withSourcePrefix(run, ''),
       );
     });
+  }
+
+  updateStatusCardPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    void this.enqueue(run, () =>
+      this.options.statusCards?.updateRunPhase(runId, phase),
+    );
   }
 
   appendOutput(segment: ChannelOutputSegmentContext, chunk: string): void {
