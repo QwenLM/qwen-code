@@ -47,6 +47,7 @@ import {
   unarchiveDaemonSessions,
   DaemonDrainingError,
 } from './session-archive.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('assertSessionLoadable', () => {
   let runtimeDir: string;
@@ -722,7 +723,7 @@ describe('archiveDaemonSessions', () => {
         expect(result.errors[0]?.error).toBeInstanceOf(
           SessionStorageEntryError,
         );
-        expect(Date.now() - startedAt).toBeLessThan(400);
+        expectWithinLatencyBudget(Date.now() - startedAt, 400);
       } finally {
         clearTimeout(unblock);
         if (writer !== undefined) fs.closeSync(writer);
