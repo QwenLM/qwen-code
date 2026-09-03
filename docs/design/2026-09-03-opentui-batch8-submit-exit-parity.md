@@ -239,25 +239,28 @@ falling through silently. Registered as U-28: a different seam than submission a
 
 A new instrument has to show it can fail, so each mechanism behind the four cases was
 removed in turn, the CLI re-bundled, and the whole spec run on the OpenTUI leg with
-`--retry=0`, then restored. The same four mutations ran again against
-`opentui-app-shell.test.tsx` and `slash-gateway.test.ts` from source, so the units column
-below is a measurement rather than an assumption.
+`--retry=0`, then restored. Every mutation ran again against
+`opentui-app-shell.test.tsx` and `slash-gateway.test.ts` from source, plus the drain's two
+exit-latch checks, for which no case in the leg ever reaches an exit. So both columns below
+are measurements rather than assumptions.
 
-| Mutation                                     | OpenTUI leg                | Units         |
-| -------------------------------------------- | -------------------------- | ------------- |
-| drain returns before replaying held commands | red — the deferral case    | red — 6 cases |
-| bare quit token is not rewritten             | red — the bare-`exit` case | red — 9 cases |
-| mid-turn gate always answers "run now"       | **green**                  | red — 9 cases |
-| quit branch drops the interrupt              | **green**                  | red — 2 cases |
+| Mutation                                     | OpenTUI leg                | Units                     |
+| -------------------------------------------- | -------------------------- | ------------------------- |
+| drain returns before replaying held commands | red — the deferral case    | red — 6 cases             |
+| bare quit token is not rewritten             | red — the bare-`exit` case | red — 9 cases             |
+| mid-turn gate always answers "run now"       | **green**                  | red — 9 cases             |
+| quit branch drops the interrupt              | **green**                  | red — 2 cases             |
+| drain drops its in-loop exit-latch check     | not probed                 | red — the R4-1 case, only |
+| drain drops its pre-loop exit-latch check    | not probed                 | **green** — see below     |
 
-Those two green cells are the leg's real limit, and they share a cause: both mechanisms change
-_when_ something happens inside a turn the fake server keeps open, and every observable this
-file has is a request the CLI sent. Remove the gate and the command submits mid-turn — but a
-mid-turn submit in OpenTUI _is_ a steer, so its expanded prompt still reaches the model only
-after the held turn ends, and the request log is unchanged. Remove the interrupt and the
-process still exits: teardown closes the socket however the turn ends. What the deferral case
-does pin is the drain itself, plus that the command ran exactly once, after the turn, as an
-expanded prompt rather than as typed text.
+Those two green cells in the leg column are its real limit, and they share a cause: both
+mechanisms change _when_ something happens inside a turn the fake server keeps open, and
+every observable this file has is a request the CLI sent. Remove the gate and the command
+submits mid-turn — but a mid-turn submit in OpenTUI _is_ a steer, so its expanded prompt
+still reaches the model only after the held turn ends, and the request log is unchanged.
+Remove the interrupt and the process still exits: teardown closes the socket however the turn
+ends. What the deferral case does pin is the drain itself, plus that the command ran exactly
+once, after the turn, as an expanded prompt rather than as typed text.
 
 U-23's shutdown path is unit-only by construction, not by omission: the exit cases set
 `enableManagedAutoMemory: false`, so no background task exists for `requestShutdown` to wait
@@ -268,8 +271,10 @@ Only the bare-`exit` case is differential — ink passes it before this batch an
 after. On the other three an ink pass shows the instrument is renderer-neutral; U-21, U-22 and
 U-23 live in OpenTUI-only code, so the OpenTUI leg is the only one that can redden for them.
 
-One probe survived, and it is worth naming: deleting the drain effect's _pre-loop_ exit-latch
-check leaves the unit suite green, because the in-loop check refuses every command the edge
-check would have stopped. That redundancy is why the R4-1 test has to flip the latch inside an
-in-flight dispatch rather than before the drain runs, and why the edge check itself stays
-unpinned. That mutation was probed against the units only, not against the leg.
+The two latch probes measure the redundancy the drain lives with. Deleting the _in-loop_ check
+reddens exactly one case — the R4-1 test, which flips the latch inside an in-flight dispatch
+precisely because that is the crossing the pre-loop check cannot see; the test is the only thing
+pinning that line. Deleting the _pre-loop_ check leaves the unit suite green, because the in-loop
+check refuses every command the edge check would have stopped — so no unit test covers the edge
+check on its own, and the redundancy is why that is acceptable. Neither latch mutation was
+probed against the leg.
