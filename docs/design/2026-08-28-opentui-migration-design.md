@@ -159,8 +159,8 @@ The pieces, in landing order:
   own (#8662 U-10). The runtime fixes this batch used to carry — the Bun
   memory flags and the goal-runtime startup wait — landed early in #10128.
 - **Build & CI.** Bundle asset pipeline for the OpenTUI runtime assets, the
-  CI legs (e2e, tui-parity), renderer-matrix integration tests, and the
-  parity tooling (codemod, PTY harness).
+  tui-parity CI gate, renderer-matrix integration tests and the env pinning
+  the e2e legs carry, and the parity tooling (codemod, PTY harness).
 
 ### Renderer selection and runtime gate
 
@@ -252,8 +252,12 @@ safe to run before its owners exist, and the activation batch inherits them:
   vitest suite green; the default (ink) path byte-for-byte unchanged — the
   batches landed so far touch zero reachable ink code paths because nothing
   outside `src/ui/opentui/` imports them. The activation batch additionally
-  smoke-tests the flag under Bun (boot, dialog, live turn, exit drain); the
-  build/CI batch runs the OpenTUI e2e leg green on CI.
+  smoke-tests the flag under Bun (boot, dialog, live turn, exit drain). The
+  build/CI batch wired the renderer matrix into the existing e2e legs and
+  added the tui-parity gate; its own OpenTUI interactive e2e leg ran on
+  `main`, reported three real gaps (approval-mode indicator never drawn,
+  `@file` expansion absent, `submitted_prompt` dropped), and has since come
+  out of CI until those close (#8662).
 - **1:1 parity audits** — screen-by-screen comparison against ink, plus a
   reverse audit pass, with surviving differences landing as tracked gaps
   (G-series) rather than silent drift.

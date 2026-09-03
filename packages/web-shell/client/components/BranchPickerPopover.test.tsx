@@ -658,6 +658,9 @@ describe('BranchPickerPopover actions', () => {
       'cannot discard changes: the workspace is a subdirectory',
     );
     expect(footerText()).toContain('Stash Changes and Update');
+    // The daemon declared discarding impossible for this workspace; the
+    // action is gone rather than looping the same refusal.
+    expect(footerText()).not.toContain('Discard Changes and Update');
     expect(footerText()).not.toContain('Discard and Update');
   });
 

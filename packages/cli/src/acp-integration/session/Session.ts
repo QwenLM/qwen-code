@@ -4172,6 +4172,7 @@ export class Session implements SessionContext {
       this.#workflowStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -9430,6 +9431,25 @@ export class Session implements SessionContext {
           });
       });
 
+    // Shell-detected `gh pr create` bindings persist in the child's own
+    // sidecar write; the daemon never sees it, so carry the catalog-clock
+    // mark — version-watching clients then refetch the binding the same way
+    // they pick up automatic titles.
+    this.config
+      .getSessionService()
+      .setSessionPrBoundCallback((sessionId, pr) => {
+        void this.client
+          .extNotification('qwen/notify/session/pr-binding', {
+            v: 1,
+            sessionId,
+            pr: { number: pr.number, url: pr.url },
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the badge
+            // until the client's next catalog refresh.
+          });
+      });
+
     if (typeof this.config.onChatRecordingFailure === 'function') {
       this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
         (event) =>
@@ -13490,14 +13510,24 @@ export class Session implements SessionContext {
       : undefined;
 
     switch (result.type) {
-      case 'submit_prompt':
-        // Command wants to submit a prompt to the model
-        // Convert PartListUnion to Part[]
+      case 'submit_prompt': {
+        const expandedPrompt = normalizePartList(result.content);
+        const attachmentBlocks =
+          result.resolvedCommand?.kind === CommandKind.BUILT_IN
+            ? []
+            : originalPrompt.filter((block) => block.type !== 'text');
+        const attachmentParts =
+          attachmentBlocks.length === 0
+            ? []
+            : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
+                deferBridgeConversions: true,
+              });
         return this.#applyBridgeConversionsIfNeeded(
-          normalizePartList(result.content),
+          [...attachmentParts, ...expandedPrompt],
           abortSignal,
           onFullTurnModel,
         );
+      }
 
       case 'message': {
         if (result.messageType === 'error') {

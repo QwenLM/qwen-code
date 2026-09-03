@@ -922,33 +922,13 @@ function pullArgs(opts?: GitPullOptions): string[] {
   return args;
 }
 
-/** The upstream ref configured for the checked-out branch, or ''. */
-async function configuredUpstream(
-  cwd: string,
-  env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
-  try {
-    const branch = (
-      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env)
-    ).trim();
-    return (
-      await runGit(
-        cwd,
-        ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`],
-        env,
-      )
-    ).trim();
-  } catch {
-    return '';
-  }
-}
-
 /**
  * SHA of the upstream tip, resolved after the flow's own fetch (so a
  * tracking ref pruned earlier is back if the remote branch exists again).
- * A branch with no upstream configured fails with git's own message, as a
- * plain pull always has; a configured upstream whose remote branch is
- * gone is a typed refusal — nothing has been touched at this point.
+ * A detached HEAD and a configured upstream whose remote branch is gone
+ * are typed refusals — nothing has been touched at this point; a branch
+ * with no upstream configured fails with git's own message, as a plain
+ * pull always has.
  */
 async function validatedUpstream(
   cwd: string,
@@ -956,13 +936,35 @@ async function validatedUpstream(
 ): Promise<string> {
   const sha = await upstreamSha(cwd, env);
   if (sha) return sha;
-  if (await configuredUpstream(cwd, env)) {
+  let branch: string;
+  try {
+    branch = (
+      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env)
+    ).trim();
+  } catch {
+    throw new GitPullFailure(
+      'pull_failed',
+      'cannot update: HEAD is detached; check out a branch from a terminal first',
+    );
+  }
+  const configured = (
+    await runGit(
+      cwd,
+      ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`],
+      env,
+    ).catch(() => '')
+  ).trim();
+  if (configured) {
     throw new GitPullFailure(
       'pull_failed',
       'cannot update: the upstream branch no longer exists on the remote; nothing was changed',
     );
   }
+  // No upstream is configured: surface git's own message so the route
+  // classifies it as it always has.
   await runGit(cwd, ['rev-parse', '--abbrev-ref', '@{upstream}'], env);
+  // Reachable only when the upstream appeared between the probes; refuse
+  // conservatively instead of proceeding on a tip that was never validated.
   throw new GitPullFailure(
     'pull_failed',
     'cannot update: the upstream branch could not be resolved; nothing was changed',
@@ -1148,6 +1150,12 @@ export async function gitPull(
 ): Promise<GitPullResult> {
   if (opts?.stash && opts?.force) {
     throw new Error('stash and force are mutually exclusive');
+  }
+  if (opts?.fetchOnly && (opts?.stash || opts?.force)) {
+    // A fetch-only request has nothing to stash around or discard for;
+    // refuse rather than silently dropping the resolution the caller
+    // asked for.
+    throw new Error('fetchOnly cannot be combined with stash or force');
   }
   if (opts?.fetchOnly) {
     const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);
