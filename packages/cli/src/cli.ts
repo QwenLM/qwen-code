@@ -22,6 +22,10 @@ import {
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
+import {
+  BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+} from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
@@ -513,6 +517,32 @@ export async function runCliEntry(
     );
     await installManagedNpmUpdate(managedUpdateVersion);
     return;
+  }
+
+  // Before the parser, and gated on a raw-argv scan so an ordinary launch
+  // pays nothing: this process may have been spawned to BE the Agent View
+  // supervisor, and the flag that says so is internal — the strict parser
+  // below would reject it, which is why the supervisor never served.
+  if (rawArgv.includes(INTERNAL_AGENT_VIEW_SUPERVISOR_ARG)) {
+    const { runAsAgentViewSupervisor } = await import(
+      './agent-view/background-entry.js'
+    );
+    await runAsAgentViewSupervisor();
+    return;
+  }
+
+  // `--bg` needs a prompt and a directory, nothing else the interactive
+  // startup path would load. The scan only gates the import; the parse
+  // declines a `--bg` that is the user's own data after `--`.
+  if (rawArgv.includes(BACKGROUND_FLAG)) {
+    const { readBackgroundPrompt, runBackgroundDispatch } = await import(
+      './agent-view/background-entry.js'
+    );
+    const prompt = readBackgroundPrompt(rawArgv);
+    if (prompt !== undefined) {
+      process.exitCode = await runBackgroundDispatch(prompt);
+      return;
+    }
   }
 
   const argv = normalizeServeFastPathArgv(rawArgv);

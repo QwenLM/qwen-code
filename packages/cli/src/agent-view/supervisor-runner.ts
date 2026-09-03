@@ -35,9 +35,9 @@ import {
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { INTERNAL_AGENT_VIEW_SUPERVISOR_ARG } from './entry-flags.js';
 
-export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
-  '--internal-agent-view-supervisor';
+export { INTERNAL_AGENT_VIEW_SUPERVISOR_ARG } from './entry-flags.js';
 
 const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
