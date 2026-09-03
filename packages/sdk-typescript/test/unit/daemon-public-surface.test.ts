@@ -31,6 +31,7 @@ import type {
   DaemonStandaloneFields,
   DaemonStandaloneMetadataResult,
   DaemonStandaloneSession,
+  DaemonStandaloneSessionOptions,
   DaemonStandaloneSessionCreating,
   DaemonStandaloneSessionListOptions,
   DaemonStandaloneSessionListPage,
@@ -203,6 +204,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
       'standalone_sessions_v1',
     );
+    expect(Public.STANDALONE_SESSION_OPTIONS_CAPABILITY).toBe(
+      'standalone_session_options_v1',
+    );
     expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
     expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
     expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
@@ -215,6 +219,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
     expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionOptions>().not.toBeNever();
     expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();

@@ -455,6 +455,23 @@ jobs:
           if-no-files-found: 'error'
           overwrite: true
 
+      # prepare:package's guards (unpacked size budget, forbidden literals,
+      # missing bundle artifacts) had no gate before the publish job, so the
+      # first thing that tripped one was the Dockerfile's builder stage in
+      # integration_docker — a ~20 minute wait for a one-line error, and
+      # before the build_sandbox.js output fix, one that printed nothing.
+      # Running the same steps here reports it in minutes instead. Kept after
+      # the upload so the packed artifact stays exactly what the build steps
+      # above produced.
+      - name: 'Verify Prepared Package'
+        run: |-
+          npm run bundle
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
+          npm run prepare:package
+
   quality_typecheck:
     name: 'Quality Checks (Typecheck)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
@@ -523,10 +540,27 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          # Nightly and preview releases may absorb a transient timing failure;
-          # stable releases remain strict and never retry a failed test.
-          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '0' }}"
-        run: 'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests --retry="${VITEST_RETRY}"'
+          # Every release schedule absorbs a transient timing failure, not
+          # just nightly and preview. A stable release used to run with no
+          # retry at all, so any one flaky test out of ~30k reddened it
+          # outright: six consecutive stable runs failed on a single test
+          # each while every other gate stayed green, and the same test
+          # passed on the next attempt. Retrying hides nothing — a real
+          # break fails all three attempts — it only stops a contended
+          # runner from deciding whether a release ships. Operators can
+          # retune this without a PR via the repository variable, or set it
+          # to 'off' to omit the flag entirely. 'off' rather than '0': a
+          # command-line --retry=0 outranks the config and would disable a
+          # workspace's deliberate retry (packages/sdk-typescript) on the
+          # release lane alone, and an empty variable just falls back to the
+          # default.
+          VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
+        run: |-
+          retry_arg=()
+          if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
+            retry_arg=("--retry=${VITEST_RETRY}")
+          fi
+          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
@@ -685,50 +719,54 @@ jobs:
           sandbox_revision="$(git rev-parse HEAD)"
           sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
-          acquire_daemon_write_lock() {
-            lock_deadline=$((SECONDS + 1800))
-            until flock --nonblock 9; do
-              if (( SECONDS >= lock_deadline )); then
-                echo "::error::docker daemon write lock not acquired within 30 minutes"
-                exit 1
-              fi
-              sleep 1
-            done
-          }
-
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
             mkdir -p "${HOME}/.cache/qwen-code-ci"
-            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
-            if ! flock --wait 1800 8; then
-              echo "::error::docker build coordinator lock not acquired within 30 minutes"
-              exit 1
-            fi
+            # Same protocol as e2e.yml: the host daemon lock is held shared
+            # for the whole step and never upgraded, so preparing an image
+            # cannot be starved by the test phase of a run already on the
+            # host (run 33637097713).
             exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
             if ! flock --shared --wait 1800 9; then
               echo "::error::docker daemon read lock not acquired within 30 minutes"
+              exit 1
+            fi
+            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
+            if ! flock --wait 1800 8; then
+              echo "::error::docker build coordinator lock not acquired within 30 minutes"
               exit 1
             fi
           fi
 
           if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-              flock --unlock 9
-              acquire_daemon_write_lock
+              # Host build mutex, shared with the E2E lane and held only
+              # while an image is prepared.
+              exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"
+              if ! flock --wait 1800 7; then
+                echo "::error::docker build lock not acquired within 30 minutes"
+                exit 1
+              fi
             fi
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
-            npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            # See e2e.yml: closing the lock descriptors in the child keeps
+            # a descendant that outlives this job from holding the lock.
+            npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --unlock 7
+              exec 7>&-
+            fi
           fi
           sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
           export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-            flock --shared 9
             flock --unlock 8
+            exec 8>&-
           fi
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
@@ -966,7 +1004,13 @@ jobs:
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
-        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: |-
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone ${PREVIEW_ARGS}
 
       # npm trusted publishing can only be configured after a package exists.
       # Keep this disabled until the one-time bootstrap publish and trusted
@@ -1074,8 +1118,14 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
-          npm run verify:installation-release -- --dir dist/standalone
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
 
       - name: 'Auto-label internal CI PRs for release notes exclusion'
         continue-on-error: true
