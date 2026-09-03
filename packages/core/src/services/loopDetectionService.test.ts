@@ -21,7 +21,14 @@ import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
-import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
+import {
+  FULL_OUTPUT_DIGEST_LABEL,
+  persistAndTruncateToolResult,
+} from '../tools/truncation.js';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../tools/tool-response-finalizer.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -31,6 +38,17 @@ vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
 }));
+
+// Only persistAndTruncateToolResult is mocked (the finalizer regression
+// test below drives it); every other export stays real.
+vi.mock('../tools/truncation.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/truncation.js')>();
+  return {
+    ...actual,
+    persistAndTruncateToolResult: vi.fn(),
+  };
+});
 
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
@@ -3507,6 +3525,96 @@ ${boardState}
         ]);
       }
       expect(fired).toBe(true);
+    });
+
+    it('halts on persisted oversized-error stubs with per-call unique paths', () => {
+      // The scheduler persists oversized errors before createErrorResponse
+      // (persistAndTruncateToolResult); the stub envelope embeds a
+      // per-call unique path, so the guard must key on the producer digest.
+      const digest = createHash('sha256')
+        .update('huge error content')
+        .digest('hex');
+      const persistedStub = (callId: string): string => `<persisted-output>
+Output too large (42 KB). Full output saved to: /tool-results/${callId}.txt
+${FULL_OUTPUT_DIGEST_LABEL}${digest}
+Note: this file may be cleaned up after 24 hours.
+
+Preview (up to 2000 chars):
+huge error content
+</persisted-output>`;
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolErrorBatch(
+            errorResult(persistedStub(`call-${i}`), `call-${i}`),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(persistedStub('call-final'), 'call-final'),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('halts on identical oversized errors truncated by the batch-budget finalizer', async () => {
+      // Oversized errors pass through finalizeToolResponses before reaching
+      // the guard; its truncation envelope embeds a per-call unique artifact
+      // path, so fitText embeds the sha256 of the full text and the guard
+      // must key on it — otherwise the largest errors fingerprint uniquely
+      // per call and the guard never fires.
+      vi.mocked(persistAndTruncateToolResult).mockImplementation(
+        async (callId, _toolName, content) => ({
+          content,
+          outputFile: `/tool-results/${callId}.txt`,
+          bytesWritten: Buffer.byteLength(content),
+        }),
+      );
+      const bigError = 'src/module.ts(1,5): error TS2345: boom. '.repeat(1000);
+      const finalizerConfig = {
+        getToolOutputBatchBudget: () => 4000,
+      } as unknown as Config;
+      const runRound = async (round: number): Promise<Part[]> => {
+        const entries: ToolResponseBudgetEntry[] = Array.from(
+          { length: 4 },
+          (_, k) => ({
+            callId: `call-r${round}-k${k}`,
+            toolName: 'run_shell_command',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: `call-r${round}-k${k}`,
+                  name: 'run_shell_command',
+                  response: { error: bigError },
+                },
+              },
+            ],
+          }),
+        );
+        const finalized = await finalizeToolResponses(
+          finalizerConfig,
+          entries,
+          undefined,
+          false,
+        );
+        return finalized.flatMap((entry) => entry.responseParts);
+      };
+      let fired = false;
+      for (
+        let round = 0;
+        round < REPEATED_TOOL_ERROR_THRESHOLD && !fired;
+        round++
+      ) {
+        const parts = await runRound(round);
+        // The envelope carries the digest line; identical underlying errors
+        // must fingerprint identically despite per-call unique paths.
+        const error = parts[0]?.functionResponse?.response?.['error'];
+        expect(typeof error).toBe('string');
+        expect(error as string).toContain(FULL_OUTPUT_DIGEST_LABEL);
+        fired = service.recordToolErrorBatch(parts);
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
   });
 });

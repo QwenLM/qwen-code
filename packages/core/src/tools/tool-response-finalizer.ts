@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -16,6 +17,7 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
+  FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -215,7 +217,7 @@ function fitText(
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  const header =
+  const artifactHeader =
     persistedOutputFiles && persistedOutputFiles.length > 0
       ? persistedOutputFiles.length === 1
         ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
@@ -223,6 +225,16 @@ function fitText(
             .map((file) => `- ${file}`)
             .join('\n')}`
       : 'Tool output truncated.';
+  // sha256 of the FULL pre-truncation text, labeled exactly like the
+  // single-result stub's digest line (FULL_OUTPUT_DIGEST_LABEL,
+  // truncation.ts): the header embeds a per-call unique artifact path and
+  // the head/tail preview below depends on this slot's allocated budget, so
+  // consumers that fingerprint results (services/loopDetectionService.ts)
+  // read this digest instead of hashing the envelope — identical underlying
+  // output fingerprints identically no matter which call it was persisted
+  // for (issue #10887).
+  const digest = createHash('sha256').update(text).digest('hex');
+  const header = `${artifactHeader}\n${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }

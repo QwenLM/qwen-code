@@ -213,16 +213,19 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
-// Producer shapes of the oversized-result stubs (see tools/truncation.ts).
-// Recognition is anchored on these LEADING prefixes: results like task_list
-// embed peer-authored text verbatim, and that text can quote stub markers —
-// honoring a marker found mid-string would let quoted content collapse or
-// vary the fingerprint, so only shapes that START with a producer prefix are
-// treated as stubs (issue #9450).
+// Producer shapes of the oversized-result stubs (see tools/truncation.ts)
+// and of the batch-budget finalizer's truncation envelope (see
+// tools/tool-response-finalizer.ts fitText). Recognition is anchored on
+// these LEADING prefixes: results like task_list embed peer-authored text
+// verbatim, and that text can quote stub markers — honoring a marker found
+// mid-string would let quoted content collapse or vary the fingerprint, so
+// only shapes that START with a producer prefix are treated as stubs
+// (issue #9450).
 const STUB_PRODUCER_PREFIXES: readonly string[] = [
   '<persisted-output>',
   'Output too large (',
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  'Tool output truncated.',
 ];
 
 const STUB_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
