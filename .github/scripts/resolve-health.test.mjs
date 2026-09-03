@@ -1560,6 +1560,108 @@ describe('resolve-health: the tracking issue feed', () => {
     assert.match(jq, /\.created_at/);
     assert.match(jq, /\.updated_at/);
   });
+
+  it('carries the body barrier forward when a benign comment blanks it', () => {
+    // The Issues API bumps `updated_at` on ANY comment, so a stranger's reply
+    // — needing no permission at all — makes an intact body look edited and
+    // drops it from the state sources. Until the watch's own first comment the
+    // body is the only record of the barrier, so losing it breaks the promise
+    // `stateOf` makes (carried forward, never lowered) in both directions: a
+    // quiet tick refreshes with `newestUnanswered: null` and the next tick's
+    // gate has no barrier left to postdate, and an alarm tick read from a
+    // roster whose newest request is older records that lower value.
+    const now = new Date('2026-08-27T12:00:00Z');
+    const filed = '2026-08-27T02:00:00Z';
+    const replied = '2026-08-27T05:00:00Z';
+    const barrier = '2026-08-27T01:00:00Z';
+    const asked = (at, pr, state = 'open') => ({
+      number: pr,
+      state,
+      comments: [request(at, pr)],
+    });
+    const lane = [
+      {
+        number: 40,
+        state: 'open',
+        comments: [result('2026-08-26T00:00:00Z', PUSHED, 40)],
+      },
+      asked('2026-08-26T01:00:00Z', 41),
+      asked('2026-08-26T02:00:00Z', 42),
+      asked(barrier, 43),
+    ];
+    const body = decide(assess(lane, { now }), null)[0].body;
+    assert.equal(readState([body]).newestUnanswered, barrier);
+
+    // The issue as the API returns it once someone has replied: `updated_at`
+    // moved, the body is byte-identical, and no watch comment carries a marker
+    // yet — so the blanked body leaves no readable state at all.
+    const feed =
+      (watchComments = []) =>
+      (args) => {
+        if (args[3] === 'repos/QwenLM/qwen-code/issues') {
+          return [
+            ['91', 'github-actions[bot]', filed, replied, b64(body)].join('\t'),
+            '',
+          ].join('\n');
+        }
+        return [
+          ['stranger', replied, replied, b64('same here')].join('\t'),
+          ...watchComments.map((text) =>
+            ['github-actions[bot]', replied, replied, b64(text)].join('\t'),
+          ),
+          '',
+        ].join('\n');
+      };
+    const issueWith = (watchComments) =>
+      findOpenIssue(feed(watchComments), 'QwenLM/qwen-code', DEFAULTS.label);
+    const blanked = issueWith();
+    assert.equal(blanked.number, 91);
+    assert.equal(readState(blanked.texts), null);
+
+    // The unanswered PRs close, so the roster clears and the alarm goes quiet
+    // with the pre-barrier push still the latest attempt. The refresh must
+    // carry the discarded body's barrier forward, not drop it...
+    const quiet = assess(
+      lane.map((pr) => (pr.number === 40 ? pr : { ...pr, state: 'closed' })),
+      { now },
+    );
+    assert.equal(quiet.alarm, false);
+    assert.equal(quiet.latestAttempt.kind, 'pushed');
+    const refresh = decide(quiet, blanked);
+    assert.deepEqual(
+      refresh.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(refresh[0].body, /State refresh:/);
+    assert.equal(readState([refresh[0].body]).newestUnanswered, barrier);
+
+    // ...so the next tick, reading that refresh as its state, refuses the
+    // close: the push predates a request that was never answered.
+    const next = issueWith([refresh[0].body]);
+    assert.equal(readState(next.texts).newestUnanswered, barrier);
+    assert.deepEqual(decide(quiet, next), []);
+
+    // The same body read on an alarm tick: the barrier's PR closed and three
+    // older requests fire, so a state taken only from the roster would LOWER
+    // the barrier, and a push landing between the two would then close.
+    const still = assess(
+      [
+        ...lane.slice(0, 3),
+        asked('2026-08-26T03:00:00Z', 44),
+        asked(barrier, 43, 'closed'),
+      ],
+      { now },
+    );
+    assert.equal(still.alarm, true);
+    assert.equal(still.unanswered.at(-1).at, '2026-08-26T03:00:00Z');
+    const update = decide(still, blanked);
+    assert.deepEqual(
+      update.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(update[0].body, /Still failing/);
+    assert.equal(readState([update[0].body]).newestUnanswered, barrier);
+  });
 });
 
 describe('resolve-health: end to end against a recording gh', () => {

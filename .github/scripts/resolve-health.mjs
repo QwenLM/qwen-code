@@ -420,8 +420,21 @@ export function renderRecovery(assessment, options = {}, previous = null) {
   ].join('\n');
 }
 
+// Holds a state's barrier at the issue body's own when the body is not
+// trusted as state — see findOpenIssue's `bodyFloor`. Monotone, so a body
+// can only hold the barrier up, never lower what a trusted marker recorded.
+function withFloor(previous, bodyFloor) {
+  const carried = previous?.newestUnanswered ?? null;
+  return {
+    ...previous,
+    newestUnanswered:
+      bodyFloor && (!carried || bodyFloor > carried) ? bodyFloor : carried,
+  };
+}
+
 // Pure decision: what to write, given the assessment and the open issue (if
-// any). `existing` is { number, texts: [body, ...comments] } or null.
+// any). `existing` is { number, texts: [body, ...comments], bodyFloor } or
+// null.
 export function decide(assessment, existing, options = {}) {
   const actions = [];
   if (assessment.alarm) {
@@ -438,7 +451,11 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderUpdate(assessment, options, previous),
+          body: renderUpdate(
+            assessment,
+            options,
+            withFloor(previous, existing.bodyFloor),
+          ),
         });
       }
     }
@@ -450,6 +467,7 @@ export function decide(assessment, existing, options = {}) {
     // no attempt happened at all — is not a recovery, and closing on it
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
+    const carried = withFloor(previous, existing.bodyFloor);
     const latest = assessment.latestAttempt;
     // ...and the push must postdate every unanswered request the watch has
     // seen since the issue opened: a push that landed before those requests
@@ -457,7 +475,7 @@ export function decide(assessment, existing, options = {}) {
     // a closed PR or by ageing out of the window leave no trace in the
     // current assessment, so their newest timestamp survives in the state
     // markers written on the issue.
-    const barrier = stateOf(assessment, previous).newestUnanswered;
+    const barrier = stateOf(assessment, carried).newestUnanswered;
     // No readable state means no barrier ON RECORD, which is not the same as
     // no barrier: the marker carrying it can be edited away, and closing on
     // that would certify a recovery nothing vouches for.
@@ -476,7 +494,7 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderRecovery(assessment, options, previous),
+          body: renderRecovery(assessment, options, carried),
         });
       }
       actions.push({ type: 'close', number: existing.number });
@@ -490,7 +508,7 @@ export function decide(assessment, existing, options = {}) {
       actions.push({
         type: 'comment',
         number: existing.number,
-        body: renderStateRefresh(assessment, options, previous),
+        body: renderStateRefresh(assessment, options, carried),
       });
     }
   }
@@ -635,6 +653,13 @@ export function findOpenIssue(gh, repo, label) {
       return {
         number: Number(number),
         texts: [updated_at === created_at ? text : '', ...comments],
+        // The barrier outlives the blanking above: `updated_at` moves on ANY
+        // comment, so a stranger's reply — no permission needed — would
+        // otherwise drop the only record of it until the watch's own first
+        // comment, and an older push could certify a recovery. Only this one
+        // field is carried out of an untrusted body, and only upward: a
+        // forged-high floor can delay a close, never certify a false one.
+        bodyFloor: readState([text])?.newestUnanswered ?? null,
       };
     }
   }
