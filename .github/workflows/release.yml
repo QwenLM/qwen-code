@@ -540,13 +540,21 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          # Nightly and preview releases may absorb a transient timing
-          # failure. Stable releases add no retry of their own and stay on
-          # whatever each workspace's Vitest config asks for; the flag is
-          # omitted rather than set to 0, because a command-line --retry=0
-          # outranks the config and would disable a workspace's deliberate
-          # retry (packages/sdk-typescript) on the release lane alone.
-          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}"
+          # Every release schedule absorbs a transient timing failure, not
+          # just nightly and preview. A stable release used to run with no
+          # retry at all, so any one flaky test out of ~30k reddened it
+          # outright: six consecutive stable runs failed on a single test
+          # each while every other gate stayed green, and the same test
+          # passed on the next attempt. Retrying hides nothing — a real
+          # break fails all three attempts — it only stops a contended
+          # runner from deciding whether a release ships. Operators can
+          # retune this without a PR via the repository variable, or set it
+          # to 'off' to omit the flag entirely. 'off' rather than '0': a
+          # command-line --retry=0 outranks the config and would disable a
+          # workspace's deliberate retry (packages/sdk-typescript) on the
+          # release lane alone, and an empty variable just falls back to the
+          # default.
+          VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
         # Through the wrapper rather than npm directly: a vitest run can exit
         # non-zero with every test green (an unhandled error fails the run on
         # Linux, where dangerouslyIgnoreUnhandledErrors is false), and that
@@ -555,11 +563,10 @@ jobs:
         # case. See run 33576013293: 211 files, 9480 tests passed, exit 1.
         run: |-
           retry_arg=()
-          if [ -n "${VITEST_RETRY}" ]; then
+          if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
           node scripts/run-release-workspace-tests.js -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
-
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
