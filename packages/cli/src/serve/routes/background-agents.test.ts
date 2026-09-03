@@ -120,7 +120,11 @@ describe('GET /background-agents', () => {
     ).get('/background-agents');
 
     expect(response.status).toBe(503);
-    expect(response.body.error).toBe('background_agents_unavailable');
+    // The daemon's error envelope: the human message under `error`, the
+    // machine key under `code`, as in every other serve 503 a client can
+    // classify by `body.code`.
+    expect(response.body.error).toBe('Background agents are unavailable.');
+    expect(response.body.code).toBe('background_agents_unavailable');
     expect(response.body.message).toContain('EACCES');
   });
 

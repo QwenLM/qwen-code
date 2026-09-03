@@ -79,7 +79,8 @@ export function registerBackgroundAgentRoutes(
       // client that cannot tell those apart would show an empty list to
       // someone whose agent is waiting for an answer.
       res.status(503).json({
-        error: 'background_agents_unavailable',
+        error: 'Background agents are unavailable.',
+        code: 'background_agents_unavailable',
         message: error instanceof Error ? error.message : String(error),
       });
     }
