@@ -369,15 +369,20 @@ describe('qwen sessions ps', () => {
   });
 
   it('neutralizes control sequences in a store failure reason', async () => {
-    // The message can carry a path a foreign process chose.
+    // The message can carry a path a foreign process chose. LF and TAB
+    // must go with it: the sibling test pins one note on stderr, and a
+    // preserved LF would forge extra lines out of a single failure.
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockRejectedValue(
-      new Error('ENOENT: /w/\x1b[31mevil\r'),
+      new Error('ENOENT: /w/\x1b[31mevil\r\n\tFORGED: attacker line'),
     );
     await run({ json: false });
 
+    expect(stderr).toHaveLength(1);
     expect(stderr[0]).not.toContain('\x1b');
     expect(stderr[0]).not.toContain('\r');
+    expect(stderr[0]).not.toContain('\n');
+    expect(stderr[0]).not.toContain('\t');
   });
 
   it('says so plainly when neither source has anything', async () => {
