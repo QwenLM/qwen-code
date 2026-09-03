@@ -183,11 +183,12 @@ describe('QWEN_HOME environment variable', () => {
      * denied, mkdir '<home>/.qwen'`.
      *
      * The redirected home carries no credentials, so the run drives the fake
-     * OpenAI server through explicit CLI flags and is required to exit 0. That
-     * success requirement is load-bearing: globalSetup pins QWEN_HOME for every
-     * other spawned CLI, making this the suite's only end-to-end guard of the
-     * unset path, so tolerating a failed run would report green on a regression
-     * that kills it after config.initialize().
+     * OpenAI server through explicit CLI flags, and it must complete the
+     * round-trip rather than tolerate failure like its siblings — tolerating
+     * one would report green on a regression that kills the run after
+     * config.initialize(). This is the only case that runs the unset path; in a
+     * container sandbox that coverage stops at the host-side launcher, because
+     * the launcher re-pins QWEN_HOME for the containerized CLI.
      */
     it('1d: CLI functions normally when QWEN_HOME is not set', async () => {
       await rig.setup('qwen-home-1d-default-behaviour');
@@ -222,7 +223,7 @@ describe('QWEN_HOME environment variable', () => {
           '--openai-api-key',
           'fake-key',
         );
-        expect(result).toBeTruthy();
+        expect(result).toContain('Hello!');
       } finally {
         await fakeServer.close();
       }
