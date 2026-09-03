@@ -35,6 +35,17 @@ const ANSI_RE = /(?:\x1b|\^\[)\[[0-9;]*m/g;
 const RULE_RE = /^[⎯\s]+$/;
 const RULE_EDGE_RE = /^[⎯\s]+|[⎯\s]+$/g;
 const UNHANDLED_START_RE = /Unhandled Errors?/;
+/**
+ * Vitest's own worker↔main RPC giving up, not anything the product did:
+ * `[vitest-worker]: Timeout calling "onTaskUpdate"`. It means a worker could
+ * not get a progress callback through before birpc's deadline — a starved
+ * host, nothing else. `--retry` cannot cover it (retries re-run failing
+ * TESTS; an unhandled error fails the run outright), so on a contended
+ * runner it reddens a suite whose every test passed.
+ */
+const TRANSPORT_TIMEOUT_RE = /\[vitest-(?:worker|pool)\]:\s*Timeout calling /;
+/** The line vitest prefixes to the error itself inside an unhandled block. */
+const UNHANDLED_ERROR_LINE_RE = /^\s*Error:/;
 // Anchored: vitest prints its failure header at the start of the line. A
 // whitespace-bounded match anywhere would let a passing test whose NAME
 // contains FAIL ("renders FAIL banner for expired token") set the flag, and a
@@ -200,6 +211,26 @@ export function classifyRunOutput(text) {
 }
 
 /**
+ * True when every error vitest reported outside a test is its own transport
+ * timing out, so the run carries no product signal to act on.
+ *
+ * Conservative on both sides: a block with no `Error:` line at all is not
+ * evidence of anything (it is the "Vitest caught N unhandled error" preamble),
+ * and a single non-transport error anywhere disqualifies the whole run —
+ * #10842's `Session.ts` rejection has to keep failing releases.
+ *
+ * @param {string[]} unhandledBlocks
+ * @returns {boolean}
+ */
+export function isTransportTimeoutOnly(unhandledBlocks) {
+  const errorLines = unhandledBlocks
+    .flatMap((block) => block.split('\n'))
+    .filter((line) => UNHANDLED_ERROR_LINE_RE.test(line));
+  if (errorLines.length === 0) return false;
+  return errorLines.every((line) => TRANSPORT_TIMEOUT_RE.test(line));
+}
+
+/**
  * Builds what to say about a finished run. Returns null when the run needs no
  * commentary: it passed, or it failed with failing tests that speak for
  * themselves.
@@ -218,7 +249,28 @@ export function describeSilentFailure(classification, exitCode) {
 
   if (classification.unhandledBlocks.length > 0) {
     const blocks = classification.unhandledBlocks.join('\n\n');
+    if (isTransportTimeoutOnly(classification.unhandledBlocks)) {
+      return {
+        level: 'warning',
+        downgradeExitCode: true,
+        title: `Workspace tests exited ${exitCode} on a Vitest transport timeout`,
+        body: [
+          'Every test passed. The run exited non-zero because Vitest could not',
+          "get a worker's progress callback back to the main process before its",
+          'RPC deadline — a starved host, not a product signal, and one that',
+          '`--retry` cannot cover because retries re-run failing TESTS while an',
+          'unhandled error fails the run outright.',
+          '',
+          'Treated as a pass. Any other unhandled error still fails the run.',
+          '',
+          blocks,
+          '',
+          summary,
+        ].join('\n'),
+      };
+    }
     return {
+      level: 'error',
       title: `Workspace tests exited ${exitCode} with no failing test`,
       body: [
         `The suite reported no failing test and still exited ${exitCode}: vitest`,
@@ -234,6 +286,7 @@ export function describeSilentFailure(classification, exitCode) {
   }
 
   return {
+    level: 'error',
     title: `Workspace tests exited ${exitCode} with no failing test`,
     body: [
       `The suite reported no failing test and no unhandled error, and still`,
@@ -293,8 +346,13 @@ export async function runAndReport({
   const report = describeSilentFailure(classification, exitCode);
   if (!report) return exitCode;
 
+  // A transport timeout carries no product signal, so the wrapper reports it
+  // and hands back a pass. Everything else keeps the child's exit code: this
+  // must never turn a real failure green.
+  const reportedExitCode = report.downgradeExitCode ? 0 : exitCode;
+
   stdout.write(
-    `::error title=${escapeWorkflowCommand(report.title)}::${escapeWorkflowCommand(report.body)}\n`,
+    `::${report.level} title=${escapeWorkflowCommand(report.title)}::${escapeWorkflowCommand(report.body)}\n`,
   );
   stderr.write(`\n${report.title}\n\n${report.body}\n`);
 
@@ -310,7 +368,7 @@ export async function runAndReport({
     }
   }
 
-  return exitCode;
+  return reportedExitCode;
 }
 
 // `import.meta.url` is a percent-encoded WHATWG URL, so comparing it against a
