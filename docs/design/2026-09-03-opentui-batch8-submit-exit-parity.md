@@ -194,13 +194,15 @@ mismatch.
 ### U-26 — steered text has no transcript echo
 
 ink's `accept()` adds a `USER` item with `sentToModel: false` when the steered message
-lands; OpenTUI's queue shows a count and the drained text disappears. Registered as U-26
-rather than silently widening this diff.
+lands; OpenTUI's queue shows a count and the drained text disappears. Corrected: this note
+first minted a fresh number, U-26, which was retired the same day — the ledger's U-12 row
+carries the gap from both fix sites, and U-12 is fixed in Batch 9.
 
 ### U-27 — no unsupported-image-format warning on either hop
 
 ink calls `checkImageFormatsSupport` after building the request parts on both the fresh hop
-and the steering hop, and adds an INFO row naming the formats the model cannot read. OpenTUI
+and the steering hop, and adds an INFO row listing the formats the pipeline supports (ink's
+warning text names the supported set, not the offending format). OpenTUI
 has no equivalent on either hop, so a `@file` that expands to, say, a TIFF reaches the model
 with no disclosure. Registered as U-27 — porting it belongs to one change across both hops,
 not to the steering hop only.
