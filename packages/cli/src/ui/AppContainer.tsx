@@ -1085,7 +1085,9 @@ export const AppContainer = (props: AppContainerProps) => {
           const durableTasks = await readCronTasks(config.getProjectRoot());
           activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
         } catch (error) {
-          debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
+          debugLogger.warn(
+            `Failed to read scheduled tasks at startup: ${error}`,
+          );
         }
       }
       const scheduledTasksWarning = getScheduledTasksStartupWarning(
