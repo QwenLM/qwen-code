@@ -15,6 +15,7 @@ import {
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 const mocks = vi.hoisted(() => {
+  const loadSessionOutputStyles = vi.fn();
   const state = {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
@@ -52,7 +53,7 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { state, renderer, buildJsxRuntime };
+  return { state, renderer, buildJsxRuntime, loadSessionOutputStyles };
 });
 
 vi.mock('@opentui/react', () => ({
@@ -68,6 +69,14 @@ vi.mock('./key-map.js', () => ({
 }));
 vi.mock('./theme.js', () => ({
   C: new Proxy({}, { get: () => '#ffffff' }),
+}));
+// The dialog loads the style catalog from disk; stub just that so the test
+// never depends on the developer's own ~/.qwen/output-styles.
+vi.mock('../commands/output-style-utils.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../commands/output-style-utils.js')
+  >()),
+  loadSessionOutputStyles: mocks.loadSessionOutputStyles,
 }));
 
 import { OpenTuiOutputStyleDialog } from './dialogs-modes.js';
@@ -135,10 +144,53 @@ describe('OpenTuiOutputStyleDialog', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
+    mocks.loadSessionOutputStyles.mockReset();
+    mocks.loadSessionOutputStyles.mockResolvedValue(BUILT_IN_OUTPUT_STYLES);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('lists a custom style and pre-selects the active one', async () => {
+    // Startup style resolution is renderer-independent, so a custom style can
+    // be live here. A list of built-ins alone leaves it unfound, and the
+    // `-1 -> 0` clamp then highlights `default` -- one Enter persists that
+    // over the user's own setting.
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      custom,
+    ]);
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('Reviewer')).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    // Labelled with its source, as the ink picker does.
+    expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+      '(user)',
+    );
+    expect(
+      screen.getByText('default').parentElement?.textContent,
+    ).not.toContain('● default');
   });
 
   it('keeps the configured style selected while a system prompt override is active', async () => {

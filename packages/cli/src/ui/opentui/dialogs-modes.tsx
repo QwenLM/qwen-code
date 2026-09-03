@@ -12,7 +12,7 @@
  * up/down, Enter applies (settings + config), Esc cancels.
  */
 
-import { useLayoutEffect, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
 import {
   applyReasoningEffort,
@@ -26,7 +26,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
-import { applyOutputStyleSelection } from '../commands/output-style-utils.js';
+import {
+  applyOutputStyleSelection,
+  loadSessionOutputStyles,
+} from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
 
@@ -233,6 +236,29 @@ export function OpenTuiOutputStyleDialog(props: {
   notify: (text: string) => void;
 }) {
   const { config, settings, onClose, notify } = props;
+  // The catalog, not just the built-ins: a custom style can be active under
+  // this renderer too (`--output-style`, `general.outputStyle`, or the
+  // renderer-agnostic `/output-style <name>`), and a list of built-ins alone
+  // would leave it unlisted -- pre-selecting `default` and persisting that
+  // over the user's setting on the first Enter.
+  const [styles, setStyles] = useState<readonly OutputStyleDefinition[]>(
+    BUILT_IN_OUTPUT_STYLES,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void loadSessionOutputStyles(config).then(
+      (loaded) => {
+        if (!cancelled) setStyles(loaded);
+      },
+      () => {
+        // Keep the built-ins; the ink path degrades the same way.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+
   const items: Array<{
     key: string;
     label: string;
@@ -245,10 +271,13 @@ export function OpenTuiOutputStyleDialog(props: {
       desc: DEFAULT_STYLE_DESC,
       style: undefined,
     },
-    ...BUILT_IN_OUTPUT_STYLES.map((style) => ({
+    ...styles.map((style) => ({
       key: style.name,
       label: style.name,
-      desc: style.description,
+      desc:
+        style.source === 'built-in'
+          ? style.description
+          : `${style.description} (${style.source})`,
       style,
     })),
   ];
@@ -256,12 +285,15 @@ export function OpenTuiOutputStyleDialog(props: {
   // (default), so pre-selecting index 0 in that case tells the truth (ink
   // OutputStyleDialog parity).
   const current = config.getOutputStyle()?.name;
-  const [sel, setSel] = useState(
-    Math.max(
-      0,
-      items.findIndex((item) => item.key === current),
-    ),
-  );
+  // `useState` runs its initialiser once, so the catalog arriving later would
+  // leave the `-1 -> 0` clamp in place; re-derive when the list changes.
+  const [sel, setSel] = useState(0);
+  useEffect(() => {
+    const index = items.findIndex((item) => item.key === current);
+    setSel(index >= 0 ? index : 0);
+    // The item list is derived from `styles`, so that is the real dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [styles, current]);
   useEsc(onClose);
   const pick = () => {
     const item = items[sel];
