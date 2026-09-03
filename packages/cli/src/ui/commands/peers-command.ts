@@ -59,7 +59,44 @@ function preview(text: string, max = 100): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
-export function formatHeldList(held: readonly HeldMessage[]): string {
+/**
+ * How much of a message's hold is left, in words.
+ *
+ * The sender is waiting on this decision and stops waiting when the hold
+ * runs out, so the listing has to say how long the user has — a review
+ * screen that hides its own deadline invites decisions that arrive too
+ * late to mean anything. Rounded up, so "1 minute left" never means
+ * "already gone", and floored at "less than a minute" rather than
+ * counting seconds nobody can act on.
+ */
+function describeRemaining(
+  entry: HeldMessage,
+  expiryMs: number | null,
+): string {
+  if (expiryMs === null) return '';
+  // Aged the way the gate ages it: `InboundGate.ageOf` takes the larger
+  // of the wall-clock and monotonic elapsed times, so reading the wall
+  // clock alone here would promise time the gate will not grant. After a
+  // backward NTP correction four minutes into a five-minute hold the
+  // gate expires the message in about a minute while a wall-only
+  // reading prints "61 minutes left".
+  const wallAge = Date.now() - entry.heldAt;
+  const age =
+    entry.monotonicAt === undefined
+      ? wallAge
+      : Math.max(wallAge, performance.now() - entry.monotonicAt);
+  const remaining = expiryMs - age;
+  if (remaining <= 0) return ', expiring now';
+  const minutes = Math.ceil(remaining / 60_000);
+  return remaining < 60_000
+    ? ', less than a minute left'
+    : `, ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
+
+export function formatHeldList(
+  held: readonly HeldMessage[],
+  expiryMs: number | null = null,
+): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
@@ -76,7 +113,8 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
     return (
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
-      `      held because ${describeHoldCause(entry.cause)}`
+      `      held because ${describeHoldCause(entry.cause)}` +
+      describeRemaining(entry, expiryMs)
     );
   });
 
@@ -160,7 +198,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: formatHeldList(held),
+        content: formatHeldList(held, peerMessaging.getHeldExpiryMs()),
       };
     }
 
@@ -212,10 +250,19 @@ export const peersCommand: SlashCommand = {
       const ids = held.map((entry) => entry.frame.msgId);
       let count = 0;
       let failed = 0;
+      // Counted separately, never folded into `failed`: a message that
+      // expired is settled and its sender already has an `expired`
+      // receipt, while a failed release is still waiting. `getHeld()`
+      // does not sweep, so a listing can show entries as "expiring now"
+      // and the first `decide()` then sweeps the whole overdue backlog --
+      // which makes every remaining id come back 'gone'. Without this the
+      // user reads "Released 0 messages." and is told nothing at all.
+      let gone = 0;
       for (const msgId of ids) {
         const outcome = peerMessaging.decide(msgId, decision);
         if (outcome === 'done') count += 1;
         else if (outcome === 'failed') failed += 1;
+        else if (outcome === 'gone') gone += 1;
       }
       // The user now knows what remains; bind later decisions to it.
       peerMessaging.recordHeldListing(peerMessaging.getHeld());
@@ -230,6 +277,9 @@ export const peersCommand: SlashCommand = {
             ? ` ${failed} could not be delivered and ${
                 failed === 1 ? 'is' : 'are'
               } still waiting — try again once the session catches up.`
+            : '') +
+          (gone > 0
+            ? ` ${gone} had already expired or been decided — run /peers to see what is waiting now.`
             : ''),
       };
     }
