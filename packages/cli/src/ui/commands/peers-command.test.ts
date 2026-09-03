@@ -115,14 +115,16 @@ beforeEach(() => {
     ),
     // Mirrors PeerMessaging: decisions bind to the last recorded listing,
     // entry identity included — a re-admitted id gets a fresh heldAt.
-    heldSetChangedSinceListing: () =>
-      listed === null ||
-      listed.length !== messages.length ||
-      messages.some(
-        (entry, index) =>
-          entry.frame.msgId !== listed![index].id ||
-          entry.heldAt !== listed![index].heldAt,
-      ),
+    // Entries leaving the set are not a change; the expiry timer removes
+    // them with no user activity, and a shrinking set cannot make a
+    // handle resolve to a different message.
+    heldSetChangedSinceListing: () => {
+      if (listed === null) return true;
+      const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+      return messages.some(
+        (entry) => pinned.get(entry.frame.msgId) !== entry.heldAt,
+      );
+    },
   };
 });
 
@@ -488,6 +490,52 @@ describe('/peers', () => {
     expect(fake.decide).not.toHaveBeenCalled();
   });
 
+  it('still decides a survivor after the expiry timer removed the other', async () => {
+    // The expiry timer removes entries with no peer or user activity --
+    // a mover the guard's rationale never named. A removal can never make
+    // a printed handle resolve to a different message, so bouncing it
+    // refuses a decision that would have been correct and tells the user
+    // to re-list something they can still uniquely name.
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000', heldAt: 1_000 }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000', heldAt: 2_000 }),
+    ];
+    await run(fake, '');
+    // What `expireOverdue` does to the buffer: the first entry leaves.
+    messages = [
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000', heldAt: 2_000 }),
+    ];
+
+    const result = await run(fake, 'accept bbbbbb');
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).not.toContain('changed since you listed it');
+    expect(fake.decide).toHaveBeenCalledWith(
+      'bbbbbb22-0000-4000-8000-000000000000',
+      'approve',
+    );
+  });
+
+  it('says how many were already gone when a bulk decision sweeps them', async () => {
+    // `getHeld()` does not sweep, so a listing can show entries as
+    // "expiring now" while the first `decide()` sweeps the whole overdue
+    // backlog and every id comes back 'gone'. Counting those as neither
+    // released nor failed leaves the user reading "Released 0 messages."
+    // with no reason, while both senders were receipted `expired`.
+    messages = [
+      held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+    await run(fake, '');
+    fake.decide.mockReturnValue('gone');
+
+    const result = await run(fake, 'accept all');
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Released 0 messages.');
+    expect(result.content).toContain('2 had already expired or been decided');
+  });
+
   it('allows consecutive decisions after one listing', async () => {
     messages = [
       held({ msgId: 'aaaaaa11-0000-4000-8000-000000000000' }),
@@ -538,11 +586,19 @@ describe('formatHeldList — remaining time', () => {
   });
 
   it('rounds up rather than down', () => {
+    // Deliberately off the 60_000 boundary. At exactly one minute
+    // `Math.ceil` and `Math.floor` agree, so the property this test is
+    // named for would be unpinned -- and the two `Date.now()` reads only
+    // have to straddle a millisecond for the sub-minute branch to fire
+    // and the assertion to flip.
+    //
+    // ~90s remaining: `ceil` says 2 minutes, `floor` says 1, for any
+    // scheduling drift up to 30s.
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 30_000 })],
-      90_000,
+      120_000,
     );
-    expect(out).toContain('1 minute left');
+    expect(out).toContain('2 minutes left');
   });
 
   it('does not count seconds nobody can act on', () => {

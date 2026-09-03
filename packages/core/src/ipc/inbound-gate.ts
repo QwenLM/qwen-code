@@ -143,10 +143,30 @@ export interface PeerOrigin {
   selfSent: boolean;
 }
 
+/**
+ * setTimeout's 32-bit ceiling. Above it Node clamps the delay to 1 ms and
+ * warns, so an unclamped re-arm becomes a busy loop.
+ */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 export interface HeldMessage {
   frame: PeerUserFrame;
   cause: HoldCause;
   heldAt: number;
+  /**
+   * Monotonic counterpart of `heldAt`, from `performance.now()`.
+   *
+   * `heldAt` is wall-clock because the UI renders a countdown from it,
+   * but expiry must not move when the system clock steps. A backward NTP
+   * correction would otherwise stretch a 5-minute hold to over an hour
+   * with no receipt, and a step past ~24.8 days would push the delay
+   * beyond setTimeout's 32-bit range, where Node clamps it to 1 ms and
+   * the re-arm spins at ~1 kHz.
+   *
+   * Optional so entries built by hand (tests, older callers) still work;
+   * those fall back to the wall clock.
+   */
+  monotonicAt?: number;
   /** Set when the message came from one of this session's own processes. */
   selfSent?: true;
 }
@@ -455,6 +475,7 @@ export class InboundGate {
       frame,
       cause,
       heldAt: Date.now(),
+      monotonicAt: performance.now(),
       ...(origin.selfSent ? { selfSent: true } : {}),
     });
     debugLogger.debug(
@@ -584,6 +605,11 @@ export class InboundGate {
     }
 
     this.held.length = 0;
+    // Sorted, not appended in loop order: a failed release keeps its
+    // original (older) timestamp, and pushing it behind newer entries
+    // would leave `held.shift()` evicting the newest message at
+    // MAX_HELD_MESSAGES -- the opposite of "evict the oldest".
+    stillHeld.sort((a, b) => a.heldAt - b.heldAt);
     this.held.push(...stillHeld);
     this.rescheduleExpiry();
 
@@ -707,14 +733,36 @@ export class InboundGate {
    * has the property that what `/peers` shows as remaining is what
    * actually happens.
    */
+  /**
+   * How long `entry` has been parked: the larger of the wall-clock and
+   * monotonic elapsed times.
+   *
+   * Neither clock alone is right. The wall clock is what a suspended
+   * machine advances -- CLOCK_MONOTONIC does not tick across suspend, so
+   * a monotonic-only age would keep a message parked through a two-hour
+   * sleep. But the wall clock also moves when nothing elapsed: a
+   * backward NTP correction of an hour would stretch a five-minute hold
+   * past sixty, and a step over ~24.8 days pushes the re-armed delay
+   * beyond setTimeout's range.
+   *
+   * Taking the larger keeps the suspend case working and makes a
+   * backward step a no-op, at the cost of treating a forward step as
+   * elapsed time -- which is the conservative direction, and in any case
+   * a forward step is indistinguishable from a suspend from in here.
+   */
+  private ageOf(entry: HeldMessage): number {
+    const wall = Date.now() - entry.heldAt;
+    if (entry.monotonicAt === undefined) return wall;
+    return Math.max(wall, performance.now() - entry.monotonicAt);
+  }
+
   private expireOverdue(): void {
     const expiryMs = this.getHeldExpiryMs();
     if (expiryMs === null || this.held.length === 0) return;
-    const deadline = Date.now() - expiryMs;
     const survivors: HeldMessage[] = [];
     const expired: HeldMessage[] = [];
     for (const entry of this.held) {
-      (entry.heldAt <= deadline ? expired : survivors).push(entry);
+      (this.ageOf(entry) >= expiryMs ? expired : survivors).push(entry);
     }
     if (expired.length === 0) return;
 
@@ -728,6 +776,11 @@ export class InboundGate {
       void this.report(entry.frame, 'expired');
     }
     this.notifyHeldChange();
+    // Every entry point sweeps, and several of them return without
+    // touching the buffer afterwards (`decide` answering 'gone',
+    // `admit`'s non-hold paths). Without this a survivor's own deadline
+    // would wait on the next unrelated frame, or on a stale timer.
+    this.rescheduleExpiry();
   }
 
   /**
@@ -746,12 +799,22 @@ export class InboundGate {
     if (this.shuttingDown) return;
     const expiryMs = this.getHeldExpiryMs();
     if (expiryMs === null) return;
-    const oldest = this.held[0];
-    if (oldest === undefined) return;
+    let oldestAge: number | null = null;
+    for (const entry of this.held) {
+      const age = this.ageOf(entry);
+      if (oldestAge === null || age > oldestAge) oldestAge = age;
+    }
+    if (oldestAge === null) return;
 
+    // Scanned rather than read from `held[0]`: a failed release re-parks
+    // an entry keeping its original timestamp, so the buffer is not
+    // reliably oldest-first and the head can carry a later deadline.
+    //
     // Never negative, and never zero: a zero-delay timer that fires
     // inside the same tick as the change that armed it would recurse.
-    const delay = Math.max(1, oldest.heldAt + expiryMs - Date.now());
+    // Never above setTimeout's 32-bit ceiling either, where Node clamps
+    // to 1 ms and the callback re-arms the same oversized delay.
+    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(1, expiryMs - oldestAge));
     this.expiryTimer = setTimeout(() => {
       this.expiryTimer = null;
       this.expireOverdue();

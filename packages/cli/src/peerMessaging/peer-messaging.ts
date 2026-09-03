@@ -331,19 +331,31 @@ export class PeerMessaging {
     }));
   }
 
-  /** True when the held set no longer matches the last recorded listing. */
+  /**
+   * True when the held set no longer matches the last recorded listing.
+   *
+   * Entries *leaving* the set are not a change. The expiry timer removes
+   * them with no peer or user activity -- a fourth mover the rationale
+   * above does not name -- and a shrinking set can never make a printed
+   * handle resolve to a different message: `resolveHeld` prefix-matches
+   * over the current set, so removing entries only narrows it. Bouncing
+   * those refuses a decision that would have been correct, and tells the
+   * user the list changed when what they can still uniquely name is
+   * exactly what they reviewed.
+   *
+   * Dropping an expired entry is safe because the gate tombstones it
+   * before it leaves the set, so a re-admitted id arrives with a fresh
+   * `heldAt` and still mismatches the pin below.
+   *
+   * What must still bounce: an arrival, and a re-sent id whose body may
+   * have been swapped, which the `heldAt` pin is what catches.
+   */
   heldSetChangedSinceListing(): boolean {
     const listed = this.listedHeld;
     if (listed === null) return true;
-    const held = this.getHeld();
-    return (
-      held.length !== listed.length ||
-      held.some((entry, index) => {
-        const snapshot = listed[index];
-        return (
-          entry.frame.msgId !== snapshot.id || entry.heldAt !== snapshot.heldAt
-        );
-      })
+    const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+    return this.getHeld().some(
+      (entry) => pinned.get(entry.frame.msgId) !== entry.heldAt,
     );
   }
 

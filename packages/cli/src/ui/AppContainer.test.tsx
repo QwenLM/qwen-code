@@ -7700,6 +7700,92 @@ describe('AppContainer State Management', () => {
       );
     };
 
+    it('re-runs the gate when the held-expiry lifetime changes', () => {
+      // Both peer settings reload live, and both change what the gate
+      // would decide for messages already parked. Parking under `never`
+      // arms no timer at all, so without this trigger an edit to `1m`
+      // leaves the backlog held until session exit -- no expired receipt
+      // for the sender -- while `/peers` counts down from the new value.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionHeldExpiry: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('never')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('1m')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('does not re-run the gate when an unrelated setting changes', () => {
+      // `reevaluate` also settles a parked backlog as `denied` under a
+      // refuse policy, so it must key on the parsed lifetime and the
+      // policy -- not on any settings-file edit, which would discard the
+      // user's backlog on an unrelated key.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (version: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '1m',
+            },
+            ui: { ...mockSettings.merged.ui, customWittyPhrases: [version] },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('a')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('b')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).not.toHaveBeenCalledWith('held-expiry-changed');
+    });
+
     it('queues the envelope on the peer path, never as typed user input', () => {
       // The peer path marks the entry so the drain submits it on the
       // preprocessing-free Teammate send type — queued as user text, an

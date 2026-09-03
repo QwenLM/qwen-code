@@ -1024,6 +1024,70 @@ describe('held message expiry', () => {
     ).toBe(true);
   });
 
+  it('keeps the delay inside setTimeout range after a far-backward clock step', () => {
+    // A stale VM restore or a `date -s` moves Date.now() back far enough
+    // that `expiryMs - wallAge` passes setTimeout's 32-bit ceiling. Node
+    // clamps such a delay to 1 ms and warns, so the callback re-arms the
+    // same oversized value and spins at ~1 kHz -- pegging a core and
+    // tearing the Ink render -- until the buffer drains.
+    const delays: number[] = [];
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      delays.push(ms ?? 0);
+      return { unref: () => {} } as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout);
+    try {
+      const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+      h.gate.admit(frame());
+      delays.length = 0;
+      vi.setSystemTime(Date.now() - 30 * 24 * 60 * 60_000);
+      // Any re-arm against the stepped clock, with the single parked
+      // entry still the one the timer is armed for.
+      h.gate.reevaluate('clock-step');
+      expect(delays.length).toBeGreaterThan(0);
+      for (const delay of delays) {
+        expect(delay).toBeGreaterThanOrEqual(1);
+        expect(delay).toBeLessThanOrEqual(2 ** 31 - 1);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the buffer oldest-first when a failed release re-parks', () => {
+    // `reevaluate` walks the buffer in order but appends a failed release
+    // at the END, keeping its original (older) timestamp -- so the buffer
+    // stops being oldest-first. That misaims two things that read it
+    // positionally: the expiry timer armed from the head, and the
+    // `held.shift()` eviction at MAX_HELD_MESSAGES, which would then
+    // evict the newest message instead of the oldest.
+    //
+    // Park both under an unknown mode, then resolve it to one that
+    // releases exactly one of them: `bypass` is accepted by an auto-edit
+    // receiver, `prompting` is still held on the mode mismatch.
+    // `harness({ mode: null })` would coalesce back to DEFAULT.
+    const h = harness({ heldExpiryMs: 60_000 });
+    h.setMode(null);
+    const older = frame({ fromMode: 'bypass' });
+    expect(h.gate.admit(older)).toBe('held');
+    vi.advanceTimersByTime(10_000);
+    const newer = frame({ fromMode: 'prompting' });
+    expect(h.gate.admit(newer)).toBe('held');
+
+    h.failDelivery();
+    h.setMode(ApprovalMode.AUTO_EDIT);
+    h.gate.reevaluate('approval-mode-changed');
+
+    // `older` was released, failed, and re-parked; `newer` never left.
+    // Appending the failure would leave [newer, older].
+    expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([
+      older.msgId,
+      newer.msgId,
+    ]);
+  });
+
   it('takes a still-unexpired message through the gate normally', () => {
     const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
     const f = frame();

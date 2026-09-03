@@ -1378,7 +1378,7 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
   });
 });
 
-describe('held message expiry', () => {
+describe.skipIf(isWindows)('held message expiry', () => {
   it('reports the configured lifetime for the /peers listing', async () => {
     const { messaging } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
@@ -1422,6 +1422,36 @@ describe('held message expiry', () => {
       .filter((frame) => frame.type === 'control')
       .map((frame) => (frame as { status: string }).status);
     expect(statuses).toContain('expired');
+  });
+
+  it('does not call a listing stale when only an expiry removed an entry', async () => {
+    // The expiry timer is a fourth mover of the held set, alongside the
+    // arrivals, evictions and releases the guard was written for. A
+    // removal cannot make a printed handle resolve to a different
+    // message -- `resolveHeld` prefix-matches over the current set, so
+    // shrinking only narrows it -- and bouncing it refuses a decision
+    // that would have been correct.
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 250,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'first', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(1);
+    messaging.recordHeldListing(messaging.getHeld());
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(0);
+
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
   });
 
   it('receipts a refusal as refused rather than denied', async () => {
