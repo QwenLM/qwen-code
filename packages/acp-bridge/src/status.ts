@@ -10,12 +10,22 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export interface ServeWorkspaceRuntimeCapabilityStatus {
+  state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  revision: number;
+  runtimeEpoch?: number;
+  error?: { code: string; message: string };
+}
+
 export interface ServeWorkspaceRuntimeStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
   runtimeEpoch: number;
+  capabilities?: {
+    mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+  };
 }
 
 /**
@@ -425,6 +435,8 @@ export interface ServeWorkspaceMcpStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache';
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
   errors?: ServeStatusCell[];
@@ -457,6 +469,7 @@ export interface ServeWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: ServeWorkspaceMcpToolStatus[];
   errors?: ServeStatusCell[];
@@ -489,6 +502,7 @@ export interface ServeWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: ServeWorkspaceMcpResourceStatus[];
   errors?: ServeStatusCell[];

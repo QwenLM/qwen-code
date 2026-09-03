@@ -81,6 +81,10 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import {
+  PersistedSessionListCache,
+  type PersistedSessionListCacheStatus,
+} from '../server/persisted-session-list-cache.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { tagListener } from '../local-control/listener-identity.js';
@@ -3715,6 +3719,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         return scan;
       });
+    // The scan is cancelled the moment its waiter count reaches zero, and a
+    // request only becomes a waiter once it reaches `lookup()`. Posting both
+    // requests and waiting for the loader proves only that the *first* one
+    // attached: on a loaded runner the second can still be resolving params
+    // when the DELETE below tears the first connection down, which drops the
+    // count to zero, aborts the shared scan, and leaves the second request
+    // answering from a rejected promise. Watch `lookup()` for the
+    // single-flight join so the DELETE never lands before the second waiter
+    // is attached.
+    const lookupStatuses: PersistedSessionListCacheStatus[] = [];
+    const originalLookup = PersistedSessionListCache.prototype.lookup;
+    const lookupSpy = vi
+      .spyOn(PersistedSessionListCache.prototype, 'lookup')
+      .mockImplementation(function (
+        this: PersistedSessionListCache,
+        ...args: Parameters<typeof originalLookup>
+      ) {
+        const lookup = originalLookup.apply(this, args);
+        lookupStatuses.push(lookup.status);
+        return lookup;
+      });
 
     try {
       const firstConnId = await initialize();
@@ -3737,6 +3762,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       await waitUntil(() => loadSignal !== undefined);
       expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      await waitUntil(
+        () =>
+          lookupStatuses.filter((status) => status === 'single_flight')
+            .length === 1,
+        10_000,
+      );
 
       const deleted = await fetch(`${base}/acp`, {
         method: 'DELETE',
@@ -3754,6 +3785,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
     } finally {
       resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      lookupSpy.mockRestore();
       listSessionsSpy.mockRestore();
     }
   });

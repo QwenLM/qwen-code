@@ -115,6 +115,7 @@ export interface DaemonConnectionState {
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
@@ -323,6 +324,7 @@ export interface DaemonCommandInfo {
   argumentHint?: string;
   autoSubmit?: boolean;
   source?: string;
+  altNames?: string[];
   raw: DaemonAvailableCommand;
 }
 
