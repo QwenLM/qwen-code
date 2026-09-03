@@ -10538,7 +10538,6 @@ export class Session implements SessionContext {
       !(
         selection !== undefined &&
         selection !== REASONING_EFFORT_DEFAULT &&
-        selection !== REASONING_EFFORT_NONE &&
         isReasoningSelectionSupported(modelId, selection, thinkingMandatory)
       )
     ) {
@@ -10568,11 +10567,21 @@ export class Session implements SessionContext {
       (supported || appliesSessionDefault) && selection !== undefined
         ? selection
         : REASONING_EFFORT_DEFAULT;
+    if (effectiveSelection === REASONING_EFFORT_DEFAULT && modelReasoning) {
+      this.config.setReasoningEffort?.(undefined);
+    }
     applyReasoningSelection(
       this.config,
       effectiveSelection,
       this.getDefaultReasoningConfig(),
     );
+    if (modelReasoning && effectiveSelection !== REASONING_EFFORT_DEFAULT) {
+      if (effectiveSelection === REASONING_EFFORT_NONE) {
+        this.config.setReasoningDisabled?.(true);
+      } else {
+        this.config.setReasoningEffort?.(effectiveSelection);
+      }
+    }
   }
 
   private writeReasoningSelection(scope: SettingScope, value: unknown): void {

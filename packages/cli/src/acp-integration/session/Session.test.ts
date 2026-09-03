@@ -6941,6 +6941,91 @@ describe('Session', () => {
       );
     });
 
+    it('clears a discarded session effort override on an incompatible registered route', async () => {
+      const state = installReasoningPreference('low');
+      for (const layer of [state.user, state.workspace]) {
+        delete layer.settings.model.reasoningEffort;
+        delete layer.originalSettings.model.reasoningEffort;
+      }
+      mockSettings.recomputeMerged();
+      Object.assign(state.live, {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+      });
+      session.setSessionReasoningSelection('medium');
+      let stickyEffort: string | undefined = 'medium';
+      Object.assign(mockConfig, {
+        setReasoningEffort: vi.fn((effort: string | undefined) => {
+          stickyEffort = effort;
+        }),
+      });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `glm-5.2(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(session.getSessionReasoningSelection()).toBeUndefined();
+      expect(stickyEffort).toBeUndefined();
+      expect(state.live.reasoning).toBeUndefined();
+      expect(mockConfig.setReasoningEffort).toHaveBeenLastCalledWith(undefined);
+    });
+
+    it('parks an effort override on a mandatory-default-only route', async () => {
+      const state = installReasoningPreference('low', {
+        thinkingMandatory: true,
+      });
+      for (const layer of [state.user, state.workspace]) {
+        delete layer.settings.model.reasoningEffort;
+        delete layer.originalSettings.model.reasoningEffort;
+      }
+      mockSettings.recomputeMerged();
+      Object.assign(state.live, {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.moonshot.cn/v1',
+      });
+      session.setSessionReasoningSelection('medium');
+      let stickyEffort: string | undefined = 'medium';
+      Object.assign(mockConfig, {
+        setReasoningEffort: vi.fn((effort: string | undefined) => {
+          stickyEffort = effort;
+        }),
+      });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `kimi-k2.7-code(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(session.getSessionReasoningSelection()).toBe('medium');
+      expect(stickyEffort).toBe('medium');
+      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('preserves a global disable across a canDisable false route', async () => {
+      const state = installReasoningPreference('none', { trusted: true });
+      Object.assign(state.live, {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.moonshot.cn/v1',
+      });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `kimi-k3(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.user.settings.model.reasoningEffort).toBe('none');
+      expect(state.workspace.settings.model.reasoningEffort).toBe('none');
+      expect(state.live.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'model.reasoningEffort',
+        undefined,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it.each([
       ['low', 'qwen3.8-max', {}, { effort: 'low' }, 'low'],
       ['none', 'qwen3.7-plus', {}, false, 'none'],
