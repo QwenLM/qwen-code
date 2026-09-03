@@ -540,8 +540,12 @@ describe('release workflow', () => {
     expect(testStep.run).toContain(
       'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
+    // Every release schedule retries, stable included: running the stable
+    // lane with no retry let one flaky test out of ~30k red a release whose
+    // other gates were all green. The default is pinned here so a silent
+    // drop back to a no-retry stable lane fails this test.
     expect(testStep.env.VITEST_RETRY).toBe(
-      "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}",
+      "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -559,11 +563,12 @@ describe('release workflow', () => {
     }
   });
 
-  it('passes --retry only when the release schedule asks for one', () => {
+  it('passes --retry unless the operator switched it off', () => {
     // The flag reaches every workspace's vitest, where a command line option
-    // outranks the config. Passing --retry=0 on stable releases would switch
-    // off a workspace's own retry (packages/sdk-typescript) on this lane
-    // alone, so the stable path must omit the flag rather than zero it.
+    // outranks the config. Every schedule now retries by default; the only
+    // way off is the operator sentinel, and it must omit the flag rather
+    // than zero it — --retry=0 would switch off a workspace's own retry
+    // (packages/sdk-typescript) on this lane alone.
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
@@ -572,6 +577,9 @@ describe('release workflow', () => {
     for (const [retry, expected] of [
       ['2', '--retry=2'],
       ['', null],
+      // 'off' must omit the flag, not pass --retry=0: that would outrank a
+      // workspace's own config-level retry.
+      ['off', null],
     ]) {
       const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
       try {
@@ -1270,10 +1278,24 @@ describe('release workflow', () => {
       'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
     );
     expect(testStep.run).toContain('flock --shared --wait 1800 9');
-    expect(testStep.run).toContain('flock --shared 9');
-    expect(testStep.run).toContain('until flock --nonblock 9');
-    expect(testStep.run).toContain('integration-tests cli');
-    expect(testStep.run).toContain('integration-tests interactive');
+    // The daemon lock stays shared for the whole step: upgrading it to
+    // exclusive to build an image starves the build behind the test phase of
+    // any run already on the host (run 33637097713). Builds serialize on a
+    // separate host mutex that no test phase holds.
+    expect(testStep.run).toContain(
+      'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+    );
+    expect(testStep.run).toContain('flock --wait 1800 7');
+    expect(testStep.run).not.toContain('acquire_daemon_write_lock');
+    expect(testStep.run).not.toContain('flock --unlock 9');
+    expect(testStep.run).not.toContain('flock --nonblock 9');
+    // A flock lives on the open file description: a descendant inheriting
+    // the descriptor past the job would keep the lock on the host.
+    expect(testStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+    expect(testStep.run).toContain('exec 7>&-');
+    expect(testStep.run).toContain('exec 8>&-');
+    expect(testStep.run).toContain('integration-tests cli 9>&-');
+    expect(testStep.run).toContain('integration-tests interactive 9>&-');
   });
 
   it('digest-pins every sandbox base image', () => {
