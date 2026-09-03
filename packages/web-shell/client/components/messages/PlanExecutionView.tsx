@@ -127,7 +127,7 @@ export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   return layers;
 }
 
-interface TaskExecutionIndex {
+export interface TaskExecutionIndex {
   rootByToolCallId: ReadonlyMap<string, DaemonSessionAgentTaskStatus>;
   childrenByParentId: ReadonlyMap<string, DaemonSessionAgentTaskStatus[]>;
   nestedByRootId: Map<
@@ -136,7 +136,7 @@ interface TaskExecutionIndex {
   >;
 }
 
-function createTaskExecutionIndex(
+export function createTaskExecutionIndex(
   tasks: readonly DaemonSessionTaskStatus[],
 ): TaskExecutionIndex {
   const rootByToolCallId = new Map<string, DaemonSessionAgentTaskStatus>();
@@ -194,7 +194,7 @@ function isAgentExecutionActive(status: string): boolean {
   );
 }
 
-function nestedTasksFromIndex(
+export function nestedTasksFromIndex(
   tool: ACPToolCall,
   taskIndex: TaskExecutionIndex,
 ): Array<{ task: DaemonSessionAgentTaskStatus; depth: number }> {
@@ -233,9 +233,23 @@ export function nestedTasksForTool(
   return nestedTasksFromIndex(tool, createTaskExecutionIndex(tasks));
 }
 
+/**
+ * Keyed on the tool object, which is sound because a tool whose `subTools` are
+ * still being appended to (`transcriptToMessages`' `appendSubTool` mutates in
+ * place) is always rebuilt: `useMessages` only reuses a projected message when
+ * every preceding transcript block is reference-identical and the sole change
+ * is a streaming text append on the tail, so a reused tool's subtree is final.
+ */
+const nestedAgentToolsCache = new WeakMap<
+  ACPToolCall,
+  Array<{ tool: ACPToolCall; depth: number }>
+>();
+
 export function nestedAgentToolsForTool(
   tool: ACPToolCall,
 ): Array<{ tool: ACPToolCall; depth: number }> {
+  const cached = nestedAgentToolsCache.get(tool);
+  if (cached) return cached;
   const result: Array<{ tool: ACPToolCall; depth: number }> = [];
   const visit = (parent: ACPToolCall, depth: number) => {
     for (const child of parent.subTools ?? []) {
@@ -245,6 +259,7 @@ export function nestedAgentToolsForTool(
     }
   };
   visit(tool, 1);
+  nestedAgentToolsCache.set(tool, result);
   return result;
 }
 
@@ -352,7 +367,19 @@ export function getActiveAgents(
   tools: readonly ACPToolCall[],
   tasks: readonly DaemonSessionTaskStatus[],
 ): DaemonSessionAgentTaskStatus[] {
-  const taskIndex = createTaskExecutionIndex(tasks);
+  return getActiveAgentsFromIndex(tools, createTaskExecutionIndex(tasks));
+}
+
+/**
+ * {@link getActiveAgents} for callers that already hold an index. Building the
+ * index is O(tasks); doing it per todo and per tool — as the workflow
+ * projection used to — makes the walk O((todos + tools) x tasks) for a result
+ * that never varies with the todo or the tool.
+ */
+export function getActiveAgentsFromIndex(
+  tools: readonly ACPToolCall[],
+  taskIndex: TaskExecutionIndex,
+): DaemonSessionAgentTaskStatus[] {
   const active: DaemonSessionAgentTaskStatus[] = [];
   for (const tool of tools) {
     const root = activeAgentEntry(tool, taskIndex);
@@ -377,7 +404,7 @@ export function getActiveAgents(
   return active;
 }
 
-function getPlanNodeStateFromIndex(
+export function getPlanNodeStateFromIndex(
   todo: TodoItem,
   todosById: ReadonlyMap<string, TodoItem>,
   tools: readonly ACPToolCall[],
@@ -423,7 +450,8 @@ export function getPlanNodeState(
   );
 }
 
-function todoIdOf(tool: ACPToolCall): string | undefined {
+/** The plan step a tool call was issued for, when it declares one. */
+export function todoIdOf(tool: ACPToolCall): string | undefined {
   const value = tool.args?.todo_id;
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
@@ -528,81 +556,127 @@ export function PlanExecutionView({
   const { t } = useI18n();
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
 
-  const knownIds = new Set(todos.map((todo) => todo.id));
-  const todosById = new Map(todos.map((todo) => [todo.id, todo]));
-  const toolsByTodo = new Map<string, ACPToolCall[]>();
-  const unassigned: ACPToolCall[] = [];
-  for (const tool of tools) {
-    const todoId = todoIdOf(tool);
-    if (!todoId || !knownIds.has(todoId)) {
-      unassigned.push(tool);
-      continue;
+  // One derivation for the whole graph, so a hover — which only flips
+  // `data-focused` / `data-active` — no longer re-runs the topological sort,
+  // the topology serialization, and the per-todo x per-tool attention walk.
+  // `todos` arrives with a stable identity from `useStableArray`, and `tools`
+  // is rebuilt whenever the transcript changes, so this memo tracks content
+  // rather than defeating itself on fresh array identities.
+  const {
+    todosById,
+    toolsByTodo,
+    unassigned,
+    statesByTodo,
+    completedCount,
+    progressPercent,
+    activeAgentCount,
+    attentionCount,
+    topology,
+    dependencyIdsByTodo,
+    topologyKey,
+    dependencyCount,
+    hasDependencies,
+    drawsDependencyEdges,
+    layers,
+    layerByTodo,
+    dependentsByTodo,
+  } = useMemo(() => {
+    const knownIds = new Set(todos.map((todo) => todo.id));
+    const todosById = new Map(todos.map((todo) => [todo.id, todo]));
+    const toolsByTodo = new Map<string, ACPToolCall[]>();
+    const unassigned: ACPToolCall[] = [];
+    for (const tool of tools) {
+      const todoId = todoIdOf(tool);
+      if (!todoId || !knownIds.has(todoId)) {
+        unassigned.push(tool);
+        continue;
+      }
+      const grouped = toolsByTodo.get(todoId) ?? [];
+      grouped.push(tool);
+      toolsByTodo.set(todoId, grouped);
     }
-    const grouped = toolsByTodo.get(todoId) ?? [];
-    grouped.push(tool);
-    toolsByTodo.set(todoId, grouped);
-  }
-  const statesByTodo = new Map(
-    todos.map((todo) => [
+    const statesByTodo = new Map(
+      todos.map((todo) => [
+        todo.id,
+        getPlanNodeStateFromIndex(
+          todo,
+          todosById,
+          toolsByTodo.get(todo.id) ?? [],
+          taskIndex,
+        ),
+      ]),
+    );
+    const completedCount = todos.filter(
+      (todo) => todo.status === 'completed',
+    ).length;
+    // floor, not round: (N-1)/N rounds up to 100% on long plans, reporting
+    // completion (including to aria-valuenow) while a step is still
+    // outstanding.
+    const progressPercent =
+      todos.length === 0
+        ? 0
+        : Math.floor((completedCount / todos.length) * 100);
+    // Derive from the same source as the node badges (executionStatus): the
+    // live daemon index when a task exists, otherwise the tool call's
+    // persisted/transcript status. Counting only live tasks contradicted the
+    // badges on a replayed transcript of an interrupted session — the node
+    // rendered Running off an in_progress tool call while this strip reported
+    // "Active agents: 0" because no live daemon task existed. The workflow
+    // inspector summary counts the very same helper output, so the two
+    // surfaces can never contradict each other.
+    const activeAgentCount = getActiveAgentsFromIndex(tools, taskIndex).length;
+    const attentionCount = [...statesByTodo.values()].filter(
+      (state) => state.attention,
+    ).length;
+    const topology = todos.map((todo): [string, string[]] => [
       todo.id,
-      getPlanNodeStateFromIndex(
-        todo,
-        todosById,
-        toolsByTodo.get(todo.id) ?? [],
-        taskIndex,
+      [...new Set(todo.blockedBy ?? [])].filter(
+        (dependencyId) =>
+          dependencyId !== todo.id && knownIds.has(dependencyId),
       ),
-    ]),
-  );
-  const completedCount = todos.filter(
-    (todo) => todo.status === 'completed',
-  ).length;
-  // floor, not round: (N-1)/N rounds up to 100% on long plans, reporting
-  // completion (including to aria-valuenow) while a step is still outstanding.
-  const progressPercent =
-    todos.length === 0 ? 0 : Math.floor((completedCount / todos.length) * 100);
-  // Derive from the same source as the node badges (executionStatus): the
-  // live daemon index when a task exists, otherwise the tool call's
-  // persisted/transcript status. Counting only live tasks contradicted the
-  // badges on a replayed transcript of an interrupted session — the node
-  // rendered Running off an in_progress tool call while this strip reported
-  // "Active agents: 0" because no live daemon task existed. The workflow
-  // inspector summary counts the very same helper output, so the two
-  // surfaces can never contradict each other.
-  const activeAgentCount = useMemo(
-    () => getActiveAgents(tools, tasks).length,
-    [tools, tasks],
-  );
-  const attentionCount = [...statesByTodo.values()].filter(
-    (state) => state.attention,
-  ).length;
-  const topology = todos.map((todo): [string, string[]] => [
-    todo.id,
-    [...new Set(todo.blockedBy ?? [])].filter(
-      (dependencyId) => dependencyId !== todo.id && knownIds.has(dependencyId),
-    ),
-  ]);
-  const dependencyIdsByTodo = new Map(topology);
-  const topologyKey = JSON.stringify(topology);
-  const dependencyCount = topology.reduce(
-    (total, entry) => total + entry[1].length,
-    0,
-  );
-  const hasDependencies = dependencyCount > 0;
-  const drawsDependencyEdges =
-    hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
-  const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
-  const layerByTodo = new Map<string, number>();
-  const dependentsByTodo = new Map<string, string[]>();
-  layers.forEach((layer, index) => {
-    for (const todo of layer) layerByTodo.set(todo.id, index);
-  });
-  for (const [todoId, dependencies] of topology) {
-    for (const dependencyId of dependencies) {
-      const dependents = dependentsByTodo.get(dependencyId) ?? [];
-      dependents.push(todoId);
-      dependentsByTodo.set(dependencyId, dependents);
+    ]);
+    const dependencyIdsByTodo = new Map(topology);
+    const topologyKey = JSON.stringify(topology);
+    const dependencyCount = topology.reduce(
+      (total, entry) => total + entry[1].length,
+      0,
+    );
+    const hasDependencies = dependencyCount > 0;
+    const drawsDependencyEdges =
+      hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
+    const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
+    const layerByTodo = new Map<string, number>();
+    const dependentsByTodo = new Map<string, string[]>();
+    layers.forEach((layer, index) => {
+      for (const todo of layer) layerByTodo.set(todo.id, index);
+    });
+    for (const [todoId, dependencies] of topology) {
+      for (const dependencyId of dependencies) {
+        const dependents = dependentsByTodo.get(dependencyId) ?? [];
+        dependents.push(todoId);
+        dependentsByTodo.set(dependencyId, dependents);
+      }
     }
-  }
+    return {
+      todosById,
+      toolsByTodo,
+      unassigned,
+      statesByTodo,
+      completedCount,
+      progressPercent,
+      activeAgentCount,
+      attentionCount,
+      topology,
+      dependencyIdsByTodo,
+      topologyKey,
+      dependencyCount,
+      hasDependencies,
+      drawsDependencyEdges,
+      layers,
+      layerByTodo,
+      dependentsByTodo,
+    };
+  }, [taskIndex, todos, tools]);
   const graphId = useId().replaceAll(':', '');
   const markerId = `plan-arrow-${graphId}`;
   const dimMarkerId = `plan-arrow-dim-${graphId}`;
@@ -818,16 +892,34 @@ export function PlanExecutionView({
       setGraph(next);
     };
 
+    // Every node is observed and a window resize lands in the same frame as
+    // the observer's own batch, so one viewport change ran `measure` many
+    // times over — each run doing a getBoundingClientRect per node and
+    // concatenating a signature across every edge. Coalesce to one run per
+    // frame, which also lets the trailing run read a settled layout. The first
+    // measure stays synchronous so the edges are present on the initial paint.
+    let frame: number | undefined;
+    let pending = false;
+    const scheduleMeasure = () => {
+      if (pending) return;
+      pending = true;
+      frame = requestAnimationFrame(() => {
+        pending = false;
+        measure();
+      });
+    };
+
     measure();
-    window.addEventListener('resize', measure);
+    window.addEventListener('resize', scheduleMeasure);
     const observer =
       typeof ResizeObserver === 'undefined'
         ? undefined
-        : new ResizeObserver(measure);
+        : new ResizeObserver(scheduleMeasure);
     observer?.observe(graphElement);
     for (const node of nodeRefs.current.values()) observer?.observe(node);
     return () => {
-      window.removeEventListener('resize', measure);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      window.removeEventListener('resize', scheduleMeasure);
       observer?.disconnect();
     };
   }, [drawsDependencyEdges, topologyKey]);
@@ -1132,7 +1224,7 @@ export function PlanExecutionView({
                     data-from={edge.from}
                     data-to={edge.to}
                     d={edge.d}
-                    key={JSON.stringify([edge.from, edge.to])}
+                    key={`${edge.from}>${edge.to}`}
                     markerEnd={`url(#${active ? markerId : dimMarkerId})`}
                   />
                 );
