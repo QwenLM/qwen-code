@@ -510,13 +510,16 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # The cap has to clear the slowest honest shard, not the healthy one.
-    # In run 33713579913 a passing shard's test step took 41m32s of the
-    # ~42m the 45-minute cap left it, and attempt 3 was cancelled with both
-    # shards still live at that cap. --retry=2 re-runs every failed test on
-    # top; #10868 sized the CI unit lane's step cap for the same arithmetic.
-    # 90 clears the measured worst case plus its retries.
-    timeout-minutes: 90
+    # Set by how busy the reserved host is, not by the suite: the same third
+    # ran 6.7 min quiet and 36 contended, and 45 killed shards at the boundary
+    # with every suite green (run 33713579913). Retunable without a PR. The
+    # default still has to clear the slowest honest shard, not the healthy
+    # one: in that run a passing shard's test step took 41m32s of the ~42m
+    # the 45-minute cap left it, and attempt 3 was cancelled with both shards
+    # still live at that cap. --retry=2 re-runs every failed test on top;
+    # #10868 sized the CI unit lane's step cap for the same arithmetic. 90
+    # clears the measured worst case plus its retries.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}"
     needs:
       - 'prepare'
       - 'quality_build'
@@ -566,7 +569,38 @@ jobs:
           if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
-          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
+          # `tee` so the annotation can name WHICH failure this is: a shard
+          # killed by Vitest's own worker RPC timing out reads identically to
+          # a real break, and this release lost two attempts to that
+          # (run 33713579913). The status is re-raised untouched either way;
+          # `-o pipefail` is the step default, so `$?` is npm's.
+          log="${RUNNER_TEMP:-/tmp}/workspace-tests-${{ matrix.shard }}.log"
+          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" 2>&1 | tee "${log}" || {
+            status=$?
+            if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
+              : # A failing test names itself; an annotation adds nothing.
+            elif grep -q 'Timeout calling' "${log}"; then
+              # Passed only with proof the run reached its end and nothing
+              # else broke: a normal exit (a signal death is 128+N), a
+              # passing tally, no failing tally, and no unhandled error that
+              # is not the transport. Vitest's worker RPC giving up says
+              # nothing about the product, and --retry cannot cover it —
+              # retries re-run failing TESTS while an unhandled error fails
+              # the run outright. It has now cost this release three
+              # attempts (run 33713579913).
+              if [ "${status}" -lt 128 ] \
+                && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
+                && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
+                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
+                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
+                exit 0
+              fi
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
+            else
+              echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
+            fi
+            exit "${status}"
+          }
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'

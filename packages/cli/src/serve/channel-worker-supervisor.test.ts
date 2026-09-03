@@ -21,6 +21,7 @@ import {
   MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryRequest,
 } from '../runtime/channel-delivery-ipc.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // `tls.getCACertificates` arrives in Node 22.15, while engines still allow
 // 22.0: there the loader oracle answers `legacy` and the inspection throws,
@@ -3128,7 +3129,7 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     const startedAt = Date.now();
     child.stderr.emit('data', Buffer.from('a.'.repeat(33_000)));
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expectWithinLatencyBudget(Date.now() - startedAt, 1_000);
     child.emit('message', {
       type: 'ready',
       pid: 12345,

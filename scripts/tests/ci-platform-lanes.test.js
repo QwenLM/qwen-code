@@ -433,16 +433,25 @@ describe('post-merge push lane', () => {
     }
   });
 
-  it('does not upload coverage from a post-merge run', () => {
-    // The artifact's only consumer, post_coverage_comment, is gated to
-    // pull_request; nothing else under .github/ reads coverage-reports-*.
-    // Without this exclusion every merge spends pool egress and artifact
-    // retention on a lane with no reader.
+  it('collects and uploads coverage only from the post-merge run', () => {
+    // Coverage is switched on by QWEN_CI_COVERAGE, which the unit-test step
+    // sets only for push (main): pull-request runs had no reader for the
+    // reports and paid about a fifth of the suite's wall time collecting
+    // them. The upload gate must agree with the switch, or a PR run uploads
+    // an empty artifact and a push run collects reports nobody keeps.
+    const run = stepOf('test', 'Run tests and generate reports');
+    expect(run).toBeDefined();
+    expect(String(run.env?.QWEN_CI_COVERAGE)).toBe(
+      "${{ github.event_name == 'push' && '1' || '' }}",
+    );
     const step = stepOf('test', 'Upload coverage reports');
     expect(step).toBeDefined();
     expect(String(step.if)).toBe(
-      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}",
+      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'push' }}",
     );
+    // The pull-request coverage comment was the artifact's only reader; with
+    // no PR-side reports it has nothing to post and must stay gone.
+    expect(ci.jobs.post_coverage_comment).toBeUndefined();
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
