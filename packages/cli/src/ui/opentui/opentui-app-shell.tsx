@@ -58,6 +58,7 @@ import {
   OpenTuiSlashDispatcher,
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
@@ -424,6 +425,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // the turn ends and no dialog owns the UI (ink's shouldDrainMessageQueue
   // gates the drain on both).
   useEffect(() => {
+    // Nothing queued may run behind an exit either way: the exits that bypass
+    // this shell's quit branch (Ctrl+C/Ctrl+D double press, render-error
+    // bailout) never clear this ref, so the drain itself must consult the
+    // shared exit latch — at the edge and between dispatches, since the exit
+    // can start while an earlier command is still awaiting its outcome.
+    if (isExitInProgress()) return;
     if (streaming || dialog || deferredCommandsRef.current.length === 0) {
       return;
     }
@@ -431,6 +438,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     deferredCommandsRef.current = [];
     void (async () => {
       for (const [i, command] of pending.entries()) {
+        if (isExitInProgress()) return;
         const settlement = await gateway.dispatch(command);
         if (settlement.kind === 'rejected') {
           notify(settlement.reason);

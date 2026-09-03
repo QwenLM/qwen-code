@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => {
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    exitInProgress: false,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -168,6 +169,9 @@ vi.mock('./dialogs-confirm.js', () => ({
     return 'action-confirm';
   },
 }));
+vi.mock('./exit-lifecycle.js', () => ({
+  isExitInProgress: () => mocks.state.exitInProgress,
+}));
 
 const CONFIG = {} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
@@ -219,6 +223,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.shellConfirmProps = null;
     mocks.state.actionConfirmProps = null;
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.exitInProgress = false;
   });
 
   it('renders the composer inside the error boundary by default', async () => {
@@ -783,6 +788,36 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onPopQueue.mock.invocationCallOrder[0]).toBeLessThan(
       onInterrupt.mock.invocationCallOrder[0],
     );
+  });
+
+  it('does not replay held commands once an exit drain is in flight', async () => {
+    // The Ctrl+C/Ctrl+D double press and render-error exits never pass through
+    // this shell's quit branch, so they cannot clear the ref at the source —
+    // the drain itself must consult the shared exit latch (R2-1).
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('/first');
+    await submit('/second');
+    expect(mocks.state.handledTexts).toEqual([]);
+
+    // The exit drain starts (exitSession), then the idle edge the drain waits
+    // on crosses — the snapshot must not dispatch behind the teardown.
+    mocks.state.exitInProgress = true;
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.state.handledTexts).toEqual([]);
   });
 
   it('catches a subtree render error inside the error boundary', async () => {

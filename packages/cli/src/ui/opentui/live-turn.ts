@@ -238,18 +238,21 @@ export function useOpenTuiLiveTurn(
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
           setBusy(false);
-          // Whatever survived the tool-boundary drain becomes the next turn.
+          // One queued submission per chained turn: a decline (e.g. an abort
+          // landing inside an @-expansion read) must consume only its own
+          // submission — the rest stay queued for the following boundaries,
+          // matching ink's pop-one-submission-per-settle drain.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const text = drainQueue().join('\n');
-            if (text.trim()) {
-              apply({ type: 'user', text });
-              // ink keeps provenance for a queued submission, and the raw text
-              // is what the stream layer expands `@path` mentions from.
-              void runTurn(text, nextLivePromptId(config), {
-                submittedPrompt: text,
-              });
-            }
+            const [text, ...remaining] = rest;
+            queueRef.current = remaining;
+            setQueueLength(remaining.length);
+            apply({ type: 'user', text });
+            // ink keeps provenance for a queued submission, and the raw text
+            // is what the stream layer expands `@path` mentions from.
+            void runTurn(text, nextLivePromptId(config), {
+              submittedPrompt: text,
+            });
           }
         }
       }

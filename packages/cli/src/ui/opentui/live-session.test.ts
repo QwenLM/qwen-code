@@ -283,12 +283,20 @@ describe('livePromptEvents', () => {
       { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
     ];
 
-    await drain(livePromptEvents(config, parts));
+    // Production always reaches this seam with provenance set (the composer
+    // submit passes `submittedPrompt`), so the options here are what force the
+    // gate's string check — not the provenance short-circuit — to decide.
+    await drain(
+      livePromptEvents(config, parts, undefined, {
+        submittedPrompt: 'describe this: ',
+      }),
+    );
 
     const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
     expect(prompt).toBe(parts);
-    // ink expands only a string query (processQuery's `typeof query ===
-    // 'string'` branch), so an attachment payload rides through untouched.
+    // ink expands only a string query (prepareQueryForLlm's
+    // `typeof query === 'string'` branch), so an attachment payload rides
+    // through untouched.
     expect(atMocks.calls).toEqual([]);
   });
 

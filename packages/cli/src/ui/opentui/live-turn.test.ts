@@ -25,9 +25,12 @@ import {
 
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
+// `declines` marks 1-based turn numbers that end without yielding — the
+// @-expansion decline path (an abort landing inside the read).
 const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
+  declines: new Set<number>(),
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -42,6 +45,7 @@ vi.mock('./live-session.js', () => ({
     if (live.turns.length === 1) {
       await new Promise<void>((resolve) => live.waiters.push(resolve));
     }
+    if (live.declines.has(live.turns.length)) return;
     yield { type: 'done' };
   },
 }));
@@ -106,6 +110,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   beforeEach(() => {
     live.turns.length = 0;
     live.waiters.length = 0;
+    live.declines.clear();
   });
 
   it('forwards per-turn options through the idle submit hop (R1-4)', () => {
@@ -156,6 +161,37 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[1]?.options).toMatchObject({
       submittedPrompt: 'look @notes.md',
     });
+    expect(result.current.queueLength).toBe(0);
+  });
+
+  it('consumes only its own submission when a replayed turn declines (R2-2)', async () => {
+    // The one reachable decline of the expander — an abort landing inside the
+    // @-mention read — ends the replayed turn without a send. Each queued
+    // submission rides its own chained turn, so the sibling must survive the
+    // decline instead of being swallowed with a joined payload.
+    live.declines.add(2);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    act(() => {
+      result.current.submit('look @notes.md');
+    });
+    act(() => {
+      result.current.submit('then do the other thing');
+    });
+    expect(result.current.queueLength).toBe(2);
+
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+      await vi.waitFor(() => expect(live.turns).toHaveLength(3));
+    });
+
+    expect(live.turns[1]?.prompt).toBe('look @notes.md');
+    expect(live.turns[2]?.prompt).toBe('then do the other thing');
     expect(result.current.queueLength).toBe(0);
   });
 });
