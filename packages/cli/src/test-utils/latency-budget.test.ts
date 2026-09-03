@@ -32,10 +32,20 @@ describe('expectWithinLatencyBudget', () => {
     expect(() => expectWithinLatencyBudget(1762, 1000)).toThrow();
   });
 
+  it('treats values that read as off as enforcing', () => {
+    // '0' and 'false' are truthy strings; a raw truthiness gate would skip
+    // every budget for them — the opposite of the boolean reflex.
+    for (const value of ['0', 'false']) {
+      process.env['QWEN_SKIP_LATENCY_BUDGETS'] = value;
+      expect(() => expectWithinLatencyBudget(1762, 1000)).toThrow();
+    }
+  });
+
   it('keeps asserting on the pool when the duration is the property', () => {
-    // Five of the quarantined cases have no other expect() — a complexity
-    // bound or a no-zombie guarantee is the whole test. Skipping there would
-    // leave them running and checking nothing, so they keep a relaxed bound:
+    // Three of the quarantined cases have no other expect() — a complexity
+    // bound or a no-hang close guarantee is the whole test. Skipping there
+    // would leave them running and checking nothing, so they keep a relaxed
+    // bound:
     // wide enough for a 5x-contended host, far too tight for a quadratic
     // regression.
     process.env['QWEN_SKIP_LATENCY_BUDGETS'] = '1';
