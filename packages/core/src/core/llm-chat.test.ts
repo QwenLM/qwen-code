@@ -13166,6 +13166,46 @@ describe('LlmChat', async () => {
     }
   });
 
+  it('retries orphaned XML tool-call closing tags after quoted opener text', async () => {
+    vi.useFakeTimers();
+    try {
+      const leakedText =
+        JSON.stringify({ example: '<invoke>' }) + '\n</parameter>\n</invoke>\n';
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: leakedText }])),
+        )
+        .mockResolvedValueOnce(
+          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-quoted-xml-open-tag-before-orphaned-close',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      expect(chat.getLastModelMessageText()).toBe('Successful final response');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries leaked JSON before a structured tool call', async () => {
     vi.useFakeTimers();
     try {

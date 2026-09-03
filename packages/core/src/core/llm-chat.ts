@@ -1416,24 +1416,13 @@ const PROTOCOL_TAG_PREFIXES = [
 ] as const;
 const LEAKED_TOOL_CALL_TAGS =
   /(?:[}\]]\s*)?<\/parameter>\s*<\/(?:function|invoke)>/iy;
-const TOOL_CALL_OPEN_TAG = /<(?:function|invoke)\b/i;
-
-function hasUnclosedToolCallOpenTagBefore(
-  text: string,
-  index: number,
-): boolean {
-  const prefix = text.slice(0, index);
-  const lowerPrefix = prefix.toLowerCase();
-  const lastClose = Math.max(
-    lowerPrefix.lastIndexOf('</function>'),
-    lowerPrefix.lastIndexOf('</invoke>'),
-  );
-  return TOOL_CALL_OPEN_TAG.test(prefix.slice(lastClose + 1));
-}
+const TOOL_CALL_OPEN_TAG = /<(?:function|invoke)\b/iy;
+const TOOL_CALL_CLOSE_TAG = /<\/(?:function|invoke)>/iy;
 
 function hasLeakedToolCallTags(text: string): boolean {
   let inString = false;
   let escaped = false;
+  let openToolCallTags = 0;
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     if (inString) {
@@ -1444,11 +1433,18 @@ function hasLeakedToolCallTags(text: string): boolean {
       inString = true;
     } else if (char === '<' || char === '}' || char === ']') {
       LEAKED_TOOL_CALL_TAGS.lastIndex = i;
-      if (
-        LEAKED_TOOL_CALL_TAGS.test(text) &&
-        !hasUnclosedToolCallOpenTagBefore(text, i)
-      ) {
+      if (LEAKED_TOOL_CALL_TAGS.test(text) && openToolCallTags === 0) {
         return true;
+      }
+      if (char !== '<') continue;
+      TOOL_CALL_OPEN_TAG.lastIndex = i;
+      if (TOOL_CALL_OPEN_TAG.test(text)) {
+        openToolCallTags++;
+        continue;
+      }
+      TOOL_CALL_CLOSE_TAG.lastIndex = i;
+      if (TOOL_CALL_CLOSE_TAG.test(text)) {
+        openToolCallTags = Math.max(0, openToolCallTags - 1);
       }
     }
   }
