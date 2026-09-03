@@ -6302,6 +6302,11 @@ export class Config {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
+  /** True when a startup migration-warning provider was attached. */
+  hasSkillSettingsListsProvider(): boolean {
+    return this.skillSettingsListsProvider !== null;
+  }
+
   isSkillEnabled(skill: {
     name: string;
     authoredName?: string;

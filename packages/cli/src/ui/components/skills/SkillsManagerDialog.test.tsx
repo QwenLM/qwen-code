@@ -26,13 +26,17 @@ const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
 function fakeSettings(
   byScope: Partial<Record<SettingScope, unknown>>,
   defaultsByScope: Partial<Record<SettingScope, unknown>> = {},
+  enabledByScope: Partial<Record<SettingScope, unknown>> = {},
+  isTrusted = true,
 ): LoadedSettings {
   return {
+    isTrusted,
     forScope: (scope: SettingScope) => ({
       settings: {
         skills: {
           disabled: byScope[scope],
           defaultDisabled: defaultsByScope[scope],
+          enabled: enabledByScope[scope],
         },
       },
     }),
@@ -105,7 +109,9 @@ describe('buildHigherDisabled', () => {
       fakeSettings({}, { [SettingScope.Workspace]: ['pdf'] }),
     );
 
-    expect(higher.lockedIn(prefixed)).toBe("skills.defaultDisabled 'pdf'");
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (Workspace)",
+    );
   });
 
   it('does not lock on a registry-spelling defaultDisabled entry the qualified grant cancels', () => {
@@ -121,7 +127,7 @@ describe('buildHigherDisabled', () => {
       fakeSettings({ [SettingScope.Workspace]: ['pdf'] }),
     );
 
-    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf'");
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf' (Workspace)");
   });
 
   it('does not lock on an exact-spelling workspace hard entry the toggle removes', () => {
@@ -130,6 +136,52 @@ describe('buildHigherDisabled', () => {
     );
 
     expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('does not lock on workspace entries while the workspace is untrusted', () => {
+    // The merge drops an untrusted workspace wholesale, so its stale entries
+    // disable nothing — locking on them would dim rows for live skills.
+    const higher = buildHigherDisabled(
+      fakeSettings({ [SettingScope.Workspace]: ['pdf'] }, {}, {}, false),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBeNull();
+  });
+
+  it('does not lock when an identical-spelling grant cancels the defaultDisabled entry', () => {
+    // resolveSkillSettings cancels entry-vs-entry on identical spelling; the
+    // skill stays live and the toggle that could change state must survive.
+    const cancelled = buildHigherDisabled(
+      fakeSettings(
+        {},
+        { [SettingScope.Workspace]: ['pdf'] },
+        { [SettingScope.Workspace]: ['pdf'] },
+      ),
+    );
+
+    expect(cancelled.lockedIn(prefixed)).toBeNull();
+    // A registry-spelling grant does not cancel an authored-spelling entry.
+    const notCancelled = buildHigherDisabled(
+      fakeSettings(
+        {},
+        { [SettingScope.Workspace]: ['pdf'] },
+        { [SettingScope.Workspace]: ['demo:pdf'] },
+      ),
+    );
+
+    expect(notCancelled.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (Workspace)",
+    );
+  });
+
+  it('names the scope holding a higher-scope defaultDisabled entry', () => {
+    const higher = buildHigherDisabled(
+      fakeSettings({}, { [SettingScope.User]: ['pdf'] }),
+    );
+
+    expect(higher.lockedIn(prefixed)).toBe(
+      "skills.defaultDisabled 'pdf' (User)",
+    );
   });
 
   it('tolerates a malformed list from the settings file', () => {

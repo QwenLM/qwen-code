@@ -124,14 +124,21 @@ export function lookupSkillDisablement(
 ): SkillDisablement | undefined {
   // A hard block beats a default one whichever spelling carries it; the
   // registry-first walk would otherwise report the weaker entry in
-  // mixed-spelling states.
+  // mixed-spelling states. Among hard entries, one carrying lockedScope
+  // names the scope the user has to edit, so it wins over an unlocked
+  // hard entry either spelling holds.
   let fallback: SkillDisablement | undefined;
+  let hard: SkillDisablement | undefined;
   for (const name of skillRestrictionNames(skill)) {
     const found = disablements.get(name);
-    if (found?.reason === 'hard') return found;
+    if (found?.reason === 'hard') {
+      if (found.lockedScope) return found;
+      hard ??= found;
+      continue;
+    }
     fallback ??= found;
   }
-  return fallback;
+  return hard ?? fallback;
 }
 
 function updateTarget(

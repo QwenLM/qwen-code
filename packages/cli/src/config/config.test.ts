@@ -1226,6 +1226,24 @@ describe('loadCliConfig', () => {
     expect(config.getRestoreAskUserQuestion()).toBe(false);
   });
 
+  it('wires the skill settings lists provider outside bare and safe mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(true);
+  });
+
+  it('omits the skill settings lists provider in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(false);
+  });
+
   it('preserves explicit opt-out when --debug is used', async () => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '0';
     process.argv = ['node', 'script.js', '--debug'];

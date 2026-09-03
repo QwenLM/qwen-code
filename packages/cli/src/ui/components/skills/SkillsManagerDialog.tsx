@@ -158,9 +158,11 @@ export function buildHigherDisabled(settings: LoadedSettings): {
    * locked skill as a toggleable row and the label loses the scope the user
    * has to edit. Entries the toggle cannot cancel lock the row the same way
    * a higher scope does: a bare disablement keeps gating under either
-   * spelling, and the persisted qualified grant cancels only an
-   * identical-spelling `defaultDisabled` entry. Naming the entry (not just a
-   * scope) tells the user which list to edit.
+   * spelling, and any `enabled` entry identical to a `defaultDisabled` one
+   * cancels it at resolve time. Naming the entry and its scope tells the
+   * user which list in which file to edit. Workspace entries join the lock
+   * inputs only while the workspace is trusted — the merge drops it
+   * otherwise, so an untrusted repo's stale entries disable nothing.
    */
   lockedIn: (skill: { name: string; authoredName?: string }) => string | null;
 } {
@@ -178,21 +180,48 @@ export function buildHigherDisabled(settings: LoadedSettings): {
       scopeOfEntry.set(name, label);
     }
   }
-  const allScopes = [...scopes.map(([scope]) => scope), SettingScope.Workspace];
-  const hardEntries = new Set(
+  // Workspace settings join the lock inputs only when the merge honors them:
+  // an untrusted workspace is dropped from `settings.merged` wholesale, so
+  // locking on its entries would dim rows for skills that are live.
+  const allScopes = [
+    ...scopes.map(([scope]) => scope),
+    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+  ];
+  // name -> highest scope holding the entry (lowest precedence inserted
+  // first), so the lock label names the file the user has to edit — a
+  // workspace-origin lock is not a higher scope.
+  const hardEntries = new Map<string, string>();
+  const defaultEntries = new Map<string, string>();
+  for (const [scope, label] of [
+    ...scopes,
+    [SettingScope.Workspace, 'Workspace'],
+  ] as const) {
+    if (scope === SettingScope.Workspace && !settings.isTrusted) continue;
+    for (const name of normalizeNames(
+      skillSettingStrings(settings, scope, 'disabled'),
+    )) {
+      hardEntries.set(name, label);
+    }
+    for (const name of normalizeNames(
+      skillSettingStrings(settings, scope, 'defaultDisabled'),
+    )) {
+      defaultEntries.set(name, label);
+    }
+  }
+  // Identical-spelling cancellation mirrors resolveSkillSettings: a grant
+  // equal to a defaultDisabled entry keeps the skill live, so the row is
+  // not locked.
+  const enabledEntries = new Set(
     allScopes.flatMap((scope) =>
-      normalizeNames(skillSettingStrings(settings, scope, 'disabled')),
-    ),
-  );
-  const defaultEntries = new Set(
-    allScopes.flatMap((scope) =>
-      normalizeNames(skillSettingStrings(settings, scope, 'defaultDisabled')),
+      normalizeNames(skillSettingStrings(settings, scope, 'enabled')),
     ),
   );
   const workspaceDisabled = new Set(
-    normalizeNames(
-      skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
-    ),
+    settings.isTrusted
+      ? normalizeNames(
+          skillSettingStrings(settings, SettingScope.Workspace, 'disabled'),
+        )
+      : [],
   );
   return {
     lockedIn: (skill) => {
@@ -205,13 +234,13 @@ export function buildHigherDisabled(settings: LoadedSettings): {
           if (spelling === registry && workspaceDisabled.has(spelling)) {
             continue;
           }
-          return `skills.disabled '${spelling}'`;
+          return `skills.disabled '${spelling}' (${hardEntries.get(spelling)})`;
         }
         if (defaultEntries.has(spelling)) {
-          // The persisted qualified grant cancels an identical-spelling
-          // defaultDisabled entry at any scope.
-          if (spelling === registry) continue;
-          return `skills.defaultDisabled '${spelling}'`;
+          // A grant identical to the entry cancels it at resolve time — the
+          // persisted qualified one, or any identical-spelling bare one.
+          if (spelling === registry || enabledEntries.has(spelling)) continue;
+          return `skills.defaultDisabled '${spelling}' (${defaultEntries.get(spelling)})`;
         }
       }
       return null;
@@ -721,7 +750,7 @@ export function SkillsManagerDialog({
       {filteredLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary}>
-            {t('Locked by higher-scope settings (cannot toggle here):')}
+            {t('Locked by settings entries you cannot toggle here:')}
           </Text>
           {filteredLocked.map((s) => {
             // Scope identifiers (System / User / SystemDefaults) stay as

@@ -338,8 +338,6 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高範圍設定鎖定（此處無法切換）：',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',

@@ -270,6 +270,18 @@ describe('lookupSkillDisablement', () => {
     expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
   });
 
+  it('prefers the hard entry carrying lockedScope over an unlocked one', () => {
+    // The registry-spelling hard block carries no attribution; the authored
+    // one names the scope the user has to edit, so wire surfaces must surface
+    // it even though the registry spelling is walked first.
+    const entries = new Map<string, SkillDisablement>([
+      ['rust:pdf', { reason: 'hard' }],
+      ['pdf', hard],
+    ]);
+
+    expect(lookupSkillDisablement(entries, prefixed)).toBe(hard);
+  });
+
   it('normalizes the skill name it is given', () => {
     expect(
       lookupSkillDisablement(byRegistry, {

@@ -2326,8 +2326,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Explicit opt-ins, matched against the skill name as registered — ' +
           'an extension skill is rust:pdf there, so a bare pdf entry never ' +
-          'enables one by itself (it still cancels an identically-spelled ' +
-          'skills.defaultDisabled entry). Override a matching ' +
+          'matches as a grant; it only cancels an identically-spelled ' +
+          'skills.defaultDisabled entry, and once cancelled the skill is ' +
+          'enabled only if the owning extension declares it on by default. ' +
+          'Override a matching ' +
           'skills.defaultDisabled entry and, for ' +
           'an extension skill, the default the owning extension declares and ' +
           'the enablement stored for this workspace. Matched ' +
