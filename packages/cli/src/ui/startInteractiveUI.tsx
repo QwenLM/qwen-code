@@ -399,7 +399,7 @@ export async function startInteractiveUI(
         // record lands, and `--resume` refuses to load an empty one.
         // Non-emptiness here relies on config.shutdown() flushing the
         // recorder first — it is registered earlier in the cleanup chain
-        // in gemini.tsx; keep that registration order.
+        // in llm.tsx; keep that registration order.
         if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
@@ -451,8 +451,10 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
-          updateSessionRegistryIpcPath: (ipcPath) =>
-            config.updateSessionRegistryIpcPath(ipcPath),
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
+          getSessionId: () => config.getSessionId(),
+          reassertSessionRecord: () => config.reassertSessionRegistryRecord(),
         });
         if (exiting) {
           await peerMessaging?.close();

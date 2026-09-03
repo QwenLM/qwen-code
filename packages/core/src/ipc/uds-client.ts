@@ -17,6 +17,7 @@
 import * as net from 'node:net';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  buildAuthLine,
   buildDeliveryStatusFrame,
   encodePeerFrame,
   MAX_FRAME_BYTES,
@@ -47,6 +48,16 @@ export const SEND_TIMEOUT_MS = 5_000;
  */
 export const MAX_CONCURRENT_SENDS = 64;
 
+/**
+ * How long a reachability probe waits for a connection.
+ *
+ * Discovery probes every registered session concurrently, so this bounds
+ * the cost of a `list_agents` call to about one probe however many
+ * sessions are registered. A local socket accepts in microseconds; a
+ * quarter second is already generous for a machine under load.
+ */
+export const PROBE_TIMEOUT_MS = 250;
+
 let inFlightSends = 0;
 
 export class PeerSendError extends Error {
@@ -57,6 +68,18 @@ export class PeerSendError extends Error {
     super(message);
     this.name = 'PeerSendError';
   }
+}
+
+export interface SendPeerFrameOptions {
+  timeoutMs?: number;
+  /**
+   * The receiver's inbox token, sent as an auth line ahead of the frame.
+   * Omitted when the receiver's record advertises none — an inbox that
+   * requires one then drops the connection, which is the documented
+   * old-sender/new-receiver break; an inbox that requires none skips the
+   * line as unparseable, so leading with it is always safe.
+   */
+  authToken?: string;
 }
 
 /**
@@ -77,8 +100,9 @@ export class PeerSendError extends Error {
 export function sendPeerFrame(
   socketPath: string,
   frame: PeerFrame,
-  timeoutMs: number = SEND_TIMEOUT_MS,
+  options: SendPeerFrameOptions = {},
 ): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? SEND_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (!isLocalIpcPath(socketPath)) {
       reject(
@@ -139,7 +163,14 @@ export function sendPeerFrame(
     }, timeoutMs);
     socket.on('error', fail);
     socket.on('connect', () => {
-      socket.end(encoded);
+      // The auth line rides in the same write as the frame: the receiver
+      // reads lines in order, and a separate write would only open a
+      // window for a partial flush to strand the frame unauthenticated.
+      socket.end(
+        options.authToken !== undefined
+          ? buildAuthLine(options.authToken) + encoded
+          : encoded,
+      );
     });
     socket.on('close', () => {
       if (settled) return;
@@ -162,9 +193,12 @@ export function sendPeerFrame(
 export async function sendDeliveryStatus(
   socketPath: string,
   fields: { status: PeerDeliveryStatus; origMsgId: string; from?: string },
+  authToken?: string,
 ): Promise<void> {
   try {
-    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields));
+    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields), {
+      ...(authToken !== undefined ? { authToken } : {}),
+    });
   } catch (error) {
     debugLogger.debug(
       `delivery-status (${fields.status}) to ${socketPath} failed: ${
@@ -172,4 +206,40 @@ export async function sendDeliveryStatus(
       }`,
     );
   }
+}
+
+/**
+ * True when something is listening on `socketPath`.
+ *
+ * A full listen backlog (EAGAIN on POSIX, EBUSY on Windows named pipes)
+ * counts as alive: the peer is listening but momentarily saturated, which
+ * is a busy session, not a dead one. Everything else — including a socket
+ * file left behind by a crashed process — is dead, which is the point: a
+ * stale socket inode still stats fine, so only a dial can tell the
+ * difference.
+ */
+export function probePeerSocket(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!isLocalIpcPath(socketPath)) {
+      resolve(false);
+      return;
+    }
+    const socket = net.connect({ path: socketPath });
+    let settled = false;
+    const settle = (alive: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(alive);
+    };
+    // An absolute deadline rather than socket.setTimeout, for the same
+    // reason sendPeerFrame uses one: an idle timer is reset by any byte.
+    const deadline = setTimeout(() => settle(false), PROBE_TIMEOUT_MS);
+    deadline.unref();
+    socket.on('connect', () => settle(true));
+    socket.on('error', (error: NodeJS.ErrnoException) =>
+      settle(error.code === 'EAGAIN' || error.code === 'EBUSY'),
+    );
+  });
 }

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.22.2",
+  "version": "0.22.3",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -9,10 +9,14 @@
     ".": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./daemon-react-sdk": {
+      "types": "./dist/types/daemon-react-sdk.d.ts",
+      "import": "./dist/daemon-react-sdk.js"
     }
   },
   "files": [
-    "dist/index.js",
+    "dist/*.js",
     "dist/types"
   ],
   "scripts": {
@@ -23,7 +27,7 @@
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "test:ci": "vitest run --config vitest.config.ts --coverage",
+    "test:ci": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
     "test:e2e:perf": "cross-env WEB_SHELL_PERF=1 playwright test --config playwright.config.ts --grep @perf --project=chromium",
@@ -43,7 +47,10 @@
     "@datafe-open/markdown-chart-echarts": "^0.1.12",
     "@datafe-open/markdown-chart-react": "^0.1.12",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.26",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",
@@ -64,19 +71,18 @@
   },
   "peerDependencies": {
     "@qwen-code/sdk": ">=0.1.8",
-    "@qwen-code/webui": ">=0.0.1",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
     "@qwen-code/sdk": "file:../sdk-typescript",
-    "@qwen-code/webui": "file:../webui",
     "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.2.0",
+    "jsdom": "^26.1.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
     "react": "^19.2.0",

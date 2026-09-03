@@ -22,7 +22,11 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { ApprovalMode, Config } from '../../config/config.js';
+import type {
+  ApprovalMode,
+  Config,
+  SessionWorkflowPlanRevision,
+} from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
@@ -2468,7 +2472,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -2541,7 +2545,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -2836,16 +2840,31 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       }
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
@@ -2916,10 +2935,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
+    /** The exact Config the dispatch handed to the runtime agent. */
+    runtimeContext: Config;
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
-    runtimeContext: Config;
     options?: {
       runConfigOverrides?: unknown;
       taskName?: string;
@@ -2977,6 +2997,22 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Session Workflow plan-revision state mirroring Config's shape: an
+      // own field mutated by methods that assign `this.<field>` (config.ts
+      // set/clearSessionWorkflowPlanRevision). On an un-shimmed
+      // Object.create wrapper that assignment lands as an OWN property of
+      // the wrapper and shadows this base state — the write-through tests
+      // below assert exactly that contract.
+      sessionWorkflowPlanRevision: 'approved-revision' as unknown,
+      setSessionWorkflowPlanRevision(
+        this: Record<string, unknown>,
+        revision: unknown,
+      ) {
+        this['sessionWorkflowPlanRevision'] = revision;
+      },
+      clearSessionWorkflowPlanRevision(this: Record<string, unknown>) {
+        this['sessionWorkflowPlanRevision'] = undefined;
+      },
       // Derived dispatch contexts layer an approval profile over the
       // worktree profile; the derivation snapshots the base mode through
       // these methods.
@@ -3017,11 +3053,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
+            runtimeContext,
             runtimeTargetDir: runtimeContext.getTargetDir(),
             runtimeIgnoreFiles: runtimeContext
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
-            runtimeContext,
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               taskName: options?.taskName,
@@ -3613,6 +3649,56 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toEqual({ ok: true, value: 42 });
   });
 
+  // R7-1: the schema wrapper is the second un-shimmed Object.create builder
+  // — an agent({schema}) dispatch hands the subagent a Config whose
+  // prototype revision methods would otherwise assign an own shadow of the
+  // session-global state. The write-through must reach the base.
+  it('schema-mode override writes Session Workflow revision mutations through to the base Config', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema dispatch aborts after capture
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+
+    await createProductionDispatch(config)('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+
+    const runtime = calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(config);
+    runtime.clearSessionWorkflowPlanRevision();
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    expect(
+      (config as unknown as Record<string, unknown>)[
+        'sessionWorkflowPlanRevision'
+      ],
+    ).toBeUndefined();
+  });
+
   it('R1 #1: schema-mode SUCCESS records tokens via onTokens (was missing before fix)', async () => {
     nextOutputTokens.value = 555;
     const { config } = fakeConfigWithMgr({
@@ -4121,6 +4207,74 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     );
     expect(helper.calls[0]!.runtimeContextSame).toBe(false);
     expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  // R7-1: todo_write is not in WORKFLOW_SUBAGENT_DISALLOWED_TOOLS, so a
+  // divergent todo_write inside a directory-scoped workflow agent calls
+  // clearSessionWorkflowPlanRevision on the wrapper. Without the
+  // write-through shim, the prototype method assigns
+  // `this.sessionWorkflowPlanRevision = undefined` as an OWN property of
+  // the wrapper — the root Config keeps the stale approved revision and
+  // keeps rejecting top-level Agent launches against a plan that no longer
+  // exists. The shim must forward the mutation to the base.
+  it('workingDir override writes Session Workflow revision mutations through to the base Config', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-1',
+      sourceCallId: 'call-1',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    // Forwarded to the base: the wrapper carries no own shadow of the
+    // field, and the base's revision is what actually changed.
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
+  // R7-1 sibling: the isolation-worktree dispatch wrapper carries the same
+  // write-through contract as the workingDir one — todo_write is not
+  // disallowed, so a divergent todo_write inside the isolated agent must
+  // forward revision mutations to the base instead of shadowing them.
+  it("isolation:'worktree' override writes Session Workflow revision mutations through to the base Config", async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'isolated', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      isolation: 'worktree',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
   });
 
   it('workingDir rejects invalid values before dispatch', async () => {

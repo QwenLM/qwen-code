@@ -13,6 +13,7 @@ import {
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -1054,7 +1055,7 @@ describe('createWorkflowSandbox security', () => {
     // The banked remainder (~80 ms) fires promptly; a fresh full budget
     // (200 ms) would overshoot the upper bound, and a pause-duration
     // deduction would fire before the lower bound.
-    expect(Date.now() - resumedAt).toBeLessThan(150);
+    expectWithinLatencyBudget(Date.now() - resumedAt, 150);
     expect(Date.now() - resumedAt).toBeGreaterThan(40);
   });
 
@@ -1133,12 +1134,12 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('re-arms the pause-suspended watchdog on abort so a cancelled paused run still settles', async () => {
+  it('settles a cancelled paused run at once, not on the banked wall-clock remainder', async () => {
     // Cancelling a paused run aborts the controller, but abortPending()
-    // emits no scheduler transition — a pause-suspended watchdog that
-    // never re-armed would leave a script hung in ungated code pending
-    // forever (no settlement, snapshot, or telemetry). The abort must
-    // re-arm the banked remainder.
+    // emits no scheduler transition. Before the abort arm, settlement
+    // depended on the watchdog re-arming with its banked remainder — the
+    // user watched a cancelled run refuse to end for up to that long. Now
+    // the abort settles the run immediately; the re-arm stays as a backstop.
     vi.useFakeTimers();
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
@@ -1168,10 +1169,9 @@ describe('createWorkflowSandbox security', () => {
       expect(scheduler.snapshot().state).toBe('paused');
 
       abortOnTimeout.abort();
-      await vi.advanceTimersByTimeAsync(20);
-      expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(100);
-      await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
     } finally {
       abortOnTimeout.abort();
       await vi.runAllTimersAsync();
@@ -1180,12 +1180,11 @@ describe('createWorkflowSandbox security', () => {
     }
   });
 
-  it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
+  it('settles a run cancelled mid-pausing before the post-abort drain lands', async () => {
     // An in-flight dispatch that settles AFTER the abort still lands the
-    // scheduler's `pausing` → `paused` transition (pump's finally). The
-    // watchdog must not re-suspend on that post-abort transition, or a
-    // script that catches the abort and hangs in ungated code is
-    // orphaned again.
+    // scheduler's `pausing` → `paused` transition (pump's finally). The run
+    // must already be settled by then: a script that catches the abort and
+    // hangs in ungated code used to be orphaned until the wall clock.
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finishDispatch: ((value: string) => void) | undefined;
@@ -1213,12 +1212,12 @@ describe('createWorkflowSandbox security', () => {
     expect(scheduler.snapshot().state).toBe('pausing');
 
     abortOnTimeout.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+
+    // The drain still completes its transition afterwards; nothing about a
+    // settled run is disturbed by it.
     finishDispatch?.('late');
     await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
-
-    // The post-abort `paused` transition must not re-suspend the
-    // watchdog — the hung script still settles on the banked remainder.
-    await expect(run).rejects.toThrow(/exceeded 150 ms of active time/);
   });
 
   it('suspends the watchdog of a sandbox created while the scheduler is already paused', async () => {
@@ -1254,28 +1253,59 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('keeps the seeded watchdog armed when the shared signal is already aborted', async () => {
+  it('does not run a script whose signal was already aborted before run()', async () => {
     // Production shares one controller between the registry (which
     // pre-registers the run before run() resolves) and the sandbox, so a
     // user cancel can land before run() begins: the scheduler is already
-    // paused AND the signal is already aborted. The abort re-arm listener
-    // is dead on an already-aborted signal and no scheduler transition
-    // can follow, so only the seed guard's !aborted() check keeps the
-    // watchdog armed — deleting it suspends the newborn watchdog and the
-    // hung run never settles.
+    // paused AND the signal is already aborted. The run must settle as
+    // cancelled without executing a line of model-authored code.
     const abortOnTimeout = new AbortController();
     const scheduler = new WorkflowDispatchScheduler(1, abortOnTimeout.signal);
     expect(scheduler.pause()).toBe(true);
     abortOnTimeout.abort();
+    const dispatch = vi.fn(async () => 'ignored');
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch,
       maxWallClockMs: 100,
       scheduler,
       abortOnTimeout,
     });
-    await expect(sandbox.run(`return new Promise(() => {});`)).rejects.toThrow(
-      /exceeded 100 ms of active time/,
+    await expect(
+      sandbox.run(`await agent('never'); return new Promise(() => {});`),
+    ).rejects.toThrow(/aborted \(cancelled\)/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('cancellation settles the run at once while the script still runs its own finally', async () => {
+    // The host-side run settles immediately; the script's promise is left
+    // to finish on its own. Its dispatches reject on the aborted signal, so
+    // a `finally` inside the script still executes — cleanup the author
+    // wrote is not skipped just because the user stopped waiting.
+    const controller = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: () =>
+        new Promise<string>((_, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(new Error('dispatch aborted')),
+            { once: true },
+          );
+        }),
+    });
+    const run = sandbox.run(`
+      try { await agent('a'); }
+      finally { log('cleanup ran'); }
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+    await vi.waitFor(() =>
+      expect(sandbox.getLogs().some((l) => l.includes('cleanup ran'))).toBe(
+        true,
+      ),
     );
   });
 
@@ -2111,7 +2141,10 @@ describe('createWorkflowSandbox primitives', () => {
         'Workflow subagent x did not complete (terminate mode: CANCELLED).',
       ),
     );
-    await runPromise;
+    // The abort arm settles the run as cancelled even though the script had
+    // already returned — cancel wins a same-tick race, matching the runner,
+    // which reports a cancelled registry entry over an ok outcome.
+    await expect(runPromise).rejects.toThrow(/aborted \(cancelled\)/);
     expect(sandbox.getLogs()).toEqual([]);
   });
 

@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
@@ -278,6 +279,10 @@ describe('useProviderUpdates', () => {
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
+
+    expect(
+      Object.keys(result.current.providerUpdateRequest!.entries[0]!.diff),
+    ).not.toContain('fallbackModel');
 
     await result.current.providerUpdateRequest!.onConfirm('update');
 
@@ -568,7 +573,9 @@ describe('useProviderUpdates', () => {
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
     };
-    mockConfig.refreshAuth.mockResolvedValue(undefined);
+    mockConfig.refreshAuth.mockImplementation(async () => {
+      mockConfig.getModel.mockReturnValue('provider-default-model');
+    });
 
     const { result } = renderHook(() =>
       useProviderUpdates(
@@ -604,6 +611,12 @@ describe('useProviderUpdates', () => {
         type: 'info',
         text: 'Coding Plan configuration updated successfully.',
       },
+      expect.any(Number),
+    );
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Model switched to'),
+      }),
       expect.any(Number),
     );
   });

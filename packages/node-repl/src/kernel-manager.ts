@@ -324,13 +324,10 @@ export class NodeReplKernelManager {
       );
     }
     if (request.signal?.aborted) {
-      await this.invalidateKernel('cancelled');
       return this.hostOutcome(
         'cancelled',
-        'Execution was cancelled before it started; the node_repl process was replaced and all bindings were lost.',
+        'Execution was cancelled before it started; the persistent kernel was retained.',
         startedAt,
-        undefined,
-        true,
       );
     }
 
@@ -356,11 +353,13 @@ export class NodeReplKernelManager {
       settled: false,
       settle: () => undefined,
     };
+    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     let execFrame: string;
     try {
       execFrame = encodeFrame({
         type: 'exec',
         execId,
+        timeoutMs: effectiveTimeout,
         source: prepared.source,
         previousBindings: [...this.bindingKinds]
           .map(([name, kind]) => ({ name, kind }))
@@ -391,51 +390,56 @@ export class NodeReplKernelManager {
     });
 
     let stopStarted = false;
+    let requestedStopStatus: 'timeout' | 'cancelled' | null = null;
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
-      // `catch` before `finally`: the exec must always settle, and a rejected
-      // teardown must not surface as an unhandled rejection.
-      void this.invalidateKernel(status)
-        .catch(() => undefined)
-        .finally(() => {
-          inflight.settle({ hostStatus: status, message });
-        });
+      requestedStopStatus = status;
+      try {
+        handle.toKernel.write(encodeFrame({ type: 'cancel', execId }));
+      } catch (error) {
+        void this.invalidateKernel('crashed')
+          .catch(() => undefined)
+          .finally(() => {
+            inflight.settle({
+              hostStatus: 'crashed',
+              message: `${message} The cancellation request could not reach the kernel: ${safeErrorMessage(error)}`,
+            });
+          });
+      }
     };
-    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     const timeout = setTimeout(
       () =>
         stop(
           'timeout',
-          `Execution exceeded the ${effectiveTimeout}ms timeout; the node_repl process was replaced and all bindings were lost.`,
+          `Execution exceeded the ${effectiveTimeout}ms timeout.`,
         ),
       effectiveTimeout,
     );
     const onAbort = () =>
-      stop(
-        'cancelled',
-        'Execution was cancelled by the user; the node_repl process was replaced and all bindings were lost.',
-      );
+      stop('cancelled', 'Execution was cancelled by the user.');
     request.signal?.addEventListener('abort', onAbort, { once: true });
 
     if (request.signal?.aborted) {
       onAbort();
-    } else {
-      try {
-        handle.toKernel.write(execFrame);
-      } catch (error) {
-        clearTimeout(timeout);
-        request.signal?.removeEventListener('abort', onAbort);
-        await this.invalidateKernel('crashed');
-        if (this.inflight === inflight) this.inflight = null;
-        return this.hostOutcome(
-          'crashed',
-          `Cell could not be sent to the kernel; the process was replaced and all bindings were lost: ${safeErrorMessage(error)}`,
-          startedAt,
-          inflight,
-          true,
-        );
-      }
+    }
+    try {
+      // Even when cancellation wins this narrow race, send the cell after its
+      // cancel frame so the kernel can settle the pending ID without executing
+      // the source. Otherwise the host would wait forever for a terminal frame.
+      handle.toKernel.write(execFrame);
+    } catch (error) {
+      clearTimeout(timeout);
+      request.signal?.removeEventListener('abort', onAbort);
+      await this.invalidateKernel('crashed');
+      if (this.inflight === inflight) this.inflight = null;
+      return this.hostOutcome(
+        'crashed',
+        `Cell could not be sent to the kernel; the process was replaced and all bindings were lost: ${safeErrorMessage(error)}`,
+        startedAt,
+        inflight,
+        true,
+      );
     }
 
     const terminal = await settled;
@@ -473,16 +477,33 @@ export class NodeReplKernelManager {
       );
     }
 
-    this.bindingKinds.clear();
-    for (const name of terminal.bindingNames) {
-      this.bindingKinds.set(name, inflight.allowedBindingKinds.get(name)!);
+    if (terminal.status === 'ok' || terminal.status === 'error') {
+      this.bindingKinds.clear();
+      for (const name of terminal.bindingNames) {
+        this.bindingKinds.set(name, inflight.allowedBindingKinds.get(name)!);
+      }
     }
-    const status = terminal.status === 'ok' ? 'ok' : 'error';
+    const status =
+      requestedStopStatus === 'timeout' && terminal.status === 'cancelled'
+        ? 'timeout'
+        : terminal.status;
     const error =
-      terminal.status === 'error'
+      status !== 'ok'
         ? {
-            name: terminal.errorName ?? 'Error',
-            message: terminal.errorMessage ?? 'JavaScript execution failed.',
+            name:
+              terminal.errorName ??
+              (status === 'cancelled'
+                ? 'AbortError'
+                : status === 'timeout'
+                  ? 'TimeoutError'
+                  : 'Error'),
+            message:
+              terminal.errorMessage ??
+              (status === 'cancelled'
+                ? 'Execution was cancelled.'
+                : status === 'timeout'
+                  ? `Execution exceeded the ${effectiveTimeout}ms timeout.`
+                  : 'JavaScript execution failed.'),
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
           }
         : undefined;
@@ -514,7 +535,12 @@ export class NodeReplKernelManager {
 
     const child = spawn(
       process.execPath,
-      ['--no-warnings', '--experimental-vm-modules', resolveKernelPath()],
+      [
+        '--no-warnings',
+        '--experimental-vm-modules',
+        '--experimental-import-meta-resolve',
+        resolveKernelPath(),
+      ],
       {
         cwd: this.options.cwd,
         detached: !IS_WINDOWS,
@@ -705,7 +731,7 @@ export class NodeReplKernelManager {
     }
     if (
       handle.generation !== inflight.generation ||
-      !['ok', 'error'].includes(message.status) ||
+      !['ok', 'error', 'cancelled', 'timeout'].includes(message.status) ||
       !Array.isArray(message.bindingNames) ||
       message.bindingNames.some(
         (name) =>

@@ -15,6 +15,23 @@ export function isActiveToolStatus(
   );
 }
 
+export type TerminalBackgroundAgentStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'canceled';
+
+export function isTerminalBackgroundAgentStatus(
+  status: unknown,
+): status is TerminalBackgroundAgentStatus {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  );
+}
+
 export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
   return agents.some((agent) => isActiveToolStatus(agent.status));
 }
@@ -32,14 +49,20 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
 }
 
 // NOTE: This background-classification heuristic (top-level `agent` call, no
-// explicit `run_in_background`, no `working_dir`, no named teammate) mirrors the
-// core dispatch source of truth and must stay in sync with it:
-//   - packages/core/src/tools/agent/agent.ts
-//     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
-// If the routing rule changes in core, update this copy too. A divergence already
-// exists: `subagentConfig.background` is invisible here.
+// explicit `run_in_background`, no `working_dir`, no named teammate) is the
+// frozen compatibility path for frames lacking `executionMode` (older daemon
+// frames, recordings made before the projection, and current-core
+// blocked-spawn result frames). It must NOT be updated when the routing rule
+// changes in core — the live rule lives in packages/core/src/tools/agent/
+// agent.ts (`backgroundRequested`/`shouldRunInBackground`), and the desktop
+// adapter that used to mirror it has been forked out of this repo. A
+// divergence already exists: `subagentConfig.background` is invisible here.
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
+  if (tool.executionMode) return tool.executionMode === 'background';
+
+  // Older daemon frames and recorded sessions do not include executionMode.
+  // Preserve their existing argument/status inference as a compatibility path.
   const rawOutput = getRecord(tool.rawOutput);
   const name = tool.toolName.toLowerCase();
   const args = tool.args;
@@ -64,6 +87,28 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+export function projectTerminalBackgroundAgentTool(
+  tool: ACPToolCall,
+  status: unknown,
+  endTime?: number,
+): ACPToolCall {
+  if (!isTerminalBackgroundAgentStatus(status)) return tool;
+  const cancelled = status === 'cancelled' || status === 'canceled';
+  return {
+    ...tool,
+    status: status === 'failed' ? 'failed' : 'completed',
+    ...(endTime !== undefined ? { endTime } : {}),
+    ...(cancelled
+      ? {
+          rawOutput: {
+            ...(getRecord(tool.rawOutput) ?? {}),
+            status: 'cancelled',
+          },
+        }
+      : {}),
+  };
 }
 
 const BACKGROUND_SHELL_NAMES = new Set([

@@ -1,0 +1,37 @@
+{
+  "name": "@qwen-code/external-context-mem0",
+  "version": "0.22.3",
+  "description": "Configurable Mem0-compatible External Context Extension",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "integrations/external-context-mem0"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run clean && esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/main.js",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "eslint src",
+    "test": "vitest run --config vitest.config.ts",
+    "test:ci": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist/main.js",
+    "schemas",
+    "qwen-extension.json",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.4.5",
+    "vitest": "^3.2.4",
+    "zod": "^3.25.0"
+  }
+}

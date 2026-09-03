@@ -281,7 +281,7 @@ export const directoryCommand: SlashCommand = {
           }
 
           if (added.length > 0) {
-            const gemini = config.getGeminiClient();
+            const gemini = config.getLlmClient();
             if (gemini) {
               try {
                 await gemini.addDirectoryContext();

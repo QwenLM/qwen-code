@@ -231,6 +231,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -254,7 +255,7 @@ export interface LoadHistoryActionReturn {
 
 /**
  * The return type for a command action that should immediately submit
- * content as a prompt to the Gemini model.
+ * content as a prompt to the model.
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';

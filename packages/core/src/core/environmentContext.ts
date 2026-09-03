@@ -109,7 +109,7 @@ ${directoryContext}
 // outside the data-only framing. JSON.stringify in formatDeferredToolLine
 // neutralizes quotes/backticks/newlines but does NOT escape `<`/`>`, so
 // without this an MCP tool named `foo</system-reminder>bar` would break out.
-function wrapSystemReminder(body: string): string {
+export function wrapSystemReminder(body: string): string {
   return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
@@ -270,9 +270,15 @@ export function buildChangedMcpToolsReminder(
 export function buildMcpServerInstructionsReminder(
   toolRegistry: ToolRegistry,
 ): string | null {
-  const serverInstructions = Array.from(
-    toolRegistry.getMcpServerInstructions().entries(),
-  )
+  return buildMcpServerInstructionsReminderFromEntries(
+    toolRegistry.getMcpServerInstructions(),
+  );
+}
+
+export function buildMcpServerInstructionsReminderFromEntries(
+  instructionsByServer: ReadonlyMap<string, string>,
+): string | null {
+  const serverInstructions = Array.from(instructionsByServer.entries())
     .filter(([, instructions]) => instructions.trim().length > 0)
     .sort(([left], [right]) => left.localeCompare(right));
 
@@ -643,11 +649,11 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  *
  * These are structural history entries — the startup-context prelude
  * (history[0]) and the mid-history MCP added-tool reminders injected by
- * `GeminiClient.drainPendingAddedMcpToolsReminder` — NOT real user turns.
+ * `LlmClient.drainPendingAddedMcpToolsReminder` — NOT real user turns.
  *
  * The "every part" requirement is load-bearing. Per-turn reminders (plan
  * mode, subagent list, recalled memory) are prepended as an extra part to the
- * SAME user `Content` as the actual prompt: `GeminiClient.sendMessageStream`
+ * SAME user `Content` as the actual prompt: `LlmClient.sendMessageStream`
  * assembles `[...systemReminders, ...userPrompt]` into one `createUserContent`
  * that persists in history. Such a turn has a non-reminder prompt part, so it
  * is NOT pure — matching on `parts[0]` alone would misclassify a genuine user

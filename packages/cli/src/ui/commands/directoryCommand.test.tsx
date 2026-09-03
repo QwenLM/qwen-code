@@ -76,7 +76,7 @@ describe('directoryCommand', () => {
     mockConfig = {
       getWorkspaceContext: () => mockWorkspaceContext,
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         addDirectoryContext: vi.fn(),
       }),
       getWorkingDir: () => '/test/dir',
@@ -450,11 +450,11 @@ describe('directoryCommand', () => {
     });
 
     it('should warn when gemini.addDirectoryContext throws', async () => {
-      vi.mocked(mockConfig.getGeminiClient).mockReturnValue({
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue({
         addDirectoryContext: vi
           .fn()
           .mockRejectedValue(new Error('gemini unavailable')),
-      } as unknown as ReturnType<typeof mockConfig.getGeminiClient>);
+      } as unknown as ReturnType<typeof mockConfig.getLlmClient>);
       const newPath = path.normalize('/home/user/new-project');
       if (!addCommand?.action) throw new Error('No action');
       const result = await addCommand.action(mockContext, newPath);

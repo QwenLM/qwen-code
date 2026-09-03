@@ -16,15 +16,25 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   ApprovalMode,
+  buildDeliveryStatusFrame,
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
+  trackSentPeerMessageForTest,
+  type InboundPolicy,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
-import { MAX_ACCEPTED_BACKLOG, PeerMessaging } from './peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  MESSAGING_SOCKET_ENV,
+  MESSAGING_TOKEN_ENV,
+  PeerMessaging,
+  type PeerQueuedDelivery,
+} from './peer-messaging.js';
 
 // Holds the inbox's post-listen socket chmod, keeping startPeerInbox
 // pending while the socket already accepts connections.
@@ -50,6 +60,23 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 const isWindows = process.platform === 'win32';
 
+/**
+ * Injected through the `ipcToken` seam so every staged sender — including
+ * one racing the bind window, where the generated token would not be
+ * observable yet — can authenticate to the inbox under test.
+ */
+const TEST_TOKEN = 'test-inbox-token';
+/** The token children get; see `childToken` on PeerMessagingOptions. */
+const TEST_CHILD_TOKEN = 'test-child-token';
+
+function send(
+  socketPath: string,
+  frame: PeerFrame,
+  options: { authToken?: string } = { authToken: TEST_TOKEN },
+): Promise<void> {
+  return sendPeerFrame(socketPath, frame, options);
+}
+
 let tmpDir: string;
 let messaging: PeerMessaging | null = null;
 /** Stands in for the peer that sent us something, to collect receipts. */
@@ -62,6 +89,8 @@ beforeEach(async () => {
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
+  // The ledger is a module singleton shared by every test in this file.
+  resetSentPeerMessagesForTest();
 });
 
 afterEach(async () => {
@@ -88,6 +117,15 @@ async function startSenderInbox(): Promise<PeerInbox> {
 
 async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
+  extra: {
+    getSessionId?: () => string;
+    settleSentMessage?: (
+      msgId: string,
+      status: string,
+    ) => { address: string; previous: 'pending' | 'held' } | undefined;
+    reassertSessionRecord?: () => Promise<void>;
+    getPolicySetting?: () => InboundPolicy | undefined;
+  } = {},
 ): Promise<{
   messaging: PeerMessaging;
   submitted: Array<{ modelText: string; displayText: string }>;
@@ -98,6 +136,9 @@ async function start(
     getApprovalMode: () => mode,
     getPolicySetting: () => undefined,
     updateSessionRegistryIpcPath: async () => {},
+    ipcToken: TEST_TOKEN,
+    childToken: TEST_CHILD_TOKEN,
+    ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
   messaging = started;
@@ -111,7 +152,7 @@ async function start(
 describe.skipIf(isWindows)('PeerMessaging', () => {
   it('delivers an accepted message wrapped in an envelope', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
-    await sendPeerFrame(
+    await send(
       m.socketPath!,
       buildUserFrame({
         content: 'check the tests over there',
@@ -130,9 +171,388 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted[0].displayText).toContain('app-ab');
   });
 
+  it('surfaces a receipt for a message this session sent', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: (msgId) =>
+        msgId === 'sent-0001'
+          ? {
+              address: 'docs-cd [ab12cd]',
+              previous: 'pending',
+            }
+          : undefined,
+    });
+    const seen: Array<{ status: string; address: string; origMsgId: string }> =
+      [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([
+      {
+        status: 'held',
+        address: 'docs-cd [ab12cd]',
+        origMsgId: 'sent-0001',
+        previous: 'pending',
+      },
+    ]);
+  });
+
+  it('drops a receipt the ledger does not settle (unknown id, or a repeat)', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => undefined,
+    });
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'denied',
+        origMsgId: 'forged-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
+  it('settles receipts through the real ledger when none is injected', async () => {
+    // Production passes no settleSentMessage, so the default
+    // settleSentPeerMessage runs — a path every other receipt test stubs
+    // out. The ledger's own outcomes are covered in peer-send.test.ts;
+    // what needs pinning here is that the default is wired at all, so an
+    // id this session never sent settles to nothing and the frame is
+    // dropped rather than announced or thrown on.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'denied',
+        origMsgId: 'never-sent-by-this-session',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
+  it('surfaces a real-ledger receipt with the address the send recorded', async () => {
+    // The case above only proves the default drops what it should. A
+    // default swapped for a no-op returning undefined passes it just as
+    // happily — and in production that silently loses every receipt, since
+    // `startInteractiveUI` injects no `settleSentMessage`. This drives the
+    // other direction through the same unstubbed default: an id the real
+    // ledger holds must come back out of `onReceipt` carrying the ledger's
+    // own `address` and `previous`, neither of which the frame supplies.
+    trackSentPeerMessageForTest('sent-real-0001', 'docs-cd [ab12cd]');
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-real-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([
+      {
+        status: 'held',
+        address: 'docs-cd [ab12cd]',
+        origMsgId: 'sent-real-0001',
+        previous: 'pending',
+      },
+    ]);
+  });
+
+  it('keeps delivering receipts when one listener throws', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        previous: 'pending',
+      }),
+    });
+    const seen: unknown[] = [];
+    m.onReceipt(() => {
+      throw new Error('listener bug');
+    });
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({ status: 'expired', origMsgId: 'sent-0002' }),
+    );
+    await settle();
+
+    expect(seen).toHaveLength(1);
+  });
+
+  it('refuses a message pinned to another session id, with a receipt', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    const frame = buildUserFrame({
+      content: 'meant for whoever had this pid before',
+      from: sender.socketPath,
+      toSessionId: 'session-before',
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: 'control',
+      status: 'misaddressed',
+      origMsgId: frame.msgId,
+      from: m.socketPath,
+    });
+  });
+
+  it('admits a pinned message when it has no session id to judge it against', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+    await send(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'hello',
+        from: '/tmp/peer.sock',
+        toSessionId: 'some-session',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('re-asserts its registry record when a pinned frame misses', async () => {
+    const reassert = vi.fn().mockResolvedValue(undefined);
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+      reassertSessionRecord: reassert,
+    });
+    await send(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'stale',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-before',
+      }),
+    );
+    await settle();
+    expect(reassert).toHaveBeenCalledTimes(1);
+  });
+
+  it('judges a frame that arrives before bind completes against the pin too', async () => {
+    // startPeerInbox resolves only after its post-listen chmod; frames
+    // dispatched in that window must already see the session id.
+    // The sender inbox first, so its own chmods do not race for the
+    // held slot; the hold engages on the inbox's post-listen chmod.
+    const sender = await startSenderInbox();
+    chmodControl.calls = 0;
+    chmodControl.holdSocketChmod = true;
+    const submitted: string[] = [];
+    const starting = PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => 'session-now',
+    });
+    // Wait until the listener exists and its chmod is being held.
+    for (let i = 0; i < 100 && chmodControl.release === null; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (chmodControl.release === null) throw new Error('chmod hold missed');
+    const frame = buildUserFrame({
+      content: 'early and misaddressed',
+      from: sender.socketPath,
+      toSessionId: 'session-before',
+    });
+    await send(path.join(tmpDir, 'socks', 'self.sock'), frame);
+    await settle();
+    chmodControl.release?.();
+    const started = await starting;
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(started.getHeld()).toHaveLength(0);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: 'control',
+      status: 'misaddressed',
+      origMsgId: frame.msgId,
+    });
+  });
+
+  it('admits a message pinned to its own session id', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    await send(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'hello',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-now',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('admits an unpinned message from an older sender', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    await send(
+      m.socketPath!,
+      buildUserFrame({ content: 'hello', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('judges the pin against the id this session holds now, not at start', async () => {
+    let current = 'session-a';
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => current,
+    });
+    current = 'session-b';
+    await send(
+      m.socketPath!,
+      buildUserFrame({
+        content: 'after /clear',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-b',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+  });
+
+  it('drops a held frame when the session id swaps before reevaluation', async () => {
+    const sender = await startSenderInbox();
+    let mode = ApprovalMode.YOLO;
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'held before /clear',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, frame);
+    await settle();
+    expect(started.getHeld()).toHaveLength(1);
+
+    current = 'session-b';
+    mode = ApprovalMode.DEFAULT;
+    expect(started.reevaluate('approval-mode-changed')).toBe(0);
+    expect(started.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .filter((receipt) => receipt.origMsgId === frame.msgId)
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('drops a queued envelope whose pin the session outgrew at drain', async () => {
+    const sender = await startSenderInbox();
+    let current = 'session-a';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => current,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+    const frame = buildUserFrame({
+      content: 'queued before /clear',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, frame);
+    await settle();
+    expect(queued).toEqual([
+      {
+        msgId: frame.msgId,
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      },
+    ]);
+
+    current = 'session-b';
+    expect(started.drainQueuedFrame(queued[0])).toBe(false);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['delivered', 'misaddressed']);
+  });
+
+  it('drains a matching or unpinned queued envelope', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-a',
+    });
+    expect(m.drainQueuedFrame({ msgId: 'm1', toSessionId: 'session-a' })).toBe(
+      true,
+    );
+    expect(m.drainQueuedFrame({ msgId: 'm2' })).toBe(true);
+    expect(m.drainQueuedFrame(undefined)).toBe(true);
+  });
+
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
-    await sendPeerFrame(
+    await send(
       m.socketPath!,
       buildUserFrame({ content: 'run the deploy', from: '/tmp/peer.sock' }),
     );
@@ -145,7 +565,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
   it('releases a held message when approved', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
-    await sendPeerFrame(
+    await send(
       m.socketPath!,
       buildUserFrame({ content: 'run the deploy', from: '/tmp/peer.sock' }),
     );
@@ -165,12 +585,13 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
 
     await vi.waitFor(() => {
       expect(fsSync.existsSync(socketPath)).toBe(true);
     });
-    await sendPeerFrame(
+    await send(
       socketPath,
       buildUserFrame({ content: 'early frame', from: '/tmp/peer.sock' }),
     );
@@ -196,11 +617,12 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
 
-    await sendPeerFrame(
+    await send(
       started.socketPath!,
       buildUserFrame({ content: 'early bird', from: '/tmp/peer.sock' }),
     );
@@ -213,6 +635,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     });
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toContain('early bird');
+    expect(submitted[0]).not.toContain('origin="own-process"');
   });
 
   it('sends a delivery receipt back to the sender', async () => {
@@ -223,7 +646,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       content: 'hi',
       from: sender.socketPath,
     });
-    await sendPeerFrame(m.socketPath!, frame);
+    await send(m.socketPath!, frame);
     await settle();
 
     expect(receipts).toHaveLength(1);
@@ -239,7 +662,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.YOLO);
 
     const frame = buildUserFrame({ content: 'hi', from: sender.socketPath });
-    await sendPeerFrame(m.socketPath!, frame);
+    await send(m.socketPath!, frame);
     await settle();
     expect(receipts.map((r) => (r as { status: string }).status)).toEqual([
       'held',
@@ -258,7 +681,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.YOLO);
 
     const frame = buildUserFrame({ content: 'hi', from: sender.socketPath });
-    await sendPeerFrame(m.socketPath!, frame);
+    await send(m.socketPath!, frame);
     await settle();
 
     await m.close();
@@ -274,7 +697,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
   it('does not try to answer a sender that gave no reply address', async () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT);
     await expect(
-      sendPeerFrame(m.socketPath!, buildUserFrame({ content: 'anonymous' })),
+      send(m.socketPath!, buildUserFrame({ content: 'anonymous' })),
     ).resolves.toBeUndefined();
     await settle();
     expect(receipts).toHaveLength(0);
@@ -282,7 +705,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
   it('ignores an inbound control frame instead of treating it as a message', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
-    await sendPeerFrame(m.socketPath!, {
+    await send(m.socketPath!, {
       msgV: 1,
       msgId: 'c1',
       type: 'control',
@@ -302,6 +725,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -310,7 +734,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       return true;
     });
 
-    await sendPeerFrame(
+    await send(
       started.socketPath!,
       buildUserFrame({ content: 'later', from: '/tmp/peer.sock' }),
     );
@@ -326,7 +750,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // start() binds the socket before it returns, so a hold can park
     // before the UI subscribes; the subscriber must still hear about it.
     const { messaging: m } = await start(ApprovalMode.YOLO);
-    await sendPeerFrame(
+    await send(
       m.socketPath!,
       buildUserFrame({ content: 'early hold', from: '/tmp/peer.sock' }),
     );
@@ -348,6 +772,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -363,7 +788,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     const overflow = 5;
     for (let i = 0; i < MAX_ACCEPTED_BACKLOG + overflow; i++) {
-      await sendPeerFrame(
+      await send(
         started.socketPath!,
         buildUserFrame({ content: `flood ${i}`, from: sender.socketPath }),
       );
@@ -389,13 +814,14 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
 
     const overflow = 5;
     for (let i = 0; i < MAX_ACCEPTED_BACKLOG + overflow; i++) {
-      await sendPeerFrame(
+      await send(
         started.socketPath!,
         buildUserFrame({ content: `early ${i}`, from: sender.socketPath }),
       );
@@ -434,7 +860,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     const heldCount = 40;
     for (let i = 0; i < heldCount; i++) {
-      await sendPeerFrame(
+      await send(
         m.socketPath!,
         buildUserFrame({ content: `hold ${i}`, from: sender.socketPath }),
       );
@@ -456,6 +882,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -465,7 +892,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       content: 'early bird',
       from: sender.socketPath,
     });
-    await sendPeerFrame(started.socketPath!, frame);
+    await send(started.socketPath!, frame);
     await settle();
     expect(receipts.map((r) => (r as { status: string }).status)).toEqual([
       'delivered',
@@ -495,6 +922,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -514,8 +942,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       content: 'waiting',
       from: sender.socketPath,
     });
-    await sendPeerFrame(started.socketPath!, consumed);
-    await sendPeerFrame(started.socketPath!, waiting);
+    await send(started.socketPath!, consumed);
+    await send(started.socketPath!, waiting);
     await settle();
     expect(queued).toHaveLength(2);
 
@@ -543,6 +971,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -551,7 +980,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       buildUserFrame({ content: `mixed ${i}`, from: sender.socketPath }),
     );
     for (const frame of frames) {
-      await sendPeerFrame(started.socketPath!, frame);
+      await send(started.socketPath!, frame);
     }
     await settle();
 
@@ -588,6 +1017,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -597,13 +1027,13 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       content: 'BODY-1',
       from: sender.socketPath,
     });
-    await sendPeerFrame(started.socketPath!, target);
+    await send(started.socketPath!, target);
     await settle();
     started.recordHeldListing(started.getHeld());
 
     // Evict the target with newer holds, then release them again.
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
-      await sendPeerFrame(
+      await send(
         started.socketPath!,
         buildUserFrame({ content: `evict ${i}`, from: sender.socketPath }),
       );
@@ -614,7 +1044,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     // Prune the target's tombstone with MAX_SETTLED_IDS fresh settlements.
     for (let i = 0; i < MAX_SETTLED_IDS; i++) {
-      await sendPeerFrame(
+      await send(
         started.socketPath!,
         buildUserFrame({ content: `churn ${i}`, from: sender.socketPath }),
       );
@@ -622,7 +1052,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     // The id is re-admittable now; ids and order match the old listing.
     mode = ApprovalMode.YOLO;
-    await sendPeerFrame(started.socketPath!, {
+    await send(started.socketPath!, {
       ...target,
       message: { role: 'user', content: 'BODY-2' },
     });
@@ -636,5 +1066,313 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await m.close();
     await expect(m.close()).resolves.toBeUndefined();
     messaging = null;
+  });
+});
+
+describe.skipIf(isWindows)('inbox auth wiring', () => {
+  it('drops an unauthenticated frame before the gate sees it', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+    await send(
+      m.socketPath!,
+      buildUserFrame({ content: 'no token', from: '/tmp/peer.sock' }),
+      {},
+    ).catch(() => {
+      // The inbox may reset the connection mid-write.
+    });
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
+  });
+
+  it('publishes the token alongside the socket path, and clears both', async () => {
+    const published: Array<[string | undefined, string | undefined]> = [];
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async (ipcPath, ipcToken) => {
+        published.push([ipcPath, ipcToken]);
+      },
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    expect(published).toEqual([[started.socketPath, TEST_TOKEN]]);
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBe(started.socketPath);
+    // Children are handed the child token, never the published one.
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBe(TEST_CHILD_TOKEN);
+
+    await started.close();
+    messaging = null;
+    expect(published[1]).toEqual([undefined, undefined]);
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBeUndefined();
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
+  });
+
+  it('drops an inherited address and token when the inbox never binds', async () => {
+    // A session that binds no inbox of its own must not hand an ancestor's
+    // capability to its children: a hook following the documented injection
+    // pattern would authenticate to the ANCESTOR's inbox and land its
+    // message in the wrong session's context, reporting success.
+    process.env[MESSAGING_SOCKET_ENV] = '/inherited/ancestor.sock';
+    process.env[MESSAGING_TOKEN_ENV] = 'inherited-ancestor-token';
+
+    // A regular file where the socket's parent directory should be: the
+    // inbox cannot create the directory, so it never binds.
+    const blocker = path.join(tmpDir, 'not-a-dir');
+    await fs.writeFile(blocker, '');
+
+    const started = await PeerMessaging.start({
+      socketPath: path.join(blocker, 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+    });
+
+    expect(started).toBeNull();
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBeUndefined();
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
+  });
+
+  it('authenticates receipts with the reply token the frame offered', async () => {
+    // The sender's inbox requires its own token; a receipt can only land
+    // if it carries the replyToken from the original frame.
+    const SENDER_TOKEN = 'sender-inbox-token';
+    const sender = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
+      requiredToken: SENDER_TOKEN,
+      onFrame: (frame) => receipts.push(frame),
+    });
+    if (!sender) throw new Error('sender inbox failed to start');
+    senderInbox = sender;
+
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => 'session-now',
+    });
+    const withToken = buildUserFrame({
+      content: 'stale pin',
+      from: sender.socketPath,
+      replyToken: SENDER_TOKEN,
+      toSessionId: 'session-before',
+    });
+    await send(m.socketPath!, withToken);
+    await settle();
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: 'control',
+      status: 'misaddressed',
+      origMsgId: withToken.msgId,
+    });
+
+    // Without a replyToken the receipt bounces off the sender's own auth.
+    const withoutToken = buildUserFrame({
+      content: 'stale pin, old sender',
+      from: sender.socketPath,
+      toSessionId: 'session-before',
+    });
+    await send(m.socketPath!, withoutToken);
+    await settle();
+    expect(receipts).toHaveLength(1);
+  });
+
+  it('authenticates a held receipt, not only the misaddressed one', async () => {
+    // The gate's own reportStatus path — held/denied/delivered — is the one
+    // a real peer meets first. Without the replyToken the hold signal never
+    // reaches the sender's token-required inbox and its ledger sits on
+    // 'pending' forever, with nothing to show the user.
+    const SENDER_TOKEN = 'held-sender-token';
+    const sender = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
+      requiredToken: SENDER_TOKEN,
+      onFrame: (frame) => receipts.push(frame),
+    });
+    if (!sender) throw new Error('sender inbox failed to start');
+    senderInbox = sender;
+
+    // Policy 'hold' parks the message and reports it back.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'hold',
+    });
+    const frame = buildUserFrame({
+      content: 'please review',
+      from: sender.socketPath,
+      replyToken: SENDER_TOKEN,
+    });
+    await send(m.socketPath!, frame);
+    await settle();
+
+    expect(m.getHeld()).toHaveLength(1);
+    expect(receipts).toMatchObject([
+      { type: 'control', status: 'held', origMsgId: frame.msgId },
+    ]);
+  });
+
+  it('generates a 64-hex inbox token when none is injected', async () => {
+    // Every other test injects the token through the seam, so the default
+    // is the one branch that ships to users: a constant or truncated value
+    // here would hand every session the same guessable capability.
+    const published: Array<[string | undefined, string | undefined]> = [];
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'generated.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async (ipcPath, ipcToken) => {
+        published.push([ipcPath, ipcToken]);
+      },
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const token = published[0][1];
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    const childToken = process.env[MESSAGING_TOKEN_ENV];
+    expect(childToken).toMatch(/^[0-9a-f]{64}$/);
+    // Two independent draws: a child must not be able to pass as a peer.
+    expect(childToken).not.toBe(token);
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+
+    // Both generated capabilities are the ones the inbox actually accepts.
+    await sendPeerFrame(
+      started.socketPath!,
+      buildUserFrame({ content: 'with the generated token' }),
+      { authToken: token },
+    );
+    await sendPeerFrame(
+      started.socketPath!,
+      buildUserFrame({ content: 'with the generated child token' }),
+      { authToken: childToken },
+    );
+    await settle();
+    expect(submitted).toHaveLength(2);
+    expect(submitted[0]).not.toContain('origin="own-process"');
+    expect(submitted[1]).toContain('origin="own-process"');
+  });
+
+  it("delivers a child-token message the parity rule would hold, as the session's own", async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
+    await send(m.socketPath!, buildUserFrame({ content: 'build finished' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    expect(m.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain(
+      '<cross_session_message from="own process" origin="own-process">',
+    );
+    expect(submitted[0].modelText).not.toContain('another Qwen Code session');
+    expect(submitted[0].displayText).toBe(
+      'Message from a process this session started (own process): build finished',
+    );
+  });
+
+  it('holds the same frame when it arrives on the published token', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
+    await send(
+      m.socketPath!,
+      buildUserFrame({ content: 'build finished', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(1);
+    expect(m.getHeld()[0].selfSent).toBeUndefined();
+  });
+
+  it('parks a child-token message under an explicit hold', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'hold',
+    });
+    await send(m.socketPath!, buildUserFrame({ content: 'build finished' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ selfSent: true }]);
+    // Released as itself: the envelope still says whose process it was.
+    expect(m.decide(m.getHeld()[0].frame.msgId, 'approve')).toBe('done');
+    expect(submitted[0].modelText).toContain('origin="own-process"');
+  });
+
+  it("keeps a child-token message's origin across the pre-submit buffer", async () => {
+    // start() wires the submit function at once; here it is withheld so
+    // the message waits in the buffer, and the origin must survive the wait.
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    await send(started.socketPath!, buildUserFrame({ content: 'early' }), {
+      authToken: TEST_CHILD_TOKEN,
+    });
+    await settle();
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain('origin="own-process"');
+  });
+
+  it('keeps both origins when a later arrival retries a partial flush', async () => {
+    const policy = { value: undefined as InboundPolicy | undefined };
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => policy.value,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'buffered child' }),
+      { authToken: TEST_CHILD_TOKEN },
+    );
+    await settle();
+    policy.value = 'accept';
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'buffered peer', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    const submitted: string[] = [];
+    let refuseOnce = true;
+    started.setSubmitFn((modelText) => {
+      if (refuseOnce) {
+        refuseOnce = false;
+        return false;
+      }
+      submitted.push(modelText);
+      return true;
+    });
+
+    await send(
+      started.socketPath!,
+      buildUserFrame({ content: 'trigger drain', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(3);
+    expect(submitted[0]).toContain('buffered child');
+    expect(submitted[0]).toContain('origin="own-process"');
+    expect(submitted[1]).toContain('buffered peer');
+    expect(submitted[1]).not.toContain('origin="own-process"');
   });
 });

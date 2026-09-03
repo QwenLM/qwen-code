@@ -52,6 +52,7 @@ export default tseslint.config(
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
       'packages/desktop-shell/runtime/**',
       'packages/desktop-shell/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
@@ -302,6 +303,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ['packages/web-shell/client/daemon/**/*.{ts,tsx}'],
+    rules: {
+      'no-console': ['error', { allow: ['debug', 'warn', 'error'] }],
+    },
+  },
+  {
     files: [
       'packages/web-shell/client/**/*.test.{ts,tsx}',
       'packages/web-shell/client/test/**/*.{ts,tsx}',
@@ -468,6 +475,26 @@ export default tseslint.config(
       globals: {
         ...globals.browser,
       },
+    },
+  },
+
+  // The VS Code companion renders through @qwen-code/web-shell; the legacy
+  // @qwen-code/webui surface must not re-enter the extension bundle.
+  {
+    files: ['packages/vscode-ide-companion/src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@qwen-code/webui', '@qwen-code/webui/*'],
+              message:
+                'vscode-ide-companion must render through @qwen-code/web-shell; do not re-introduce @qwen-code/webui.',
+            },
+          ],
+        },
+      ],
     },
   },
 

@@ -128,6 +128,34 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
+  it('uses a tunable max for every Vitest pool on ECS', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const testStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test'),
+      'Run tests and generate reports',
+    );
+
+    for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+      );
+    }
+    for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+      expect(testStep).toContain(
+        `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+      );
+    }
+    // The latency-budget skip shares this fleet predicate; if the line is
+    // dropped, renamed, or its expression altered, every millisecond budget
+    // silently dies on every lane while the helper tests stay green.
+    expect(testStep).toContain(
+      `QWEN_SKIP_LATENCY_BUDGETS: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+    );
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
@@ -145,6 +173,14 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
+        './qwen-live-m4-acp-call.test.ts',
+        './qwen-live-m4-acp-permission.test.ts',
+        './qwen-live-m4-acp-steering.test.ts',
+        './qwen-live-m4-acp-multibackend.test.ts',
+        './qwen-live-m1-call.test.ts',
+        './qwen-live-m2-inject.test.ts',
+        './qwen-live-m2-permission.test.ts',
+        './qwen-live-m2-steering.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -159,7 +195,15 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('runs the no-AK integration script in the required Linux gate only', () => {
+  it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
+    // The gate ran as a step inside the Ubuntu `test` job from #8313 until
+    // it moved out: a step is invisible to anything that reads check names,
+    // and the PR review bot ruled from the (merge_group-only, hence skipped
+    // on every PR) `Integration Tests (CLI, No Sandbox)` check that a changed
+    // integration test "never ran" while this gate had executed it and
+    // passed inside `test` (#9895 round 15). A check of its own carries the
+    // fact in its name. The env isolation and the two-event condition are
+    // the gate's contract and must survive the move unchanged.
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -167,27 +211,164 @@ describe('no-AK integration CI wiring', () => {
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
+    const classifyJob = getWorkflowJob(workflow, 'classify_pr');
     const permissionsIndex = workflow.indexOf('\npermissions:');
     expect(permissionsIndex).toBeGreaterThan(0);
     const workflowTriggers = workflow.slice(0, permissionsIndex);
-    const gateStepMarker =
-      "      - name: 'Run required no-AK integration gate'";
-    const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
-    expect(gateStepStart).toBeGreaterThanOrEqual(0);
-    const nextStepIndex = ubuntuJob.indexOf(
-      '\n      - name:',
-      gateStepStart + gateStepMarker.length,
-    );
-    expect(nextStepIndex).toBeGreaterThan(0);
-    const gateStep = ubuntuJob.slice(gateStepStart, nextStepIndex);
-
-    expect(workflow).not.toContain('  integration_no_ak:');
-    expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     expect(workflowTriggers).toContain('\n  pull_request:\n');
     expect(workflowTriggers).toContain('\n  merge_group:\n');
 
-    expect(gateStep).toContain(
+    expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
+    for (const [name, job] of Object.entries({
+      test: ubuntuJob,
+      test_macos: macosJob,
+      test_windows: windowsJob,
+    })) {
+      expect(job, `${name} must not run the no-AK script`).not.toContain(
+        NO_AK_SCRIPT,
+      );
+    }
+
+    expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, No Sandbox)'",
+    );
+    expect(gateJob).toContain("    needs: 'classify_pr'");
+    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
+    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    const jobIf = gateJob
+      .split('\n')
+      .find((line) => line.startsWith('    if:'));
+    expect(jobIf).toContain("needs.classify_pr.outputs.skip_ci != 'true'");
+    expect(jobIf).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+    );
+    // PR head ref on pull_request, queue head on merge_group — the same
+    // shape the Ubuntu gate uses, so this check tests the pushed tree, not
+    // the lagging merge ref.
+    expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
+      "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    );
+    const trustedClassifierCheckout = getWorkflowStep(
+      classifyJob,
+      'Checkout trusted CI classifier',
+    );
+    expect(classifyJob).toContain(
+      "ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'",
+    );
+    // The classifier wrapper calls `repos/{}/pulls/{}/files` and
+    // `repos/{}/pulls/{}`, so the job token needs `pull-requests` scope:
+    // the workflow-level grant lists none, and without a job-level block a
+    // same-repo PR's file listing 403s and classification falls back to
+    // `full` — a regression against the base lane that classified under
+    // `pull-requests: 'write'` (#10548 verify F1).
+    expect(classifyJob).toContain(
+      "    permissions:\n      contents: 'read'\n      pull-requests: 'read'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "repository: '${{ github.repository }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "ref: '${{ github.event.pull_request.base.sha }}'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "path: 'trusted-ci-classifier'",
+    );
+    expect(trustedClassifierCheckout).toContain(
+      "sparse-checkout: '.github/scripts/ci'",
+    );
+    expect(trustedClassifierCheckout).toContain('persist-credentials: false');
+    expect(trustedClassifierCheckout).not.toContain('head.sha');
+
+    const trustedClassifier = getWorkflowStep(
+      classifyJob,
+      'Classify CI profile from trusted base',
+    );
+    expect(trustedClassifier).toContain(
+      'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    );
+    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain('profile=full');
+    // The classify_pr job output resolves against the step ID: renaming it
+    // empties the output and every consumer silently falls back to `full` —
+    // fail-safe direction, but a silent perf regression nothing would notice.
+    expect(trustedClassifier).toContain("id: 'ci_profile'");
+    expect(trustedClassifier).toContain(
+      'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(classifyJob).not.toContain('collaborators/${PR_AUTHOR}/permission');
+    expect(classifyJob).not.toContain('CI_BOT_PAT');
+
+    // Both consumers use the profile that was already computed from the
+    // base checkout. Neither may execute a classifier from the PR checkout.
+    for (const profileStep of [
+      getWorkflowStep(ubuntuJob, 'Use trusted CI profile'),
+      getWorkflowStep(gateJob, 'Use trusted CI profile'),
+    ]) {
+      expect(profileStep).toContain("id: 'ci_profile'");
+      expect(profileStep).toContain(
+        "TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'",
+      );
+      expect(profileStep).toContain('profile="${TRUSTED_CI_PROFILE:-full}"');
+      // The allowlist case line and the output write are load-bearing in
+      // the consumers too: dropping the echo empties
+      // steps.ci_profile.outputs.ci_profile, so every downstream profile
+      // gate mis-compares; dropping the case line lets an unexpected
+      // profile value pass through unnormalized.
+      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      expect(profileStep).toContain(
+        'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
+      );
+      // Degraded path (classify_pr failed or was skipped, so the output is
+      // empty) must not log a byte-identical line to a legitimate `full`
+      // classification: the breadcrumb is the only signal that distinguishes a
+      // producer failure from a PR that really is full-profile.
+      expect(profileStep).toContain('if [ -z "${TRUSTED_CI_PROFILE}" ]; then');
+      expect(profileStep).toContain(
+        'echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."',
+      );
+      expect(profileStep).not.toContain('classify-pr-profile.sh');
+      expect(profileStep).not.toContain('GH_TOKEN');
+    }
+    for (const stepName of [
+      'Setup Node.js (hosted)',
+      'Use pre-installed Node.js (self-hosted)',
+      'Disk floor gate (self-hosted)',
+      'Install Dependencies',
+      'Run required no-AK integration gate',
+    ]) {
+      expect(
+        getWorkflowStep(gateJob, stepName),
+        `${stepName} must honour the CI profile`,
+      ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+    }
+
+    const diskFloorGate = getWorkflowStep(
+      gateJob,
+      'Disk floor gate (self-hosted)',
+    );
+    expect(diskFloorGate).toContain(
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(diskFloorGate).toContain(
+      'run: \'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"\'',
+    );
+    expect(diskFloorGate).not.toContain('continue-on-error');
+    expect(diskFloorGate).not.toContain('|| true');
+    expect(diskFloorGate).not.toContain('env:');
+    expect(gateJob.indexOf("id: 'ci_profile'")).toBeLessThan(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
+    );
+    expect(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
+    ).toBeLessThan(gateJob.indexOf("name: 'Install Dependencies'"));
+
+    const gateStep = getWorkflowStep(
+      gateJob,
+      'Run required no-AK integration gate',
     );
     const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
     expect(gateStep).toContain(integrationTypecheckCommand);
@@ -235,12 +416,11 @@ describe('no-AK integration CI wiring', () => {
     ]) {
       expect(gateStep).toContain(`\n          ${key}: ''`);
     }
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
-
-    expect(macosJob).not.toContain(NO_AK_SCRIPT);
-    expect(windowsJob).not.toContain(NO_AK_SCRIPT);
+    for (const job of [ubuntuJob, gateJob]) {
+      expect(job).not.toContain('secrets.OPENAI_API_KEY');
+      expect(job).not.toContain('secrets.OPENAI_BASE_URL');
+      expect(job).not.toContain('secrets.OPENAI_MODEL');
+    }
   });
 
   it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
@@ -253,11 +433,12 @@ describe('no-AK integration CI wiring', () => {
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const integrationJob = getWorkflowJob(workflow, 'integration_cli');
+    const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
     // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
     // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, macosJob, windowsJob]) {
+    for (const job of [ubuntuJob, macosJob, windowsJob, noAkJob]) {
       expect(job).toContain(
         "format('refs/pull/{0}/head', github.event.pull_request.number)",
       );
@@ -301,11 +482,14 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
       web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
       test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
       integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
+      integration_no_ak: getWorkflowStep(noAkJob, GUARD_STEP),
     };
     for (const [jobName, call] of Object.entries(guardCalls)) {
       expect(call, `${jobName} guard must use the shared action`).toContain(
@@ -313,6 +497,11 @@ describe('no-AK integration CI wiring', () => {
       );
     }
     expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    // Byte-identical to test's event-aware shape: the lint lane replicates
+    // the same checkout contract on the same event surface.
+    expect(guardCalls.lint_and_static).toContain(
       'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.web_shell_e2e_smoke).toContain(
@@ -323,6 +512,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+    expect(guardCalls.integration_no_ak).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
 
     // The run conditions are part of the guard's contract: scoping a guard to
@@ -339,6 +531,8 @@ describe('no-AK integration CI wiring', () => {
       "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
     );
     expect(guardCalls.integration_cli).not.toContain('if:');
+    // integration_no_ak likewise gates skip_ci and both events at job level.
+    expect(guardCalls.integration_no_ak).not.toContain('if:');
   });
 
   it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
@@ -498,7 +692,7 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(smokeWorkflow).toContain('npm run test:ci');
     expect(smokeWorkflow).not.toContain(
-      'npm run test:ci --workspaces --if-present --parallel',
+      'npm run test:ci --workspaces --if-present',
     );
     // Same ordering as the gate: autocrlf off before the checkout, the `./`
     // configure action after it.
@@ -618,6 +812,10 @@ describe('no-AK integration CI wiring', () => {
         getWorkflowJob(workflow, 'integration_cli'),
         'Use pre-installed Node.js (self-hosted)',
       ),
+      integration_no_ak: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_no_ak'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
     };
     for (const [jobName, call] of Object.entries(nodeCalls)) {
       expect(call, `${jobName} must use the shared Node preflight`).toContain(
@@ -632,17 +830,9 @@ describe('no-AK integration CI wiring', () => {
         'if: "${{ runner.environment == \'self-hosted\' }}"',
       );
     }
-  });
-
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
+    expect(nodeCalls.integration_no_ak).toContain(
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
     );
-    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
-
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
   });
 
   it('does not install Linux packages on self-hosted Playwright runners', () => {

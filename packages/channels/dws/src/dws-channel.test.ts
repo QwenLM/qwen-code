@@ -7,10 +7,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import process from 'node:process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PairingStore,
   type ChannelAgentBridge,
+  type ChannelBaseOptions,
   type ChannelConfig,
   type Envelope,
 } from '@qwen-code/channel-base';
@@ -21,6 +23,7 @@ import {
   type DwsClientLike,
   type DwsCommandRunner,
   type DwsIdentity,
+  type DwsImMessageResult,
   type DwsImMessage,
   type DwsImSource,
   type DwsImTarget,
@@ -59,6 +62,23 @@ function makeBridge(): ChannelAgentBridge {
     off: vi.fn(),
     emit: vi.fn(),
   } as unknown as ChannelAgentBridge;
+}
+
+function makeChannelMemory(): NonNullable<ChannelBaseOptions['channelMemory']> {
+  return {
+    readChannelMemory: vi.fn().mockResolvedValue(''),
+    listChannelMemoryEntries: vi.fn().mockResolvedValue([]),
+    addChannelMemoryEntries: vi.fn().mockResolvedValue({
+      changed: false,
+      added: [],
+      duplicateIds: [],
+    }),
+    updateChannelMemoryEntry: vi.fn().mockResolvedValue({ changed: false }),
+    removeChannelMemoryEntries: vi
+      .fn()
+      .mockResolvedValue({ changed: false, removed: [] }),
+    clearChannelMemory: vi.fn().mockResolvedValue({ changed: false }),
+  };
 }
 
 function message(
@@ -151,7 +171,7 @@ class FakeSubscription implements DwsEventSubscription {
 
 interface FakeStream {
   source: DwsImSource;
-  onMessage: (message: DwsImMessage) => void | Promise<void>;
+  onMessage: (message: DwsImMessage) => DwsImMessageResult;
   onError: (error: Error) => void;
   subscription: FakeSubscription;
 }
@@ -226,7 +246,7 @@ class FakeDwsClient implements DwsClientLike {
 
   async subscribeToIm(
     source: DwsImSource,
-    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onMessage: (message: DwsImMessage) => DwsImMessageResult,
     onError: (error: Error) => void,
   ): Promise<DwsEventSubscription> {
     const subscription = new FakeSubscription();
@@ -237,7 +257,11 @@ class FakeDwsClient implements DwsClientLike {
   async emit(sourceIndex: number, event: DwsImMessage): Promise<void> {
     const stream = this.streams[sourceIndex];
     if (!stream) throw new Error(`Missing fake stream ${sourceIndex}.`);
-    await stream.onMessage(event);
+    const result = stream.onMessage(event);
+    if (result && 'completed' in result) {
+      await result.admitted;
+      await result.completed;
+    } else await result;
   }
 }
 
@@ -245,6 +269,7 @@ class TestableDwsChannel extends DwsChannel {
   inbound: Envelope[] = [];
   inboundError?: Error;
   inboundHandler?: (envelope: Envelope) => Promise<void>;
+  nextCursorSaveError?: Error;
   responseMessageId?: string;
   responseSenderId?: string;
   responseThreadId?: string;
@@ -253,6 +278,15 @@ class TestableDwsChannel extends DwsChannel {
 
   protected override get todoPollInterval(): number {
     return 0;
+  }
+
+  protected override saveCursor(): void {
+    if (this.nextCursorSaveError) {
+      const error = this.nextCursorSaveError;
+      this.nextCursorSaveError = undefined;
+      throw error;
+    }
+    super.saveCursor();
   }
 
   inboundAttempts = 0;
@@ -280,8 +314,12 @@ class TestableDwsChannel extends DwsChannel {
     await this.pollOnce();
   }
 
-  async respond(chatId: string, text: string): Promise<void> {
-    await this.sendResponseMessage(chatId, text, 'session-1');
+  async respond(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, 'session-1', sourceLabel);
   }
 
   async sendThread(
@@ -316,6 +354,45 @@ class TestableDwsChannel extends DwsChannel {
     return this.cursor.mentionWatermark;
   }
 
+  pendingMessageIds(): string[] {
+    return (this.cursor.pendingMessages ?? []).map(
+      ({ message }) => message.messageId,
+    );
+  }
+
+  seedPendingMessages(count: number, separateConversations = false): void {
+    this.cursor.pendingMessages = Array.from(
+      { length: count },
+      (_unused, index) => ({
+        source: { kind: 'direct' } as const,
+        message: message(
+          'user_im_message_receive_o2o_all',
+          `parked-${index}`,
+          `request ${index}`,
+          {
+            conversationId: separateConversations
+              ? `conversation-capacity-${index}`
+              : 'conversation-capacity',
+          },
+        ),
+      }),
+    );
+    this.saveCursor();
+  }
+
+  releasePendingMessage(conversationId: string, messageId: string): void {
+    const removePendingMessage = (
+      this as unknown as { removePendingMessage(key: string): boolean }
+    ).removePendingMessage.bind(this);
+    removePendingMessage(`${conversationId}\0${messageId}`);
+    this.saveCursor();
+  }
+
+  markPendingMessageProcessed(conversationId: string, messageId: string): void {
+    this.cursor.processedMessages.push(`${conversationId}\0${messageId}`);
+    this.saveCursor();
+  }
+
   resolveSession(): Promise<string> {
     return this.router.resolve(this.name, 'alice', 'doc-1', 'comment-1');
   }
@@ -344,6 +421,48 @@ class TestableDwsChannel extends DwsChannel {
   inboundFailures(): unknown[] {
     return this.cursor.inboundFailures ?? [];
   }
+
+  pendingMessageCapacityWaiterCount(): number {
+    return (
+      this as unknown as {
+        pendingMessageCapacityWaiters: Set<() => void>;
+      }
+    ).pendingMessageCapacityWaiters.size;
+  }
+
+  queuedDirectMessage(key: string): Promise<void> | undefined {
+    return (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.get(key);
+  }
+
+  directConversationTailIds(): string[] {
+    return [
+      ...(
+        this as unknown as {
+          directConversationTails: Map<string, unknown>;
+        }
+      ).directConversationTails.keys(),
+    ];
+  }
+
+  replayDirectDispatchCount(): number {
+    return (
+      this as unknown as {
+        replayDirectDispatches: Map<string, Promise<void>>;
+      }
+    ).replayDirectDispatches.size;
+  }
+
+  replaceQueuedDirectMessage(key: string, task: Promise<void>): void {
+    (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.set(key, task);
+  }
 }
 
 class PolicyDwsChannel extends DwsChannel {
@@ -359,6 +478,24 @@ class PolicyDwsChannel extends DwsChannel {
 
   pendingDocumentNotifications(): unknown[] {
     return this.cursor.pendingDocumentNotifications ?? [];
+  }
+
+  queuedDirectMessageCount(): number {
+    return (
+      this as unknown as {
+        queuedDirectMessages: Map<string, Promise<void>>;
+      }
+    ).queuedDirectMessages.size;
+  }
+
+  directConversationTailIds(): string[] {
+    return [
+      ...(
+        this as unknown as {
+          directConversationTails: Map<string, unknown>;
+        }
+      ).directConversationTails.keys(),
+    ];
   }
 
   documentSetSize(): number {
@@ -437,9 +574,10 @@ async function readyPolicyChannel(
   client: FakeDwsClient,
   config = makeConfig(),
   name = 'policy-dws',
+  options?: ChannelBaseOptions,
 ): Promise<{ channel: PolicyDwsChannel; bridge: ChannelAgentBridge }> {
   const bridge = makeBridge();
-  const channel = new PolicyDwsChannel(name, config, bridge, undefined, client);
+  const channel = new PolicyDwsChannel(name, config, bridge, options, client);
   channels.push(channel);
   await channel.connect();
   return { channel, bridge };
@@ -1101,6 +1239,95 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('lets polling recover a stale replayed direct message', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const replay = message(
+        'user_im_message_receive_o2o_all',
+        'replayed-direct',
+        'stale direct request',
+        { eventTime: Date.now() - 60_000 },
+      );
+      client.directMessages = [replay];
+
+      await client.emit(1, replay);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('parked a stale direct message'),
+      );
+      await channel.poll();
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'cid-1',
+          messageId: 'replayed-direct',
+          text: 'stale direct request',
+        }),
+      ]);
+
+      await channel.poll();
+      expect(channel.inbound).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  // R3-2: the stale-replay rescue is deliberately direct-only; every other
+  // source is still marked processed and dropped here. The mark is what keeps
+  // a replayed mention from becoming a fresh turn after a restart: the
+  // persisted mention watermark re-opens the overlap window over the downtime
+  // gap — which can lie entirely before the new connection's drop boundary —
+  // so history polling re-fetches the replay and only the mark drops it.
+  it('still drops a stale replayed non-direct message', async () => {
+    vi.useFakeTimers();
+    try {
+      const name = 'stale-at-replay-dws';
+      const firstClient = new FakeDwsClient();
+      const first = await readyChannel(firstClient, makeConfig(), name);
+      firstClient.mentionedMessages = [
+        message('user_im_message_receive_at', 'seed-mention', '@Qwen seed'),
+      ];
+      await first.poll();
+      expect(first.inbound).toHaveLength(1);
+      first.disconnect();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const secondClient = new FakeDwsClient();
+      const second = await readyChannel(secondClient, makeConfig(), name);
+      const replay = message(
+        'user_im_message_receive_at',
+        'stale-at-replay',
+        '@Qwen stale mention',
+        { eventTime: Date.now() - 15_000 },
+      );
+      secondClient.mentionedMessages = [replay];
+      const windows: Array<[number, number]> = [];
+      const listMentionedMessages =
+        secondClient.listMentionedMessages.getMockImplementation();
+      secondClient.listMentionedMessages.mockImplementation(
+        async (startTime, endTime, signal, cursor) => {
+          windows.push([startTime, endTime]);
+          return listMentionedMessages!(startTime, endTime, signal, cursor);
+        },
+      );
+
+      await secondClient.emit(0, replay);
+      expect(second.inbound).toEqual([]);
+
+      await second.poll();
+      expect(second.inbound).toEqual([]);
+      // The restored watermark's window has to actually reach back over the
+      // replay — asserting only on `inbound` would pass on a watermark that
+      // restarted at the second connect and silently vacate the witness.
+      expect(windows[0][0]).toBeLessThanOrEqual(replay.eventTime!);
+      expect(windows[0][1]).toBeGreaterThanOrEqual(replay.eventTime!);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // R4-4: the pullback above only rescues the replay if the poll that was in
   // flight when it happened does not finish by writing its own window's end
   // back over it. `checkpoint.endTime` is always past the replay's `eventTime`,
@@ -1222,6 +1449,611 @@ describe('DwsChannel', () => {
       'done',
       expect.any(String),
     );
+  });
+
+  it('does not let one direct conversation block another', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'conversation-a') await firstBlocked;
+      if (envelope.messageId === 'conversation-b') await secondBlocked;
+      channel.inbound.push(envelope);
+    };
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a',
+        'first request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() => expect(started).toEqual(['conversation-a']));
+    expect(channel.pendingMessageIds()).toEqual(['conversation-a']);
+
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-b',
+        'second request',
+        { conversationId: 'conversation-b' },
+      ),
+    );
+
+    await vi.waitFor(() =>
+      expect(started).toEqual(['conversation-a', 'conversation-b']),
+    );
+    expect(channel.pendingMessageIds()).toEqual([
+      'conversation-a',
+      'conversation-b',
+    ]);
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([firstDelivery, secondDelivery]);
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+    expect(channel.pendingMessageIds()).toEqual([]);
+  });
+
+  it('preserves direct-message order within one conversation', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let promptCount = 0;
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      promptCount += 1;
+      if (promptCount === 1) await firstBlocked;
+      return 'response';
+    });
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a-1',
+        'first request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'conversation-a-2',
+        'second request',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    releaseFirst();
+    await Promise.all([firstDelivery, secondDelivery]);
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps direct-message order past the second turn and frees the tail', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let promptCount = 0;
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      promptCount += 1;
+      if (promptCount === 1) await firstBlocked;
+      if (promptCount === 2) await secondBlocked;
+      return 'response';
+    });
+    const emit = (messageId: string, content: string) =>
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', messageId, content, {
+          conversationId: 'conversation-ordered',
+        }),
+      );
+
+    const first = emit('ordered-1', 'first request');
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    const second = emit('ordered-2', 'second request');
+
+    // Turn 1 settles while turn 2 becomes the conversation tail. Without the
+    // identity guard, turn 1's cleanup clears turn 2's entry, so the running
+    // conversation loses the tail that later turns must queue behind.
+    releaseFirst();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    expect(channel.directConversationTailIds()).toEqual([
+      'conversation-ordered',
+    ]);
+
+    const third = emit('ordered-3', 'third request');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+
+    releaseSecond();
+    await Promise.all([first, second, third]);
+    expect(bridge.prompt).toHaveBeenCalledTimes(3);
+    // A drained conversation must not keep a resolved tail around.
+    await vi.waitFor(() =>
+      expect(channel.directConversationTailIds()).toEqual([]),
+    );
+  });
+
+  it('preserves default steer order while the first message is classified', async () => {
+    const client = new FakeDwsClient();
+    let finishClassification!: (result: {
+      intent: 'none';
+      confidence: number;
+    }) => void;
+    const classification = new Promise<{
+      intent: 'none';
+      confidence: number;
+    }>((resolve) => {
+      finishClassification = resolve;
+    });
+    const memoryIntentClassifier = {
+      classifyChannelMemoryIntent: vi
+        .fn()
+        .mockReturnValueOnce(classification)
+        .mockResolvedValue({ intent: 'none', confidence: 0.9 }),
+    };
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig(),
+      'classified-order-dws',
+      {
+        channelMemory: makeChannelMemory(),
+        memoryIntentClassifier,
+      },
+    );
+    (bridge.cancelSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+      undefined,
+    );
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'classified-first',
+        'remember this please',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).toHaveBeenCalledOnce(),
+    );
+    const secondDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'classified-second',
+        'what time is it',
+        { conversationId: 'conversation-a' },
+      ),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    finishClassification({ intent: 'none', confidence: 0.9 });
+    await Promise.all([firstDelivery, secondDelivery]);
+    expect(
+      (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls.map(
+        (call) => call[1] as string,
+      ),
+    ).toEqual([
+      expect.stringContaining('remember this please'),
+      expect.stringContaining('what time is it'),
+    ]);
+  });
+
+  it('caps concurrent direct-message replay dispatches', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(25, true);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async (envelope) => {
+      await blocked;
+      channel.inbound.push(envelope);
+    };
+
+    await channel.poll();
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(16));
+    expect(channel.inboundAttempts).toBeLessThan(25);
+
+    release();
+    await vi.waitFor(() => expect(channel.pendingMessageIds()).toHaveLength(9));
+  });
+
+  it('does not let a live followup backlog starve parked replay dispatches', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    // One parked failed direct message, in a conversation of its own. Replay is
+    // its only redelivery surface, so a starved replay pass strands it.
+    channel.seedPendingMessages(1);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+
+    // A single conversation's backlog fills queuedDirectMessages to the cap
+    // while only the head turn actually runs.
+    const deliveries = Array.from({ length: 16 }, (_unused, index) =>
+      client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `backlog-${index}`,
+          `request ${index}`,
+          { conversationId: 'conversation-backlog' },
+        ),
+      ),
+    );
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    expect(channel.pendingMessageIds()).toHaveLength(17);
+
+    await channel.poll();
+
+    // The parked entry belongs to another conversation, so it dispatches
+    // immediately once the cap stops counting the backlog.
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
+    expect(channel.replayDirectDispatchCount()).toBe(1);
+
+    release();
+    await Promise.all(deliveries);
+  });
+
+  it('clears queued direct messages when disconnected', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'disconnect-queued',
+      'request',
+    );
+    const key = `${event.conversationId}\0${event.messageId}`;
+
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() =>
+      expect(channel.queuedDirectMessage(key)).toBeDefined(),
+    );
+    channel.disconnect();
+
+    expect(channel.queuedDirectMessage(key)).toBeUndefined();
+    release();
+    await delivery;
+  });
+
+  it('drops conversation tails on disconnect so reconnects do not chain onto them', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ dispatchMode: 'followup' }),
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+
+    const stranded = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'tail-before-disconnect',
+        'first request',
+        { conversationId: 'conversation-tail' },
+      ),
+    );
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    expect(channel.directConversationTailIds()).toEqual(['conversation-tail']);
+
+    channel.disconnect();
+    expect(channel.directConversationTailIds()).toEqual([]);
+
+    await channel.connect();
+    const afterReconnect = client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'tail-after-reconnect',
+        'second request',
+        { conversationId: 'conversation-tail' },
+      ),
+    );
+
+    // The pre-disconnect turn is still blocked. Had its tail survived, the new
+    // message would chain behind a promise from the previous lifecycle and
+    // never start.
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
+
+    release();
+    await Promise.all([stranded, afterReconnect]);
+  });
+
+  it('rejects full-capacity admission without waiting', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(5_000);
+
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'full-capacity', 'request'),
+      ),
+    ).rejects.toThrow(
+      'DWS pending-message capacity is exhausted; retry later.',
+    );
+
+    expect(channel.pendingMessageCapacityWaiterCount()).toBe(0);
+  });
+
+  it('does not let an older task delete a replacement queue entry', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async () => blocked;
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'replaced-queue-entry',
+      'request',
+    );
+    const key = `${event.conversationId}\0${event.messageId}`;
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() =>
+      expect(channel.queuedDirectMessage(key)).toBeDefined(),
+    );
+    const replacement = new Promise<void>(() => undefined);
+    channel.replaceQueuedDirectMessage(key, replacement);
+
+    release();
+    await delivery;
+
+    expect(channel.queuedDirectMessage(key)).toBe(replacement);
+  });
+
+  it('reports one stream error for a failed live direct turn', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      channel.inboundError = new Error('agent unavailable');
+      const stream = client.streams[1]!;
+      const result = stream.onMessage(
+        message(
+          'user_im_message_receive_o2o_all',
+          'single-live-error',
+          'request',
+        ),
+      );
+      if (!result || !('completed' in result)) {
+        throw new Error('Expected a detached direct-message dispatch.');
+      }
+      const admissionSucceeded = result.admitted.then(
+        () => true,
+        () => false,
+      );
+      void result.completed.catch(async (error: unknown) => {
+        if (await admissionSucceeded) {
+          stream.onError(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      });
+
+      await result.admitted;
+      await expect(result.completed).rejects.toThrow('agent unavailable');
+      await vi.waitFor(() => {
+        const errors = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .filter((line) => line.includes('DWS direct messages stream error'));
+        expect(errors).toHaveLength(1);
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('rejects admission instead of evicting a pending message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(5_000);
+
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'new-request', 'request', {
+          conversationId: 'conversation-new',
+        }),
+      ),
+    ).rejects.toThrow(
+      'DWS pending-message capacity is exhausted; retry later.',
+    );
+
+    expect(channel.inbound).toEqual([]);
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()[0]).toBe('parked-0');
+    expect(channel.pendingMessageIds()).not.toContain('new-request');
+  });
+
+  it('does not block or advance direct history at pending capacity', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const initialWatermark = channel.notificationWatermark()!;
+    channel.seedPendingMessages(5_000, true);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    channel.inboundHandler = async (envelope) => {
+      await blocked;
+      channel.inbound.push(envelope);
+    };
+    const victim = message(
+      'user_im_message_receive_o2o_all',
+      'history-capacity-victim',
+      'request',
+      {
+        conversationId: 'history-victim',
+        eventTime: initialWatermark - 1_000,
+      },
+    );
+    client.directMessages = [victim];
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(initialWatermark + 10_000);
+    try {
+      await channel.poll();
+
+      expect(channel.notificationWatermark()).toBe(initialWatermark);
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(0);
+
+      release();
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toHaveLength(4_984),
+      );
+      channel.inboundHandler = async (envelope) => {
+        channel.inbound.push(envelope);
+      };
+      client.listDirectMessages.mockClear();
+      await channel.connect();
+      await channel.poll();
+      await vi.waitFor(() =>
+        expect(
+          channel.inbound.some(
+            ({ messageId }) => messageId === 'history-capacity-victim',
+          ),
+        ).toBe(true),
+      );
+      expect(client.listDirectMessages.mock.calls[0]![0]).toBeLessThanOrEqual(
+        victim.eventTime!,
+      );
+    } finally {
+      release();
+      now.mockRestore();
+    }
+  });
+
+  it('drains failed replay capacity until direct history can resume', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const initialWatermark = channel.notificationWatermark()!;
+    channel.seedPendingMessages(5_000, true);
+    channel.inboundError = new Error('agent unavailable');
+    const victim = message(
+      'user_im_message_receive_o2o_all',
+      'history-capacity-victim',
+      'request',
+      {
+        conversationId: 'history-victim',
+        eventTime: initialWatermark - 1_000,
+      },
+    );
+    client.directMessages = [victim];
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(initialWatermark + 10_000);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (const expectedAttempts of [16, 32, 48, 64]) {
+        await channel.poll();
+        await vi.waitFor(() =>
+          expect(channel.inboundAttempts).toBe(expectedAttempts),
+        );
+        expect(channel.notificationWatermark()).toBe(initialWatermark);
+      }
+
+      await channel.poll();
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds().length).toBeLessThan(5_000),
+      );
+      if (!channel.pendingMessageIds().includes('history-capacity-victim')) {
+        await channel.poll();
+      }
+      await vi.waitFor(() =>
+        expect(channel.pendingMessageIds()).toContain(
+          'history-capacity-victim',
+        ),
+      );
+      expect(channel.notificationWatermark()).toBeGreaterThan(initialWatermark);
+    } finally {
+      stderr.mockRestore();
+      now.mockRestore();
+    }
+  });
+
+  it('does not acknowledge admission when cursor persistence fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'retry-after-save-failure',
+      'request',
+    );
+    channel.nextCursorSaveError = new Error('disk unavailable');
+
+    await expect(client.emit(1, event)).rejects.toThrow('disk unavailable');
+    expect(channel.pendingMessageIds()).toEqual([]);
+    expect(channel.inbound).toEqual([]);
+
+    await client.emit(1, event);
+    expect(channel.inbound.map(({ messageId }) => messageId)).toEqual([
+      'retry-after-save-failure',
+    ]);
+  });
+
+  it('cleans up a persisted message that is already processed', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(1);
+    channel.markPendingMessageProcessed('conversation-capacity', 'parked-0');
+
+    await channel.poll();
+
+    expect(channel.pendingMessageIds()).toEqual([]);
+    expect(channel.inbound).toEqual([]);
   });
 
   it('turns a document mention notification into a document task and replies to its comment', async () => {
@@ -1709,6 +2541,286 @@ describe('DwsChannel', () => {
         text: expect.stringContaining('reply with the document code'),
       }),
     ]);
+  });
+
+  it('dispatches an ordinary direct message when the event stream misses it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-direct',
+        'recover this request',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'history-direct',
+        text: 'recover this request',
+        isGroup: false,
+      }),
+    ]);
+  });
+
+  it('admits a direct-message history page without waiting for a turn', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'history-a') await firstBlocked;
+      channel.inbound.push(envelope);
+    };
+    const before = channel.notificationWatermark();
+    const eventTime = Date.now();
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'history-a', 'first request', {
+        conversationId: 'conversation-a',
+        eventTime,
+      }),
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-b',
+        'second request',
+        { conversationId: 'conversation-b', eventTime },
+      ),
+    ];
+
+    await channel.poll();
+
+    await vi.waitFor(() => expect(started).toEqual(['history-a', 'history-b']));
+    expect(channel.notificationWatermark()).toBeGreaterThanOrEqual(before!);
+    releaseFirst();
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+  });
+
+  it('does not let a document notification block another history conversation', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    let releaseDocument!: () => void;
+    const documentBlocked = new Promise<void>((resolve) => {
+      releaseDocument = resolve;
+    });
+    let releaseOrdinary!: () => void;
+    const ordinaryBlocked = new Promise<void>((resolve) => {
+      releaseOrdinary = resolve;
+    });
+    const started: string[] = [];
+    channel.inboundHandler = async (envelope) => {
+      started.push(envelope.messageId);
+      if (envelope.messageId === 'history-document') await documentBlocked;
+      if (envelope.messageId === 'history-ordinary') await ordinaryBlocked;
+      channel.inbound.push(envelope);
+    };
+    const eventTime = Date.now();
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-document',
+        documentMentionCard('doc-history-blocked', 'comment-history-blocked'),
+        { conversationId: 'conversation-document', eventTime },
+      ),
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-ordinary',
+        'second request',
+        { conversationId: 'conversation-ordinary', eventTime },
+      ),
+    ];
+
+    await channel.poll();
+
+    await vi.waitFor(() =>
+      expect(started).toEqual(['history-document', 'history-ordinary']),
+    );
+    expect(channel.pendingMessageIds()).toEqual([
+      'history-document',
+      'history-ordinary',
+    ]);
+    releaseDocument();
+    releaseOrdinary();
+    await vi.waitFor(() => expect(channel.inbound).toHaveLength(2));
+    expect(channel.pendingMessageIds()).toEqual([]);
+  });
+
+  // R1-7: every history window re-opens at `watermark - 5s`, so every
+  // live-dispatched direct message is re-fetched by a later poll. The
+  // processed-key guard is the only thing standing between that refetch and
+  // a duplicate agent turn.
+  it('deduplicates a direct message delivered by the live stream and history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'live-and-history',
+      'hello once',
+    );
+
+    await client.emit(1, event);
+    client.directMessages = [event];
+    await channel.poll();
+
+    expect(channel.inbound).toHaveLength(1);
+  });
+
+  // R2-1: the history loop dispatches every DM-history message, and
+  // The self-message check in `admitReceivedDirectMessage` is the only filter
+  // keeping the bot's own replies — now ordinary sent messages that reappear
+  // in every overlap window — out of the agent. If that check were ever
+  // conditioned on `!fromHistory`, every poll would re-dispatch them as fresh
+  // turns.
+  it('does not dispatch self-sent messages recovered from direct-message history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'own-reply', 'bot text', {
+        senderId: 'open-self',
+      }),
+    ];
+
+    await channel.poll();
+    expect(channel.inbound).toEqual([]);
+
+    await channel.poll();
+    expect(channel.inbound).toEqual([]);
+  });
+
+  // R1-1 (fix-induced): without the loop-level processed-key skip, every
+  // re-fetched self-message re-enters `admitReceivedDirectMessage`, whose self
+  // branch persists the whole cursor before the processed-key early return —
+  // one blocking mkdir/write/rename per own reply per poll on top of the
+  // end-of-poll persist.
+  it('saves the cursor once per poll for own replies re-fetched in the overlap window', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    client.directMessages = [
+      message('user_im_message_receive_o2o_all', 'own-reply-cost', 'bot text', {
+        senderId: 'open-self',
+      }),
+    ];
+    await channel.poll();
+    const saveCursor = vi.spyOn(
+      channel as unknown as { saveCursor: () => void },
+      'saveCursor',
+    );
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([]);
+    expect(saveCursor).toHaveBeenCalledTimes(1);
+  });
+
+  // R2-2: an inbound-turn failure during history dispatch escaped into the
+  // fetch catch, logged an agent-side failure as "failed to poll DWS
+  // direct-message history", and aborted the page. A failed direct message
+  // is parked for replay, so the page can keep moving instead.
+  it('keeps the page moving when a direct-message turn fails mid-window', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      channel.inboundError = new Error('agent unavailable');
+      const now = Date.now();
+      client.directMessages = [
+        message('user_im_message_receive_o2o_all', 'failing-first', 'first', {
+          eventTime: now - 1,
+        }),
+        message('user_im_message_receive_o2o_all', 'waiting-second', 'second', {
+          eventTime: now,
+        }),
+      ];
+
+      await channel.poll();
+
+      await vi.waitFor(() => expect(channel.inboundAttempts).toBe(2));
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('DWS message turn failed (attempt 1/5)');
+      expect(logged).not.toContain('failed to poll DWS direct-message history');
+      await vi.waitFor(() => {
+        expect(
+          channel.queuedDirectMessage('cid-1\0failing-first'),
+        ).toBeUndefined();
+        expect(
+          channel.queuedDirectMessage('cid-1\0waiting-second'),
+        ).toBeUndefined();
+      });
+
+      channel.inboundError = undefined;
+      await channel.poll();
+
+      await vi.waitFor(() => expect(channel.inboundAttempts).toBe(4));
+      await vi.waitFor(() =>
+        expect(channel.inbound.map((envelope) => envelope.messageId)).toEqual([
+          'failing-first',
+          'waiting-second',
+        ]),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  // R2-2 discriminator: a failed document notification is durably admitted
+  // before its turn starts. The detached turn must leave that pending entry
+  // available for later polls until the shared retry budget is exhausted.
+  it('keeps spending the retry budget of a parked document notification', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      client.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'stuck-notification',
+          documentMentionCard('doc-stuck', 'd'.repeat(45)),
+          { eventTime: Date.now() },
+        ),
+      ];
+      channel.inboundHandler = async () => {
+        throw new Error('agent unavailable');
+      };
+
+      for (let round = 0; round < 5; round += 1) {
+        await channel.poll();
+        await vi.advanceTimersByTimeAsync(6_000);
+      }
+
+      expect(channel.inboundAttempts).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies sender pairing to a direct message recovered from history', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'history-pairing',
+        'please help',
+      ),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
   });
 
   it('dispatches a group mention when the event stream misses it', async () => {
@@ -2525,10 +3637,12 @@ describe('DwsChannel', () => {
 
     await channel.poll();
 
-    expect(channel.pendingDocumentNotifications()).toEqual([
-      expect.objectContaining({ senderId: 'open-alice' }),
-      expect.objectContaining({ senderId: 'open-bob' }),
-    ]);
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([
+        expect.objectContaining({ senderId: 'open-alice' }),
+        expect.objectContaining({ senderId: 'open-bob' }),
+      ]),
+    );
     const bobPairingText = client.sendImMessage.mock.calls.find(
       ([target]) =>
         target.kind === 'direct' && target.openDingTalkId === 'open-bob',
@@ -2541,8 +3655,10 @@ describe('DwsChannel', () => {
     await channel.poll();
     await channel.poll();
 
-    expect(bridge.prompt).toHaveBeenCalledOnce();
-    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([]),
+    );
   });
 
   it('drops profile-scoped document work and IM targets on profile switch', async () => {
@@ -2655,7 +3771,7 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('shows a working eyes reaction on the notification while a document task runs', async () => {
+  it('shows the default start reaction on a notification while its task runs', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(client);
     let finishPrompt!: (value: string) => void;
@@ -2680,7 +3796,7 @@ describe('DwsChannel', () => {
       expect(client.addImReaction).toHaveBeenCalledWith(
         'cid-1',
         'document-notification',
-        '暗中观察',
+        '🤔',
       );
     });
 
@@ -2691,7 +3807,7 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'document-notification',
-        '暗中观察',
+        '🤔',
       );
     });
     expect(client.replyToComment).toHaveBeenCalledWith(
@@ -2699,11 +3815,54 @@ describe('DwsChannel', () => {
       'comment-1',
       'done',
     );
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
-  it('shows a working eyes reaction only while an accepted IM task is running', async () => {
+  it('shows the default start reaction only while an accepted IM task runs', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(client);
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+
+    const delivery = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishPrompt('done');
+    await delivery;
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a custom start reaction with a custom end reaction', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -2725,7 +3884,6 @@ describe('DwsChannel', () => {
         '暗中观察',
       );
     });
-    expect(client.removeImReaction).not.toHaveBeenCalled();
 
     finishPrompt('done');
     await delivery;
@@ -2736,12 +3894,20 @@ describe('DwsChannel', () => {
         'message-1',
         '暗中观察',
       );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
     });
   });
 
   it('removes an active working reaction when the channel disconnects', async () => {
     const client = new FakeDwsClient();
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -2764,16 +3930,20 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'running',
-        '暗中观察',
+        '🤔',
       );
     });
     finishPrompt('done');
     await delivery;
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
   it('removes an active working reaction when the agent session dies', async () => {
     const client = new FakeDwsClient();
-    const { channel, bridge } = await readyPolicyChannel(client);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
     let finishPrompt!: (value: string) => void;
     const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
     prompt.mockImplementation(
@@ -2796,11 +3966,12 @@ describe('DwsChannel', () => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
         'running',
-        '暗中观察',
+        '🤔',
       );
     });
     finishPrompt('done');
     await delivery;
+    expect(client.addImReaction).toHaveBeenCalledOnce();
   });
 
   it('does not add a working reaction to a message rejected by pairing', async () => {
@@ -2815,10 +3986,13 @@ describe('DwsChannel', () => {
     expect(client.addImReaction).not.toHaveBeenCalled();
   });
 
-  it('keeps processing when the working reaction cannot be added', async () => {
+  it('keeps processing and adds the end reaction when the start add fails', async () => {
     const client = new FakeDwsClient();
     client.addImReaction.mockRejectedValueOnce(new Error('reaction denied'));
-    const { bridge } = await readyPolicyChannel(client);
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
 
     await client.emit(
       1,
@@ -2826,10 +4000,125 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).toHaveBeenCalledOnce();
-    expect(client.replyToImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+    });
   });
 
-  it('removes a working reaction that finishes attaching after the task', async () => {
+  it('replaces the start reaction with the end reaction when a task fails', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockRejectedValueOnce(new Error('agent unavailable'));
+
+    await expect(
+      client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'failed', 'do the task'),
+      ),
+    ).rejects.toThrow('agent unavailable');
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'failed',
+        '🤔',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'failed',
+        '赞',
+      );
+    });
+  });
+
+  it('replaces the start reaction with the end reaction when a task is steered', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      )
+      .mockResolvedValueOnce('replacement done');
+    const cancelSession = bridge.cancelSession as ReturnType<typeof vi.fn>;
+    cancelSession.mockImplementation(async () => finishPrompt('late'));
+
+    const task = client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'running', 'do the task'),
+    );
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '🤔',
+      );
+    });
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'replacement',
+        'replace the task',
+      ),
+    );
+    await task;
+
+    expect(cancelSession).toHaveBeenCalledWith('session-1');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '🤔',
+      );
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '赞',
+      );
+    });
+  });
+
+  it('keeps the delivered response when the end reaction cannot be added', async () => {
+    const client = new FakeDwsClient();
+    client.addImReaction
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('end reaction denied'));
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('removes a start reaction that finishes attaching after the task', async () => {
     const client = new FakeDwsClient();
     let finishReaction!: () => void;
     client.addImReaction.mockImplementationOnce(
@@ -2844,13 +4133,554 @@ describe('DwsChannel', () => {
       1,
       message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
     );
-    expect(client.removeImReaction).toHaveBeenCalledOnce();
+    expect(client.removeImReaction).not.toHaveBeenCalled();
 
     finishReaction();
 
     await vi.waitFor(() => {
-      expect(client.removeImReaction).toHaveBeenCalledTimes(2);
+      expect(client.removeImReaction).toHaveBeenCalledOnce();
     });
+  });
+
+  it('keeps a matching custom end reaction after an in-flight start add', async () => {
+    const client = new FakeDwsClient();
+    let finishReaction!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishReaction = resolve;
+        }),
+    );
+    await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '赞', endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishReaction();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'message-1',
+        '赞',
+      );
+    });
+  });
+
+  it('serializes reaction transitions when the same message is retried', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+    });
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    finishRemoval();
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+    });
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'retry-message',
+      '赞',
+    );
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+  });
+
+  it('adds one end reaction when a retry finishes during prior removal', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockRejectedValueOnce(new Error('retry failed'));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+    });
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('retry failed');
+    finishRemoval();
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledTimes(2);
+      expect(
+        client.addImReaction.mock.calls.filter(
+          ([, , reaction]) => reaction === '赞',
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('reuses an in-flight start reaction when the same message is retried', async () => {
+    const client = new FakeDwsClient();
+    let finishStartReaction!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartReaction = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    finishStartReaction();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.removeImReaction).not.toHaveBeenCalled();
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+  });
+
+  it('keeps a single end reaction when the retry cannot remove the prior one', async () => {
+    const client = new FakeDwsClient();
+    client.removeImReaction.mockImplementation(
+      async (
+        _conversationId: unknown,
+        _messageId: unknown,
+        reaction: unknown,
+      ) => {
+        if (reaction === '赞') {
+          throw new Error('transient removal failure');
+        }
+      },
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockRejectedValueOnce(new Error('retry failed'));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('retry failed');
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledTimes(3);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledTimes(3);
+    expect(
+      client.addImReaction.mock.calls.filter(
+        ([, , reaction]) => reaction === '赞',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('drops the stale finish when the retry session dies during prior removal', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(async () => new Promise<string>(() => undefined));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+    await vi.waitFor(() =>
+      expect(client.removeImReaction).toHaveBeenCalledOnce(),
+    );
+
+    void client.emit(1, inbound).catch(() => undefined);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    channel.onSessionDied('session-1');
+
+    finishRemoval();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'retry-message',
+      '赞',
+    );
+  });
+
+  it('removes a stale end reaction when a failed message is retried after cleanup completes', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    let finishRetry!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Promise<string>((resolve) => {
+            finishRetry = resolve;
+          }),
+      );
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    await expect(client.emit(1, inbound)).rejects.toThrow('first turn failed');
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '暗中观察',
+      );
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+    });
+
+    const retry = client.emit(1, inbound);
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+      expect(client.addImReaction).toHaveBeenCalledTimes(3);
+    });
+
+    finishRetry('done');
+    await retry;
+
+    await vi.waitFor(() => {
+      expect(client.addImReaction).toHaveBeenLastCalledWith(
+        'cid-1',
+        'retry-message',
+        '赞',
+      );
+      expect(
+        client.addImReaction.mock.calls.filter(
+          ([, , reaction]) => reaction === '赞',
+        ),
+      ).toHaveLength(2);
+    });
+  });
+
+  it('does not add an end reaction when the channel disconnects mid transition', async () => {
+    const client = new FakeDwsClient();
+    let finishStartAdd!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartAdd = resolve;
+        }),
+    );
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.disconnect();
+
+    finishStartAdd();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      '赞',
+    );
+  });
+
+  it('does not apply a stale end reaction after a disconnect and reconnect', async () => {
+    const client = new FakeDwsClient();
+    let finishStartAdd!: () => void;
+    client.addImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishStartAdd = resolve;
+        }),
+    );
+    const { channel } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.disconnect();
+    await channel.connect();
+
+    finishStartAdd();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'message-1',
+        '🤔',
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.addImReaction).toHaveBeenCalledOnce();
+    expect(client.addImReaction).not.toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      '赞',
+    );
+  });
+
+  it('drops reaction operation tracking once queued transitions settle', async () => {
+    const client = new FakeDwsClient();
+    let finishRemoval!: () => void;
+    client.removeImReaction.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          finishRemoval = resolve;
+        }),
+    );
+    let finishRetryStartAdd!: () => void;
+    client.addImReaction
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        async () =>
+          new Promise<void>((resolve) => {
+            finishRetryStartAdd = resolve;
+          }),
+      );
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ startReaction: '暗中观察', endReaction: '赞' }),
+    );
+    const operations = channel as unknown as {
+      reactionOperations: Map<string, Promise<void>>;
+    };
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt
+      .mockRejectedValueOnce(new Error('first turn failed'))
+      .mockImplementationOnce(async () => new Promise<string>(() => undefined));
+    const inbound = message(
+      'user_im_message_receive_o2o_all',
+      'retry-message',
+      'do the task',
+    );
+
+    const firstFailure = expect(client.emit(1, inbound)).rejects.toThrow(
+      'first turn failed',
+    );
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    await firstFailure;
+    await vi.waitFor(() =>
+      expect(client.removeImReaction).toHaveBeenCalledOnce(),
+    );
+    expect(operations.reactionOperations.size).toBe(1);
+
+    void client.emit(1, inbound).catch(() => undefined);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    expect(operations.reactionOperations.size).toBe(1);
+
+    finishRemoval();
+    await vi.waitFor(() =>
+      expect(client.addImReaction).toHaveBeenCalledTimes(2),
+    );
+    expect(operations.reactionOperations.size).toBe(1);
+
+    finishRetryStartAdd();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(operations.reactionOperations.size).toBe(0);
+  });
+
+  it('refreshes and bounds remembered end reaction keys', async () => {
+    const client = new FakeDwsClient();
+    const { channel } = await readyPolicyChannel(client);
+    const state = channel as unknown as {
+      rememberEndReaction(key: string): void;
+      endReactionKeys: Set<string>;
+    };
+
+    state.rememberEndReaction('recent');
+    expect(state.endReactionKeys.has('recent')).toBe(true);
+    expect(state.endReactionKeys.size).toBe(1);
+
+    for (let index = 0; index < 999; index += 1) {
+      state.rememberEndReaction(`filler-${index}`);
+    }
+    expect(state.endReactionKeys.size).toBe(1000);
+
+    state.rememberEndReaction('recent');
+    expect(state.endReactionKeys.size).toBe(1000);
+
+    state.rememberEndReaction('latest');
+    expect(state.endReactionKeys.size).toBe(1000);
+    expect(state.endReactionKeys.has('filler-0')).toBe(false);
+    expect(state.endReactionKeys.has('filler-1')).toBe(true);
+    expect(state.endReactionKeys.has('recent')).toBe(true);
+    expect(state.endReactionKeys.has('latest')).toBe(true);
   });
 
   it('applies sender pairing to ordinary direct messages', async () => {
@@ -3540,8 +5370,8 @@ describe('DwsChannel', () => {
     releasePairing();
     await Promise.all([denied, catchUpPoll]);
 
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(channel.pendingDocumentNotifications()).toContainEqual(
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    expect(channel.pendingDocumentNotifications()).not.toContainEqual(
       expect.objectContaining({ messageId: 'allowed-catch-up' }),
     );
     expect(channel.notificationWatermark()).toBeGreaterThan(
@@ -3685,6 +5515,139 @@ describe('DwsChannel', () => {
     expect(channel.mentionWatermark()).toBeGreaterThan(0);
   });
 
+  it('retains a failed ambient message when its parking save fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.inboundError = new Error('agent unavailable');
+    channel.nextCursorSaveError = new Error('disk unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-save-failure',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    expect(channel.pendingMessageIds()).toEqual(['ambient-save-failure']);
+    expect(channel.inboundFailures()).toEqual([
+      expect.objectContaining({ attempts: 1 }),
+    ]);
+
+    channel.inboundError = undefined;
+    await channel.poll();
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'ambient-save-failure' }),
+    ]);
+  });
+
+  it('keeps failed ambient parking behind the pending-message cap', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.seedPendingMessages(5_000);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-at-capacity',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    const failedDelivery =
+      expect(delivery).rejects.toThrow('agent unavailable');
+    await vi.waitFor(() =>
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+    );
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()).not.toContain('ambient-at-capacity');
+
+    channel.releasePendingMessage('conversation-capacity', 'parked-0');
+    await failedDelivery;
+    expect(channel.pendingMessageIds()).toHaveLength(5_000);
+    expect(channel.pendingMessageIds()).toContain('ambient-at-capacity');
+  });
+
+  it('retains a failed ambient message across a disconnect', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    let rejectTurn!: (error: Error) => void;
+    const turn = new Promise<void>((_resolve, reject) => {
+      rejectTurn = reject;
+    });
+    channel.inboundHandler = async () => turn;
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-disconnect',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    await vi.waitFor(() => expect(channel.inboundAttempts).toBe(1));
+    channel.disconnect();
+    rejectTurn(new Error('agent unavailable'));
+    await expect(delivery).rejects.toThrow('agent unavailable');
+    expect(channel.pendingMessageIds()).toEqual(['ambient-disconnect']);
+
+    channel.inboundHandler = async (envelope) => {
+      channel.inbound.push(envelope);
+    };
+    await channel.connect();
+    await channel.poll();
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ messageId: 'ambient-disconnect' }),
+    ]);
+  });
+
+  it('retains a capacity-blocked failed ambient message across a disconnect', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    channel.seedPendingMessages(5_000);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_group_all',
+      'ambient-capacity-disconnect',
+      'please retry this group request',
+      { conversationId: 'cid-group' },
+    );
+
+    const delivery = client.emit(1, event);
+    const failedDelivery =
+      expect(delivery).rejects.toThrow('agent unavailable');
+    await vi.waitFor(() =>
+      expect(channel.pendingMessageCapacityWaiterCount()).toBe(1),
+    );
+
+    // disconnect() releases the capacity waiters. Ambient group messages have
+    // no history fallback, so parking must still happen on that exit.
+    channel.disconnect();
+    await failedDelivery;
+    expect(channel.pendingMessageIds()).toContain(
+      'ambient-capacity-disconnect',
+    );
+
+    channel.inboundError = undefined;
+    await channel.connect();
+    await channel.poll();
+    await vi.waitFor(() =>
+      expect(channel.inbound).toContainEqual(
+        expect.objectContaining({ messageId: 'ambient-capacity-disconnect' }),
+      ),
+    );
+  });
+
   it('replays a failed ambient group message after restart', async () => {
     const config = makeConfig({ groups: { '*': { requireMention: false } } });
     const name = 'pending-ambient-group-dws';
@@ -3739,10 +5702,9 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
-  // R12-1: a plain direct message whose turn throws had no redelivery path —
-  // the at-most-once event stream already consumed it, the DM history loop
-  // dispatches only document-mention notifications, and the pending queue
-  // parked only group sources. One transient failure lost it forever.
+  // R12-1: keep a local redelivery path when a direct-message turn throws.
+  // The event stream is at most once and remote history can be unavailable,
+  // so one transient failure must not lose the message forever.
   it('replays a failed direct message on the next poll', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -3812,6 +5774,146 @@ describe('DwsChannel', () => {
     }
 
     expect(channel.inboundAttempts).toBe(5);
+  });
+
+  // R1-1: `replayPendingMessages` already re-drives a parked direct message
+  // every poll, so the history dispatch must skip it. Driving it from both
+  // surfaces spent the shared retry budget twice per poll, dropping a message
+  // after a transient outage barely longer than two poll intervals.
+  it('spends one retry per poll on a failed direct message also in history', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-history-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+
+    channel.inboundError = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(4);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-history-retry',
+      }),
+    ]);
+  });
+
+  // R3-1: history dispatch skips messages that are ALREADY parked, but a
+  // direct message whose live turn is still in flight passes the skip and
+  // blocks in `dispatchImMessage`'s in-flight wait. When the live turn then
+  // fails it parks the message and spends attempt 1 — parked ≠ processed, so
+  // the waiting history dispatch must not start a second turn in the same
+  // poll and spend attempt 2.
+  it('spends one retry per poll when the live turn fails while history waits on it', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-inflight-retry',
+      'please retry this direct request',
+    );
+    client.directMessages = [event];
+
+    let turnEntered!: () => void;
+    let failTurn!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      turnEntered = resolve;
+    });
+    const failing = new Promise<void>((resolve) => {
+      failTurn = resolve;
+    });
+    channel.inboundHandler = async () => {
+      turnEntered();
+      await failing;
+      throw new Error('agent unavailable');
+    };
+
+    const liveTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await entered;
+    const poll = channel.poll();
+    // Let the poll's history dispatch reach the in-flight wait before the
+    // live turn is allowed to fail.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    failTurn();
+    await Promise.all([liveTurn, poll]);
+
+    expect(channel.inboundAttempts).toBe(1);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(2);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-inflight-retry',
+      }),
+    ]);
+  });
+
+  // The gated in-flight re-check rethrows instead of returning:
+  // `replayPendingMessages` deletes the parked entry after any normal
+  // return, so a redelivered duplicate whose turn fails while the replay
+  // waits on it must not make the replay drop the parking.
+  it('keeps a parked message parked when its replay waits on a failed duplicate turn', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-parked-duplicate',
+      'please retry this direct request',
+    );
+    channel.inboundError = new Error('agent unavailable');
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+
+    let releaseDuplicate!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseDuplicate = resolve;
+    });
+    channel.inboundHandler = async () => {
+      await held;
+      throw new Error('agent unavailable');
+    };
+    channel.inboundError = undefined;
+    const duplicateTurn = client.emit(1, event).then(
+      () => undefined,
+      () => undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const poll = channel.poll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseDuplicate();
+    await Promise.all([duplicateTurn, poll]);
+
+    // The duplicate turn spent attempt 2; the replay spent nothing and must
+    // have kept the parked entry.
+    expect(channel.inboundAttempts).toBe(2);
+
+    channel.inboundHandler = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(3);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-parked-duplicate',
+      }),
+    ]);
   });
 
   // R4-1: the budget above was wired into the mention path only. A document
@@ -3933,6 +6035,12 @@ describe('DwsChannel', () => {
 
     for (let round = 0; round < 6; round += 1) {
       await channel.poll();
+      await vi.waitFor(() =>
+        expect(bridge.prompt).toHaveBeenCalledTimes(Math.min(round + 1, 5)),
+      );
+      await vi.waitFor(() =>
+        expect(channel.queuedDirectMessageCount()).toBe(0),
+      );
     }
 
     expect(bridge.prompt).toHaveBeenCalledTimes(5);
@@ -3953,8 +6061,10 @@ describe('DwsChannel', () => {
 
     await channel.poll();
 
-    expect(bridge.prompt).toHaveBeenCalledTimes(6);
-    expect(channel.pendingDocumentNotifications()).toEqual([]);
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(6));
+    await vi.waitFor(() =>
+      expect(channel.pendingDocumentNotifications()).toEqual([]),
+    );
   });
 
   // R4-1: `pollTodos` remembers a fingerprint only on success, so a todo whose
@@ -4055,22 +6165,93 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('uses the originating message for an idempotent final reply', async () => {
+  it('sends an idempotent ordinary message for a final direct response', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'message-1', 'hello'),
+    );
     channel.responseMessageId = 'message-1';
     channel.responseSenderId = 'open-alice';
 
     await channel.respond('cid-1', 'final answer');
+    const firstKey = client.sendImMessage.mock.calls[0]?.[2];
+    await channel.respond('cid-1', 'final answer');
+
+    expect(client.sendImMessage).toHaveBeenNthCalledWith(
+      1,
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      'final answer',
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+    );
+    expect(client.sendImMessage.mock.calls[1]?.[2]).toBe(firstKey);
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses the originating message for a final group reply', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'message-1', '@Qwen hello', {
+        conversationId: 'group-1',
+      }),
+    );
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('group-1', 'final answer');
 
     expect(client.replyToImMessage).toHaveBeenCalledWith(
-      'cid-1',
+      'group-1',
       'message-1',
       'open-alice',
       'final answer',
       expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
+    );
+    expect(client.sendImMessage).not.toHaveBeenCalled();
+  });
+
+  it('attributes an IM reply after checking the raw no-reply sentinel', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('cid-1', '[NO_REPLY]', '[review_*]');
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+
+    await channel.respond('cid-1', 'final answer', '[review_*]');
+    expect(client.replyToImMessage).toHaveBeenCalledWith(
+      'cid-1',
+      'message-1',
+      'open-alice',
+      '[review_*] final answer',
+      expect.any(String),
+    );
+  });
+
+  it('keeps attributed todo Markdown fenced code line-leading', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    (
+      channel as unknown as { todoTargets: Map<string, string> }
+    ).todoTargets.set('todo:task-1', 'task-1');
+
+    await channel.respond(
+      'todo:task-1',
+      '```ts\nconst x = 1;\n```',
+      '[review_*]',
+    );
+
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-1',
+      '\\[review\\_\\*\\]\n```ts\nconst x = 1;\n```',
     );
   });
 
