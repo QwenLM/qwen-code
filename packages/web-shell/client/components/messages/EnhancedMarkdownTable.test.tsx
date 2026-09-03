@@ -976,14 +976,22 @@ describe('EnhancedMarkdownTable', () => {
     expect(selection.toString()).toBe('Gamma');
   });
 
-  it('leaves other dialog keystrokes to the dialog', () => {
+  // Every chord the dialog must not claim: a bare key, the two select-all
+  // chords that Shift or Alt turn into something the browser or host page
+  // owns, and a modified key that is not A.
+  it.each([
+    ['a bare a', { key: 'a', code: 'KeyA' }],
+    ['Ctrl+Shift+A', { key: 'A', code: 'KeyA', ctrlKey: true, shiftKey: true }],
+    ['Ctrl+Alt+A', { key: 'a', code: 'KeyA', ctrlKey: true, altKey: true }],
+    ['Ctrl+C', { key: 'c', code: 'KeyC', ctrlKey: true }],
+  ])('leaves %s to the dialog', (_name, init) => {
     const container = renderTable();
 
     doubleClick(dataCell(container, 0, 0));
 
     const dialog = cellDialog();
     const event = new KeyboardEvent('keydown', {
-      key: 'a',
+      ...init,
       bubbles: true,
       cancelable: true,
     });
@@ -992,6 +1000,7 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(event.defaultPrevented).toBe(false);
+    expect(document.getSelection()?.toString()).toBe('');
   });
 
   it('mounts the cell value dialog in the Web Shell portal root', () => {

@@ -1571,13 +1571,18 @@ export function EnhancedTable({
   // value box, which is what a read-only input would do.
   const handleCellDialogKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      // The browser's own select-all is keyed to the physical key, so match
-      // `code` as well: on a Cyrillic or Greek layout the A key reports
-      // `key === 'ф'` and matching `key` alone would let the keystroke through
-      // to the unscoped default.
+      // Cmd/Ctrl+A only. The browser's own select-all is keyed to the physical
+      // key, so match `code` as well: on a Cyrillic or Greek layout the A key
+      // reports `key === 'ф'` and matching `key` alone would let the keystroke
+      // through to the unscoped default. Adding Shift or Alt makes it a
+      // different chord that the browser or the host page owns, so those are
+      // left alone.
       const selectsAll =
-        event.code === 'KeyA' || event.key.toLowerCase() === 'a';
-      if (!(event.metaKey || event.ctrlKey) || !selectsAll) {
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        (event.code === 'KeyA' || event.key.toLowerCase() === 'a');
+      if (!selectsAll) {
         return;
       }
       const valueNode = cellDialogValueRef.current;
