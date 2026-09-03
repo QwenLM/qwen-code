@@ -145,7 +145,8 @@ operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/:id/session-info`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`, `GET /session/:id/lsp`, and
+`GET /session/:id/tasks`, `GET /session/:id/lsp`,
+`GET /session/:id/resources`, and
 `GET /session/:id/transcript`.
 
 `GET /workspace/:id/session-info` (and the plural
@@ -196,6 +197,13 @@ prompt. `/status` instead reports the live session's own `createdAt`, omits
 daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
 otherwise the route returns `enabled: false` with no servers.
 
+`GET /session/:id/resources` returns the sanitized Skill and MCP snapshots
+from that live session's own Config. Use it when a session may run from a
+worktree or another effective directory whose resources differ from the base
+workspace. Workspace-owned MCP authentication, pool, budget, and discovery
+error details are omitted from this session view. Check the
+`session_resources` capability before calling it.
+
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,
 SSE/ACP transport counts, rate limit rejects, process memory, resolved limits)
@@ -209,7 +217,7 @@ idle daemon returns `initialized: false` with an empty snapshot. Once a
 session is alive they switch to `initialized: true` and surface the real
 state.
 
-To update workspace Skill settings by name, call `POST /workspace/skills/:name/enable` with `{ "enabled": true | false }` after checking the `workspace_skill_settings_toggle` capability. To change several names, check `workspace_skill_settings_batch_toggle` and call `POST /workspace/skills/enable` with `{ "skillNames": ["review", "deploy"], "enabled": false }`; it processes every structurally valid name together, persists all resulting declaration changes in at most one locked settings write, and refreshes active ACP sessions once when anything changed. These routes write workspace `skills.disabled` and `skills.enabled` without consulting the loaded Skill catalog, so names may be disabled before installation or while their Extension is inactive. Enabling a name before installation can remove a matching workspace disable, normalize an existing workspace `skills.enabled` declaration to the requested casing, or write an explicit opt-in when an effective `skills.defaultDisabled` entry applies; with no existing workspace declaration and no such entry, enable is a no-op (`changed: false`). Their paths and request bodies are unchanged; the settings-specific capabilities replace the retired catalog-validated Skill toggle tags. The batch `errors` array remains for wire compatibility and is empty for structurally valid names. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not block the workspace from recording or removing its own declaration. Skill status cells expose `disabledReason` (`hard`, `default`, or `inactive_extension`) and an optional `lockedScope`. Untrusted workspace writes are still rejected. A `deferred` response means no child was live at the liveness check or a changed request lost its child/session during the required refresh; when `changed` is true, the persisted declaration applies when a child starts. Whether a declaration actually changed is reported by `changed` (on each result for a batch request). `skills.disabled` disables both manual and model use, unlike `disable-model-invocation: true`, which keeps direct `/skill-name` invocation available. For V2 Extension batches, check `extension_batch_activation_v2`: `PUT /extensions/activation` changes global defaults, while `PUT /workspaces/:workspace/extensions/activation` changes exact overrides for the selected workspace and accepts `"inherit"` to clear them. Both accept names in `extensionNames`; `enabled` and `disabled` may be declared before installation, while `inherit` for an unknown name is a no-op. Each request returns one operation to poll.
+To update workspace Skill settings by name, call `POST /workspace/skills/:name/enable` with `{ "enabled": true | false }` after checking the `workspace_skill_settings_toggle` capability. To change several names, check `workspace_skill_settings_batch_toggle` and call `POST /workspace/skills/enable` with `{ "skillNames": ["review", "deploy"], "enabled": false }`; it processes every structurally valid name together, persists all resulting declaration changes in at most one locked settings write, and refreshes active ACP sessions once when anything changed. These routes write workspace `skills.disabled` and `skills.enabled` without consulting the loaded Skill catalog, so names may be disabled before installation or while their Extension is inactive. Enabling removes a matching workspace disable and records an explicit `skills.enabled` opt-in, even before installation, so this entry can override an Extension's internal Skill disablement. Repeating the same declaration is a no-op (`changed: false`). Their paths and request bodies are unchanged; the settings-specific capabilities replace the retired catalog-validated Skill toggle tags. The batch `errors` array remains for wire compatibility and is empty for structurally valid names. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not block the workspace from recording or removing its own declaration. Skill status cells expose `disabledReason` (`hard`, `default`, or `inactive_extension`) and an optional `lockedScope`. Untrusted workspace writes are still rejected. A `deferred` response means no child was live at the liveness check or a changed request lost its child/session during the required refresh; when `changed` is true, the persisted declaration applies when a child starts. Whether a declaration actually changed is reported by `changed` (on each result for a batch request). `skills.disabled` disables both manual and model use, unlike `disable-model-invocation: true`, which keeps direct `/skill-name` invocation available. For V2 Extension batches, check `extension_batch_activation_v2`: `PUT /extensions/activation` changes global defaults, while `PUT /workspaces/:workspace/extensions/activation` changes exact overrides for the selected workspace and accepts `"inherit"` to clear them. Both accept names in `extensionNames`; `enabled` and `disabled` may be declared before installation, while `inherit` for an unknown name is a no-op. Each request returns one operation to poll.
 
 `GET /workspace/env` and `GET /workspace/preflight` always answer with
 `initialized: true` regardless of ACP state. `env` never consults ACP
@@ -710,6 +718,21 @@ Scope and limits:
 - Applies to NEW files created by the text-write routes (workspace targets, the same-host external host writer, and HTTP text writes). Existing files always keep their on-disk mode — editing a `0600` secret keeps it `0600`, an executable keeps `+x`.
 - Binary uploads (`POST /file/upload`) always create at `0600` regardless of this setting.
 - The daemon reads the variable at workspace-filesystem construction; restart the daemon after changing it.
+
+### Session attachment storage
+
+Session attachments (files and images uploaded by Web Shell through `POST /session/:id/attachments`) are stored by default under the workspace's runtime temp dir: `<runtimeBaseDir>/tmp/<projectHash>/attachments`, keyed per session as `session-<sessionId>`. Operators who want attachments to persist outside the runtime temp dir (e.g. on a dedicated volume) can override the root:
+
+| Env var                               | Values | Default | What it does                                                                                                                                                                                                |
+| ------------------------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_SERVE_SESSION_ATTACHMENTS_ROOT` | path   | unset   | Stores session attachments under this directory instead of the default runtime temp dir. Accepts an absolute path, a path relative to the daemon's cwd, or `~` / `~/…` expanded against the home directory. |
+
+Scope and limits:
+
+- **One-way migration.** When the env is set, new attachments are written only under the configured root. Reads and removes that miss the configured root fall back to the default runtime temp dir, so attachments uploaded **before** the switch remain readable, and removable while the default fallback dir stays writable — a remove whose legacy copy cannot be unlinked (e.g. a read-only fallback volume) surfaces the error rather than reporting success. The reverse direction — removing the env after attachments were written to the configured root — makes those attachments unreachable; keep the variable stable for a given workspace.
+- **Per-session layout.** Files live under `<root>/<projectHash>/attachments/session-<sessionId>/` in both locations, where `<projectHash>` is the same workspace hash used by the default runtime temp dir; the fallback lookup uses the same session layout in the default dir. Two workspaces pointing at the same configured root stay isolated from each other.
+- **Delete cleanup.** When a session is deleted, its attachment directory is removed from both the configured root and the default fallback dir. Archiving a session keeps its attachments so they survive unarchive.
+- The daemon reads the variable at startup; restart the daemon after changing it. The directory must be writable by the daemon process.
 
 ## Multi-session & multi-workspace deployment
 

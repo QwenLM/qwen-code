@@ -26,6 +26,7 @@ export function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     id: s.runId,
     kind: 'workflow',
     runId: s.runId,
+    ...(s.workflowName ? { workflowName: s.workflowName } : {}),
     description: s.meta?.name ?? s.runId,
     meta: s.meta,
     status: s.status,

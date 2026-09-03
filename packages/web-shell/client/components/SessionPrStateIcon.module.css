@@ -12,3 +12,16 @@
 .sessionPrStateClosed.sessionPrStateClosed {
   color: var(--destructive, #ef4444);
 }
+
+/* GitHub-style issue state: open green, completed purple, not planned muted. */
+.sessionIssueStateOpen.sessionIssueStateOpen {
+  color: var(--success-color, #22c55e);
+}
+
+.sessionIssueStateCompleted.sessionIssueStateCompleted {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.sessionIssueStateNotPlanned.sessionIssueStateNotPlanned {
+  color: var(--muted-foreground, #6b7280);
+}

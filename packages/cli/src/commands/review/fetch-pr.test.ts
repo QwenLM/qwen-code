@@ -27,6 +27,7 @@ import {
 } from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
+import { PREBUILD_BUDGET_S, PREBUILD_ENV } from './lib/prebuild.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
@@ -278,6 +279,14 @@ const producerMocks = vi.hoisted(() => ({
   buildDiffPlan: vi.fn(),
   actualBuildDiffPlan: undefined as unknown as (...a: unknown[]) => unknown,
   writeStderrLine: vi.fn(),
+  // The prebuild runs Agent 7's real build-test against the plan just
+  // written; stubbed here because this suite's fs is a mock and the wiring —
+  // when it runs, against what, and what lands in the plan — is the contract.
+  // The cover gate beside it is exercised here but owned by prebuild.test.ts;
+  // default-covered so the wiring tests run the prebuild they set the env
+  // for, overridable for the skip path.
+  prebuildCovered: vi.fn(() => true),
+  prebuildWorktree: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -406,9 +415,42 @@ vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   ) => unknown;
   return { ...actual, buildDiffPlan: producerMocks.buildDiffPlan };
 });
+vi.mock('./lib/prebuild.js', async (importOriginal) => {
+  // `prebuildRequested` stays real: the env gate — and its refusal of a
+  // .env-sourced value — is what the wiring tests below exercise.
+  const actual = await importOriginal<typeof import('./lib/prebuild.js')>();
+  return {
+    ...actual,
+    prebuildCovered: producerMocks.prebuildCovered,
+    prebuildWorktree: producerMocks.prebuildWorktree,
+  };
+});
+
+// Hermetic against the ambient opt-in this same PR welds into CI's review
+// sessions: post-merge every review-session shell inherits
+// QWEN_REVIEW_PREBUILD=1, and every suite in this FILE that drives the
+// handler passes the REAL env gate (the prebuild module mock keeps
+// prebuildRequested real) before dereferencing the bare prebuildWorktree
+// stub — so the scrub must cover the whole file, not one describe (R5-1).
+// The prebuild describe re-sets the variable for the tests that are about
+// it: its describe-level beforeEach runs after this file-level one.
+const ambientPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+beforeEach(() => {
+  delete process.env['QWEN_REVIEW_PREBUILD'];
+});
+afterAll(() => {
+  if (ambientPrebuild === undefined) {
+    delete process.env['QWEN_REVIEW_PREBUILD'];
+  } else {
+    process.env['QWEN_REVIEW_PREBUILD'] = ambientPrebuild;
+  }
+});
 
 describe('fetch-pr report assembly', () => {
-  const savedEnv: { sessionId?: string; promptId?: string } = {};
+  const savedEnv: {
+    sessionId?: string;
+    promptId?: string;
+  } = {};
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -805,6 +847,171 @@ describe('fetch-pr report assembly', () => {
   // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
   // stale-clean the holder's worktree before failing on, destroying it. The
   // refusal must precede every destructive step, including the lease write.
+  describe('prebuild (issue #10108)', () => {
+    const OUT = '/tmp/fetch-report.json';
+    const DEPS = {
+      installed: true,
+      built: true,
+      note: '',
+      report: tmpFile('pr-42', 'prebuild.json'),
+      durationMs: 1234,
+    };
+    let savedPrebuild: string | undefined;
+
+    beforeEach(() => {
+      savedPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
+      process.env['QWEN_REVIEW_PREBUILD'] = '1';
+      producerMocks.prebuildWorktree.mockReturnValue(DEPS);
+      // Same reason as the defaults above: clearAllMocks keeps a
+      // mockReturnValue the skip test below sets, so re-assert the
+      // covered default every test starts from.
+      producerMocks.prebuildCovered.mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      if (savedPrebuild === undefined) {
+        delete process.env['QWEN_REVIEW_PREBUILD'];
+      } else {
+        process.env['QWEN_REVIEW_PREBUILD'] = savedPrebuild;
+      }
+    });
+
+    /** Every write of the plan, in order, parsed. */
+    function planWrites(): Array<Record<string, unknown>> {
+      return producerMocks.writeFileSync.mock.calls
+        .filter(([path]: unknown[]) => path === OUT)
+        .map(([, body]: unknown[]) => JSON.parse(String(body)));
+    }
+
+    it('runs the prebuild against the fresh worktree and records it in the plan', async () => {
+      const report = await reportFor({});
+      expect(report.dependencies).toEqual(DEPS);
+      // Agent 7's build-test reads the plan this command wrote, builds in
+      // the worktree this command created, and writes beside the plan.
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledTimes(1);
+      expect(producerMocks.prebuildWorktree).toHaveBeenCalledWith({
+        plan: OUT,
+        worktree: worktreePath('42'),
+        report: tmpFile('pr-42', 'prebuild.json'),
+      });
+    });
+
+    it('writes the plan first, rewrites it with the outcome, and ledgers the FINAL write', async () => {
+      await reportFor({});
+      // build-test reads the plan for its file list, so the plan exists
+      // before the prebuild runs; the outcome then lands in a rewrite.
+      const writes = planWrites();
+      expect(writes).toHaveLength(2);
+      expect(writes[0]).not.toHaveProperty('dependencies');
+      expect(writes[1]).toHaveProperty('dependencies', DEPS);
+      const [firstWrite, secondWrite] =
+        producerMocks.writeFileSync.mock.invocationCallOrder.filter(
+          (_order: number, i: number) =>
+            producerMocks.writeFileSync.mock.calls[i][0] === OUT,
+        );
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(prebuildOrder).toBeGreaterThan(firstWrite);
+      expect(prebuildOrder).toBeLessThan(secondWrite);
+      // The session ledger keys on the plan's mtime — the run epoch every
+      // downstream fence reads through — so it must record the rewrite,
+      // not the write the prebuild superseded.
+      const { appendRunSession } = await import('./lib/run-ledger.js');
+      expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+      expect(
+        vi.mocked(appendRunSession).mock.invocationCallOrder[0],
+      ).toBeGreaterThan(secondWrite);
+    });
+
+    it('is absent from the plan when the environment did not ask for it', async () => {
+      delete process.env['QWEN_REVIEW_PREBUILD'];
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      // And the plan is written exactly once — byte-for-byte the pre-prebuild
+      // fetch, for every local review.
+      expect(planWrites()).toHaveLength(1);
+    });
+
+    it('skips the prebuild and warns when the session-shell cover is absent', async () => {
+      // The local shape: the opt-in is set, but no covering session
+      // default is welded — a prebuild started under the built-in 120s
+      // default dies mid-install with the whole fetch-pr call, so the
+      // review degrades to the pre-prebuild flow instead.
+      producerMocks.prebuildCovered.mockReturnValue(false);
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      expect(planWrites()).toHaveLength(1);
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild skipped:'));
+      expect(line).toContain(PREBUILD_ENV);
+    });
+
+    it('skips the prebuild on an empty diff, where the skill stops before any agent runs', async () => {
+      // A resolvable base whose range diffs to nothing: the capture
+      // succeeds and is empty, which is the one shape `emptyDiff` accepts.
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: 'b'.repeat(40),
+        baseFetchFailed: false,
+      });
+      const report = await reportFor({});
+      expect(report.emptyDiff).toBe(true);
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+    });
+
+    it('announces the prebuild on stderr before the call, and the outcome after', async () => {
+      // The call is a blocking prefix that emits nothing until it returns,
+      // so the start line must precede it — a run killed mid-prebuild
+      // otherwise ends its log at the plan write with no trace of where it
+      // died. DEPS' 1234ms rounds to the 1s the success line quotes.
+      await reportFor({});
+      const calls = producerMocks.writeStderrLine.mock.calls;
+      const startIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilding the worktree via build-test'),
+      );
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      const prebuildOrder =
+        producerMocks.prebuildWorktree.mock.invocationCallOrder[0];
+      expect(
+        producerMocks.writeStderrLine.mock.invocationCallOrder[startIdx],
+      ).toBeLessThan(prebuildOrder);
+      expect(String(calls[startIdx][0])).toContain(
+        `(${PREBUILD_ENV}=1, budget ${PREBUILD_BUDGET_S}s)`,
+      );
+      const doneIdx = calls.findIndex(([line]: unknown[]) =>
+        String(line).startsWith('Prebuilt the worktree in'),
+      );
+      expect(doneIdx).toBeGreaterThan(startIdx);
+      expect(String(calls[doneIdx][0])).toBe(
+        'Prebuilt the worktree in 1s: dependencies installed and the ' +
+          "scoped build closure compiled; build-test's install is a no-op " +
+          'on this tree.',
+      );
+    });
+
+    it('discloses an incomplete prebuild on stderr, with the note', async () => {
+      producerMocks.prebuildWorktree.mockReturnValue({
+        installed: false,
+        built: false,
+        note: 'npm ci exited 1',
+        report: null,
+        durationMs: 4321,
+      });
+      await reportFor({});
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild did not complete in'));
+      expect(line).toBe(
+        'Prebuild did not complete in 4s (installed: false, built: false; ' +
+          'npm ci exited 1); build-test installs and builds on its own ' +
+          'path as before.',
+      );
+    });
+  });
+
   describe('lease lock', () => {
     const foreignLease = {
       sessionId: 'session-other',

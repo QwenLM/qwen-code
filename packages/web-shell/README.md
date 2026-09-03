@@ -134,8 +134,9 @@ export function QwenCodePanel() {
       baseUrl="http://127.0.0.1:4170"
       token="your-bearer-token"
       sessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
-      onSessionIdChange={(sessionId) => {
-        console.log('current session:', sessionId);
+      sessionContext={{ kind: 'standalone' }}
+      onSessionIdChange={(sessionId, _workspaceId, _workspaceCwd, context) => {
+        console.log('current session:', sessionId, context);
       }}
       onSessionCreated={async (sessionId) => {
         await registerSession(sessionId);
@@ -201,33 +202,40 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
 历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
 
+## 消息操作
+
+- 已完成的 assistant 消息支持复制；具备持久化 checkpoint 时还支持分支。
+- 终态 turn error 支持复制显示的错误文本。重试入口保持独立，错误轮次不支持分支。
+
 ## Props
 
 ### WebShellWithProviders
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性                 | 类型      | 说明                                                                                                    |
-| -------------------- | --------- | ------------------------------------------------------------------------------------------------------- |
-| `baseUrl`            | `string`  | daemon API 地址，未传时使用 `window.location.origin`                                                    |
-| `token`              | `string`  | daemon API Bearer token                                                                                 |
-| `sessionId`          | `string`  | 要连接的 session id；未传或 `undefined` 时保持空页面                                                    |
-| `workspaceId`        | `string`  | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                         |
-| `workspaceCwd`       | `string`  | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                    |
-| `lockWorkspaceCwd`   | `string`  | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                      |
-| `restartSseOnPrompt` | `boolean` | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭 |
+| 属性                 | 类型                          | 说明                                                                                                    |
+| -------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `baseUrl`            | `string`                      | daemon API 地址，未传时使用 `window.location.origin`                                                    |
+| `token`              | `string`                      | daemon API Bearer token                                                                                 |
+| `sessionId`          | `string`                      | 要连接的 session id；未传或 `undefined` 时保持空页面                                                    |
+| `workspaceId`        | `string`                      | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                         |
+| `workspaceCwd`       | `string`                      | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                    |
+| `sessionContext`     | `DaemonProductSessionContext` | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd` |
+| `lockWorkspaceCwd`   | `string`                      | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                      |
+| `restartSseOnPrompt` | `boolean`                     | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭 |
 
 ### WebShell
 
-| 属性                | 类型                                                                                    | 说明                                                                             |
-| ------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `onSessionIdChange` | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string) => void` | 当前 session 或工作区变化时触发                                                  |
-| `onSessionCreated`  | `(sessionId: string) => Promise<void> \| void`                                          | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒 |
-| `theme`             | `'dark' \| 'light'`                                                                     | UI 主题，默认 `dark`                                                             |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
-| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
+| 属性                       | 类型                                                                                                                                  | 说明                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `onSessionIdChange`        | `(sessionId: string \| undefined, workspaceId?: string, workspaceCwd?: string, sessionContext?: DaemonProductSessionContext) => void` | 当前 session、工作区或显式产品上下文变化时触发；standalone 和 Live 通过第四个参数上报 |
+| `onSessionCreated`         | `(sessionId: string) => Promise<void> \| void`                                                                                        | 新 session 创建后触发；完成前会阻塞 session 初始化和 prompt 提交，最长等待 30 秒      |
+| `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                  |
+| `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                           |
+| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                               |
+| `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                     |
+| `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                    |
+| `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                         |
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
@@ -244,6 +252,36 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 回调在主聊天和分屏聊天中都会触发，也可以在 daemon 断连时处理纯宿主操作。
 命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
 回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
+
+宿主需要同步 Session 产物时，可以监听完整快照：
+
+```tsx
+<WebShell
+  onSessionArtifactsChange={({
+    reason,
+    sessionId,
+    sequence,
+    artifacts,
+    artifactsByTurn,
+  }) => {
+    replaceSessionArtifacts({
+      reason,
+      sessionId,
+      sequence,
+      artifacts,
+      artifactsByTurn,
+    });
+  }}
+/>
+```
+
+`restore` 表示进入新 Session 后的首次恢复，可携带空快照；`change` 表示实时
+Artifact 变化、同 Session 重连对账发现的差异，或 transcript 补齐后的 turn
+归属变化。每次都返回完整 `artifacts` 和 `artifactsByTurn`，不提供增量。新 Artifact
+可能先于 turn 归属交付，归属稍后补齐时会再交付一份完整快照。回调会等待 transcript
+load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账，因此宿主应接受重复
+交付，但不需要从 SSE 时序推断遗漏。`sequence` 在每个新 Session 从 1 开始。宿主回调
+抛错不会影响 WebShell 内置 Artifact 面板与轮末渲染。
 
 嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
 
