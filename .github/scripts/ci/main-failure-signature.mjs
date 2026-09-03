@@ -94,7 +94,7 @@ export function testKey(testId) {
  */
 export function parseFailedJobs(tsv) {
   const jobs = [];
-  for (const rawLine of String(tsv ?? '').split('\n')) {
+  for (const rawLine of tsv.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
     const [name, ...steps] = line.split('\t');
