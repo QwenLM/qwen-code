@@ -974,7 +974,9 @@ class ExportBudget {
   }
 
   private homeSafeText(value: string): string {
-    const redacted = redactHomePaths(value);
+    const redaction = redactHomePaths(value);
+    for (const code of redaction.omissions) this.markTruncated(code);
+    const redacted = redaction.text;
     if (!containsUnredactedHomePath(redacted, true)) return redacted;
     this.markTruncated('home_path_omitted');
     return '[home path omitted]';
@@ -1484,6 +1486,8 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'tool_result_presentation_missing',
   'file_attachment_excluded',
   'home_path_omitted',
+  'encoded_content_omitted',
+  'url_home_path_omitted',
   'label_sanitized',
 ]);
 
@@ -1912,52 +1916,135 @@ function isSafeExportPath(value: unknown): value is string {
 }
 
 const EXPORT_URL_PATTERN =
-  /\b(?:https?:\/\/[^/\s<>"'\x60()?#]*(?:\/[^\s<>"'\x60?#,;()|\\]*)?|data:image\/[A-Za-z0-9.+-]+;base64,[^\s<>"'\x60]+)/gi;
-const HOME_USERNAME_SEGMENT_SOURCE = String.raw`(?:"[^"/\\\r\n]+"|'[^'/\\\r\n]+'|[^/\\\t\r\n<>\x60,;:|()]+(?=[/\\])|[^/\\\s<>"'\x60,;:|()]+)`;
+  /\b(?:https?:\/\/[^\s<>"\x60]+|data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/gi;
+const HOME_USERNAME_SEGMENT_SOURCE = String.raw`(?:[^/\\\t\r\n<>]+(?=[/\\])|[^/\\\s<>]+)`;
 const FILE_HOME_PATH_SOURCE = String.raw`file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*${HOME_USERNAME_SEGMENT_SOURCE}`;
 const LOCAL_HOME_PATH_SOURCE = String.raw`(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const BARE_HOME_ROOT_SOURCE = String.raw`(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
+const RELATIVE_HOME_PATH_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const RELATIVE_HOME_ROOT_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
 const FILE_HOME_PATH_PATTERN = new RegExp(FILE_HOME_PATH_SOURCE, 'gi');
 const LOCAL_HOME_PATH_PATTERN = new RegExp(LOCAL_HOME_PATH_SOURCE, 'gi');
+const BARE_HOME_ROOT_PATTERN = new RegExp(BARE_HOME_ROOT_SOURCE, 'gi');
+const RELATIVE_HOME_PATH_PATTERN = new RegExp(RELATIVE_HOME_PATH_SOURCE, 'gim');
+const RELATIVE_HOME_ROOT_PATTERN = new RegExp(RELATIVE_HOME_ROOT_SOURCE, 'gim');
+const ENCODED_CONTENT_OMITTED = '[encoded content omitted]';
+const URL_HOME_PATH_OMITTED = '[link omitted]';
 
-function redactHomePaths(value: string): string {
+interface HomeRedactionResult {
+  text: string;
+  omissions: string[];
+}
+
+function redactHomePaths(value: string): HomeRedactionResult {
   return redactHomePathStructures(value);
 }
-function redactHomePathStructures(value: string): string {
+function redactHomePathStructures(value: string): HomeRedactionResult {
   const urlPattern = EXPORT_URL_PATTERN;
   let result = '';
   let cursor = 0;
+  const omissions: string[] = [];
+  const append = (redaction: HomeRedactionResult): void => {
+    result += redaction.text;
+    omissions.push(...redaction.omissions);
+  };
   for (const match of value.matchAll(urlPattern)) {
-    result += redactNonHttpHomePathStructures(value.slice(cursor, match.index));
-    result +=
+    append(redactNonHttpHomePathStructures(value.slice(cursor, match.index)));
+    if (
       match[0].toLowerCase().startsWith('data:image/') &&
       containsNonHttpHomePath(match[0], true)
-        ? redactNonHttpHomePathStructures(match[0])
-        : match[0];
+    ) {
+      append(redactNonHttpHomePathStructures(match[0]));
+    } else if (shouldOmitHttpUrlToken(match[0])) {
+      result += URL_HOME_PATH_OMITTED;
+      omissions.push('url_home_path_omitted');
+    } else {
+      result += match[0];
+    }
     cursor = match.index + match[0].length;
   }
-  return result + redactNonHttpHomePathStructures(value.slice(cursor));
+  append(redactNonHttpHomePathStructures(value.slice(cursor)));
+  return { text: result, omissions };
 }
 
-function redactNonHttpHomePathStructures(value: string): string {
+function shouldOmitHttpUrlToken(value: string): boolean {
+  const authority = /^https?:\/\/([^/?#]*)/i.exec(value)?.[1];
+  return (
+    authority !== undefined &&
+    (hasAmbiguousUrlHomePath(value) ||
+      ((normalizeNavigableUrl(value) === undefined ||
+        /[(),;|'\\]/.test(authority)) &&
+        containsNonHttpHomePath(value, true)))
+  );
+}
+
+function hasAmbiguousUrlHomePath(value: string): boolean {
+  let afterDelimiter = false;
+  let parenthesisDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if ("?#&,;|'\\".includes(character)) afterDelimiter = true;
+    if (character === '(') parenthesisDepth += 1;
+    if (character === ')') {
+      if (parenthesisDepth > 0) parenthesisDepth -= 1;
+      else afterDelimiter = true;
+    }
+    if (!afterDelimiter || (character !== '/' && character !== '\\')) {
+      continue;
+    }
+    const component = value.slice(index + 1, index + 6).toLowerCase();
+    const length = component.startsWith('users')
+      ? 5
+      : component.startsWith('home')
+        ? 4
+        : 0;
+    const separator = value[index + length + 1];
+    const firstUsernameCharacter = value[index + length + 2];
+    if (
+      length > 0 &&
+      (separator === '/' || separator === '\\') &&
+      firstUsernameCharacter !== undefined &&
+      firstUsernameCharacter !== '/' &&
+      firstUsernameCharacter !== '\\' &&
+      !/\s/.test(firstUsernameCharacter)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function redactNonHttpHomePathStructures(value: string): HomeRedactionResult {
   const rawRedacted = redactRawHomePathStructures(value);
   const decoded = decodePercentText(rawRedacted);
-  if (decoded === undefined) return '[encoded content omitted]';
+  if (decoded === undefined) {
+    return {
+      text: ENCODED_CONTENT_OMITTED,
+      omissions: ['encoded_content_omitted'],
+    };
+  }
   const encodedRedacted = containsRawHomePath(decoded)
     ? redactRawHomePathStructures(decoded).replace(
         /(?:\[home\]){2,}/g,
         '[home]',
       )
     : rawRedacted;
-  return encodedRedacted.replace(
-    /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?\[home\]/gi,
-    'file://[home]',
-  );
+  return {
+    text: encodedRedacted.replace(
+      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?\[home\]/gi,
+      'file://[home]',
+    ),
+    omissions: [],
+  };
 }
 
 function redactRawHomePathStructures(value: string): string {
   return value
     .replace(FILE_HOME_PATH_PATTERN, 'file://[home]')
-    .replace(LOCAL_HOME_PATH_PATTERN, '[home]');
+    .replace(BARE_HOME_ROOT_PATTERN, '[home]')
+    .replace(LOCAL_HOME_PATH_PATTERN, '[home]')
+    .replace(RELATIVE_HOME_ROOT_PATTERN, '$1[home]')
+    .replace(RELATIVE_HOME_PATH_PATTERN, '$1[home]');
 }
 
 function containsUnredactedHomePath(
@@ -1967,6 +2054,7 @@ function containsUnredactedHomePath(
   const urlPattern = EXPORT_URL_PATTERN;
   let cursor = 0;
   for (const match of value.matchAll(urlPattern)) {
+    if (shouldOmitHttpUrlToken(match[0])) return true;
     if (
       match[0].toLowerCase().startsWith('data:image/') &&
       containsNonHttpHomePath(match[0], checkPercentEncoding)
@@ -2016,8 +2104,7 @@ function decodePrintablePercentEscapes(value: string): string {
 }
 
 function containsRawHomePath(value: string): boolean {
-  const normalized = value.replaceAll('\\', '/');
-  return /(?:^|\/)(?:home|Users)\/(?:\.\/|\/)*(?=[^/\r\n])/i.test(normalized);
+  return redactRawHomePathStructures(value) !== value;
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

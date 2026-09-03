@@ -692,6 +692,7 @@ export function transcriptBlocksToDaemonMessages(
           projectedToolCall,
           backgroundAgentUpdate?.status,
           backgroundAgentUpdate?.endTime,
+          safeToolProjection,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {

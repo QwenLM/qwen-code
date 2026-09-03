@@ -1612,6 +1612,51 @@ describe('transcriptBlocksToDaemonMessages', () => {
     },
   );
 
+  it('preserves a cancelled background agent result in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-background-result', 'agent-result', 'completed', 20, {
+          toolName: 'agent',
+          background: true,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review safely',
+          },
+          resultPreview: { kind: 'text', text: 'Terminal result' },
+        }),
+        textBlock(
+          'agent-cancelled',
+          'assistant',
+          'background agent cancelled',
+          21,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                status: 'cancelled',
+                taskId: 'agent-task',
+                toolUseId: 'agent-result',
+              },
+            },
+          },
+        ),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      status: 'failed',
+      wasCancelled: true,
+      rawOutput: { text: 'Terminal result', status: 'cancelled' },
+    });
+  });
+
   it('does not classify non-agent background tools as subagents', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [

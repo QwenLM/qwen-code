@@ -227,6 +227,7 @@ describe('ExportTranscriptDocumentV1', () => {
                   'Saved output to C:\\Users\\John Smith\\file.txt today',
                   'Visit https://example.com/a,/home/urluser/private.txt now',
                   'Visit https://example.com/a;file:///home/fileuser/private.txt now',
+                  'Visit https://example.com/report)/home/parenuser/private.txt now',
                   'see /home/alice/notes',
                 ].join('\n'),
               },
@@ -246,8 +247,37 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('Smith');
     expect(text).not.toContain('urluser');
     expect(text).not.toContain('fileuser');
+    expect(text).not.toContain('parenuser');
     expect(text).not.toContain('/home/');
     expect(text).not.toContain('%2Fhome');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'url_home_path_omitted' }),
+    );
+  });
+
+  it('redacts bare and relative home paths without dropping surrounding text', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('bare-home-paths', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: 'cd /home/ && ls\nhome/alice/notes.txt' }],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toBe('cd [home] && ls\n[home]/notes.txt');
+    expect(text).not.toBe('[home path omitted]');
+    expect(text).not.toContain('alice');
   });
 
   it.each(['/Users/./bob', '/home/../home/alice', 'C:\\Users\\.\\alice'])(
@@ -479,6 +509,46 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain(windows);
     expect(text).not.toContain('alice');
     expect(text).not.toContain('bob');
+    expect(text).toBe('[encoded content omitted]');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'encoded_content_omitted',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('marks nonconvergent encoded text incomplete without a home path', () => {
+    let encoded = 'ordinary text';
+    for (let index = 0; index < 4; index += 1) {
+      encoded = encodeURIComponent(encoded);
+    }
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('deeply-encoded-text', null, {
+          message: { role: 'user', parts: [{ text: encoded }] },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: '[encoded content omitted]',
+    });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'encoded_content_omitted',
+      severity: 'warning',
+      count: 1,
+    });
   });
 
   it('redacts home paths split across literal and encoded text boundaries', () => {
@@ -587,6 +657,7 @@ describe('ExportTranscriptDocumentV1', () => {
     const urls = [
       'https://example.com./home/alice/notes.txt',
       'https://[::1]/home/alice/notes.txt',
+      'https://example.com/report(2026)/home/alice/notes.txt',
     ];
     const document = createExportTranscriptDocumentV1(
       [
@@ -623,6 +694,26 @@ describe('ExportTranscriptDocumentV1', () => {
 
     expect(text).toBe(urls.join('\n'));
     expect(fetchUrls).toEqual(urls);
+  });
+
+  it('preserves parenthesized remote home paths in Markdown and repository URLs', () => {
+    const url = 'https://example.com/report(2026)/home/alice/notes.txt';
+    const markdown = `[report](${url})`;
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('remote-markdown-url', null, {
+          message: { role: 'user', parts: [{ text: markdown }] },
+        }),
+      ],
+      {
+        ...sessionData,
+        metadata: { ...sessionData.metadata, gitRepo: url },
+      },
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({ kind: 'user', text: markdown });
+    expect(document.metadata.repository).toBe(url);
   });
 
   it('preserves visible turns across excluded causal system records', () => {
@@ -1743,6 +1834,23 @@ describe('ExportTranscriptDocumentV1', () => {
         ...envelope,
         blocks: [
           {
+            id: 'user-url-home-path',
+            kind: 'user',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            text: 'Leaked https://example.com/a,/home/alice/private.txt',
+            streaming: false,
+          },
+        ],
+      }),
+    ).toThrowError('home_path_forbidden');
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...envelope,
+        blocks: [
+          {
             id: 'user-file-home-path',
             kind: 'user',
             clientReceivedAt: 0,
@@ -1937,6 +2045,23 @@ describe('ExportTranscriptDocumentV1', () => {
         value: envelope([], {
           diagnostics: [
             { code: 'url_sanitized', severity: 'warning', count: 1 },
+          ],
+          metadata: {
+            exportedAt: '2026-08-16T01:00:00.000Z',
+            complete: false,
+            truncated: false,
+          },
+        }),
+        error: 'invalid_metadata_state',
+      },
+      {
+        value: envelope([], {
+          diagnostics: [
+            {
+              code: 'encoded_content_omitted',
+              severity: 'warning',
+              count: 1,
+            },
           ],
           metadata: {
             exportedAt: '2026-08-16T01:00:00.000Z',
