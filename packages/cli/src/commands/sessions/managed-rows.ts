@@ -81,6 +81,14 @@ const TASK_STATE: Record<AgentViewTaskState, SessionRowState> = {
 /**
  * Rows for the managed sessions a supervisor knows about.
  *
+ * Only a snapshot the supervisor owns qualifies. The store also holds
+ * unmanaged tombstones (a removed session persists for a retention
+ * window), sessions mid-removal, and sessions mid-adoption — and an
+ * adopting snapshot reuses the id of a session that is still live and
+ * registered. Mapping any of those would list a ghost, or let the merge
+ * below replace a registry row that knows a live pid with one that does
+ * not. The supervisor's own listing skips the same shapes.
+ *
  * The name and the state both come from `deriveAgentViewPresentation`, so
  * this listing and the roster UI cannot drift into describing the same
  * session two different ways.
@@ -89,40 +97,43 @@ export function managedSessionRows(
   snapshots: readonly AgentViewSessionSnapshot[],
   now: number = Date.now(),
 ): SessionRow[] {
-  return snapshots.map((snapshot) => {
-    // Passed field by field rather than spread: the parameter is a union
-    // of the snapshot and the presentation input, and only the latter
-    // carries `now`.
-    const presentation = deriveAgentViewPresentation({
-      state: snapshot.state,
-      rosterEntry: snapshot.rosterEntry,
-      launch: snapshot.launch,
-      activity: snapshot.activity,
-      now: new Date(now),
+  return snapshots
+    .filter((snapshot) => snapshot.state.ownership === 'managed')
+    .map((snapshot) => {
+      // Passed field by field rather than spread: the parameter is a
+      // union of the snapshot and the presentation input, and only the
+      // latter carries `now`.
+      const presentation = deriveAgentViewPresentation({
+        state: snapshot.state,
+        rosterEntry: snapshot.rosterEntry,
+        launch: snapshot.launch,
+        activity: snapshot.activity,
+        now: new Date(now),
+      });
+      const createdAt = Date.parse(snapshot.state.createdAt);
+      return {
+        // `title` is derived from the roster entry, the activity file
+        // and the launch record in that order, so it is the same label
+        // the roster shows. Its placeholder is the one case to override:
+        // the roster can afford identical "Untitled session" rows because
+        // a user arrows onto one, while here the id is the only thing
+        // that tells two of them apart — and the only thing they can be
+        // acted on by.
+        name:
+          presentation.title === AGENT_VIEW_UNTITLED_TITLE ||
+          !presentation.title
+            ? snapshot.state.sessionId
+            : presentation.title,
+        // The worker is the process doing the work; the host only owns
+        // the PTY. Report whichever exists, worker first.
+        pid: snapshot.worker?.workerPid ?? snapshot.worker?.hostPid,
+        startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
+        cwd: snapshot.state.activeCwd,
+        state: TASK_STATE[presentation.taskState],
+        sessionId: snapshot.state.sessionId,
+        managed: true,
+      };
     });
-    const createdAt = Date.parse(snapshot.state.createdAt);
-    return {
-      // `title` is derived from the roster entry, the activity file and
-      // the launch record in that order, so it is the same label the
-      // roster shows. Its placeholder is the one case to override: the
-      // roster can afford identical "Untitled session" rows because a
-      // user arrows onto one, while here the id is the only thing that
-      // tells two of them apart — and the only thing they can be acted
-      // on by.
-      name:
-        presentation.title === AGENT_VIEW_UNTITLED_TITLE || !presentation.title
-          ? snapshot.state.sessionId
-          : presentation.title,
-      // The worker is the process doing the work; the host only owns the
-      // PTY. Report whichever exists, worker first.
-      pid: snapshot.worker?.workerPid ?? snapshot.worker?.hostPid,
-      startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
-      cwd: snapshot.state.activeCwd,
-      state: TASK_STATE[presentation.taskState],
-      sessionId: snapshot.state.sessionId,
-      managed: true,
-    };
-  });
 }
 
 /** Row for one live registry record. */

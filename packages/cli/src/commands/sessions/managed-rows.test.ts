@@ -169,6 +169,21 @@ describe('managedSessionRows', () => {
     expect(row.startedAt).toBeUndefined();
   });
 
+  it('lists only snapshots the supervisor owns', () => {
+    // A removed session lingers as an unmanaged tombstone for a retention
+    // window, a removal can be mid-flight, and adoption reuses the id of
+    // a session that is still live and registered. Listing any of those
+    // would show a ghost, or shadow a live registry row with a pid-less
+    // one during the adopting window.
+    for (const ownership of ['unmanaged', 'adopting', 'removing'] as const) {
+      const rows = managedSessionRows(
+        [snapshot({ state: state({ ownership }) })],
+        NOW,
+      );
+      expect(rows).toHaveLength(0);
+    }
+  });
+
   it('carries the created stamp through as epoch milliseconds', () => {
     const [row] = managedSessionRows([snapshot()], NOW);
     expect(row.startedAt).toBe(Date.parse('2026-09-04T11:58:00Z'));
@@ -206,6 +221,23 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].state).toBe('working');
+  });
+
+  it('lets a live registry record survive the adopting window', () => {
+    // Adoption reuses the live session's id before ownership flips to
+    // managed. Until it flips, the registry record is the only row that
+    // knows a live pid, so the merge must not drop it for an adopting
+    // snapshot.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1' })],
+      managedSessionRows(
+        [snapshot({ state: state({ ownership: 'adopting' }) })],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(false);
+    expect(rows[0].pid).toBe(4242);
   });
 
   it('keeps registry rows whose session id no supervisor claims', () => {
