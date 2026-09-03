@@ -6,13 +6,21 @@
 
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
+import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
 import {
   CompressionStatus,
   getStartupContextLength,
-  isClearedMediaPlaceholder,
-  isSystemReminderContent,
+  isApiUserPrompt,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
+
+/**
+ * TUI rewind's binding of the shared user-prompt classifier. Exported so the
+ * OpenTUI parity path counts prompts under the exact same rule.
+ */
+export const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
+  excludeClearedMediaPlaceholders: true,
+};
 
 /**
  * Returns true when the history item represents a real user prompt that was
@@ -39,64 +47,18 @@ export function isRealUserTurn(
 /**
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
+ *
+ * Thin binding of the shared classifier: TUI rewind excludes microcompaction
+ * media-clear placeholders because a cleared media-only entry never produced
+ * a visible user turn, so counting it would desynchronize the API prompt
+ * count from the UI turn count and truncate one turn early. See
+ * `ApiUserPromptOptions` in core for why that exclusion is an option rather
+ * than part of the shared rule (ACP must keep those entries counted), and for
+ * the exact-match collision this leaves behind — which is what prompt
+ * identity resolves.
  */
 export function isUserTextContent(content: Content): boolean {
-  if (content.role !== 'user') return false;
-  if (!content.parts || content.parts.length === 0) return false;
-
-  const hasFunctionResponse = content.parts.some(
-    (part) => 'functionResponse' in part,
-  );
-  if (hasFunctionResponse) return false;
-
-  // Exclude pure <system-reminder> entries (the startup prelude and the
-  // mid-history MCP added-tool reminders). They are structural, not real user
-  // prompts; counting them here would shift the rewind truncation index and
-  // silently drop a real turn's context. A genuine user turn that merely has
-  // a per-turn reminder prepended still has a non-reminder prompt part, so it
-  // is NOT excluded.
-  if (isSystemReminderContent(content)) return false;
-
-  // Exclude microcompaction media-clear placeholders. `/compress-fast`'s
-  // microcompaction replaces the top-level inlineData/fileData parts of
-  // user entries with text placeholders. A media-only user entry never
-  // produced a UI user turn, but once cleared it carries a text part;
-  // counting it here desynchronizes the API prompt count from the UI turn
-  // count and makes the walk below truncate one turn early, silently
-  // dropping a turn the UI still shows. Match the FULL generated
-  // placeholder shape, not just its prefix: microcompaction never rewrites
-  // text parts, so a user prompt that merely begins with the prefix (e.g.
-  // a pasted placeholder) is genuine and must keep counting. An entry that
-  // mixes placeholders with real prompt text still counts (it IS a real
-  // turn).
-  //
-  // Known limitation (exact-match collision): a genuine prompt whose ENTIRE
-  // text equals a generated placeholder shape is indistinguishable from a
-  // cleared media-only entry once serialized — both carry the identical
-  // text. Such a prompt is excluded here, leaving the API prompt count one
-  // behind the UI turn count. Every rewind target AFTER the colliding turn
-  // then returns -1 and AppContainer surfaces a loud "Cannot rewind to a
-  // turn that was compressed" abort. Rewinding TO the colliding turn itself
-  // depends on position: as the first post-compression turn it works via
-  // the uiUserTurnCount === 0 shortcut; mid-history the walk lands on the
-  // next counted prompt and truncates one turn LATE, so the colliding
-  // turn's prompt+response stays in model context while the UI removes the
-  // turn (under-deletion of context, not loss of context the UI keeps).
-  // Disambiguating any of this durably needs a structural sentinel on
-  // cleared parts, which changes the persisted API history shape and is out
-  // of scope for this fix; see the pinned tests in historyMapping.test.ts.
-  //
-  // The ACP session's private `#isUserTextContent`
-  // (packages/cli/src/acp-integration/session/Session.ts) deliberately
-  // keeps the bare text-presence check (`'text' in part && part.text`),
-  // which counts these placeholders: ACP rewind maps against per-prompt
-  // file-history snapshots, which ARE created for media-only prompts, so
-  // cleared placeholders must stay counted there. Do not mirror this
-  // exclusion into that twin.
-  return content.parts.some(
-    (part) =>
-      'text' in part && !!part.text && !isClearedMediaPlaceholder(part.text),
-  );
+  return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
 }
 
 /**
