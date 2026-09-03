@@ -117,6 +117,7 @@ type TestableAcpBridge = AcpBridge & {
   };
   knownSessionIds: Set<string>;
   sessionBindingTokens: Map<string, object | undefined>;
+  toolCallKindsBySession: Map<string, Map<string, string>>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -1187,6 +1188,26 @@ describe('AcpBridge', () => {
       rawInput: undefined,
     });
     expect(responseBoundary).not.toHaveBeenCalled();
+  });
+
+  it('does not retain kinds from terminal initial tool calls', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+
+    bridge.handleSessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-search',
+        kind: 'search',
+        title: 'Search',
+        status: 'completed',
+      },
+    });
+
+    expect(bridge.toolCallKindsBySession.has('session-1')).toBe(false);
   });
 
   it('ignores meta-only shell progress heartbeats', () => {

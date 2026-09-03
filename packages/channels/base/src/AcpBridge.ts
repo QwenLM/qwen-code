@@ -528,10 +528,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
-        if (
-          type === 'tool_call_update' &&
-          (event.status === 'completed' || event.status === 'failed')
-        ) {
+        if (event.status === 'completed' || event.status === 'failed') {
           sessionKinds?.delete(toolCallId);
           if (sessionKinds?.size === 0) {
             this.toolCallKindsBySession.delete(sessionId);
