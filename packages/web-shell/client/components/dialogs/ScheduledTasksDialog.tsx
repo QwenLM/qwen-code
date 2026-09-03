@@ -698,17 +698,28 @@ export function ScheduledTasksDialog({
     setSessionGroups([]);
     setGroupColors([]);
     setModelOptions([]);
-    void Promise.all([
+    void Promise.allSettled([
       actions.listSessionGroups(formWorkspaceCwd),
       actions.loadProviders(formWorkspaceCwd),
     ])
-      .then(
-        ([catalog, providers]) => {
-          if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
-            return;
+      .then(([catalogResult, providersResult]) => {
+        if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
+          return;
+        const errors: string[] = [];
+        if (catalogResult.status === 'fulfilled') {
+          const catalog = catalogResult.value;
           setSessionGroups(catalog.groups);
           setGroupColors(catalog.colorOptions);
           setNewGroupColor(catalog.colorOptions[0] ?? 'blue');
+        } else {
+          errors.push(
+            catalogResult.reason instanceof Error
+              ? catalogResult.reason.message
+              : String(catalogResult.reason),
+          );
+        }
+        if (providersResult.status === 'fulfilled') {
+          const providers = providersResult.value;
           const seen = new Set<string>();
           setModelOptions(
             providers.providers.flatMap((provider) =>
@@ -724,15 +735,15 @@ export function ScheduledTasksDialog({
               }),
             ),
           );
-        },
-        (error) => {
-          if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
-            return;
-          setRoutingOptionsError(
-            error instanceof Error ? error.message : String(error),
+        } else {
+          errors.push(
+            providersResult.reason instanceof Error
+              ? providersResult.reason.message
+              : String(providersResult.reason),
           );
-        },
-      )
+        }
+        if (errors.length > 0) setRoutingOptionsError(errors.join('; '));
+      })
       .finally(() => {
         if (mountedRef.current && seq === routingOptionsLoadSeqRef.current) {
           setRoutingOptionsLoading(false);

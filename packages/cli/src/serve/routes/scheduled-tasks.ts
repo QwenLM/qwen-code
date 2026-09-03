@@ -101,7 +101,7 @@ export interface ScheduledTasksSessionBridge {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
-  }): Promise<{ sessionId: string }>;
+  }): Promise<{ sessionId: string; modelApplied?: boolean }>;
   sendPrompt?(
     sessionId: string,
     req: {
@@ -560,34 +560,22 @@ async function dispatchTaskToFreshSession(
     }),
   );
   try {
-    bridge.updateSessionMetadata(child.sessionId, {
-      displayName: scheduledTaskRunSessionName(
-        task.name ?? task.prompt,
-        triggeredAt,
-      ),
-      titleSource: 'auto',
-    });
-  } catch {
-    // The prompt can still run with the generated session id as its label.
-  }
-  if (task.groupId) {
-    try {
-      await runWithScheduledTaskTarget(target, () =>
-        createSessionOrganizationService(
-          target.workspaceCwd,
-        ).updateSessionOrganization(child.sessionId, {
-          groupId: task.groupId,
-          color: null,
-        }),
-      );
-      bridge.markSessionCatalogChanged?.();
-    } catch (error) {
-      writeStderrLine(
-        `qwen serve: scheduled-task session ${child.sessionId} could not be assigned to group ${task.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+    if (task.modelServiceId && child.modelApplied === false) {
+      throw new Error(
+        `Scheduled task model selection failed: ${task.modelServiceId}`,
       );
     }
-  }
-  try {
+    try {
+      bridge.updateSessionMetadata(child.sessionId, {
+        displayName: scheduledTaskRunSessionName(
+          task.name ?? task.prompt,
+          triggeredAt,
+        ),
+        titleSource: 'auto',
+      });
+    } catch {
+      // The prompt can still run with the generated session id as its label.
+    }
     let markPromptAdmitted!: () => void;
     const promptAdmitted = new Promise<void>((resolve) => {
       markPromptAdmitted = resolve;
@@ -615,6 +603,11 @@ async function dispatchTaskToFreshSession(
         onPromptAdmitted: markPromptAdmitted,
       },
     );
+    void turn.catch((error) => {
+      writeStderrLine(
+        `qwen serve: scheduled-task session ${child.sessionId} prompt failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     await Promise.race([
       promptAdmitted,
       turn.then(
@@ -622,11 +615,23 @@ async function dispatchTaskToFreshSession(
         (error) => Promise.reject(error),
       ),
     ]);
-    void turn.catch((error) => {
-      writeStderrLine(
-        `qwen serve: scheduled-task session ${child.sessionId} prompt failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    if (task.groupId) {
+      try {
+        await runWithScheduledTaskTarget(target, () =>
+          createSessionOrganizationService(
+            target.workspaceCwd,
+          ).updateSessionOrganization(child.sessionId, {
+            groupId: task.groupId,
+            color: null,
+          }),
+        );
+        bridge.markSessionCatalogChanged?.();
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: scheduled-task session ${child.sessionId} could not be assigned to group ${task.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   } catch (error) {
     await teardownBoundSession(target, child.sessionId);
     throw error;

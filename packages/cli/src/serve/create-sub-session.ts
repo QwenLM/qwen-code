@@ -63,7 +63,7 @@ import { createSessionOrganizationService } from './session-organization-helpers
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
-  'createChildWithInitialPrompt' | 'resume' | 'continueSession'
+  'createChildWithInitialPrompt' | 'resume' | 'continueSession' | 'delete'
 >;
 
 const log = createDebugLogger('SUB_SESSION');
@@ -891,6 +891,20 @@ export function createSubSessionLauncher(
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
+      if (info.model && sub.modelApplied === false) {
+        if (standalone) {
+          try {
+            await standaloneService!.delete([sessionId]);
+          } catch (cleanupError) {
+            log.debug(
+              'sub-session: standalone model-selection rollback failed',
+              sessionId,
+              cleanupError,
+            );
+          }
+        }
+        throw new Error(`sub-session model selection failed: ${info.model}`);
+      }
       if (isolatedWorkspace && !standalone) {
         const isolatedCwd =
           await isolatedWorkspace.materializeDirectory(sessionId);
@@ -921,28 +935,6 @@ export function createSubSessionLauncher(
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
       }
 
-      if (info.groupId) {
-        try {
-          const assign = () =>
-            createSessionOrganizationService(
-              boundWorkspace,
-            ).updateSessionOrganization(sessionId, {
-              groupId: info.groupId,
-              color: null,
-            });
-          if (runtimeBaseDir) {
-            await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, assign);
-          } else {
-            await assign();
-          }
-          bridge.markSessionCatalogChanged();
-        } catch (error) {
-          writeStderrLine(
-            `qwen serve: scheduled-task session ${sessionId} could not be assigned to group ${info.groupId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-
       if (!standalone) {
         lastEventId = bridge.getSessionLastEventId(sessionId);
         let markPromptAdmitted!: () => void;
@@ -968,21 +960,44 @@ export function createSubSessionLauncher(
         log.debug('sub-session: sendPrompt rejected', sessionId, String(err));
       });
 
-      if (info.completion === 'sent') {
-        if (isScheduledTaskRunSource(info) && promptAdmission) {
-          await Promise.race([
-            promptAdmission,
-            turn.then(
-              () => undefined,
-              (err) =>
-                Promise.reject(
-                  new Error(
-                    `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
-                  ),
+      if (isScheduledTaskRunSource(info) && promptAdmission) {
+        await Promise.race([
+          promptAdmission,
+          turn.then(
+            () => undefined,
+            (err) =>
+              Promise.reject(
+                new Error(
+                  `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
                 ),
-            ),
-          ]);
+              ),
+          ),
+        ]);
+      }
+
+      if (info.groupId) {
+        try {
+          const assign = () =>
+            createSessionOrganizationService(
+              boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              groupId: info.groupId,
+              color: null,
+            });
+          if (runtimeBaseDir) {
+            await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, assign);
+          } else {
+            await assign();
+          }
+          bridge.markSessionCatalogChanged();
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: scheduled-task session ${sessionId} could not be assigned to group ${info.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
+      }
+
+      if (info.completion === 'sent') {
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the

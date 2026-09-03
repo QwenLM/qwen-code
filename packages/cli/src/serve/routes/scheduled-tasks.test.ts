@@ -55,7 +55,7 @@ interface StubBridge {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
-  }): Promise<{ sessionId: string }>;
+  }): Promise<{ sessionId: string; modelApplied?: boolean }>;
   sendPrompt(
     sessionId: string,
     req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
@@ -107,6 +107,7 @@ interface StubBridge {
     titleSource?: 'manual' | 'auto';
   }>;
   failNext: boolean;
+  modelApplied?: boolean;
   persistenceError?: Error;
 }
 
@@ -145,7 +146,13 @@ function makeStubBridge(): StubBridge {
         hasActivePrompt: false,
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
       });
-      return { sessionId };
+      return {
+        sessionId,
+        ...(req.modelServiceId !== undefined &&
+        bridge.modelApplied !== undefined
+          ? { modelApplied: bridge.modelApplied }
+          : {}),
+      };
     },
     async sendPrompt(sessionId, req, _signal, context) {
       bridge.prompts.push({ sessionId, text: req.prompt[0]?.text ?? '' });
@@ -547,6 +554,35 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.spawned).toEqual([]);
   });
 
+  it('validates per-run routing fields before creating the task session', async () => {
+    const persistent = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'persistent',
+      modelServiceId: 'qwen-max(openai)',
+    });
+    const emptyModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: '',
+    });
+    const longGroup = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'g'.repeat(129),
+    });
+
+    expect(persistent.status).toBe(400);
+    expect(persistent.body.code).toBe('session_routing_requires_per_run');
+    expect(emptyModel.status).toBe(400);
+    expect(emptyModel.body.code).toBe('invalid_model_service_id');
+    expect(longGroup.status).toBe(400);
+    expect(longGroup.body.code).toBe('invalid_group_id');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
   it('updates and clears per-run model and group routing', async () => {
     const organization = new SessionOrganizationService(h.workspace);
     const group = await organization.createGroup({
@@ -609,11 +645,17 @@ describe('scheduled-tasks routes', () => {
   });
 
   it('restores a per-run one-shot when prompt admission rejects asynchronously', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
     const created = await create({
       cron: '0 0 1 1 *',
       prompt: 'run once',
       recurring: false,
       sessionMode: 'per_run',
+      groupId: group.id,
     });
     h.bridge.sendPrompt = vi.fn(() =>
       Promise.reject(new SessionNotFoundError('sess-2')),
@@ -634,6 +676,31 @@ describe('scheduled-tasks routes', () => {
       sessionMode: 'per_run',
     });
     expect(stored[0]?.runs).toBeUndefined();
+    expect((await organization.readSnapshot()).sessions.has('sess-2')).toBe(
+      false,
+    );
+  });
+
+  it('fails a per-run dispatch when the selected model is not applied', async () => {
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'run with the selected model',
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    h.bridge.modelApplied = false;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(h.bridge.prompts).toEqual([]);
+    expect((await readCronTasks(h.workspace))[0]?.runs?.at(-1)).toMatchObject({
+      sessionDispatchFailed: true,
+    });
   });
 
   it('restores a consumed one-shot even when an unrelated write lands during dispatch', async () => {

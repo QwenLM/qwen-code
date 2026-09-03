@@ -1630,6 +1630,44 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 
+  it('rejects group routing outside a valid scheduled-task run', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-group' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const scheduledSource = {
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: 'group-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/groupId/);
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: '',
+        callerSessionId: 'caller-1',
+        ...scheduledSource,
+      }),
+    ).rejects.toThrow(/groupId/);
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'x',
+        completion: 'sent',
+        groupId: 'g'.repeat(129),
+        callerSessionId: 'caller-1',
+        ...scheduledSource,
+      }),
+    ).rejects.toThrow(/groupId/);
+
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
   it('rejects a callerSessionId this connection does not own', async () => {
     // The key names the launcher's per-caller concurrency bucket. A child that
     // can name any session evades its own cap (a fabricated id starts a fresh

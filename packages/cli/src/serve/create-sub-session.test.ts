@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { SessionService } from '@qwen-code/qwen-code-core';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -56,6 +56,7 @@ function makeFakeBridge(opts?: {
   events?: (promptId: string) => FakeEvent[];
   blockAfterEvents?: boolean;
   sendPromptRejects?: string;
+  modelApplied?: boolean;
   /** Simulate a persisted parent that the idle reaper removed before the
    * sent-mode worker completes. `resumeSession` makes it live again. */
   reapedParentSessionId?: string;
@@ -137,7 +138,12 @@ function makeFakeBridge(opts?: {
       parentSessionId?: string;
     }) => {
       spawns.push(req);
-      return { sessionId: `sub-${++n}` };
+      return {
+        sessionId: `sub-${++n}`,
+        ...(req.modelServiceId !== undefined && opts?.modelApplied !== undefined
+          ? { modelApplied: opts.modelApplied }
+          : {}),
+      };
     },
     updateSessionMetadata: (
       sessionId: string,
@@ -427,6 +433,57 @@ describe('sub-session launcher', () => {
     expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalled();
   });
 
+  it('assigns the selected group inside the resolved runtime storage', async () => {
+    const fake = makeFakeBridge();
+    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    updateSessionOrganization.mockImplementationOnce(async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(runtimeBaseDir);
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      groupId: 'group-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(updateSessionOrganization).toHaveBeenCalledOnce();
+  });
+
+  it('still launches when scheduled-task group assignment fails', async () => {
+    const fake = makeFakeBridge();
+    updateSessionOrganization.mockRejectedValueOnce(
+      new Error('group_not_found'),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        groupId: 'group-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-1' });
+
+    expect(fake.prompts).toHaveLength(1);
+    expect(stderrLines).toContainEqual(
+      expect.stringMatching(/could not be assigned.*group_not_found/i),
+    );
+  });
+
   it('rejects a scheduled-task run when prompt admission fails', async () => {
     const fake = makeFakeBridge({
       sendPromptRejects: 'child disappeared during init',
@@ -442,10 +499,34 @@ describe('sub-session launcher', () => {
         completion: 'sent',
         sourceType: 'default',
         sourceId: 'scheduled_task_run:task-1',
+        groupId: 'group-1',
         callerSessionId: 'caller-1',
       }),
     ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
     expect(fake.closes).toEqual(['sub-1']);
+    expect(updateSessionOrganization).not.toHaveBeenCalled();
+  });
+
+  it('rejects a scheduled-task run when its selected model is not applied', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'run the task',
+        completion: 'sent',
+        model: 'missing-model',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/model selection failed.*missing-model/i);
+
+    expect(fake.closes).toEqual(['sub-1']);
+    expect(fake.prompts).toEqual([]);
   });
 
   it('routes a standalone caller through the managed standalone child service', async () => {
@@ -484,6 +565,7 @@ describe('sub-session launcher', () => {
       getBridge: () => fake.bridge,
       getStandaloneSessionService: () => ({
         createChildWithInitialPrompt,
+        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(async (_sessionId, dispatch) =>
           dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
@@ -518,6 +600,64 @@ describe('sub-session launcher', () => {
     expect(fake.subscriptions).toEqual([
       { sessionId: result.sessionId, lastEventId: 37 },
     ]);
+  });
+
+  it('deletes a standalone child when its selected model is not applied', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    let childSessionId = '';
+    const deleteSessions = vi.fn(async () => ({}) as never);
+    const createChildWithInitialPrompt = vi.fn(
+      async (request: {
+        sessionId: string;
+        parentSessionId: string;
+        promptId: string;
+        modelServiceId?: string;
+      }) => {
+        childSessionId = request.sessionId;
+        return {
+          session: {
+            sessionId: request.sessionId,
+            workspaceCwd: WS,
+            attached: false,
+            sourceType: 'standalone',
+            sourcePersisted: true,
+            parentSessionPersisted: true,
+            modelApplied: false,
+          },
+          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+          workingDirectory: { state: 'ready' as const },
+          initialPrompt: {
+            promptId: request.promptId,
+            lastEventId: 37,
+            turn: new Promise<never>(() => {}),
+          },
+        };
+      },
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        delete: deleteSessions,
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'standalone child task',
+        completion: 'sent',
+        model: 'missing-model',
+        callerSessionId: 'caller-standalone',
+      }),
+    ).rejects.toThrow(/model selection failed.*missing-model/i);
+
+    expect(deleteSessions).toHaveBeenCalledWith([childSessionId]);
+    expect(fake.prompts).toEqual([]);
   });
 
   it('returns a standalone first turn correlated to the managed prompt', async () => {
@@ -556,6 +696,7 @@ describe('sub-session launcher', () => {
       getBridge: () => fake.bridge,
       getStandaloneSessionService: () => ({
         createChildWithInitialPrompt,
+        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(),
       }),
@@ -609,6 +750,7 @@ describe('sub-session launcher', () => {
             turn: Promise.reject(new Error('managed dispatch failed')),
           },
         }),
+        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(),
       }),
@@ -697,6 +839,7 @@ describe('sub-session launcher', () => {
             },
           };
         },
+        delete: vi.fn(),
         resume,
         continueSession,
       }),
