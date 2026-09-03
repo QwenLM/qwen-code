@@ -77,6 +77,13 @@ vi.mock('@qwen-code/channel-base', () => ({
       mockHandleInbound(env);
       return Promise.resolve();
     }
+    // QQChannel reads this to decide `isSlash` from the payload after the
+    // configured prefix. Mirrors the real accessor, which reads the same
+    // config key.
+    protected configuredMessagePrefix(): string | undefined {
+      const value = this.config['messagePrefix'];
+      return typeof value === 'string' && value ? value : undefined;
+    }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
     }
@@ -113,6 +120,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     const cp = Array.from(str);
     return cp.length > max ? cp.slice(0, max).join('') : str;
   },
+  // QQChannel decides `isSlash` from the payload *after* the configured
+  // prefix, so it imports the real helper. Mirrors the shared contract:
+  // undefined when the text does not carry the prefix, the text itself
+  // when no prefix is configured.
+  stripMessagePrefix: (text: string, prefix: string | undefined) =>
+    prefix ? undefined : text,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');

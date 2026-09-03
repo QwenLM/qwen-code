@@ -2498,9 +2498,16 @@ export class QQChannel extends ChannelBase {
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
-    const commandText =
-      stripMessagePrefix(safeDisplayText, this.configuredMessagePrefix()) ??
-      safeCleanText;
+    const configuredPrefix = this.configuredMessagePrefix();
+    // With no prefix configured, slash detection runs on the mention-free
+    // text as it always has: another member's `<@...>` ahead of the
+    // command must not make it read as prose. With a prefix, the display
+    // text is the right source -- `stripMessagePrefix` skips leading
+    // mentions itself, and what decides "command" is the payload after
+    // the prefix, not the raw text.
+    const commandText = configuredPrefix
+      ? (stripMessagePrefix(safeDisplayText, configuredPrefix) ?? safeCleanText)
+      : safeCleanText;
     const isSlash = effectiveIsAtBot && commandText.startsWith('/');
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
