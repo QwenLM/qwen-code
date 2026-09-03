@@ -172,6 +172,12 @@ unsafe, or uncertain state preserves the current compromised or unavailable
 failure. The check never writes a new owner record and does not participate in
 Live discovery handoff.
 
+The check is one-shot for that daemon generation. It is not repeated after the
+Conversations runtime is published and therefore cannot detect a legacy owner
+record created later. This proposal accepts that limitation under the
+drain-and-cutover requirement below rather than adding owner polling or runtime
+read-only degradation.
+
 `createServeApp` constructs only that compatibility checker; it does not attach
 a Conversations owner to `ServeAppLifecycleController`. The lifecycle
 controller therefore has no Conversations ownership to release after shutdown;
@@ -237,10 +243,21 @@ runtime can host, including standalone, Live, scheduled-task controller, and
 scheduled-task run sessions. A source-based override would miss background
 sessions whose persisted source is not `standalone`.
 
-The default `runQwenServe` runtime factory owns this wiring. An embedded runtime
-factory supplied through `createServeApp` must honor the same
-`live-conversation` provenance contract when it creates the bridge; test fakes
-may model the resulting behavior without spawning a child.
+The default `runQwenServe` runtime factory owns this wiring.
+`createAcpSessionBridge` exposes one private immutable attestation derived from
+its frozen child-environment overrides. The attestation is true only when the
+bridge will inject both the private parent capability and the exact
+Conversations marker into every ACP child it creates.
+`ConversationRuntimeManager` includes that attestation in its owned-runtime
+validation before it accepts an existing registered runtime or publishes a new
+candidate. A missing or false attestation rejects and disposes or quarantines
+the runtime as `conversation_runtime_unavailable`; it is never exposed to
+standalone, Live, scheduled-task, lifecycle, or maintenance callers.
+
+An embedded runtime factory supplied through `createServeApp` must construct a
+bridge with the same attestation. Setting `provenance: 'live-conversation'`
+alone is insufficient. Test fakes may expose the attestation directly without
+spawning a child, but publication tests must still exercise the same check.
 
 The ACP session must acquire the lease during config initialization before it
 reports successful creation or restore. It retains the lease until session
@@ -314,11 +331,13 @@ authoritative external writer fence before manual cleanup.
 
 Forcing the lease also makes graceful managed shutdown seal and hash every
 active Conversations transcript. The implementation does not silently lengthen
-the existing child-termination deadline. Delivery therefore requires proving
-that representative maximum active-session and transcript sizes finish within
-that budget. If the timeout ends in process death while the primary record is
-still a well-formed active record, the qualified successor can recover it; a
-residual claim or uncertain transition continues to fail closed.
+the existing child-termination deadline. Measure representative maximum
+active-session and transcript sizes against that budget as a performance
+observation. If the timeout ends in process death while the primary record is
+still a well-formed active record, qualified-successor reclaim is the recovery
+path. Delivery must still prove that timeout and cancellation do not leave a
+residual claim or uncertain transition, because those states continue to fail
+closed.
 
 ### Retire owner writes without removing migration or state-directory safety
 
@@ -475,6 +494,7 @@ mixed-mode compatibility problem without serving the requested default.
 | The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                    |
 | A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                              |
 | A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                    |
+| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose or quarantine the runtime; `503 conversation_runtime_unavailable`                 |
 | A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                        |
 | Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response |
 
@@ -506,12 +526,13 @@ initialization removes the stale exact record and proceeds without a restart.
 This compatibility guard reduces the failure mode but does not make a rolling
 mixed-version deployment supported.
 
-The reverse direction remains unsafe: an old daemon started after updated
-daemons have mounted Conversations finds no owner record, writes one, and may
-run an unleased ACP writer beside leased writers. All daemons sharing one
-Conversations root must therefore be upgraded together. The owner-record format
-is not extended with a lease-aware marker because older strict readers would
-reject the new shape as compromised.
+The compatibility check is not repeated after runtime publication, so it cannot
+detect the reverse direction: an old daemon started after updated daemons have
+mounted Conversations finds no owner record, writes one, and may run an
+unleased ACP writer beside leased writers. All daemons sharing one Conversations
+root must therefore be upgraded together. The owner-record format is not
+extended with a lease-aware marker because older strict readers would reject
+the new shape as compromised.
 
 The writer-lock schema-version-2 owner record accepts the optional
 `pid_namespace_id`; updated Linux writers populate it when available and
@@ -546,8 +567,9 @@ Release notes must state that:
 - a provably dead same-domain active writer is recovered automatically; on
   Linux that requires the same hostname, boot, and PID namespace, while a live
   or unverifiable writer stays fenced;
-- a live old-version runtime owner still causes a transitional 503 and all
-  daemons sharing a root must be upgraded together;
+- a live old-version runtime owner present at first runtime creation still causes
+  a transitional 503, but the one-shot check cannot detect an old daemon started
+  later, so all daemons sharing a root require drain-and-cutover together;
 - the lease provides a same-session conflict fence, not multi-master support.
 
 ## Verification
@@ -567,11 +589,15 @@ for an ordinary runtime, and on for all runtimes; Conversations selects
 rejection without a private parent capability, capture before environment-file
 loading, user-level and project-level environment scrubbing, sandbox
 propagation, and isolation between primary, secondary, and Conversations bridge
-child environments. Standalone parent lifecycle and maintenance acquisitions
-must select the same `local` policy. Scheduler coverage verifies that the
-captured Conversations marker installs the unbound-durable-task skip before
-loading or catch-up detection, allows a task after it is bound to that session,
-and leaves ordinary workspace lock-owner behavior unchanged.
+child environments. Runtime-publication coverage accepts the default
+Conversations bridge and a conforming test fake, rejects and disposes a new
+`live-conversation` candidate whose bridge does not attest to the mandatory
+marker, and rejects and quarantines an equivalent existing registered runtime.
+Standalone parent lifecycle and maintenance acquisitions must select the same
+`local` policy. Scheduler coverage verifies that the captured Conversations
+marker installs the unbound-durable-task skip before loading or catch-up
+detection, allows a task after it is bound to that session, and leaves ordinary
+workspace lock-owner behavior unchanged.
 
 Core lease coverage records and validates the Linux PID namespace, treats a
 missing reclaim identity as live, reclaims dead and PID-reused owners only in
@@ -582,12 +608,13 @@ hostname and process-start rules. Existing concurrent-reclaimer, exact-record,
 transcript-proof, and crashed-reclaimer tests remain in force.
 
 Managed-shutdown coverage uses representative high active-session counts and
-large transcripts to verify that parallel sealing finishes before the existing
-termination deadline. It also verifies that a forced timeout retains the exact
-active lock while the writer process is still live and preserves the existing
-observable unclean-shutdown outcome rather than releasing ownership ambiguously.
-After that exact process exits, only a same-identity-domain contender may
-recover a well-formed active record; an uncertain transition remains fenced.
+large transcripts to measure parallel sealing against the existing termination
+deadline. It also verifies that a forced timeout retains the exact active lock
+while the writer process is still live, never leaves a residual claim or
+uncertain transition, and preserves the existing observable unclean-shutdown
+outcome rather than releasing ownership ambiguously. After that exact process
+exits, only a same-identity-domain contender may recover a well-formed active
+record.
 
 A two-process daemon integration test uses the same home, runtime base, and
 Conversations root and verifies:
