@@ -27,7 +27,11 @@ import {
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
-import { MAX_SOCKET_PATH_BYTES } from './socket-path.js';
+import {
+  MAX_SOCKET_PATH_BYTES,
+  SOCKET_DIR_NAME,
+  resolvePeerSocketCandidates,
+} from './socket-path.js';
 import {
   getLastPeerInboxFailure,
   describePeerInboxFailure,
@@ -280,6 +284,49 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     } finally {
       vi.unstubAllEnvs();
       await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('blames the first candidate when every candidate fails', async () => {
+    // The recorded failure keeps candidate 1's diagnosis -- the path the
+    // user configured -- while `attempts` counts the rest. Report the
+    // last one instead and the banner names a nonce directory this
+    // process minted, which appears in no configuration and which the
+    // user cannot act on, while the "Tried N candidate paths." sentence
+    // disappears with it. Every other failure test hands in an explicit
+    // socketPath, so the candidate list has one entry and this path
+    // through `startPeerInbox` is never walked.
+    const runtime = path.join(tmpDir, 'runtime-file');
+    const tmp = path.join(tmpDir, 'tmp-file');
+    await fs.writeFile(runtime, 'not a directory');
+    await fs.writeFile(tmp, 'not a directory');
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
+    vi.stubEnv('TMPDIR', tmp);
+    // Candidates 1 and 2 fail at mkdir. Candidate 3 lives under a literal
+    // `/tmp`, which exists and is writable, so the uid guard is what has
+    // to turn it away; the spy moves the comparison value rather than the
+    // directory's owner, so it fires whether or not the runner is root.
+    // It mutates process-global state, hence the restore in `finally`.
+    const withUid = process as NodeJS.Process & { getuid: () => number };
+    const uid = vi.spyOn(withUid, 'getuid');
+    uid.mockReturnValue((process.getuid?.() ?? 0) + 1);
+    try {
+      const expected = resolvePeerSocketCandidates();
+      expect(expected).toHaveLength(3);
+
+      const started = await startPeerInbox({ onFrame: () => {} });
+
+      expect(started).toBeNull();
+      const failure = getLastPeerInboxFailure();
+      expect(failure?.socketPath).toBe(expected[0]);
+      expect(failure?.cause).toBe('not_directory');
+      expect(failure?.attempts).toBe(3);
+      expect(describePeerInboxFailure(failure!)).toContain(
+        'Tried 3 candidate paths',
+      );
+    } finally {
+      uid.mockRestore();
+      vi.unstubAllEnvs();
     }
   });
 
@@ -1242,6 +1289,56 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('reports a sibling overflow when the race lands on an unpadded name', async (ctx) => {
+    // The raced ordering AND a sibling that will not fit: the one
+    // combination neither existing test reaches. Both sibling-overflow
+    // tests use a live squatter, which takes the pre-bind probe branch,
+    // and the raced test above uses a geometry where the sibling fits.
+    // Without the early return this falls through `classify` -- which has
+    // no EADDRINUSE case -- to `bind_failed`, telling the user to restart
+    // after a process that will never exit, when the blocker is a name
+    // length.
+    //
+    // Same directory-in-the-socket's-place trick as the test above, in
+    // the padded geometry: `<pid>.sock` fits sun_path, the 9-byte sibling
+    // suffix does not.
+    const root = await fs.mkdtemp('/tmp/qs-');
+    const base = path.join(root, 'socks');
+    const padding = 'p'.repeat(
+      Math.max(
+        0,
+        MAX_SOCKET_PATH_BYTES - Buffer.byteLength(path.join(base, '4242.sock')),
+      ),
+    );
+    const dir = base + padding;
+    const taken = path.join(dir, '4242.sock');
+    // A visible skip rather than a bare return, for the same reason as
+    // the sibling-overflow test below: a machine where the geometry
+    // stopped holding must not look like a pass.
+    if (Buffer.byteLength(taken) > MAX_SOCKET_PATH_BYTES) {
+      ctx.skip();
+      return;
+    }
+    expect(Buffer.byteLength(taken) + 9).toBeGreaterThan(MAX_SOCKET_PATH_BYTES);
+    await fs.mkdir(taken, { recursive: true });
+    try {
+      const started = await startPeerInbox({
+        socketPath: taken,
+        onFrame: () => {},
+      });
+
+      expect(started).toBeNull();
+      const failure = getLastPeerInboxFailure();
+      expect(failure?.cause).toBe('sibling_too_long');
+      expect(failure?.socketPath).toBe(taken);
+      expect(describePeerInboxFailure(failure!)).toContain(
+        'held by another live session',
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('falls through to the next candidate when the sibling would not fit', async (ctx) => {
     // Both path_too_long tests pass an explicit socketPath, so the
     // candidate list has exactly one entry and the fall-through is never
@@ -1253,7 +1350,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     const shortTmp = await fs.mkdtemp('/tmp/qs-tm-');
     // Pad the runtime dir so `<pid>.sock` lands inside sun_path but the
     // 9-byte sibling suffix would push it over.
-    const suffix = path.join('qwen-socks', `${process.pid}.sock`);
+    const suffix = path.join(SOCKET_DIR_NAME, `${process.pid}.sock`);
     const target = 99;
     const padLength =
       target - Buffer.byteLength(path.join(runtimeRoot, 'x', suffix)) + 1;
@@ -1272,6 +1369,16 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     vi.stubEnv('TMPDIR', shortTmp);
     try {
+      // Everything below is only a test of the fall-through while the
+      // padded path really is candidate 1. Let the directory name grow by
+      // five bytes and the pre-bind length filter drops it before any
+      // bind is attempted -- the inbox then binds the TMPDIR candidate
+      // first, every assertion here still passes, and the only guard
+      // against an early `break` on `sibling_too_long` is silently gone.
+      // `resolvePeerSocketCandidates` reads the environment when called,
+      // so this has to run after the stubs above.
+      expect(resolvePeerSocketCandidates()[0]).toBe(taken);
+
       const started = await startPeerInbox({
         onFrame: (frame) => received.push(frame),
       });

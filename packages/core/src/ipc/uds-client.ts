@@ -280,6 +280,11 @@ export function probePeerSocketVerdict(
  * on the answer must use {@link probePeerSocketVerdict} and require `dead`:
  * this collapse maps `unknown` and `dead` onto the same `false`, and acting
  * destructively on that would treat "could not tell" as "provably gone".
+ *
+ * Kept for callers outside this package; nothing in this repository uses
+ * it. The read-only listing it was written for moved to the verdict so
+ * its own tests could tell `unknown` from `dead`, and this wrapper's
+ * suite in `uds-client.test.ts` is now what pins the collapse.
  */
 export function probePeerSocket(socketPath: string): Promise<boolean> {
   return probePeerSocketVerdict(socketPath).then(

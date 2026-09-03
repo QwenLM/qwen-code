@@ -127,9 +127,14 @@ export interface PeerInboxStartFailure {
   cause: PeerInboxFailureCause;
   /**
    * The path whose failure is reported: the first candidate tried, which
-   * is the one the user configured. Later candidates are process-minted
-   * fallback directories, so naming those would point the user at a
-   * directory that exists nowhere in their configuration.
+   * is the one the user configured.
+   *
+   * Every other name this code may end up handing to `listen()` is one
+   * the process minted -- a fallback nonce directory, or the
+   * `<pid>-<8hex>.sock` sibling a PID collision moves aside to -- and
+   * naming those would send the user after a path that exists nowhere in
+   * their configuration. The name actually attempted stays in `detail`,
+   * which carries Node's errno message verbatim.
    */
   socketPath: string;
   /** The underlying error, for logs. */
@@ -606,7 +611,10 @@ async function bindAt(
   automaticPath: boolean,
 ): Promise<{ inbox: PeerInbox } | { failure: PeerInboxStartFailure }> {
   // Moves to a sibling name when a live listener already holds the
-  // PID-keyed path; everything below binds and reports the bound path.
+  // PID-keyed path. `socketPath` is what gets bound and what a successful
+  // inbox reports; `requestedPath` is what a *failure* reports, because
+  // the sibling is a name this process minted (see
+  // `PeerInboxStartFailure.socketPath`).
   let socketPath = requestedPath;
   if (!isLocalIpcPath(socketPath)) {
     const unsupportedPlatform = automaticPath && process.platform === 'win32';
@@ -621,7 +629,7 @@ async function bindAt(
             ? 'Disable cross-session messaging for this session.'
             : 'Use an absolute local path.',
         ),
-        socketPath,
+        requestedPath,
       ),
     };
   }
@@ -631,7 +639,7 @@ async function bindAt(
         Object.assign(new Error(`${socketPath} exceeds sun_path`), {
           code: 'ENAMETOOLONG',
         }),
-        socketPath,
+        requestedPath,
       ),
     };
   }
@@ -675,7 +683,7 @@ async function bindAt(
     await fs.chmod(dir, SOCKET_DIR_MODE);
   } catch (error) {
     await dropDirIfEmpty();
-    return { failure: classify(error, socketPath) };
+    return { failure: classify(error, requestedPath) };
   }
 
   // A socket file left behind by a crashed session would make bind() fail
@@ -695,7 +703,7 @@ async function bindAt(
     const sibling = siblingSocketPath(socketPath);
     if (sibling === null) {
       await dropDirIfEmpty();
-      return { failure: siblingOverflowFailure(socketPath) };
+      return { failure: siblingOverflowFailure(requestedPath) };
     }
     debugLogger.debug(
       `${socketPath} is held by a live session (a PID collision across namespaces); binding at ${sibling}`,
@@ -846,18 +854,11 @@ async function bindAt(
       // take ownership of a directory that is already theirs, when the
       // real blocker is a name length.
       await dropDirIfEmpty();
-      return { failure: siblingOverflowFailure(socketPath) };
+      return { failure: siblingOverflowFailure(requestedPath) };
     }
     let raced = error;
-    // The path last handed to listen(), which is what a failure must
-    // name. `socketPath` is only advanced on success, so reporting it
-    // after a failed retry would put the original path in the sentence
-    // while Node's message in `detail` named the sibling -- one banner,
-    // two paths, and the user sent after the wrong one.
-    let attempted = socketPath;
     if (sibling !== null) {
       try {
-        attempted = sibling;
         await listenAt(sibling);
         socketPath = sibling;
         raced = null;
@@ -867,7 +868,7 @@ async function bindAt(
     }
     if (raced !== null) {
       await dropDirIfEmpty();
-      const classified = classify(raced, attempted);
+      const classified = classify(raced, requestedPath);
       return {
         failure:
           classified.cause === 'unknown'
@@ -895,7 +896,7 @@ async function bindAt(
     await dropDirIfEmpty();
     return {
       failure: {
-        ...classify(error, socketPath),
+        ...classify(error, requestedPath),
         cause: 'chmod_failed',
       },
     };

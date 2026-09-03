@@ -9,10 +9,15 @@
  * and against a scripted `net.connect` for the errno and deadline rules
  * that a real socket cannot be made to produce on demand.
  *
- * The verdict suite below carries the three-valued answer; the boolean
- * suite carries the collapse the read-only listing consumes. They are kept
- * apart because the interesting cases are exactly the ones where the two
- * disagree -- `unknown` and `dead` both read as `false`.
+ * The verdict suite below carries the three-valued answer. The boolean
+ * suite covers `probePeerSocket`, which no caller in this repository uses
+ * any more: it predates the verdict, and the one consumer it had -- the
+ * read-only peer listing -- moved to `probePeerSocketVerdict` so its own
+ * tests could tell `unknown` from `dead`. The wrapper stays exported for
+ * callers outside this repository, and its suite is what pins the collapse
+ * they get. Kept apart from the verdict suite because the interesting
+ * cases are exactly the ones where the two disagree -- `unknown` and
+ * `dead` both read as `false`.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';

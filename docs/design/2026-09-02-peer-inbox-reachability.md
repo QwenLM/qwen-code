@@ -49,11 +49,11 @@ peers learn the address from the session registry rather than deriving it.
 
 **Classified failure with a hint.** When every candidate fails the error is
 mapped onto a cause a user can act on — not a directory, foreign owner,
-permission, missing ancestor, path too long, bind failure, chmod failure —
-each with one line naming what to change. The failure is kept in module
-state so two surfaces can show it: the session prints it once at startup,
-and `/peers` repeats it instead of pointing at a debug flag. A successful
-bind clears it.
+permission, missing ancestor, path too long, sibling name too long, bind
+failure, chmod failure — each with one line naming what to change. The
+failure is kept in module state so two surfaces can show it: the session
+prints it once at startup, and `/peers` repeats it instead of pointing at a
+debug flag. A successful bind clears it.
 
 **A deadline, not an idle timer.** A connection must complete a line within
 30 s of connecting, and then within 30 s of its last complete line. Only a
@@ -75,8 +75,15 @@ beside it instead. Only a socket that does not answer is unlinked. If
 `listen()` still reports `EADDRINUSE` — the path was taken between the
 probe and the listen — one retry at a sibling name settles it, and a second
 failure is reported as a real bind failure. When a sibling name would
-exceed `sun_path` the candidate fails as `path_too_long` rather than
-binding something unusable, and the chain moves on.
+exceed `sun_path` the candidate fails as `sibling_too_long` — its own cause
+and its own sentence, deliberately not `path_too_long`, because the
+configured path itself fits and telling the user it is over a limit they can
+measure is a claim they can disprove — rather than binding something
+unusable, and the chain moves on.
+
+A failure always names the path the user configured, never the sibling or
+the nonce directory this process minted; the name actually attempted stays
+in the errno detail.
 
 ## Trade-offs
 
@@ -107,6 +114,10 @@ binding something unusable, and the chain moves on.
   both sweeps.
 - `packages/core/src/ipc/uds-client.ts` — probe used by the sweeps and the
   bind.
+- `packages/core/src/ipc/uds-inbox-bind-failures.test.ts` — the two bind
+  failures no filesystem fixture can produce (a socket `chmod` that fails
+  after `listen()` succeeded, and a `listen()` that fails at both names),
+  kept apart so their module-level stubs stay off the real-socket suite.
 - `packages/cli/src/peerMessaging/PeerMessagingContext.tsx` — failure
   context, kept apart from the inbox so a null inbox can be told from a
   failed one.
