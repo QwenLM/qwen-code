@@ -136,15 +136,9 @@ describe('ledgerResumeCount — entries past the original, no double subtraction
   // entry, so subtracting the original again counts one resume short: the
   // exact backstop shape (a deleted marker, the original session resuming)
   // passed a cap it had already exhausted.
-  // Stamped at call time, not when this block is COLLECTED. Entries are
-  // fenced against the plan file's mtime with RUN_EPOCH_SLACK_MS (2s) of
-  // slack, and `beforeEach` writes that file — so a stamp taken at collection
-  // is stale by however long collection took, and the fence drops the entries
-  // as a previous run's. Release run 33713579913 collected for 2260s on a
-  // contended host; this block then read 1, then 0, then 0 across its three
-  // attempts, against an expected 2.
+  const now = Date.now();
+
   function threeSessions(): void {
-    const now = Date.now();
     appendRunSession(plan, envOf('S0'), now);
     appendRunSession(plan, envOf('S1'), now + 1000);
     appendRunSession(plan, envOf('S2'), now + 2000);
@@ -170,7 +164,7 @@ describe('ledgerResumeCount — entries past the original, no double subtraction
   });
 
   it('is zero on a fresh ledger, whatever excludes', () => {
-    appendRunSession(plan, envOf('S0'), Date.now());
+    appendRunSession(plan, envOf('S0'), now);
     expect(ledgerResumeCount(plan)).toBe(0);
     expect(ledgerResumeCount(plan, { excludeSessionId: 'S0' })).toBe(0);
     expect(ledgerResumeCount(plan, { excludeSessionId: 'S9' })).toBe(0);
