@@ -331,7 +331,6 @@ import {
 } from '../i18n/index.js';
 import {
   isWorkspaceTrusted,
-  isFolderTrustEnabled,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
 import {
@@ -4004,6 +4003,10 @@ class QwenAgent implements Agent {
           config.setAllowedMcpServers(gating.allowed);
           config.setPendingMcpServers(gating.pending);
           await config.reinitializeMcpServers(mcpServers);
+          const llmClient = config.getLlmClient?.();
+          if (llmClient?.isInitialized?.()) {
+            await llmClient.setTools?.();
+          }
         } catch (error) {
           syncErrors.push(error);
         }
@@ -6489,7 +6492,18 @@ class QwenAgent implements Agent {
             } catch {
               // Match CLI: token lookup errors should not break /mcp status.
             }
-            const rawStatus = this.getMcpServerStatus(config, name);
+            const poolRow = poolByName[name];
+            const rawStatus = poolRow
+              ? poolRow.entrySummary.some(
+                  (entry) => entry.status === MCPServerStatus.CONNECTED,
+                )
+                ? MCPServerStatus.CONNECTED
+                : poolRow.entrySummary.some(
+                      (entry) => entry.status === MCPServerStatus.CONNECTING,
+                    )
+                  ? MCPServerStatus.CONNECTING
+                  : MCPServerStatus.DISCONNECTED
+              : this.getMcpServerStatus(config, name);
             const requiresAuth =
               rawStatus !== MCPServerStatus.CONNECTED &&
               (mcpServerRequiresOAuth.get(name) === true ||
@@ -6625,7 +6639,6 @@ class QwenAgent implements Agent {
               }
             }
             // Pool entries enrichment.
-            const poolRow = poolByName[name];
             if (poolRow) {
               out.entryCount = poolRow.entryCount;
               out.entrySummary = poolRow.entrySummary.map((e) => ({
@@ -10542,7 +10555,19 @@ class QwenAgent implements Agent {
         const validateTrust = () => {
           if (
             managedTrustAllowed ||
-            !isFolderTrustEnabled(this.settings.merged)
+            // Folder-trust enablement is bound to the workspace this session
+            // was admitted under: `config.getFolderTrust()` is
+            // `security.folderTrust.enabled` from that workspace, set once at
+            // construction and never moved by `relocateWorkingDirectory`.
+            // Deliberately NOT the process-wide `this.settings` cache (holds
+            // another workspace's value in a multi-workspace daemon — the bug
+            // this fixes), and deliberately NOT a live re-read keyed on the
+            // current cwd: a cd moves `targetDir` into a subdirectory that
+            // carries no `.qwen/settings.json`, so a cwd-keyed read resolves
+            // disabled after the first cd and disarms the gate for the rest of
+            // the session. `security.folderTrust.enabled` is `requiresRestart`,
+            // so binding it at admission matches its declared semantics.
+            !config.getFolderTrust()
           ) {
             trustValidated = true;
             return;

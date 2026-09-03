@@ -33,6 +33,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   PromptDeadlineExceededError,
   PromptQueueFullError,
@@ -1648,10 +1649,16 @@ describe('createAcpSessionBridge', () => {
     const bridge = makeBridge({ channelFactory });
 
     await bridge.initializeWorkspaceMcp();
-    await bridge.queryWorkspaceStatus(
-      SERVE_STATUS_EXT_METHODS.workspaceMcp,
-      () => ({ discoveryState: 'not_started', servers: [] }),
-    );
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+      source: 'live',
+    });
     expect(handle.killed).toBe(true);
 
     await expect(
@@ -1659,7 +1666,11 @@ describe('createAcpSessionBridge', () => {
         SERVE_STATUS_EXT_METHODS.workspaceMcp,
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
-    ).resolves.toMatchObject({ discoveryState: 'completed' });
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+      source: 'cache',
+    });
     expect(channelFactory).toHaveBeenCalledTimes(1);
     expect(
       handle.agent.extMethodCalls.filter(
@@ -1671,7 +1682,184 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states after disabling in a fresh child', async () => {
+  it('does not reuse completed MCP status after the runtime epoch changes', async () => {
+    const first = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return { discoveryState: 'completed', servers: [] };
+        }
+        return {};
+      },
+    });
+    const second = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+          ? { discoveryState: 'not_started', servers: [] }
+          : {},
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+    });
+    expect(first.killed).toBe(true);
+
+    await bridge.preheat({ keepAliveMs: 600_000 });
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'not_started',
+      runtimeEpoch: 2,
+      source: 'live',
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('serializes MCP authentication across workspace bridges', async () => {
+    let authenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (authenticationActive) return undefined;
+      authenticationActive = true;
+      return () => {
+        authenticationActive = false;
+      };
+    };
+    const makeAuthenticationChannel = () =>
+      makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+    const firstHandle = makeAuthenticationChannel();
+    const secondHandle = makeAuthenticationChannel();
+    const first = makeBridge({
+      channelFactory: async () => firstHandle.channel,
+      acquireMcpAuthentication,
+    });
+    const second = makeBridge({
+      boundWorkspace: WS_B,
+      channelFactory: async () => secondHandle.channel,
+      acquireMcpAuthentication,
+    });
+
+    await expect(
+      first.manageMcpServer('aone', 'authenticate', undefined),
+    ).resolves.toMatchObject({ pending: true });
+    await expect(
+      second.manageMcpServer('aone', 'authenticate', undefined),
+    ).rejects.toBeInstanceOf(McpAuthenticationInProgressError);
+
+    await first.shutdown();
+    await expect(
+      second.manageMcpServer('aone', 'authenticate', undefined),
+    ).resolves.toMatchObject({ pending: true });
+    await second.shutdown();
+  });
+
+  it('keeps MCP authentication admission after a timed-out RPC until its channel exits', async () => {
+    vi.useFakeTimers();
+    try {
+      let authenticationActive = false;
+      const acquireMcpAuthentication = () => {
+        if (authenticationActive) return undefined;
+        authenticationActive = true;
+        return () => {
+          authenticationActive = false;
+        };
+      };
+      const stalledAuthentication = deferred<Record<string, unknown>>();
+      const firstHandle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage
+            ? await stalledAuthentication.promise
+            : {},
+      });
+      const secondHandle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+      const first = makeBridge({
+        channelFactory: async () => firstHandle.channel,
+        acquireMcpAuthentication,
+      });
+      const second = makeBridge({
+        boundWorkspace: WS_B,
+        channelFactory: async () => secondHandle.channel,
+        acquireMcpAuthentication,
+      });
+      const session = await first.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const request = first.manageMcpServer('aone', 'authenticate', undefined);
+      void request.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(firstHandle.killed).toBe(false);
+      await expect(
+        second.manageMcpServer('aone', 'authenticate', undefined),
+      ).rejects.toBeInstanceOf(McpAuthenticationInProgressError);
+
+      await first.closeSession(session.sessionId);
+      await vi.waitFor(() => expect(firstHandle.killed).toBe(true));
+      await expect(
+        second.manageMcpServer('aone', 'authenticate', undefined),
+      ).resolves.toMatchObject({ pending: true });
+
+      await first.shutdown();
+      await second.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reuse other MCP states after disabling in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1746,7 +1934,9 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
+      runtimeEpoch: 2,
+      source: 'cache',
       servers: [
         expect.objectContaining({
           name: 'aone',
@@ -1756,7 +1946,7 @@ describe('createAcpSessionBridge', () => {
         expect.objectContaining({
           name: 'yuque',
           disabled: false,
-          mcpStatus: 'connected',
+          mcpStatus: 'disconnected',
         }),
       ],
     });
@@ -1765,7 +1955,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states while polling authentication', async () => {
+  it('does not reuse other MCP states while polling in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1831,14 +2021,14 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
       servers: [
         expect.objectContaining({
           name: 'aone',
           mcpStatus: 'connected',
           authenticationState: 'succeeded',
         }),
-        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'disconnected' }),
       ],
     });
     expect(authentication.killed).toBe(true);
@@ -1846,7 +2036,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states after restarting in a fresh child', async () => {
+  it('does not reuse other MCP states after restarting in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1903,10 +2093,10 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
       servers: [
         expect.objectContaining({ name: 'aone', mcpStatus: 'connected' }),
-        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'disconnected' }),
       ],
     });
 
@@ -32625,7 +32815,7 @@ describe('preheat', () => {
     await secondBridge.shutdown();
   });
 
-  it('keeps an idle-timeout-zero channel alive while workspace status is pending', async () => {
+  it('reaps an idle-timeout-zero preheat after workspace status settles', async () => {
     const statusResult = deferred<Record<string, unknown>>();
     const statusMethod = 'qwen/status/workspace/test';
     const handle = makeChannel({
@@ -32658,10 +32848,10 @@ describe('preheat', () => {
 
     statusResult.resolve({ ready: true });
     await expect(status).resolves.toEqual({ ready: true });
-    expect(handle.killed).toBe(false);
+    expect(handle.killed).toBe(true);
     expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-      state: 'idle',
-      runtimeLive: true,
+      state: 'cold',
+      runtimeLive: false,
       activeWork: false,
     });
 
