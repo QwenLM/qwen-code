@@ -74,7 +74,18 @@ function describeRemaining(
   expiryMs: number | null,
 ): string {
   if (expiryMs === null) return '';
-  const remaining = entry.heldAt + expiryMs - Date.now();
+  // Aged the way the gate ages it: `InboundGate.ageOf` takes the larger
+  // of the wall-clock and monotonic elapsed times, so reading the wall
+  // clock alone here would promise time the gate will not grant. After a
+  // backward NTP correction four minutes into a five-minute hold the
+  // gate expires the message in about a minute while a wall-only
+  // reading prints "61 minutes left".
+  const wallAge = Date.now() - entry.heldAt;
+  const age =
+    entry.monotonicAt === undefined
+      ? wallAge
+      : Math.max(wallAge, performance.now() - entry.monotonicAt);
+  const remaining = expiryMs - age;
   if (remaining <= 0) return ', expiring now';
   const minutes = Math.ceil(remaining / 60_000);
   return remaining < 60_000

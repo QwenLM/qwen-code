@@ -7743,6 +7743,51 @@ describe('AppContainer State Management', () => {
       expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
     });
 
+    it('re-runs the gate when the inbound policy changes', () => {
+      // The effect keys on the parsed lifetime AND the policy. The policy
+      // half is referenced nowhere in the effect body, so dropping it from
+      // the deps array flags nothing -- and a user live-editing
+      // `crossSessionInbound` from `hold` to `refuse` would never have the
+      // parked backlog settled as `denied`, leaving senders with no
+      // receipt for messages the new policy is supposed to have handled.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionInbound: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('hold')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
     it('does not re-run the gate when an unrelated setting changes', () => {
       // `reevaluate` also settles a parked backlog as `denied` under a
       // refuse policy, so it must key on the parsed lifetime and the

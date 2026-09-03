@@ -26,6 +26,7 @@ import {
 } from './env.js';
 import {
   type ApprovalMode,
+  canonicalizeMsgId,
   createDebugLogger,
   formatPeerDisplay,
   formatPeerEnvelope,
@@ -354,9 +355,33 @@ export class PeerMessaging {
     const listed = this.listedHeld;
     if (listed === null) return true;
     const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
-    return this.getHeld().some(
-      (entry) => pinned.get(entry.frame.msgId) !== entry.heldAt,
+    const current = this.getHeld();
+    if (current.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt))
+      return true;
+
+    // A departure is normally harmless -- `resolveHeld` prefix-matches
+    // over the current set, so a smaller set only narrows what a printed
+    // handle can mean. The exception is an id that *extends* the departed
+    // one: `msgId` is peer-chosen and only shape-checked, so a peer can
+    // park `abc` beside `abc12345`. While both are held the handles are
+    // distinct, and `resolveHeld`'s exact-match tier gives `abc` to the
+    // shorter. Once `abc` expires, that same handle falls through to
+    // prefix-matching and silently decides `abc12345` -- a different
+    // message than the one the user reviewed, released under the reviewed
+    // one's handle.
+    //
+    // Canonicalized the way `resolveHeld` canonicalizes, or the check
+    // would miss the dashed forms it matches on.
+    const liveIds = current.map((entry) =>
+      canonicalizeMsgId(entry.frame.msgId),
     );
+    const liveSet = new Set(liveIds);
+    for (const id of pinned.keys()) {
+      const departed = canonicalizeMsgId(id);
+      if (liveSet.has(departed)) continue;
+      if (liveIds.some((live) => live.startsWith(departed))) return true;
+    }
+    return false;
   }
 
   decide(

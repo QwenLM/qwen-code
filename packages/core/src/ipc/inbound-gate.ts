@@ -622,7 +622,15 @@ export class InboundGate {
     // original (older) timestamp, and pushing it behind newer entries
     // would leave `held.shift()` evicting the newest message at
     // MAX_HELD_MESSAGES -- the opposite of "evict the oldest".
-    stillHeld.sort((a, b) => a.heldAt - b.heldAt);
+    //
+    // Ordered by `ageOf`, not by `heldAt`: expiry judges age on the same
+    // function, and sorting on the wall clock alone reintroduces the
+    // inversion this sort exists to prevent. After a backward wall-clock
+    // step, entries admitted since the step carry a smaller `heldAt` and
+    // would sort ahead of genuinely older ones -- so `held.shift()` would
+    // evict a newer message and receipt its sender `expired` early.
+    // Descending age is oldest-first.
+    stillHeld.sort((a, b) => this.ageOf(b) - this.ageOf(a));
     this.held.push(...stillHeld);
     this.rescheduleExpiry();
 
@@ -737,16 +745,6 @@ export class InboundGate {
   }
 
   /**
-   * Settle every message whose hold has run out.
-   *
-   * Expiry is judged against the lifetime configured *now*, not the one
-   * in force when each message arrived: shortening the setting expires a
-   * backlog that is already too old, and lengthening it gives the
-   * backlog the longer window. Either reading is defensible; this one
-   * has the property that what `/peers` shows as remaining is what
-   * actually happens.
-   */
-  /**
    * How long `entry` has been parked: the larger of the wall-clock and
    * monotonic elapsed times.
    *
@@ -769,6 +767,16 @@ export class InboundGate {
     return Math.max(wall, performance.now() - entry.monotonicAt);
   }
 
+  /**
+   * Settle every message whose hold has run out.
+   *
+   * Expiry is judged against the lifetime configured *now*, not the one
+   * in force when each message arrived: shortening the setting expires a
+   * backlog that is already too old, and lengthening it gives the
+   * backlog the longer window. Either reading is defensible; this one
+   * has the property that what `/peers` shows as remaining is what
+   * actually happens.
+   */
   private expireOverdue(): void {
     const expiryMs = this.getHeldExpiryMs();
     if (expiryMs === null || this.held.length === 0) return;

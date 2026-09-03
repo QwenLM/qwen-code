@@ -1056,12 +1056,19 @@ describe('held message expiry', () => {
     ).toBe(true);
   });
 
-  it('keeps the delay inside setTimeout range after a far-backward clock step', () => {
-    // A stale VM restore or a `date -s` moves Date.now() back far enough
-    // that `expiryMs - wallAge` passes setTimeout's 32-bit ceiling. Node
-    // clamps such a delay to 1 ms and warns, so the callback re-arms the
-    // same oversized value and spins at ~1 kHz -- pegging a core and
-    // tearing the Ink render -- until the buffer drains.
+  it('clamps the delay for an entry with no monotonic anchor', () => {
+    // The clamp is only reachable through the wall-clock fallback: every
+    // entry `admit()` builds carries `monotonicAt`, so its age is never
+    // negative and the delay never exceeds the lifetime. An entry
+    // without the anchor -- an older caller, or a hand-built one -- ages
+    // on the wall clock alone, and a far-backward step then makes
+    // `expiryMs - age` overflow setTimeout's 32-bit ceiling. Node clamps
+    // such a delay to 1 ms and warns, so the callback re-arms the same
+    // oversized value and spins at ~1 kHz until the buffer drains.
+    //
+    // `vi.setSystemTime` cannot be used to reach this through `ageOf`:
+    // vitest's faked `performance.now` moves with it, so the monotonic
+    // side never diverges and the age stays ~0.
     const delays: number[] = [];
     const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
       fn: () => void,
@@ -1073,18 +1080,52 @@ describe('held message expiry', () => {
     try {
       const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
       h.gate.admit(frame());
-      delays.length = 0;
+      // Strip the anchor, then step the wall clock back 30 days.
+      const entry = h.gate.getHeld()[0] as { monotonicAt?: number };
+      delete entry.monotonicAt;
       vi.setSystemTime(Date.now() - 30 * 24 * 60 * 60_000);
-      // Any re-arm against the stepped clock, with the single parked
-      // entry still the one the timer is armed for.
+      delays.length = 0;
+
       h.gate.reevaluate('clock-step');
+
       expect(delays.length).toBeGreaterThan(0);
-      for (const delay of delays) {
-        expect(delay).toBeGreaterThanOrEqual(1);
-        expect(delay).toBeLessThanOrEqual(2 ** 31 - 1);
-      }
+      // Unclamped this would be ~2.592e12; the ceiling is what stops the
+      // 1 ms re-arm loop.
+      expect(delays[0]).toBe(2 ** 31 - 1);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('expires on the monotonic clock when the wall clock steps backward', () => {
+    // The reason `monotonicAt` exists. A backward NTP correction makes
+    // the wall age negative, so a wall-only reading never sees the hold
+    // as overdue and the message is parked past its lifetime with no
+    // receipt. The clocks have to be driven apart explicitly: under fake
+    // timers `vi.setSystemTime` moves both.
+    let monotonic = 0;
+    const perf = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonic);
+    try {
+      const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
+      const f = frame();
+      h.gate.admit(f);
+
+      // An hour backward, four seconds in: wall age is now about -1h.
+      monotonic += 4_000;
+      vi.setSystemTime(Date.now() - 60 * 60_000);
+      expect(Date.now() - h.gate.getHeld()[0].heldAt).toBeLessThan(0);
+
+      // A full lifetime of monotonic time passes.
+      monotonic += 60_001;
+      h.gate.admit(frame());
+
+      expect(
+        h.statuses.some((s) => s.msgId === f.msgId && s.status === 'expired'),
+      ).toBe(true);
+    } finally {
+      perf.mockRestore();
     }
   });
 
@@ -1144,6 +1185,63 @@ describe('held message expiry', () => {
       deliver: () => {},
     });
     expect(gate.getHeldExpiryMs()).toBe(DEFAULT_HELD_EXPIRY_MS);
+  });
+
+  it('evicts by age, not by wall clock, after the clocks diverge', () => {
+    // The buffer is ordered so `held.shift()` evicts the oldest at the
+    // cap. Sorting on `heldAt` alone reintroduces the inversion the sort
+    // exists to prevent: after a backward wall-clock step, an entry
+    // admitted since the step carries a smaller `heldAt` and would sort
+    // ahead of a genuinely older one -- so the newer message is evicted
+    // and its sender receipted `expired` early.
+    //
+    // `vi.setSystemTime` alone cannot diverge the clocks: it moves
+    // Date.now() while the fake timers also move performance.now(). The
+    // monotonic side is pinned separately so only the wall clock steps.
+    let monotonic = 0;
+    const perf = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonic);
+    try {
+      const h = harness({ policy: 'hold', heldExpiryMs: null });
+      const older = frame();
+      h.gate.admit(older);
+      monotonic += 60_000;
+      // The wall clock steps back an hour; the monotonic clock does not.
+      vi.setSystemTime(Date.now() - 60 * 60_000);
+      const newer = frame();
+      h.gate.admit(newer);
+
+      // By `heldAt` the newer entry now looks older and would sort first.
+      const held = h.gate.getHeld();
+      expect(held[0].frame.msgId).toBe(older.msgId);
+      expect(held[1].heldAt).toBeLessThan(held[0].heldAt);
+
+      h.gate.reevaluate('test');
+      expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([
+        older.msgId,
+        newer.msgId,
+      ]);
+
+      // Fill to exactly the cap, then admit one more so precisely one
+      // eviction happens: the victim must be the genuinely oldest entry,
+      // not the one with the smaller wall-clock stamp.
+      for (let i = 0; i < MAX_HELD_MESSAGES - 2; i++) h.gate.admit(frame());
+      expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
+      h.gate.admit(frame());
+      expect(
+        h.statuses.some(
+          (s) => s.msgId === older.msgId && s.status === 'expired',
+        ),
+      ).toBe(true);
+      expect(
+        h.statuses.some(
+          (s) => s.msgId === newer.msgId && s.status === 'expired',
+        ),
+      ).toBe(false);
+    } finally {
+      perf.mockRestore();
+    }
   });
 
   it('takes a still-unexpired message through the gate normally', () => {

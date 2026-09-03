@@ -1454,6 +1454,54 @@ describe.skipIf(isWindows)('held message expiry', () => {
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
   });
 
+  it('calls a listing stale when an expiry lets a handle reassign', async () => {
+    // The exception to the rule above. `msgId` is peer-chosen and only
+    // shape-checked, so a peer can park `abc` beside `abc12345`. While
+    // both are held the handles are distinct and `resolveHeld`'s
+    // exact-match tier gives `abc` to the shorter one. Once `abc`
+    // expires, that handle falls through to prefix-matching and would
+    // release `abc12345` -- a different message than the user reviewed.
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 600,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      {
+        ...buildUserFrame({ content: 'short', from: sender.socketPath }),
+        msgId: 'abc',
+      },
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    // Parked later, so it outlives the shorter id's window.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await sendPeerFrame(
+      messaging.socketPath!,
+      {
+        ...buildUserFrame({ content: 'long', from: sender.socketPath }),
+        msgId: 'abc12345',
+      },
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual([
+      'abc',
+      'abc12345',
+    ]);
+    messaging.recordHeldListing(messaging.getHeld());
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
+
+    // `abc` ages past 600ms while `abc12345` has ~300ms left.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await settle();
+    expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual(['abc12345']);
+
+    expect(messaging.heldSetChangedSinceListing()).toBe(true);
+  });
+
   it('receipts a refusal as refused rather than denied', async () => {
     const sender = await startSenderInbox();
     const { messaging } = await start(ApprovalMode.DEFAULT, {

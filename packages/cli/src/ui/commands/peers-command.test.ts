@@ -44,6 +44,7 @@ function held(over: {
   fromName?: string;
   cause?: HeldMessage['cause'];
   heldAt?: number;
+  monotonicAt?: number;
 }): HeldMessage {
   return {
     frame: {
@@ -57,6 +58,9 @@ function held(over: {
     },
     cause: over.cause ?? 'mode-mismatch',
     heldAt: over.heldAt ?? 1_000,
+    ...(over.monotonicAt !== undefined
+      ? { monotonicAt: over.monotonicAt }
+      : {}),
   };
 }
 
@@ -121,9 +125,25 @@ beforeEach(() => {
     heldSetChangedSinceListing: () => {
       if (listed === null) return true;
       const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
-      return messages.some(
-        (entry) => pinned.get(entry.frame.msgId) !== entry.heldAt,
-      );
+      if (
+        messages.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt)
+      ) {
+        return true;
+      }
+      // A departure only matters when a survivor's id extends it: the
+      // departed entry's printed handle then falls through resolveHeld's
+      // exact-match tier into prefix-matching and names a different
+      // message.
+      const canon = (id: string) => id.replace(/-/g, '').toLowerCase();
+      const liveIds = messages.map((entry) => canon(entry.frame.msgId));
+      const liveSet = new Set(liveIds);
+      return [...pinned.keys()].some((id) => {
+        const departed = canon(id);
+        return (
+          !liveSet.has(departed) &&
+          liveIds.some((live) => live.startsWith(departed))
+        );
+      });
     },
   };
 });
@@ -509,6 +529,30 @@ describe('/peers', () => {
     expect(result.content).toContain('4 minutes left');
   });
 
+  it('bounces a handle that would reassign after the shorter id expired', async () => {
+    // `msgId` is peer-chosen and only shape-checked, so a peer can park
+    // `abc` beside `abc12345`. While both are held the handles are
+    // distinct and resolveHeld's exact-match tier gives `abc` to the
+    // shorter one. Once `abc` leaves on the expiry timer, that same
+    // handle falls through to prefix-matching and would release
+    // `abc12345` -- a different message than the one the user reviewed --
+    // under the reviewed one's handle, certified "Released to this
+    // session."
+    messages = [
+      held({ msgId: 'abc', heldAt: 1_000 }),
+      held({ msgId: 'abc12345', heldAt: 2_000 }),
+    ];
+    await run(fake, '');
+    // What the expiry timer does to the buffer: the shorter id leaves.
+    messages = [held({ msgId: 'abc12345', heldAt: 2_000 })];
+
+    const result = await run(fake, 'accept abc');
+
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('changed since you listed it');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
   it('still decides a survivor after the expiry timer removed the other', async () => {
     // The expiry timer removes entries with no peer or user activity --
     // a mover the guard's rationale never named. A removal can never make
@@ -618,6 +662,33 @@ describe('formatHeldList — remaining time', () => {
       120_000,
     );
     expect(out).toContain('2 minutes left');
+  });
+
+  it('ages on the same clock the gate expires on', () => {
+    // The gate takes the larger of the wall-clock and monotonic ages, so
+    // a wall-only reading here promises time it will not grant: after a
+    // backward NTP correction four minutes into a five-minute hold the
+    // message expires in about a minute while the wall clock still shows
+    // an hour left.
+    const perf = vi.spyOn(performance, 'now').mockReturnValue(300_000);
+    try {
+      const out = formatHeldList(
+        [
+          held({
+            msgId: 'a1b2c3',
+            // Wall clock stepped back an hour: this looks like the
+            // future, so the wall age is negative.
+            heldAt: Date.now() + 56 * 60_000,
+            monotonicAt: 0,
+          }),
+        ],
+        5 * 60_000,
+      );
+      expect(out).toContain('expiring now');
+      expect(out).not.toContain('minutes left');
+    } finally {
+      perf.mockRestore();
+    }
   });
 
   it('does not count seconds nobody can act on', () => {
