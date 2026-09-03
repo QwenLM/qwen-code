@@ -50,8 +50,9 @@ describe('expectWithinLatencyBudget', () => {
     // whether the duration *is* the property: a complexity or ReDoS bound, a
     // close that must not hang. Those keep a bound wide enough for a
     // 5x-contended host and far too tight for a quadratic regression — 20x
-    // where the lane allows it, 10x or 5x where a shorter per-test timeout
-    // would otherwise decide the outcome before the assertion does.
+    // where the lane allows it and the bound still sits under the
+    // regression's own cost; a lower multiple where a shorter per-test
+    // timeout or the regression's own cost decides the outcome first.
     process.env['QWEN_SKIP_LATENCY_BUDGETS'] = '1';
     expect(() =>
       expectWithinLatencyBudget(1500, 100, { poolMultiplier: 20 }),
