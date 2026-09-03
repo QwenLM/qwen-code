@@ -101,14 +101,22 @@ jobs:
             # package dir (ENOTEMPTY). Clear trash left by crashed installs
             # and retry through the seconds-long race window.
             PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            # --prefix pins the install to /usr/local: on the hk-4/hk-5
+            # machines root's npm global prefix is a custom Node directory
+            # (/usr/local/lib/nodejs/node-v22.23.2-linux-x64), so without
+            # it the update landed there while the pool kept resolving the
+            # stale /usr/local/bin/qwen -> /usr/local/lib/node_modules copy.
+            # Some pool machines have no passwordless sudo for the runner
+            # user; fall back to installing as that user, which works when
+            # it owns the prefix.
+            if sudo -n true 2>/dev/null; then
+              INSTALL=(sudo env -u NPM_CONFIG_PREFIX)
+            else
+              INSTALL=(env)
+            fi
             for attempt in 1 2 3; do
               sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              # --prefix pins the install to /usr/local: on the hk-4/hk-5
-              # machines root's npm global prefix is a custom Node directory
-              # (/usr/local/lib/nodejs/node-v22.23.2-linux-x64), so without
-              # it the update landed there while the pool kept resolving the
-              # stale /usr/local/bin/qwen -> /usr/local/lib/node_modules copy.
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              if "${INSTALL[@]}" npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
