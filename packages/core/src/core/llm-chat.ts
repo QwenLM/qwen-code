@@ -2226,26 +2226,39 @@ export class LlmChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
-    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-          )
-        : undefined;
-      replaced = replaceImagePayloadsInPlace(
-        curatedHistory,
-        this.imagePayloadStore,
-        skipEntry,
-      );
-    }
+    // History always holds `Image #<id>` markers rather than raw bytes: that
+    // is what survives compaction, truncation and resume. The threshold only
+    // decides how many payloads are reattached to the outgoing request.
+    const imageCount = countAllInlineImages(curatedHistory);
+    const skipEntry = currentUserContent
+      ? curatedHistory.find(
+          (c) =>
+            c === currentUserContent ||
+            (c.role === 'user' &&
+              currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+        )
+      : undefined;
+    const replaced = replaceImagePayloadsInPlace(
+      curatedHistory,
+      this.imagePayloadStore,
+      skipEntry,
+    );
     const requestHistory = curatedHistory.map(copyContentContainer);
+    // A prompt naming explicit image ids attaches only those, so the recent
+    // window contributes nothing; below the threshold every historical image
+    // stays attached; at or above it only the configured recent ones do.
+    const hasExplicitReferences =
+      collectReferencedImageIds(
+        requestHistory.at(-1) ? [requestHistory.at(-1)!] : [],
+      ).size > 0;
+    const reattachCount = hasExplicitReferences
+      ? 0
+      : imageCount >= imagePayloadThreshold
+        ? maxRecentImages
+        : imageCount;
     const reattachParts = buildReattachParts(
       replaced,
-      maxRecentImages,
+      reattachCount,
       requestHistory,
       this.imagePayloadStore,
     );

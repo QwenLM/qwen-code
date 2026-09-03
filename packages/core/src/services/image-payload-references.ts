@@ -138,7 +138,9 @@ export function buildReattachParts(
   const recent = recentUniqueImages(candidates, maxRecentImages).map(
     ({ stored }) => stored,
   );
-  const reattachLimit = Math.max(maxRecentImages, 1);
+  // An explicit multi-image prompt must keep every id it named; the recent
+  // window alone would shift all but the last one back out.
+  const reattachLimit = Math.max(maxRecentImages, lastReferencedIds.size, 1);
   if (store) {
     for (const id of lastReferencedIds) {
       if (inlineIds.has(id) || recent.some((image) => image.id === id)) {
