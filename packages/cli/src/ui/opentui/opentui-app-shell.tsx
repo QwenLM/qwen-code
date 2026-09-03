@@ -53,7 +53,10 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import type { WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  normalizeQuitSubmission,
+  OpenTuiSlashGateway,
+} from './slash-gateway.js';
 import {
   OpenTuiSlashDispatcher,
   type OpenTuiDispatchOutcome,
@@ -385,11 +388,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
+      // Ahead of the gate and the dispatch, exactly where ink's
+      // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
+      // it must not be deferred behind the turn or reach the model as text.
+      const submission = normalizeQuitSubmission(text);
       // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
       // only a command that opted into canRunDuringStreaming runs now — the
       // rest wait for idle instead of racing the stream.
-      if (streaming && (await gateway.mustDeferDuringStreaming(text))) {
-        const command = text.trim();
+      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
+        const command = submission.trim();
         deferredCommandsRef.current.push(command);
         setDeferredRevision((revision) => revision + 1);
         notify(
@@ -397,7 +404,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         );
         return;
       }
-      const settlement = await gateway.dispatch(text);
+      const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
