@@ -65,10 +65,20 @@ const NO_SUPERVISOR: ManagedControlResult = {
  * words, or a path it chose — so it carries the same risk as a registry
  * record: escape sequences that repaint the screen, and bidi overrides
  * that reorder what is read. `sessions ps` sanitizes for the same reason.
+ *
+ * `sanitizeTerminalText` deliberately preserves TAB and LF for multi-line
+ * render sites, but everything this file prints is one labelled line: a
+ * kept LF would let session text start a forged continuation at column 0
+ * — a fake `Answer it with:` hint, for instance. The one-line renderer
+ * `ps.ts` drops those two on top of the shared helper for exactly this
+ * reason, so this does the same.
  */
 function clean(value: string | undefined, limit = 500): string {
   if (!value) return '';
-  return truncateToWidth(sanitizeTerminalText(value).replace(/\r/g, ''), limit);
+  return truncateToWidth(
+    sanitizeTerminalText(value).replace(/[\t\n]/g, ''),
+    limit,
+  );
 }
 
 interface PeekResponse {
