@@ -108,6 +108,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerBackgroundAgentRoutes } from './routes/background-agents.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -2236,6 +2237,10 @@ export function createServeApp(
       );
     });
   }
+  // Background agents are owned by the Agent View supervisor, not by this
+  // daemon, so they appear in none of the session routes above.
+  registerBackgroundAgentRoutes(app, {});
+
   registerCapabilitiesRoutes(app, {
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
