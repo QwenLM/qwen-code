@@ -72,4 +72,39 @@ describe('Web Shell client source proxy bypass', () => {
       options.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBe(request.url);
   });
+
+  it('serves live source modules instead of proxying them', () => {
+    const liveProxy = loadConfig().server?.proxy?.['/live'];
+    expect(liveProxy).not.toBeTypeOf('string');
+    expect(liveProxy).toBeDefined();
+    const options = liveProxy as ProxyOptions;
+    const request = {
+      method: 'GET',
+      url: '/live/useLiveVoice.ts',
+      headers: { 'sec-fetch-dest': 'script' },
+    } as unknown as IncomingMessage;
+
+    expect(
+      options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBe(request.url);
+  });
+});
+
+describe('Web Shell daemon API proxy coverage', () => {
+  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+    const proxy = loadConfig().server?.proxy?.[prefix];
+    expect(proxy).not.toBeTypeOf('string');
+    expect(proxy).toBeDefined();
+    const options = proxy as ProxyOptions;
+    const request = {
+      method: 'GET',
+      url: `${prefix}/status`,
+      headers: { accept: '*/*' },
+    } as unknown as IncomingMessage;
+
+    // API fetches must NOT bypass to the shell; undefined means "proxy it".
+    expect(
+      options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBeUndefined();
+  });
 });

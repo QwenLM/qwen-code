@@ -89,7 +89,7 @@ With `--output-format stream-json`, each Goal status change emits a `stream_even
 
 > [!note]
 >
-> This behavior applies to standard headless CLI runs. ACP still uses the legacy Goal command path.
+> This behavior applies to standard headless CLI runs. ACP-driven sessions (IDE integrations, Web Shell) drive the same Goal runtime through the `sessionGoalControl` extension method, and receive each status change as a `session/update` notification carrying `_meta.goalState` instead of a `goal_state` stream event.
 
 ## Customize the Main Session Prompt
 
