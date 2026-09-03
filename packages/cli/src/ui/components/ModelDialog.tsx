@@ -10,6 +10,7 @@ import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
+  buildModelIdContext,
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
@@ -36,6 +37,11 @@ import {
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
 import type { HistoryItemWithoutId } from '../types.js';
+import {
+  allowsFastOnlyAdvisorModel,
+  checkAdvisorModelAvailability,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -117,6 +123,7 @@ function encodeVisionModelSelector(selected: string): string {
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
+  isAdvisorModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
   isCompactionModelMode?: boolean;
@@ -139,6 +146,7 @@ const MAX_MODEL_ITEMS_TO_SHOW = 10;
 const MODEL_DIALOG_FIXED_ROWS = 14;
 const MODEL_OPTION_ROW_HEIGHT = 1;
 const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
+const ADVISOR_OFF_OPTION = '$advisor-off';
 
 function maskApiKey(apiKey: string | undefined): string {
   if (!apiKey) return `(${t('not set')})`;
@@ -293,6 +301,7 @@ function DetailRow({
 export function ModelDialog({
   onClose,
   isFastModelMode,
+  isAdvisorModelMode,
   isVoiceModelMode,
   isVisionModelMode,
   isCompactionModelMode,
@@ -312,15 +321,43 @@ export function ModelDialog({
 
   const availableModelEntries = useMemo(() => {
     const allModels = config ? config.getAllConfiguredModels() : [];
+    const advisorModel = config?.getAdvisorModel?.();
+    const advisorContext = config ? buildModelIdContext(config) : {};
+    let advisorSelector: ReturnType<typeof resolveModelId> | undefined;
+    if (isAdvisorModelMode && advisorModel) {
+      try {
+        advisorSelector = resolveModelId(advisorModel, advisorContext);
+      } catch {
+        advisorSelector = undefined;
+      }
+    }
+    const allowAdvisorFastOnly = allowsFastOnlyAdvisorModel(
+      advisorModel,
+      advisorSelector,
+      advisorContext,
+    );
 
     // Separate runtime models from registry models
     const runtimeModels = isImageModelMode
       ? []
-      : allModels.filter((m) => m.isRuntimeModel);
+      : allModels.filter(
+          (m) =>
+            m.isRuntimeModel &&
+            (!isAdvisorModelMode ||
+              isAdvisorModelEligible(m, allowAdvisorFastOnly)),
+        );
     const registryModels = allModels.filter((m) => {
       const imageModelSelector = encodeVisionModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
+      const advisorModelSelector = encodeAuxModelSelector(
+        buildModelSelectionKey(m.authType, m.id, m.baseUrl),
+      );
+      const isAvailableAdvisorModel =
+        !isAdvisorModelMode ||
+        (config !== undefined &&
+          checkAdvisorModelAvailability(config, advisorModelSelector)
+            .available);
       const isSelectableImageModel = isImageModelMode
         ? isImageGenerationCapable(m) &&
           config?.resolveImageGenerationModel(imageModelSelector) !== undefined
@@ -330,9 +367,14 @@ export function ModelDialog({
         (m.authType !== AuthType.QWEN_OAUTH ||
           authType === AuthType.QWEN_OAUTH) &&
         isSelectableImageModel &&
-        (isFastModelMode || !m.fastOnly) &&
+        (isFastModelMode ||
+          (isAdvisorModelMode && isAvailableAdvisorModel) ||
+          !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
-        (isVisionModelMode || isImageModelMode || !m.visionOnly)
+        (isVisionModelMode || isImageModelMode || !m.visionOnly) &&
+        (!isAdvisorModelMode ||
+          (isAvailableAdvisorModel &&
+            isAdvisorModelEligible(m, allowAdvisorFastOnly)))
       );
     });
 
@@ -391,73 +433,81 @@ export function ModelDialog({
     authType,
     config,
     isFastModelMode,
+    isAdvisorModelMode,
     isImageModelMode,
     isVoiceModelMode,
     isVisionModelMode,
   ]);
 
-  const MODEL_OPTIONS = useMemo(
-    () =>
-      availableModelEntries.map(
-        ({ authType: t2, model, isRuntime, snapshotId }) => {
-          const value =
-            isRuntime && snapshotId
-              ? snapshotId
-              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+  const MODEL_OPTIONS = useMemo(() => {
+    const options = availableModelEntries.map(
+      ({ authType: t2, model, isRuntime, snapshotId }) => {
+        const value =
+          isRuntime && snapshotId
+            ? snapshotId
+            : buildModelSelectionKey(t2, model.id, model.baseUrl);
 
-          const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
+        const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
-          const title = (
-            <Text>
-              <Text
-                bold
-                color={
-                  isQwenOAuth
+        const title = (
+          <Text>
+            <Text
+              bold
+              color={
+                isQwenOAuth
+                  ? theme.status.warning
+                  : isRuntime
                     ? theme.status.warning
-                    : isRuntime
-                      ? theme.status.warning
-                      : theme.text.accent
-                }
-              >
-                [{t2}]
-              </Text>
-              <Text>{` ${model.label}`}</Text>
-              {model.id !== model.label && (
-                <Text color={theme.text.secondary} italic>
-                  {' '}
-                  ({model.id})
-                </Text>
-              )}
-              {isRuntime && (
-                <Text color={theme.status.warning}> (Runtime)</Text>
-              )}
-              {isQwenOAuth && !isRuntime && (
-                <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
-              )}
+                    : theme.text.accent
+              }
+            >
+              [{t2}]
             </Text>
-          );
+            <Text>{` ${model.label}`}</Text>
+            {model.id !== model.label && (
+              <Text color={theme.text.secondary} italic>
+                {' '}
+                ({model.id})
+              </Text>
+            )}
+            {isRuntime && <Text color={theme.status.warning}> (Runtime)</Text>}
+            {isQwenOAuth && !isRuntime && (
+              <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
+            )}
+          </Text>
+        );
 
-          // Include runtime / discontinued indicator in description
-          let description = model.description || '';
-          if (isRuntime) {
-            description = description
-              ? `${description} (Runtime)`
-              : 'Runtime model';
-          }
-          if (isQwenOAuth && !isRuntime) {
-            description = t('Discontinued — switch to Coding Plan or API Key');
-          }
+        // Include runtime / discontinued indicator in description
+        let description = model.description || '';
+        if (isRuntime) {
+          description = description
+            ? `${description} (Runtime)`
+            : 'Runtime model';
+        }
+        if (isQwenOAuth && !isRuntime) {
+          description = t('Discontinued — switch to Coding Plan or API Key');
+        }
 
-          return {
-            value,
-            title,
-            description,
-            key: value,
-          };
-        },
-      ),
-    [availableModelEntries],
-  );
+        return {
+          value,
+          title,
+          description,
+          key: value,
+        };
+      },
+    );
+    return isAdvisorModelMode
+      ? [
+          {
+            value: ADVISOR_OFF_OPTION,
+            title: <Text bold>{t('Off')}</Text>,
+            description: t('Disable Advisor'),
+            key: ADVISOR_OFF_OPTION,
+          },
+          ...options,
+        ]
+      : options;
+  }, [availableModelEntries, isAdvisorModelMode]);
   const modelOptionRowHeight = MODEL_OPTIONS.some(
     ({ description }) =>
       typeof description !== 'string' || description.trim().length > 0,
@@ -489,6 +539,10 @@ export function ModelDialog({
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const advisorModelSetting =
+    typeof config?.getAdvisorModel === 'function'
+      ? config.getAdvisorModel()
+      : undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
     | string
@@ -504,6 +558,15 @@ export function ModelDialog({
       return undefined;
     }
   }, [fastModelSetting, isFastModelMode]);
+  const parsedAdvisorModelSetting = useMemo(() => {
+    if (!isAdvisorModelMode || !config || !advisorModelSetting)
+      return undefined;
+    try {
+      return resolveModelId(advisorModelSetting, buildModelIdContext(config));
+    } catch {
+      return undefined;
+    }
+  }, [advisorModelSetting, config, isAdvisorModelMode]);
   const parsedVisionModelSetting = useMemo(() => {
     if (!isVisionModelMode) return undefined;
     try {
@@ -523,13 +586,16 @@ export function ModelDialog({
   const preferredModelId =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.modelId
-      : isVisionModelMode && parsedVisionModelSetting
-        ? parsedVisionModelSetting.modelId
-        : isImageModelMode && parsedImageModelSetting
-          ? parsedImageModelSetting.modelId
-          : config?.getModel() || MAINLINE_CODER_MODEL;
+      : isAdvisorModelMode && parsedAdvisorModelSetting
+        ? parsedAdvisorModelSetting.modelId
+        : isVisionModelMode && parsedVisionModelSetting
+          ? parsedVisionModelSetting.modelId
+          : isImageModelMode && parsedImageModelSetting
+            ? parsedImageModelSetting.modelId
+            : config?.getModel() || MAINLINE_CODER_MODEL;
   const isAuxiliaryModelMode =
     isFastModelMode ||
+    isAdvisorModelMode ||
     isVoiceModelMode ||
     isVisionModelMode ||
     isCompactionModelMode ||
@@ -558,6 +624,18 @@ export function ModelDialog({
           )
         : availableModelEntries.find(
             ({ model }) => model.id === parsedFastModelSetting.modelId,
+          )
+      : undefined;
+  const preferredAdvisorModelEntry =
+    isAdvisorModelMode && parsedAdvisorModelSetting
+      ? parsedAdvisorModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedAdvisorModelSetting.authType &&
+              model.id === parsedAdvisorModelSetting.modelId,
+          )
+        : availableModelEntries.find(
+            ({ model }) => model.id === parsedAdvisorModelSetting.modelId,
           )
       : undefined;
   const preferredVoiceModelEntry =
@@ -627,43 +705,51 @@ export function ModelDialog({
       : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
-    : preferredVoiceModelEntry
-      ? buildModelSelectionKey(
-          preferredVoiceModelEntry.authType,
-          preferredVoiceModelEntry.model.id,
-          preferredVoiceModelEntry.model.baseUrl,
-        )
-      : preferredVisionModelEntry
+    : isAdvisorModelMode && !advisorModelSetting
+      ? ADVISOR_OFF_OPTION
+      : preferredVoiceModelEntry
         ? buildModelSelectionKey(
-            preferredVisionModelEntry.authType,
-            preferredVisionModelEntry.model.id,
-            preferredVisionModelEntry.model.baseUrl,
+            preferredVoiceModelEntry.authType,
+            preferredVoiceModelEntry.model.id,
+            preferredVoiceModelEntry.model.baseUrl,
           )
-        : preferredCompactionModelEntry
+        : preferredVisionModelEntry
           ? buildModelSelectionKey(
-              preferredCompactionModelEntry.authType,
-              preferredCompactionModelEntry.model.id,
-              preferredCompactionModelEntry.model.baseUrl,
+              preferredVisionModelEntry.authType,
+              preferredVisionModelEntry.model.id,
+              preferredVisionModelEntry.model.baseUrl,
             )
-          : preferredImageModelEntry
+          : preferredCompactionModelEntry
             ? buildModelSelectionKey(
-                preferredImageModelEntry.authType,
-                preferredImageModelEntry.model.id,
-                preferredImageModelEntry.model.baseUrl,
+                preferredCompactionModelEntry.authType,
+                preferredCompactionModelEntry.model.id,
+                preferredCompactionModelEntry.model.baseUrl,
               )
-            : preferredFastModelEntry
+            : preferredImageModelEntry
               ? buildModelSelectionKey(
-                  preferredFastModelEntry.authType,
-                  preferredFastModelEntry.model.id,
-                  preferredFastModelEntry.model.baseUrl,
+                  preferredImageModelEntry.authType,
+                  preferredImageModelEntry.model.id,
+                  preferredImageModelEntry.model.baseUrl,
                 )
-              : authType
+              : preferredAdvisorModelEntry
                 ? buildModelSelectionKey(
-                    authType,
-                    preferredModelId,
-                    currentBaseUrl,
+                    preferredAdvisorModelEntry.authType,
+                    preferredAdvisorModelEntry.model.id,
+                    preferredAdvisorModelEntry.model.baseUrl,
                   )
-                : '';
+                : preferredFastModelEntry
+                  ? buildModelSelectionKey(
+                      preferredFastModelEntry.authType,
+                      preferredFastModelEntry.model.id,
+                      preferredFastModelEntry.model.baseUrl,
+                    )
+                  : authType
+                    ? buildModelSelectionKey(
+                        authType,
+                        preferredModelId,
+                        currentBaseUrl,
+                      )
+                    : '';
 
   // Escape can arrive twice in one stdin chunk before the parent unmounts
   // the dialog; latch so the close feedback and onClose fire only once.
@@ -675,11 +761,11 @@ export function ModelDialog({
       uiState?.historyManager.addItem(feedbackItem, Date.now());
       config?.getChatRecordingService?.()?.recordSlashCommand({
         phase: 'result',
-        rawCommand: '/model',
+        rawCommand: isAdvisorModelMode ? '/advisor' : '/model',
         outputHistoryItems: [feedbackItem],
       });
     },
-    [config, uiState],
+    [config, isAdvisorModelMode, uiState],
   );
   const closeWithoutSelection = useCallback(() => {
     if (closeLatchRef.current || selectionInFlightRef.current) return;
@@ -724,8 +810,11 @@ export function ModelDialog({
     const index = MODEL_OPTIONS.findIndex(
       (option) => option.value === preferredKey,
     );
-    return index === -1 ? 0 : index;
-  }, [MODEL_OPTIONS, preferredKey]);
+    if (index !== -1) return index;
+    return isAdvisorModelMode && advisorModelSetting && MODEL_OPTIONS.length > 1
+      ? 1
+      : 0;
+  }, [MODEL_OPTIONS, preferredKey, isAdvisorModelMode, advisorModelSetting]);
 
   const handleHighlight = useCallback((value: string) => {
     setHighlightedValue(value);
@@ -757,6 +846,57 @@ export function ModelDialog({
           return value === selected;
         },
       );
+
+      if (isAdvisorModelMode) {
+        if (!config) {
+          setErrorMessage(t('Configuration not available.'));
+          return;
+        }
+        if (selected === ADVISOR_OFF_OPTION) {
+          settings.setValue(SettingScope.User, 'advisorModel', '');
+          selectionInFlightRef.current = true;
+          try {
+            await config.setAdvisorModel(undefined);
+          } finally {
+            selectionInFlightRef.current = false;
+          }
+          reportAuxiliaryModelSelection({
+            type: 'success',
+            text: t('Advisor disabled'),
+          });
+          onClose();
+          return;
+        }
+        if (!selectedEntry) {
+          setErrorMessage(t('Selected Advisor model is unavailable.'));
+          return;
+        }
+
+        hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
+        const advisorModel = encodeAuxModelSelector(selected);
+        if (!checkAdvisorModelAvailability(config, advisorModel).available) {
+          setErrorMessage(t('Selected Advisor model is unavailable.'));
+          return;
+        }
+        selectionInFlightRef.current = true;
+        let applied: boolean | undefined;
+        try {
+          applied = await config.setAdvisorModel(advisorModel);
+        } finally {
+          selectionInFlightRef.current = false;
+        }
+        if (applied === false) {
+          setErrorMessage(t('Advisor configuration is unavailable.'));
+          return;
+        }
+        settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: t('Advisor set to {{model}}', { model: advisorModel }),
+        });
+        onClose();
+        return;
+      }
 
       if (isVoiceModelMode) {
         if (!selectedEntry) {
@@ -1062,6 +1202,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -1072,7 +1213,7 @@ export function ModelDialog({
     ],
   );
 
-  const hasModels = MODEL_OPTIONS.length > 0;
+  const hasModels = availableModelEntries.length > 0;
 
   return (
     <Box
@@ -1091,9 +1232,11 @@ export function ModelDialog({
               ? t('Select Compaction Model')
               : isImageModelMode
                 ? t('Select Image Model')
-                : isFastModelMode
-                  ? t('Select Fast Model')
-                  : t('Select Model')) +
+                : isAdvisorModelMode
+                  ? t('Select Advisor Model')
+                  : isFastModelMode
+                    ? t('Select Fast Model')
+                    : t('Select Model')) +
           (persistScope === 'workspace'
             ? t(' (this project)')
             : persistScope === 'user'

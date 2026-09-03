@@ -328,6 +328,12 @@ function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
 }
 
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -1263,6 +1269,11 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
   /**
    * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
    * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
@@ -2455,6 +2466,7 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
@@ -2959,6 +2971,7 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -5018,6 +5031,26 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
   }
 
   /**
@@ -9319,6 +9352,46 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+    options?: { forSubAgent?: boolean },
+  ): Promise<void> {
+    if (
+      !this.getAdvisorModel() ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      options?.forSubAgent
+    ) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    let enabled = true;
+    try {
+      enabled = this.permissionManager
+        ? await this.permissionManager.isToolEnabled(ToolNames.ADVISOR)
+        : true;
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.ADVISOR}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (!enabled) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    const { AdvisorTool } = await import('../tools/advisor.js');
+    if (registry.getTool(ToolNames.ADVISOR) instanceof AdvisorTool) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    registry.registerTool(new AdvisorTool(this));
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
@@ -9450,6 +9523,7 @@ export class Config {
 
     // --- Core tools (always registered) ---
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry, options);
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

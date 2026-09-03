@@ -169,6 +169,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterTool = vi.fn();
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
@@ -5252,6 +5253,67 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    it('registers and removes Advisor with the runtime model setting', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          llmClient: { setTools: typeof setTools };
+        }
+      ).llmClient = { setTools };
+      const registry = config.getToolRegistry();
+
+      await config.setAdvisorModel('advisor-model');
+
+      expect(config.getAdvisorModel()).toBe('advisor-model');
+      expect(registry.unregisterTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: ToolNames.ADVISOR }),
+      );
+      expect(setTools).toHaveBeenCalledTimes(1);
+
+      await config.setAdvisorModel('off');
+
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+      expect(setTools).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not disturb Advisor registration while the tool is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.ADVISOR],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      vi.mocked(registry.unregisterTool).mockClear();
+      vi.mocked(registry.registerTool).mockClear();
+
+      const applied = await config.setAdvisorModel('advisor-model');
+
+      expect(applied).toBe(false);
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).not.toHaveBeenCalled();
+      expect(registry.registerTool).not.toHaveBeenCalled();
+    });
+
+    it('does not register Advisor in safe mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        safeMode: true,
+      });
+
+      await config.initialize();
+
+      expect(ToolRegistry.prototype.registerTool).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: ToolNames.ADVISOR }),
+      );
     });
 
     it.each([

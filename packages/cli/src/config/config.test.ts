@@ -1362,6 +1362,92 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
+  it('uses advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+  });
+
+  it('lets --advisor override the persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+  });
+
+  it('lets --advisor off disable a persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

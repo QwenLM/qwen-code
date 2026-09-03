@@ -3671,6 +3671,30 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('advisorModel scope handling', () => {
+    it('ignores workspace values and preserves the user selection', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ advisorModel: 'user-advisor' });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ advisorModel: 'workspace-advisor' });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.advisorModel).toBe('user-advisor');
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('advisorModel'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
     // R4-3: the strip, the warning and the dialog filter all derive from this
     // list. A key present here but unstripped would be honored from a repo's

@@ -271,6 +271,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isAdvisorModelMode={uiState.isAdvisorModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
         isCompactionModelMode={uiState.isCompactionModelMode}

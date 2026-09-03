@@ -357,6 +357,10 @@ export class ToolRegistry {
     this.factories.set(name, factory);
   }
 
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
+  }
+
   /**
    * Registers a lazy tool factory for a tool that an active
    * `settings.tools.eager` allowlist demoted to deferred (#9827,

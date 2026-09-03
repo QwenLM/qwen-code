@@ -105,6 +105,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { resolveSkillSettings } from './skill-settings.js';
+import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -158,6 +159,7 @@ export function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -607,6 +609,7 @@ export async function parseArguments(): Promise<CliArgs> {
       yargsInstance
         .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
+        .option('advisor', DEFAULT_COMMAND_OPTIONS.advisor)
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],
           string: true,
@@ -1158,6 +1161,58 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(
+  config: Config,
+  rawModel: string,
+  startupContext: {
+    fastModel?: string;
+    currentModel?: string;
+    currentAuthType?: AuthType;
+  },
+): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const availability = checkAdvisorModelAvailability(
+    config,
+    modelName,
+    startupContext,
+  );
+  if (!availability.available) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        availability.availableModelIds,
+      ),
+    );
+  }
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -2105,6 +2160,8 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const advisorModel =
+    bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -2377,6 +2434,7 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
@@ -2446,6 +2504,13 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+  if (advisorModel) {
+    validateCliAdvisorModel(config, advisorModel, {
+      fastModel: settings.fastModel,
+      currentModel: resolvedModel,
+      currentAuthType: selectedAuthType,
+    });
+  }
 
   if (lspEnabled) {
     try {

@@ -783,6 +783,7 @@ export function isTerminalImageDisplay(
 
 export type ToolResultDisplay =
   | string
+  | AdvisorReviewDisplay
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
@@ -796,6 +797,47 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorReviewDisplay {
+  type: 'advisor_review';
+  model?: string;
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
+export function isAdvisorReviewDisplay(
+  display: unknown,
+): display is AdvisorReviewDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'advisor_review' &&
+    'verdict' in display &&
+    typeof display.verdict === 'string' &&
+    'risks' in display &&
+    typeof display.risks === 'string' &&
+    'missingEvidence' in display &&
+    typeof display.missingEvidence === 'string' &&
+    'recommendation' in display &&
+    typeof display.recommendation === 'string'
+  );
+}
 
 export interface TeamResultDisplay {
   type: 'team_result';

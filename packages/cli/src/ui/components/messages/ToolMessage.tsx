@@ -22,13 +22,16 @@ import type {
   PlanResultDisplay,
   AnsiOutput,
   AnsiOutputDisplay,
+  AdvisorReviewDisplay,
   Config,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatAdvisorReview,
   formatVisionBridgeNoticeDisplay,
+  isAdvisorReviewDisplay,
   isTerminalImageDisplay,
   isVisionBridgeNoticeDisplay,
   ToolNames,
@@ -61,6 +64,7 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
+import { AdvisorMessage } from './AdvisorMessage.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -176,6 +180,7 @@ type DisplayRendererResult =
   | { type: 'todo'; data: TodoResultDisplay }
   | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
+  | { type: 'advisor'; data: AdvisorReviewDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
@@ -195,6 +200,13 @@ const useResultDisplayRenderer = (
 
     if (isTerminalImageDisplay(resultDisplay)) {
       return { type: 'image', data: resultDisplay };
+    }
+
+    if (isAdvisorReviewDisplay(resultDisplay)) {
+      return {
+        type: 'advisor',
+        data: resultDisplay,
+      };
     }
 
     // Check for TodoResultDisplay
@@ -994,6 +1006,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
+              />
+            )}
+            {effectiveDisplayRenderer.type === 'advisor' && (
+              <AdvisorMessage
+                text={formatAdvisorReview(effectiveDisplayRenderer.data)}
+                model={effectiveDisplayRenderer.data.model ?? description}
+                containerWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'task' && config && (

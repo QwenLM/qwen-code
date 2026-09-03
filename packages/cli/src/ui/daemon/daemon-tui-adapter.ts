@@ -15,6 +15,7 @@ import {
   FINDING_OUTCOMES,
   FINDING_SEVERITIES,
   FINDING_SOURCES,
+  isAdvisorReviewDisplay,
   isVisionBridgeNoticeDisplay,
   REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core';
@@ -326,6 +327,11 @@ function formatToolResultDisplay(
     return sanitizeDisplayText(value);
   }
   if (isVisionBridgeNoticeDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
+  }
+  if (isAdvisorReviewDisplay(value)) {
     return sanitizeDaemonValue(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];

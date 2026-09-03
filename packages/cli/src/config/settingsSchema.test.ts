@@ -287,8 +287,8 @@ describe('SettingsSchema', () => {
       expect(advisorModel.type).toBe('string');
       expect(advisorModel.category).toBe('Model');
       expect(advisorModel.default).toBe('');
-      expect(advisorModel.requiresRestart).toBe(false);
-      expect(advisorModel.showInDialog).toBe(true);
+      expect(advisorModel.requiresRestart).toBe(true);
+      expect(advisorModel.showInDialog).toBe(false);
     });
 
     it('should define the built-in Explore model setting', () => {

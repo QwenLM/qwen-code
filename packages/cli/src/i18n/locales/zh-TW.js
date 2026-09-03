@@ -182,6 +182,7 @@ export default {
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.ReportFindings': '上報評審發現',
@@ -2074,6 +2075,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':

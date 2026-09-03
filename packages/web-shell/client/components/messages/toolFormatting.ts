@@ -26,6 +26,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
+  advisor: 'Advisor',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
@@ -142,6 +143,10 @@ export function isAskUserQuestionToolName(toolName: string): boolean {
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
+export function isAdvisorToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'advisor';
+}
+
 export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
@@ -202,6 +207,10 @@ export function extractText(tool: ACPToolCall): string | null {
   return extractRawOutputText(tool.rawOutput);
 }
 
+export function getAdvisorDisplayText(tool: ACPToolCall): string | null {
+  return extractRawOutputText(tool.rawOutput) ?? extractText(tool);
+}
+
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
@@ -211,6 +220,13 @@ export function getToolResultSummary(tool: ACPToolCall): string {
       (extractRawOutputText(tool.rawOutput) ?? '').trim(),
     );
     if (rawSummary) return rawSummary;
+  }
+
+  if (isAdvisorToolName(name)) {
+    const raw = getAdvisorReview(tool.rawOutput);
+    if (raw) return truncateText(raw.verdict.trim().replace(/\s+/g, ' '), 80);
+    const fallback = getAdvisorDisplayText(tool);
+    return fallback ? truncateText(fallback.split('\n')[0] ?? '', 80) : '';
   }
 
   const text = extractText(tool);
@@ -582,12 +598,44 @@ export function getAgentCurrentToolHint(
   return truncateText(hint, 50);
 }
 
-function extractRawOutputText(rawOutput: unknown): string | null {
+interface AdvisorReviewOutput {
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+function getAdvisorReview(rawOutput: unknown): AdvisorReviewOutput | undefined {
+  if (!rawOutput || typeof rawOutput !== 'object') return undefined;
+  const raw = rawOutput as Record<string, unknown>;
+  if (raw.type !== 'advisor_review') return undefined;
+  if (
+    typeof raw.verdict !== 'string' ||
+    typeof raw.risks !== 'string' ||
+    typeof raw.missingEvidence !== 'string' ||
+    typeof raw.recommendation !== 'string'
+  ) {
+    return undefined;
+  }
+  return raw as unknown as AdvisorReviewOutput;
+}
+
+export function extractRawOutputText(rawOutput: unknown): string | null {
   if (!rawOutput) return null;
   if (typeof rawOutput === 'string') return rawOutput;
   if (typeof rawOutput !== 'object') return null;
 
   const raw = rawOutput as Record<string, unknown>;
+  const advisorReview = getAdvisorReview(raw);
+  if (advisorReview) {
+    const fields = [
+      ['Verdict', advisorReview.verdict],
+      ['Risks', advisorReview.risks],
+      ['Missing evidence', advisorReview.missingEvidence],
+      ['Recommendation', advisorReview.recommendation],
+    ] as const;
+    return fields.map(([label, value]) => `## ${label}\n${value}`).join('\n\n');
+  }
   if (typeof raw.output === 'string') return raw.output;
   if (typeof raw.stdout === 'string') return raw.stdout;
   if (typeof raw.content === 'string') return raw.content;

@@ -81,6 +81,8 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getAdvisorModel: vi.fn(() => undefined),
+    setAdvisorModel: vi.fn().mockResolvedValue(undefined),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
@@ -154,6 +156,245 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('lists Off and persists an Advisor model without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const switchModel = vi.fn();
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'vision-only',
+            label: 'Vision Only',
+            authType: AuthType.USE_OPENAI,
+            visionOnly: true,
+          },
+        ]),
+        setAdvisorModel,
+        switchModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::advisor-model`,
+    ]);
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:advisor-model`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:advisor-model`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('does not persist an Advisor model when the tool is disabled', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not default to Off when the configured Advisor model is unavailable', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'stale-advisor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'available-advisor-model',
+            label: 'Available Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.initialIndex).toBe(1);
+    await select.onSelect(select.items[1]!.value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:available-advisor-model`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:available-advisor-model`,
+    );
+  });
+
+  it('shows and selects the fast-only model configured as Advisor fast', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'fast'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-advisor-model',
+            label: 'Fast Advisor Model',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-advisor-model`,
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('shows the active runtime model in Advisor mode', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'runtime-advisor'),
+        getModel: vi.fn(() => 'runtime-advisor'),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'runtime-advisor',
+        })),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'runtime-advisor',
+            label: 'Runtime Advisor',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|runtime-advisor',
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      '$runtime|openai|runtime-advisor',
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('keeps the persisted fast-only Advisor model listed and highlighted', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(
+          () => `${AuthType.USE_OPENAI}:fast-advisor-model`,
+        ),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-advisor-model',
+            label: 'Fast Advisor Model',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-advisor-model`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
+  it('does not list or persist other fast-only models in Advisor mode', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'fast'),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-flash`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-flash',
+            label: 'Fast Flash',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'fast-mini',
+            label: 'Fast Mini',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-flash`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::fast-mini`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
   });
 
   it('caps visible model options to the available dialog height', () => {

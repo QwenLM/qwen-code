@@ -1468,11 +1468,11 @@ const SETTINGS_SCHEMA = {
     type: 'string',
     label: 'Advisor Model',
     category: 'Model',
-    requiresRestart: false,
+    requiresRestart: true,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
-    showInDialog: true,
+      'Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.',
+    showInDialog: false,
   },
 
   visionModel: {

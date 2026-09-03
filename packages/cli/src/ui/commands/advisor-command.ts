@@ -12,6 +12,11 @@ import type {
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { SettingScope } from '../../config/settings.js';
+import {
+  checkAdvisorModelAvailability,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 import {
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -88,11 +93,102 @@ function formatAdvisorReview(
   ].join('\n\n');
 }
 
+function parseJsonObjectText(
+  text: string | null | undefined,
+): Record<string, unknown> | undefined {
+  const value = text?.trim();
+  if (!value) return undefined;
+
+  const firstStructuredChar = value.search(/[[{]/);
+  if (firstStructuredChar !== -1 && value[firstStructuredChar] === '[') {
+    return undefined;
+  }
+  const first = value.indexOf('{');
+  const last = value.lastIndexOf('}');
+  if (first === -1 || last <= first) return undefined;
+
+  try {
+    const parsed = JSON.parse(value.slice(first, last + 1)) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function formatAdvisorError(error: unknown): string {
   return t('Advisor review failed: {{error}}', {
     error:
       error instanceof Error ? error.message : String(error || 'Unknown error'),
   });
+}
+
+function unavailableModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const configured =
+    availableModelIds.length > 0
+      ? t('Configured models: {{models}}.', {
+          models: availableModelIds.join(', '),
+        })
+      : t('No models are configured.');
+  return [
+    `Advisor model '${modelName}' is not configured.`,
+    configured,
+    'Configure models in settings.modelProviders, or run /advisor without arguments to choose a model.',
+  ].join('\n');
+}
+
+async function setAdvisorModel(
+  context: CommandContext,
+  model: string | undefined,
+): Promise<SlashCommandActionReturn> {
+  if (context.executionPolicy?.persistModelSelection === false) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('This model selection is not available in this session.'),
+    };
+  }
+
+  const { config, settings } = context.services;
+  if (!config) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Advisor configuration is unavailable.'),
+    };
+  }
+
+  if (model) {
+    const availability = checkAdvisorModelAvailability(config, model);
+    if (!availability.available) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: unavailableModelMessage(model, availability.availableModelIds),
+      };
+    }
+  }
+
+  const applied = await config.setAdvisorModel(model);
+  if (applied === false) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Advisor configuration is unavailable.'),
+    };
+  }
+  settings.setValue(SettingScope.User, 'advisorModel', model ?? '');
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: model
+      ? t('Advisor set to {{model}}', { model })
+      : t('Advisor disabled'),
+  };
 }
 
 async function askAdvisor(
@@ -111,8 +207,7 @@ async function askAdvisor(
     throw new Error(t('No conversation context available for /advisor'));
   }
 
-  const advisorModel =
-    context.services.settings.merged.advisorModel?.trim() || undefined;
+  const advisorModel = config.getAdvisorModel();
 
   // Tools are always stripped (NO_TOOLS), matching /btw and the "You have NO
   // tools" framing of the advisor prompt. This accepts a cache-prefix miss in
@@ -129,7 +224,9 @@ async function askAdvisor(
   });
 
   return {
-    text: formatAdvisorReview(result.jsonResult),
+    text: formatAdvisorReview(
+      result.jsonResult ?? parseJsonObjectText(result.text),
+    ),
     model: result.model,
   };
 }
@@ -137,17 +234,58 @@ async function askAdvisor(
 export const advisorCommand: SlashCommand = {
   name: 'advisor',
   get description() {
-    return t(
-      'Get a second opinion on the current conversation from a reviewer model',
-    );
+    return t('Configure the Advisor model');
   },
+  argumentHint: '[<model-id>|off|review [focus]]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
+  completion: async (context, partialArg) => {
+    const prefix = partialArg.trim();
+    const fixed = [
+      { value: 'off', description: t('Disable Advisor') },
+      {
+        value: 'review',
+        description: t(
+          'Get a second opinion on the current conversation from a reviewer model',
+        ),
+      },
+    ].filter(({ value }) => value.startsWith(prefix));
+    if (!context.services.config || prefix.startsWith('review ')) return fixed;
+    return [
+      ...fixed,
+      ...context.services.config
+        .getAllConfiguredModels()
+        .filter((model) => isAdvisorModelEligible(model))
+        .map((model) => model.id)
+        .filter((id) => id.startsWith(prefix)),
+    ];
+  },
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
-    const focus = args.trim();
+    const value = context.invocation?.args?.trim() || args.trim();
+    const [subcommand = '', ...rest] = value.split(/\s+/);
+    const isReview = subcommand === 'review';
+
+    if (!isReview) {
+      if (!value) {
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'Use /advisor <model-id> or /advisor off.',
+          };
+        }
+        return { type: 'dialog', dialog: 'advisor-model' };
+      }
+      return setAdvisorModel(
+        context,
+        value.toLowerCase() === 'off' ? undefined : value,
+      );
+    }
+
+    const focus = rest.join(' ').trim();
 
     if (focus.length > BTW_MAX_INPUT_LENGTH) {
       return {

@@ -185,6 +185,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'string' as const,
     description: 'Model',
   },
+  advisor: {
+    type: 'string' as const,
+    description:
+      'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
+  },
   'fallback-model': {
     type: 'array' as const,
     description:

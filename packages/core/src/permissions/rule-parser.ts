@@ -121,6 +121,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadMcpResource: 'read_mcp_resource',
   ReadMcpResourceTool: 'read_mcp_resource',
 
+  // Advisor tool
+  advisor: 'advisor',
+  Advisor: 'advisor',
+
   // Agent (subagent) tool
   agent: 'agent',
   Agent: 'agent',

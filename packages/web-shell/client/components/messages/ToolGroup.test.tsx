@@ -702,6 +702,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('shows the Advisor verdict and expands the full review', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'advisor',
+        status: 'completed',
+        rawOutput: {
+          type: 'advisor_review',
+          verdict: 'Sound approach.',
+          risks: 'Retry handling is unclear.',
+          missingEvidence: 'No integration result.',
+          recommendation: 'Run the integration test.',
+        },
+      }),
+    ]);
+
+    act(() => {
+      (container.querySelector('button') as HTMLElement).click();
+    });
+
+    expect(container.textContent).toContain('Sound approach.');
+    expect(container.textContent).toContain('Retry handling is unclear.');
+    expect(container.textContent).toContain('Run the integration test.');
+  });
+
   it('renders the aggregate summary for a multi-tool group', () => {
     const container = renderToolGroup([
       makeTool({

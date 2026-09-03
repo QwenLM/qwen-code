@@ -161,6 +161,14 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
+    it('unregisters an eager tool', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'eager' }));
+
+      toolRegistry.unregisterTool('eager');
+
+      expect(toolRegistry.getTool('eager')).toBeUndefined();
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server
