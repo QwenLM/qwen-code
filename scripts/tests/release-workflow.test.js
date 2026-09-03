@@ -630,7 +630,7 @@ describe('release workflow', () => {
     // moves; the variable is the same runtime knob QWEN_CI_VITEST_MAX_WORKERS
     // and QWEN_RELEASE_VITEST_RETRY already use.
     expect(workflow).toContain(
-      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"`,
+      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}"`,
     );
     // fromJSON, not the bare variable: timeout-minutes takes a number, and an
     // unset variable has to fall back rather than render an empty string.
@@ -1437,9 +1437,7 @@ describe('release workflow', () => {
       quality_build: 45,
       quality_typecheck: 30,
       // The one bound an operator can retune without a PR; its default is
-      // pinned by its own test above. That default is sized for the
-      // contended pool: run 33713579913 had a green shard finish at 44.0
-      // min and another cancelled at the old 45 min cap in both attempts.
+      // pinned by its own test above.
       workspace_tests:
         "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}",
       quality_scripts: 30,

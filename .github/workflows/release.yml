@@ -511,13 +511,11 @@ jobs:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Set by how busy the reserved host is, not by the suite: the same third
-    # ran 6.7 min quiet and 36 contended (run 33713579913). The default still
-    # has to clear the slowest honest shard, not the healthy one: attempt 2
-    # cancelled shard 2 at the old 45m cap while shard 1 finished green at
-    # 44.0m, and the lane's retry re-runs each failing test twice more inside
-    # that window. 90 is the hosted-to-pool doubling ci.yml already gives
-    # this suite's Test job (60/120) and its neighbours (45/90, 30/60).
-    # Retunable without a PR.
+    # ran 6.7 min quiet and 36 contended, and 45 killed shards at the boundary
+    # with every suite green (run 33713579913). Attempt 2 cancelled one at the
+    # cap while its sibling finished green at 44.0m, so the default doubles to
+    # 90, the hosted-to-pool ratio ci.yml already gives this suite's Test job
+    # (60/120). Retunable without a PR.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}"
     needs:
       - 'prepare'
