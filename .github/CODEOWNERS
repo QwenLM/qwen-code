@@ -6,8 +6,14 @@
 /.github/CODEOWNERS    @pomelo-nwu @wenshao
 
 # --- Primary npm release workflows require core maintainer approval ---
-/.github/workflows/release.yml          @pomelo-nwu @wenshao
-/.github/workflows/finalize-release.yml @pomelo-nwu @wenshao
+# @yiliang114 and @qqqys are already owners of /packages/core/ and carry the
+# release lane day to day. Adding them here keeps the gate on these files
+# while removing the single-pair bottleneck: every push to a release-lane PR
+# dismisses the prior approval, so a two-owner list turned routine fixes into
+# a wait. The CODEOWNERS file itself and the security gate are deliberately
+# NOT widened.
+/.github/workflows/release.yml          @pomelo-nwu @wenshao @yiliang114 @qqqys
+/.github/workflows/finalize-release.yml @pomelo-nwu @wenshao @yiliang114 @qqqys
 
 # --- Security gate workflows require core maintainer approval ---
 /.github/workflows/security-checks.yml  @pomelo-nwu @wenshao
