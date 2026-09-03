@@ -37,6 +37,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   BranchSessionRequest,
   DaemonBranchSessionRequest,
   DaemonBranchSessionResult,
@@ -61,6 +62,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionSearchOptions,
+  DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
   DaemonWorkspaceSessionLiveState,
   DaemonSessionOrganizationResult,
@@ -102,7 +105,10 @@ import type {
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonMcpConfigMutationResult,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadResult,
   DaemonWorkspaceMcpReloadOptions,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
@@ -238,6 +244,7 @@ import type {
 import { parseSseStream } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,
   isStandaloneSessionNotFoundError,
@@ -249,6 +256,7 @@ import {
   parseStandaloneLookup,
   parseStandaloneMetadataResult,
   parseStandaloneSession,
+  parseStandaloneSessionOptions,
   parseUnarchiveStandaloneSessionsResult,
   type CreateStandaloneSessionOptions,
   type DaemonArchiveStandaloneSessionsResult,
@@ -258,6 +266,7 @@ import {
   type DaemonStandaloneDirectoryResult,
   type DaemonStandaloneMetadataResult,
   type DaemonStandaloneSession,
+  type DaemonStandaloneSessionOptions,
   type DaemonStandaloneSessionListOptions,
   type DaemonStandaloneSessionListPage,
   type DaemonStandaloneSessionLookup,
@@ -1244,6 +1253,42 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
       },
+    );
+  }
+
+  async setUserMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+  ): Promise<DaemonMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspace/config/mcp/servers/:name',
+      {
+        method: 'PUT',
+        body: { scope: 'user', config },
+        mode: 'rest',
+      },
+    );
+  }
+
+  async removeUserMcpServer(
+    name: string,
+  ): Promise<DaemonMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}?scope=user`,
+      'DELETE /workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
+  async setUserMcpServerEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonMcpConfigMutationResult>(
+      `/workspace/config/mcp/${urlEncode(name)}/${enabled ? 'enable' : 'disable'}`,
+      'POST /workspace/config/mcp/:server/:action',
+      { method: 'POST', body: {}, mode: 'rest' },
     );
   }
 
@@ -2640,6 +2685,17 @@ export class DaemonClient {
 
   // -- Sessions ----------------------------------------------------------
 
+  async getStandaloneSessionOptions(): Promise<DaemonStandaloneSessionOptions> {
+    await this.requireCapability(STANDALONE_SESSION_OPTIONS_CAPABILITY);
+    const route = 'GET /standalone/session-options';
+    const response = await this.jsonRequest<unknown>(
+      '/standalone/session-options',
+      route,
+      { mode: 'rest' },
+    );
+    return parseStandaloneSessionOptions(response, route);
+  }
+
   async createStandaloneSession(
     options: CreateStandaloneSessionOptions = {},
   ): Promise<DaemonStandaloneSession> {
@@ -3030,6 +3086,28 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
+    );
+  }
+
+  /**
+   * Search user/assistant message content across a workspace's persisted
+   * sessions via `GET /workspace/:id/sessions/search`. Returns one summary +
+   * snippet per matching session, most recently modified first. Requires a
+   * daemon new enough to serve the route — older daemons answer 404.
+   */
+  async searchWorkspaceSessions(
+    workspaceCwd: string,
+    queryText: string,
+    options: DaemonSessionSearchOptions = {},
+  ): Promise<DaemonSessionSearchResult> {
+    const query = new URLSearchParams({ q: queryText });
+    if (options.maxResults !== undefined) {
+      query.set('maxResults', String(options.maxResults));
+    }
+    return await this.jsonRequest<DaemonSessionSearchResult>(
+      `/workspace/${urlEncode(workspaceCwd)}/sessions/search?${query.toString()}`,
+      'GET /workspace/sessions/search',
+      { ...(options.signal ? { signal: options.signal } : {}) },
     );
   }
 
@@ -5037,13 +5115,27 @@ export class DaemonClient {
   async setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
-    value: string,
-    clientId?: string,
+    value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
+    const options =
+      typeof clientOrOptions === 'string'
+        ? { clientId: clientOrOptions }
+        : clientOrOptions;
     return await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
-      { method: 'POST', body: { configId, value }, clientId },
+      {
+        method: 'POST',
+        body: {
+          configId,
+          value,
+          ...(options?.persist !== undefined
+            ? { persist: options.persist }
+            : {}),
+        },
+        clientId: options?.clientId,
+      },
     );
   }
 
@@ -5889,6 +5981,128 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
+  mcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceMcpConfigStatus>(
+      this.workspaceSelector,
+      '/config/mcp/servers',
+      'GET /workspaces/:workspace/config/mcp/servers',
+      { mode: 'rest' },
+    );
+  }
+
+  setMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+  ): Promise<DaemonMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest<DaemonMcpConfigMutationResult>(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspaces/:workspace/config/mcp/servers/:name',
+      {
+        method: 'PUT',
+        body: { scope: 'workspace', config },
+        mode: 'rest',
+      },
+    );
+  }
+
+  removeMcpServer(name: string): Promise<DaemonMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest<DaemonMcpConfigMutationResult>(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}?scope=workspace`,
+      'DELETE /workspaces/:workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
+  setMcpServerEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest<DaemonMcpConfigMutationResult>(
+      this.workspaceSelector,
+      `/config/mcp/${urlEncode(name)}/${enabled ? 'enable' : 'disable'}`,
+      'POST /workspaces/:workspace/config/mcp/:server/:action',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  runtimeMcp(): Promise<DaemonWorkspaceMcpStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceMcpStatus>(
+      this.workspaceSelector,
+      '/runtime/mcp',
+      'GET /workspaces/:workspace/runtime/mcp',
+      { mode: 'rest' },
+    );
+  }
+
+  runtimeMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceMcpToolsStatus>(
+      this.workspaceSelector,
+      `/runtime/mcp/${urlEncode(serverName)}/tools`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/tools',
+      { mode: 'rest' },
+    );
+  }
+
+  runtimeMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceMcpResourcesStatus>(
+      this.workspaceSelector,
+      `/runtime/mcp/${urlEncode(serverName)}/resources`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/resources',
+      { mode: 'rest' },
+    );
+  }
+
+  reloadRuntimeMcp(
+    options: DaemonWorkspaceMcpReloadOptions = {},
+  ): Promise<DaemonWorkspaceMcpReloadResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceMcpReloadResult>(
+      this.workspaceSelector,
+      '/runtime/mcp/reload',
+      'POST /workspaces/:workspace/runtime/mcp/reload',
+      {
+        method: 'POST',
+        body: options,
+        mode: 'rest',
+        timeoutMs: MCP_RESTART_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
+  restartRuntimeMcpServer(serverName: string): Promise<DaemonMcpRestartResult> {
+    return this.client.workspaceJsonRequest<DaemonMcpRestartResult>(
+      this.workspaceSelector,
+      `/runtime/mcp/${urlEncode(serverName)}/restart`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/restart',
+      {
+        method: 'POST',
+        body: {},
+        mode: 'rest',
+        timeoutMs: MCP_RESTART_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
+  manageRuntimeMcpServer(
+    serverName: string,
+    action: 'approve' | 'authenticate' | 'clear-auth',
+  ): Promise<DaemonMcpManageResult> {
+    return this.client.workspaceJsonRequest<DaemonMcpManageResult>(
+      this.workspaceSelector,
+      `/runtime/mcp/${urlEncode(serverName)}/${action}`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/:action',
+      {
+        method: 'POST',
+        body: {},
+        mode: 'rest',
+        timeoutMs: MCP_RESTART_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
     return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
       this.workspaceSelector,
@@ -5908,6 +6122,36 @@ export class WorkspaceDaemonClient {
       '/runtime/status',
       'GET /workspaces/:workspace/runtime/status',
       { mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open this workspace's directory in the host's OS
+   * file manager (Finder/Explorer/xdg-open). Only advertised via the
+   * `workspace_local_open` capability; on a headless host the daemon answers
+   * 501 `local_path_open_unavailable`.
+   */
+  async openLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /**
+   * Ask the daemon host to open a terminal window in this workspace's
+   * directory (Terminal.app/wt.exe/a Linux terminal emulator). Only
+   * advertised via the `workspace_local_terminal` capability; on a headless
+   * host the daemon answers 501 `local_path_open_unavailable`.
+   */
+  async openTerminalLocally(): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/open',
+      'POST /workspaces/:workspace/open',
+      { method: 'POST', body: { target: 'terminal' }, mode: 'rest' },
     );
   }
 

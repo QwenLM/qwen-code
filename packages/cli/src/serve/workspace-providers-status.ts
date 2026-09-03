@@ -33,7 +33,10 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
-import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
+import {
+  buildModelReasoningConfigPreview,
+  resolvePersistedReasoningConfigState,
+} from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
@@ -165,14 +168,18 @@ function buildWorkspaceProvidersStatus(
         currentAuth === model.authType && currentAcpModelId === modelId;
       const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
         ? undefined
-        : buildModelReasoningConfigPreview(model.id, {
-            thinkingMandatory:
+        : buildModelReasoningConfigPreview(
+            model.id,
+            resolvePersistedReasoningConfigState(
+              model.id,
+              settings.model?.reasoningEffort,
               modelsConfig.getResolvedModel(
                 model.authType,
                 model.id,
                 model.registryBaseUrl ?? model.baseUrl,
               )?.generationConfig.thinkingMandatory === true,
-          });
+            ),
+          );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -180,7 +187,12 @@ function buildWorkspaceProvidersStatus(
         ...(model.description !== undefined
           ? { description: model.description }
           : {}),
-        contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+        // A non-positive contextWindowSize is meaningless (the SDK rejects it
+        // on the wire); treat it as unset and fall back to the estimate.
+        contextLimit:
+          model.contextWindowSize !== undefined && model.contextWindowSize > 0
+            ? model.contextWindowSize
+            : tokenLimit(effectiveModelId),
         ...(model.modalities !== undefined
           ? { modalities: model.modalities }
           : {}),

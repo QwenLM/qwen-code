@@ -272,6 +272,62 @@ describe('ci flaky rerun patrol', () => {
     ]);
   });
 
+  it('keeps the status rollup out of the PR search query', async () => {
+    // With statusCheckRollup in the list query, the search is one GraphQL
+    // call costing matched PRs times their check runs. It began returning
+    // HTTP 504 above ~30 matches and failed 100 consecutive scheduled scans;
+    // the same search without the rollup answers in a second. Reading the
+    // rollup per PR keeps every call small.
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (args[1] === 'list') {
+        return JSON.stringify([{ number: 7 }, { number: 8 }]);
+      }
+      if (args[2] === '8') {
+        throw new Error('HTTP 502');
+      }
+      return JSON.stringify({ statusCheckRollup: [run()] });
+    };
+    await expect(api.prList('status:failure')).resolves.toEqual([
+      { number: 7, statusCheckRollup: [run()] },
+    ]);
+    const listArgs = calls[0];
+    expect(listArgs[listArgs.indexOf('--json') + 1].split(',')).not.toContain(
+      'statusCheckRollup',
+    );
+    expect(calls).toHaveLength(3);
+  });
+
+  it('bounds how many PR detail reads run at once', async () => {
+    // The patrol job has a ten-minute budget and this cost grows with the
+    // open-PR count, so the fan-out is capped rather than unbounded.
+    const api = new GhClient('QwenLM/qwen-code');
+    let inFlight = 0;
+    let peak = 0;
+    api.gh = async (args) => {
+      if (args[1] === 'list') {
+        return JSON.stringify(
+          Array.from({ length: 12 }, (_, i) => ({ number: i + 1 })),
+        );
+      }
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return JSON.stringify({ statusCheckRollup: [run()] });
+    };
+    const result = await api.prList('status:failure');
+    expect(result).toHaveLength(12);
+    // Order survives the fan-out: the caller pairs rollups with PR numbers.
+    expect(result.map((pr) => pr.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(5);
+  });
+
   it('requests the PR number when refreshing current PR state', async () => {
     const api = new GhClient('QwenLM/qwen-code');
     let args = [];

@@ -31,6 +31,7 @@ import type {
 import type {
   ChatRecord,
   Config,
+  ContentGeneratorConfig,
   Extension,
   LlmChat,
 } from '@qwen-code/qwen-code-core';
@@ -934,6 +935,9 @@ describe('Session', () => {
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -1058,6 +1062,50 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('captures the Session Workflow gate from settings at construction instead of tracking the live view', () => {
+    const setSessionWorkflowEnabledProvider = vi.fn();
+    const merged: Record<string, unknown> = {
+      experimental: { sessionWorkflow: true },
+    };
+    const gateSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+      reloadScopeFromDisk: vi.fn(() => {
+        merged['experimental'] = { sessionWorkflow: false };
+      }),
+    } as unknown as LoadedSettings;
+    const gateConfig = {
+      ...mockConfig,
+      setSessionWorkflowEnabledProvider,
+    } as unknown as Config;
+
+    const gateSession = new Session(
+      'gate-session-id',
+      gateConfig,
+      mockClient,
+      gateSettings,
+    );
+
+    const provider = setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0];
+    expect(provider).toBeDefined();
+    expect(provider?.()).toBe(true);
+
+    // reloadSkillSettings (the reload a workspaceSkillsRefresh performs on
+    // every live session) swaps the session's own workspace view; the gate
+    // must not silently flip with no change event and no plan-revision
+    // cleanup — gate changes flow through the daemon's explicit writers.
+    gateSession.reloadSkillSettings();
+    expect(
+      (merged['experimental'] as Record<string, unknown>)['sessionWorkflow'],
+    ).toBe(false);
+    expect(provider?.()).toBe(true);
   });
 
   it('reloads model providers from the session-owned settings', () => {
@@ -5622,6 +5670,274 @@ describe('Session', () => {
     return calls.at(-1)![0];
   }
 
+  function enableSessionWorkflowRevisionContext(): void {
+    let revision:
+      | { planId: string; sourceCallId: string; todoIds: readonly string[] }
+      | undefined;
+    mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.setSessionWorkflowPlanRevision = vi.fn((next) => {
+      revision = next;
+    });
+    mockConfig.clearSessionWorkflowPlanRevision = vi.fn(() => {
+      revision = undefined;
+    });
+    mockConfig.getSessionWorkflowPlanRevision = vi.fn(() => revision);
+  }
+
+  describe('Session Workflow plan revision context', () => {
+    it('captures Todo IDs only for an enabled, active revision', async () => {
+      const setRevision = vi.fn();
+      const clearRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).toHaveBeenCalledWith({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect', 'ship'],
+      });
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+
+    it('requires both the Workflow marker and complete Todo identity', async () => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an in-progress plan', ['in_progress']],
+      ['a partially completed plan', ['completed', 'pending']],
+    ] as const)('does not bind %s for approval', async (_label, statuses) => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: statuses.map((status, index) => ({
+          content: `Step ${index + 1}`,
+          priority: 'medium',
+          status,
+          _meta: { qwenTodo: { id: `step-${index + 1}` } },
+        })),
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it('keeps the last pending approval snapshot across status-only updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const planUpdate: SessionUpdate = {
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      };
+      await session.sendUpdate(planUpdate);
+
+      await session.sendUpdate({
+        ...planUpdate,
+        entries: [{ ...planUpdate.entries[0]!, status: 'in_progress' }],
+        _meta: {
+          ...planUpdate._meta,
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+    });
+
+    it('clears the pending approval snapshot when the plan structure changes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Changed scope',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+
+    it('keeps the approved Todo IDs frozen during execution updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await runExitPlanModeApprovalPrompt();
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Unapproved follow-up',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'follow-up' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect'],
+      });
+    });
+
+    it('clears the revision context on session disposal', () => {
+      const clearRevision = vi.fn();
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      session.dispose();
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -5669,19 +5985,40 @@ describe('Session', () => {
       );
     });
 
-    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
+    it('clears the active Todo plan revision when changing mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: sending this update in DEFAULT would never
+      // bind a revision, and the assertion below would pass vacuously.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
       });
 
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // A user-driven transition into plan mode from a non-plan mode starts a
+      // fresh approval cycle, so the bound revision must be dropped.
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
       await session.setMode({
         sessionId: 'test-session-id',
         modeId: 'plan',
@@ -5696,11 +6033,20 @@ describe('Session', () => {
     });
 
     it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
@@ -5715,6 +6061,90 @@ describe('Session', () => {
       expect(request.toolCall._meta).toEqual(
         expect.objectContaining({
           qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+    });
+
+    it('keeps the approved Todo plan revision when switching between non-plan modes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Approving via exit_plan_mode stamps the revision and leaves PLAN.
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // The approved plan keeps executing in the new mode, so a non-plan →
+      // non-plan switch (default → auto-edit) touches no approval cycle and
+      // must not disarm the revision mid-execution. (After the helper, the
+      // current mode is DEFAULT.)
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['ship'],
+      });
+    });
+
+    it('clears the active Todo plan revision when leaving plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: bind the revision while the session is
+      // still in PLAN, then leave PLAN before any approval happens.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Leaving PLAN abandons the draft approval cycle: the bound revision
+      // must be dropped so a later exit_plan_mode approval cannot reuse it.
+      // getApprovalMode still reports PLAN here, so this exercises the
+      // PLAN → DEFAULT exit side of the transition (the entry side is
+      // covered by the 'when changing mode' case above).
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'default',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
         }),
       );
     });
@@ -5848,31 +6278,60 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      await session.sendUpdate({
-        sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
-        _meta: {
-          qwenTodoPlan: { id: 'old-plan' },
-          qwenTranscript: { planToolCallId: 'old-call' },
-        },
-      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      const request = await runExitPlanModeApprovalPrompt();
-      expect(request.toolCall._meta).toEqual(
-        expect.not.objectContaining({
-          qwenTodoApproval: expect.anything(),
-        }),
-      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
         [],
+      );
+    });
+
+    it('clears the active Todo plan revision when rewinding', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.rewindToTurn(1);
+
+      const rewound = await runExitPlanModeApprovalPrompt();
+      expect(rewound.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
       );
     });
 
@@ -6172,10 +6631,20 @@ describe('Session', () => {
     });
 
     it('clears the active Todo plan revision when restoring history', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'old-plan' },
           qwenTranscript: { planToolCallId: 'old-call' },
         },
@@ -6251,6 +6720,84 @@ describe('Session', () => {
   });
 
   describe('setModel', () => {
+    function installReasoningPreference(
+      selection: 'none' | 'low' | 'max',
+      options: {
+        trusted?: boolean;
+        thinkingMandatory?: boolean;
+        defaultReasoning?: ContentGeneratorConfig['reasoning'];
+      } = {},
+    ) {
+      type ReasoningSettingsLayer = {
+        settings: { model: { reasoningEffort?: typeof selection } };
+        originalSettings: { model: { reasoningEffort?: typeof selection } };
+      };
+      const user: ReasoningSettingsLayer = {
+        settings: { model: { reasoningEffort: selection } },
+        originalSettings: { model: { reasoningEffort: selection } },
+      };
+      const workspace = structuredClone(user);
+      const live: Partial<ContentGeneratorConfig> & { model: string } = {
+        model: currentModel,
+        ...(options.thinkingMandatory ? { thinkingMandatory: true } : {}),
+        reasoning: selection === 'none' ? false : { effort: selection },
+      };
+      const rebuildable: Partial<ContentGeneratorConfig> =
+        structuredClone(live);
+      Object.assign(mockSettings, {
+        isTrusted: options.trusted === true,
+        user,
+        workspace,
+        forScope: vi.fn((scope: SettingScope) =>
+          scope === SettingScope.Workspace ? workspace : user,
+        ),
+        merged: { model: { reasoningEffort: selection } },
+        recomputeMerged: vi.fn(() => {
+          const value =
+            (options.trusted
+              ? workspace.settings.model.reasoningEffort
+              : undefined) ?? user.settings.model.reasoningEffort;
+          mockSettings.merged.model =
+            value === undefined ? {} : { reasoningEffort: value };
+        }),
+      });
+      vi.mocked(mockSettings.setValue).mockImplementation(
+        (scope, key, value) => {
+          if (key !== 'model.reasoningEffort') return;
+          const target = scope === SettingScope.Workspace ? workspace : user;
+          target.settings.model.reasoningEffort = value as
+            | typeof selection
+            | undefined;
+          target.originalSettings.model.reasoningEffort = value as
+            | typeof selection
+            | undefined;
+          mockSettings.recomputeMerged();
+        },
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        live as ReturnType<Config['getContentGeneratorConfig']>,
+      );
+      Object.assign(mockConfig, {
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: () => rebuildable,
+        })),
+        getResolvedModelConfig: vi.fn(() => ({
+          generationConfig: { reasoning: options.defaultReasoning },
+        })),
+      });
+      switchModelSpy.mockImplementation(
+        async (authType: AuthType, modelId: string) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          live.model = modelId;
+          rebuildable.model = modelId;
+          live.reasoning = options.defaultReasoning;
+          rebuildable.reasoning = options.defaultReasoning;
+        },
+      );
+      return { user, workspace, live, rebuildable };
+    }
+
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
       vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
@@ -6512,6 +7059,425 @@ describe('Session', () => {
         authType: AuthType.USE_OPENAI,
       });
     });
+
+    it('clears only the live override for a non-persisting ACP model switch', async () => {
+      const state = installReasoningPreference('max');
+
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: false },
+      );
+
+      expect(state.user.settings.model.reasoningEffort).toBe('max');
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('deletes an incompatible max preference from both writable scopes without downgrading it', async () => {
+      const state = installReasoningPreference('max', { trusted: true });
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.user.settings.model).not.toHaveProperty('reasoningEffort');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      expect(state.live.reasoning).toBeUndefined();
+      expect(state.rebuildable.reasoning).toBeUndefined();
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'model.reasoningEffort',
+        'xhigh',
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `claude-opus-4-6(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.live.reasoning).toBeUndefined();
+    });
+
+    it.each([
+      ['low', 'qwen3.8-max', {}, { effort: 'low' }, 'low'],
+      ['none', 'qwen3.7-plus', {}, false, 'none'],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: false },
+        { effort: 'low' },
+        'low',
+      ],
+      [
+        'low',
+        'qwen3.8-max',
+        { defaultReasoning: { budget_tokens: 42000 } },
+        { effort: 'low', budget_tokens: 42000 },
+        'low',
+      ],
+      ['max', 'qwen3.7-plus', { defaultReasoning: false }, false, undefined],
+      ['max', 'qwen3.7-plus', {}, undefined, undefined],
+      ['none', 'qwen-plus', {}, undefined, undefined],
+      [
+        'none',
+        'qwen3.8-max',
+        { thinkingMandatory: true },
+        undefined,
+        undefined,
+      ],
+    ] as const)(
+      'reconciles reasoning %s for %s with %j',
+      async (selection, modelId, options, expected, stored) => {
+        const state = installReasoningPreference(selection, options);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+        });
+
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.user.settings.model).toStrictEqual(
+          stored === undefined ? {} : { reasoningEffort: stored },
+        );
+        if (stored !== undefined) {
+          expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+            expect.anything(),
+            'model.reasoningEffort',
+            undefined,
+            expect.anything(),
+            expect.anything(),
+          );
+        }
+        if ('defaultReasoning' in options) {
+          expect(session.getDefaultReasoningConfig()).toEqual(
+            options.defaultReasoning,
+          );
+        }
+      },
+    );
+
+    it('falls back to a compatible persisted tier after dropping a session-only tier', async () => {
+      const state = installReasoningPreference('low');
+      session.setSessionReasoningSelection('max');
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+    });
+
+    it.each([
+      ['low', { effort: 'low' }, true],
+      ['none', false, true],
+      ['default', undefined, false],
+    ] as const)(
+      'reconciles session-only reasoning %s after a model rebuild',
+      async (selection, expectedReasoning, clearsOverrides) => {
+        const samplingParams = {
+          enable_thinking: false,
+          temperature: 0.2,
+        };
+        const live: Partial<ContentGeneratorConfig> & { model: string } = {
+          model: currentModel,
+          reasoning:
+            selection === 'none'
+              ? false
+              : selection === 'default'
+                ? undefined
+                : { effort: selection },
+        };
+        const rebuildable: Partial<ContentGeneratorConfig> = {};
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+          live as ReturnType<Config['getContentGeneratorConfig']>,
+        );
+        Object.assign(mockConfig, {
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: () => rebuildable,
+          })),
+        });
+        session.setSessionReasoningSelection(selection);
+        switchModelSpy.mockImplementation(async (authType, nextModelId) => {
+          currentAuthType = authType;
+          currentModel = nextModelId;
+          Object.assign(live, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+          Object.assign(rebuildable, {
+            model: nextModelId,
+            reasoning: undefined,
+            samplingParams,
+          });
+        });
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        });
+
+        expect(live.reasoning).toEqual(expectedReasoning);
+        expect(live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(rebuildable.samplingParams).toEqual(samplingParams);
+        expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+          expect.anything(),
+          'model.reasoningEffort',
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+        );
+      },
+    );
+
+    it('retains a compatible preference when switching to a runtime snapshot', async () => {
+      const state = installReasoningPreference('low');
+      const snapshotId = `$runtime|${AuthType.USE_OPENAI}|qwen3.8-max`;
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          id: snapshotId,
+          modelId: 'qwen3.8-max',
+          authType: AuthType.USE_OPENAI,
+        })),
+      });
+      switchModelSpy.mockImplementationOnce(async () => {
+        currentModel = 'qwen3.8-max';
+        state.live.model = currentModel;
+        state.live.reasoning = undefined;
+        state.rebuildable.reasoning = undefined;
+      });
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${snapshotId}(${AuthType.USE_OPENAI})`,
+      });
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+      expect(state.live.reasoning).toEqual({ effort: 'low' });
+      expect(state.rebuildable.reasoning).toEqual({ effort: 'low' });
+    });
+
+    it.each(['low', 'none'] as const)(
+      'retains compatible %s on an opaque route using the resolved base model',
+      async (selection) => {
+        const state = installReasoningPreference(selection);
+        const models = ['one', 'two'].map((name) => ({
+          id: 'qwen3.8-max',
+          label: name,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: `https://${name}.example/v1`,
+          registryBaseUrl: `https://${name}.example/v1`,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: buildAcpModelOptions(models)[1]!.modelId,
+        });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          AuthType.USE_OPENAI,
+          'qwen3.8-max',
+          { baseUrl: 'https://two.example/v1' },
+        );
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+        expect(state.live.reasoning).toEqual(
+          selection === 'none' ? false : { effort: selection },
+        );
+      },
+    );
+
+    it('does not treat a runtime snapshot of a previous selection as the model default', () => {
+      installReasoningPreference('none');
+      Object.assign(mockConfig, {
+        getActiveRuntimeModelSnapshot: vi.fn(() => ({
+          generationConfig: { reasoning: { effort: 'max' } },
+        })),
+      });
+      Object.assign(mockSettings.merged.model!, {
+        generationConfig: { reasoning: { budget_tokens: 42000 } },
+      });
+      expect(session.getDefaultReasoningConfig()).toEqual({
+        budget_tokens: 42000,
+      });
+    });
+
+    it.each([
+      ['qwen3.7-plus', 'none', false],
+      ['qwen3.8-max', 'low', true],
+      ['qwen3.8-max', 'max', false],
+    ] as const)(
+      'reloads persisted reasoning for %s with %s after a workspace model rebuild',
+      (modelId, selection, clearsOverrides) => {
+        const state = installReasoningPreference('low');
+        const extraBody = {
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        };
+        const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+        currentModel = modelId;
+        for (const generation of [state.live, state.rebuildable]) {
+          Object.assign(generation, {
+            model: modelId,
+            reasoning: undefined,
+            extra_body: extraBody,
+            samplingParams,
+          });
+        }
+        vi.mocked(mockSettings.reloadScopeFromDisk).mockImplementation(() => {
+          state.user.settings.model.reasoningEffort = selection;
+          mockSettings.recomputeMerged();
+          return true;
+        });
+        session.reloadReasoningSelection();
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.User,
+        );
+        expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+          SettingScope.Workspace,
+        );
+        const expected =
+          selection === 'none'
+            ? false
+            : selection === 'low'
+              ? { effort: 'low' }
+              : undefined;
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.live.extra_body).toEqual(
+          clearsOverrides ? { seed: 7 } : extraBody,
+        );
+        expect(state.live.samplingParams).toEqual(
+          clearsOverrides ? { temperature: 0.2 } : samplingParams,
+        );
+        expect(state.rebuildable.extra_body).toEqual({
+          enable_thinking: false,
+          reasoning_effort: 'xhigh',
+          seed: 7,
+        });
+        expect(state.rebuildable.samplingParams).toEqual({
+          thinking_budget: 1024,
+          temperature: 0.2,
+        });
+      },
+    );
+
+    it('keeps a model switch live when incompatible preference cleanup fails', async () => {
+      const state = installReasoningPreference('max');
+      const setValue = vi.mocked(mockSettings.setValue);
+      const write = setValue.getMockImplementation();
+      setValue.mockImplementation((scope, key, value, ...rest) => {
+        if (key === 'model.reasoningEffort' && value === undefined) {
+          throw new Error('settings are read-only');
+        }
+        return write?.(scope, key, value, ...rest);
+      });
+
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
+        }),
+      ).resolves.toBeDefined();
+
+      expect(state.live.reasoning).toBeUndefined();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'model.name',
+        'qwen3.7-plus',
+      );
+    });
+
+    it.each(['none', 'default'] as const)(
+      'persists %s in the model scope and removes shadowing tiers',
+      (selection) => {
+        const state = installReasoningPreference('max', { trusted: true });
+        session.persistReasoningSelection(selection);
+        for (const field of ['settings', 'originalSettings'] as const) {
+          expect(state.user[field].model).toStrictEqual(
+            selection === 'default' ? {} : { reasoningEffort: selection },
+          );
+          expect(state.workspace[field].model).not.toHaveProperty(
+            'reasoningEffort',
+          );
+        }
+        expect(mockSettings.merged.model?.reasoningEffort).toBe(
+          selection === 'default' ? undefined : selection,
+        );
+      },
+    );
+
+    it.each(['medium', 'default'] as const)(
+      'preserves scope values when persisting %s fails',
+      (selection) => {
+        const state = installReasoningPreference(
+          selection === 'medium' ? 'low' : 'max',
+          { trusted: true },
+        );
+        if (selection === 'medium') {
+          Object.assign(state.workspace.settings, { modelProviders: {} });
+          Object.assign(state.workspace.originalSettings, {
+            modelProviders: {},
+          });
+          delete state.workspace.settings.model.reasoningEffort;
+          delete state.workspace.originalSettings.model.reasoningEffort;
+          mockSettings.recomputeMerged();
+        }
+        const files = [state.user, state.workspace];
+        const before = files.map((file) => ({ ...file.settings.model }));
+        const setValue = vi.mocked(mockSettings.setValue);
+        const write = setValue.getMockImplementation();
+        setValue.mockImplementation((scope, key, value, ...rest) => {
+          if (
+            key === 'model.reasoningEffort' &&
+            scope ===
+              (selection === 'medium'
+                ? SettingScope.Workspace
+                : SettingScope.User) &&
+            value === (selection === 'medium' ? selection : undefined)
+          ) {
+            throw new Error('settings are read-only');
+          }
+          return write?.(scope, key, value, ...rest);
+        });
+
+        expect(() => session.persistReasoningSelection(selection)).toThrow(
+          'settings are read-only',
+        );
+        files.forEach((file, index) => {
+          expect(file.settings.model).toStrictEqual(before[index]);
+          expect(file.originalSettings.model).toStrictEqual(before[index]);
+        });
+      },
+    );
 
     it('does not persist a shared model default for a standalone session', async () => {
       session.dispose();
@@ -17559,6 +18525,100 @@ describe('Session', () => {
         ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
       }, 20_000);
 
+      it('keeps a logger failure inside late drain recovery from escaping', async () => {
+        // Regression for the timeout branch's `.catch(() => {})` guard: the
+        // recovery is best-effort by construction, and anything thrown after
+        // the drain race — the debug logger among them — would escape a bare
+        // `void` as an unhandled rejection and end the daemon process. Same
+        // shape as the recovery test above, but the module-graph logger mock
+        // faults exactly on the recovery's own debug line, and the run must
+        // surface zero escaped rejections (vitest fails a file on one).
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        let resolveLate: (value: { messages: string[] }) => void = () => {};
+        const latePromise = new Promise<{ messages: string[] }>((res) => {
+          resolveLate = res;
+        });
+        let drainCalls = 0;
+        mockClient.extMethod = vi.fn((method: string) => {
+          if (method !== 'craft/drainMidTurnQueue') return Promise.resolve({});
+          drainCalls += 1;
+          return drainCalls === 1
+            ? latePromise
+            : Promise.resolve({ messages: [] });
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'c',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Fault through the module graph (sessionIdContext.run in a real turn
+        // bypasses any process-wide logger session): the recovery's own debug
+        // line throws, everything else logs normally.
+        debugLoggerDebugSpy.mockImplementation((message: unknown) => {
+          if (
+            typeof message === 'string' &&
+            message.includes('timed-out drain')
+          ) {
+            throw new Error('debug logger unavailable');
+          }
+        });
+
+        const unhandled = vi.fn();
+        process.on('unhandledRejection', unhandled);
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text' as const, text: 'read file' }],
+          });
+
+          // The daemon's late answer lands; flush so the recovery race
+          // settles and its throwing logger call runs inside this test.
+          resolveLate({ messages: ['late message'] });
+          await new Promise((r) => setTimeout(r, 0));
+          await new Promise((r) => setImmediate(r));
+
+          // The recovery did reach its debug line (the fault actually fired).
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('timed-out drain'),
+          );
+          expect(unhandled).not.toHaveBeenCalled();
+        } finally {
+          process.off('unhandledRejection', unhandled);
+          debugLoggerDebugSpy.mockImplementation(() => {});
+        }
+      }, 20_000);
+
       it('keeps mid-turn drain enabled after a transient error', async () => {
         const tool = {
           name: 'read_file',
@@ -21423,6 +22483,73 @@ describe('Session', () => {
         });
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
+      });
+
+      it.each([
+        ['skill', CommandKind.SKILL],
+        ['custom command', CommandKind.FILE],
+      ])(
+        'keeps attachments when a %s expands into a model prompt',
+        async (_, kind) => {
+          vi.mocked(
+            nonInteractiveCliCommands.handleSlashCommand,
+          ).mockResolvedValueOnce({
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded skill prompt' }],
+            resolvedCommand: {
+              name: 'price-sheet',
+              kind,
+            },
+          });
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/price-sheet update these prices' },
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///notes.txt',
+                  mimeType: 'text/plain',
+                  text: 'hello',
+                },
+              },
+            ],
+          });
+
+          expect(firstSentMessage()).toEqual([
+            { text: '@attachment:///notes.txt' },
+            { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+            { text: 'File: attachment:///notes.txt\nhello' },
+            { text: 'Expanded skill prompt' },
+          ]);
+        },
+      );
+
+      it('does not forward attachments from built-in commands', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded built-in prompt' }],
+          resolvedCommand: {
+            name: 'remember',
+            kind: CommandKind.BUILT_IN,
+          },
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/remember this' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+          ],
+        });
+
+        expect(firstSentMessage()).toEqual([
+          { text: 'Expanded built-in prompt' },
+        ]);
       });
 
       it('preserves an expanded slash prompt cancelled before model send', async () => {
@@ -25608,13 +26735,14 @@ describe('Session', () => {
     it.each([
       ['live update', 'live', true],
       ['history replay', 'replay', false],
-      ['failed replacement', 'failed', false],
+      ['failed replacement', 'failed', true],
       ['mode transition', 'cleared', false],
       ['empty plan update', 'empty-entries', false],
       ['plan update without identity', 'missing-meta', false],
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
+        enableSessionWorkflowRevisionContext();
         let mode = ApprovalMode.PLAN;
         const hookSpy = vi
           .spyOn(core, 'firePermissionRequestHook')
@@ -25686,9 +26814,11 @@ describe('Session', () => {
               content: 'Ship',
               priority: 'medium',
               status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'todo-call-1' },
           },
@@ -25812,6 +26942,180 @@ describe('Session', () => {
         });
       },
     );
+
+    it.each([
+      [
+        'Session revision is cleared',
+        async () => session.clearActiveTodoPlanRevision(),
+      ],
+      [
+        'Config revision is cleared',
+        async () => mockConfig.clearSessionWorkflowPlanRevision?.(),
+      ],
+      [
+        'revision identity is replaced',
+        async () =>
+          session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: [
+              {
+                content: 'Ship',
+                priority: 'medium',
+                status: 'pending',
+                _meta: { qwenTodo: { id: 'ship' } },
+              },
+            ],
+            _meta: {
+              qwenSessionWorkflow: true,
+              qwenTodoPlan: { id: 'plan-1' },
+              qwenTranscript: { planToolCallId: 'todo-call-2' },
+            },
+          }),
+      ],
+    ] as const)(
+      'cancels a revision-bound plan exit when the %s',
+      async (_label, invalidateRevision) => {
+        enableSessionWorkflowRevisionContext();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        let resolvePermission!: (
+          response: Awaited<
+            ReturnType<AgentSideConnection['requestPermission']>
+          >,
+        ) => void;
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise((resolve) => {
+            resolvePermission = resolve;
+          }),
+        );
+        await session.sendUpdate({
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
+            },
+          ],
+          _meta: {
+            qwenSessionWorkflow: true,
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        });
+
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(
+          vi.mocked(mockClient.requestPermission).mock.calls[0]?.[0].toolCall
+            ._meta,
+        ).toEqual(
+          expect.objectContaining({
+            qwenTodoApproval: {
+              planId: 'plan-1',
+              sourceCallId: 'todo-call-1',
+            },
+          }),
+        );
+
+        await invalidateRevision();
+        resolvePermission({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        await prompt;
+
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            ),
+        ).toHaveLength(0);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                response: {
+                  error: expect.stringContaining('Workflow revision changed'),
+                },
+              }),
+            }),
+          ]),
+          expect.objectContaining({
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      },
+    );
+
+    it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      let resolvePreToolUse!: (result: { shouldProceed: boolean }) => void;
+      const preToolUseSpy = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolvePreToolUse = resolve;
+          }),
+        );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      try {
+        const prompt = runExitPlanModeApprovalPrompt();
+        await vi.waitFor(() => expect(preToolUseSpy).toHaveBeenCalledOnce());
+        session.clearActiveTodoPlanRevision();
+        resolvePreToolUse({ shouldProceed: true });
+        await prompt;
+      } finally {
+        preToolUseSpy.mockRestore();
+      }
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) => params.update.sessionUpdate === 'current_mode_update',
+          ),
+      ).toHaveLength(0);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              response: {
+                error: expect.stringContaining('Workflow revision changed'),
+              },
+            }),
+          }),
+        ]),
+        expect.objectContaining({
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+    });
 
     it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
       let mode = ApprovalMode.DEFAULT;
