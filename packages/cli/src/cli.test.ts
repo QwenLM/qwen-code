@@ -27,6 +27,10 @@ import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
+  BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+} from './agent-view/entry-flags.js';
+import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
   handleCriticalError,
@@ -51,6 +55,8 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runAsAgentViewSupervisor: vi.fn(),
+  runBackgroundDispatch: vi.fn(),
 }));
 
 vi.mock('./llm.js', () => ({
@@ -81,6 +87,19 @@ vi.mock('./utils/version.js', () => ({
 vi.mock('./utils/managed-npm-update.js', () => ({
   installManagedNpmUpdate: mocks.installManagedNpmUpdate,
 }));
+
+vi.mock('./agent-view/background-entry.js', async (importOriginal) => {
+  // Keep the real readBackgroundPrompt: the entry tests pin how the raw
+  // argv scan is wired, and only the two side-effectful functions are
+  // mocked.
+  const actual =
+    await importOriginal<typeof import('./agent-view/background-entry.js')>();
+  return {
+    ...actual,
+    runAsAgentViewSupervisor: mocks.runAsAgentViewSupervisor,
+    runBackgroundDispatch: mocks.runBackgroundDispatch,
+  };
+});
 
 vi.mock('./commands/mcp.js', () => ({
   mcpCommand: {
@@ -1032,6 +1051,91 @@ describe('runCliEntry', () => {
     await runCliEntry([]);
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  describe('Agent View entry intercepts', () => {
+    it('runs a process spawned with the internal flag as the supervisor', async () => {
+      await runCliEntry([INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).toHaveBeenCalledTimes(1);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('scrubs the Guard token before either intercept can spawn a child', async () => {
+      // Both intercepts return before the full startup path, so the
+      // route-level scrub above them is the only thing keeping the
+      // serve-only credential out of the supervisor they spawn.
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+      mocks.runAsAgentViewSupervisor.mockImplementationOnce(async () => {
+        expect(
+          process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+        ).toBeUndefined();
+      });
+
+      await runCliEntry([INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).toHaveBeenCalledTimes(1);
+
+      mocks.runBackgroundDispatch.mockImplementationOnce(async () => {
+        expect(
+          process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+        ).toBeUndefined();
+        return 0;
+      });
+
+      await runCliEntry([BACKGROUND_FLAG, 'audit']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
+    });
+
+    it('does not treat a supervisor flag after `--` as a spawn', async () => {
+      await runCliEntry(['-p', 'x', '--', INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches a background session and reports its exit code', async () => {
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'audit the release']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'audit the release',
+      );
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('leaves a subcommand launch to the parser instead of dispatching it', async () => {
+      await runCliEntry(['sessions', 'ps', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets the version intercept win over --bg', async () => {
+      await runCliEntry(['--version', BACKGROUND_FLAG]);
+
+      expect(stdout.join('')).toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+    });
+
+    it('declines a --bg that is the user’s own data after `--`', async () => {
+      await runCliEntry(['-p', 'x', '--', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('names a flag --bg does not honor instead of dropping it', async () => {
+      await runCliEntry([BACKGROUND_FLAG, '--yolo', 'audit']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('--yolo');
+    });
   });
 
   it('loads gemini on the default path', async () => {
