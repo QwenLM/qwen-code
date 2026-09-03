@@ -39,8 +39,9 @@ export default defineConfig({
     // Quality Checks (Scripts) job to two files at once —
     // qwen-autofix-workflow.test.js, whose heaviest case measures ~14s idle,
     // and acp-serve-boundary-guard.test.js — neither of them slow, both past
-    // 30s under contention. Per-test `vi.setConfig` does not help: these
-    // cases register their timeout at collection, before it runs.
+    // 30s under contention. A per-file `vi.setConfig` does outrank this
+    // config, but not the per-test budget the cases that timed out carry: that
+    // is registered at collection and beats both.
     testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS'] ?? 90_000),
     coverage: {
       provider: 'v8',

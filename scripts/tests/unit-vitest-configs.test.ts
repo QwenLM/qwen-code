@@ -228,8 +228,9 @@ describe('scripts suite timeout', () => {
     // 30s was the quiet-host figure. Release run 33725742855 lost its Quality
     // Checks (Scripts) job to two files at once — qwen-autofix-workflow, whose
     // heaviest case measures ~14s idle, and acp-serve-boundary-guard — neither
-    // slow, both past 30s under contention. A per-file `vi.setConfig` cannot
-    // fix it: these cases register their timeout at collection.
+    // slow, both past 30s under contention. A per-file `vi.setConfig` does
+    // outrank this config, but not the per-test budget the cases that timed out
+    // carry: that is registered at collection and beats both.
     for (const [stub, expected] of [
       [undefined, 90_000],
       ['5000', 5_000],
@@ -252,16 +253,24 @@ describe('scripts suite timeout', () => {
     // a suite applies to itself: a runtime `setConfig` in a test file outranks
     // the project config and holds that suite at its own number while this file
     // reads green — install-script.test.js sat at 30s under the raised ceiling
-    // that way. The walk spans the config's whole include+setup surface, since
-    // an override anywhere in it outranks the ceiling.
+    // that way. Every argument shape does that, so the call itself is the
+    // violation; matching `testTimeout` inside the arguments let a parenthesized
+    // value ahead of it slip past. The walk takes every file here, not the
+    // include glob's extension list, so widening that list cannot leave the scan
+    // behind. Deliberate per-test budgets (`it(name, fn, ms)`) are out of scope:
+    // they are visible at the test they clamp, unlike a file-wide override.
     const here = fileURLToPath(new URL('.', import.meta.url));
-    const shadowing = readdirSync(here, { encoding: 'utf8', recursive: true })
-      .filter((name) => /\.[jt]s$/.test(name))
-      .filter((name) =>
-        /vi\.setConfig\([^)]*\btestTimeout\b/.test(
-          readFileSync(join(here, name), 'utf8'),
+    const shadowing = readdirSync(here, {
+      recursive: true,
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile())
+      .filter((entry) =>
+        /vi\.setConfig\(/.test(
+          readFileSync(join(entry.parentPath, entry.name), 'utf8'),
         ),
-      );
+      )
+      .map((entry) => entry.name);
     expect(shadowing).toEqual([]);
   });
 });
