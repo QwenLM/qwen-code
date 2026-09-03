@@ -32,6 +32,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
@@ -71,6 +72,10 @@ import {
   type ServeProtocolVersion,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -84,6 +89,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
+  SESSION_PR_LIST_LIMIT,
   SessionIdCaseConflictError,
   SessionService,
   Storage,
@@ -103,7 +109,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { BridgeTimeoutError } from '@qwen-code/acp-bridge/status';
+import {
+  BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -708,7 +717,11 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'scheduled_task_session_reuse'];
     }
     if (feature === 'session_export') {
-      return [feature, 'standalone_sessions_v1'];
+      return [
+        feature,
+        'standalone_sessions_v1',
+        'standalone_session_options_v1',
+      ];
     }
     return [feature];
   }).filter(
@@ -796,6 +809,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_local_open',
+  'workspace_local_terminal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -1374,6 +1389,10 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }>;
+  setSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }>;
   heartbeatCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -1485,6 +1504,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const seedSessionPrsCalls: FakeBridge['seedSessionPrsCalls'] = [];
+  const setSessionPrsCalls: FakeBridge['setSessionPrsCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
@@ -2112,6 +2132,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     closeCalls,
     updateMetadataCalls,
     seedSessionPrsCalls,
+    setSessionPrsCalls,
     heartbeatCalls,
     heartbeatStateCalls,
     get shutdownCalls() {
@@ -2647,6 +2668,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     seedSessionPrs(sessionId, prs) {
       seedSessionPrsCalls.push({ sessionId, prs });
     },
+    setSessionPrs(sessionId, prs) {
+      setSessionPrsCalls.push({ sessionId, prs });
+    },
     recordHeartbeat(sessionId, context) {
       heartbeatCalls.push({
         sessionId,
@@ -2935,7 +2959,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'standalone_sessions_v1') {
+        if (
+          feature === 'standalone_sessions_v1' ||
+          feature === 'standalone_session_options_v1'
+        ) {
           expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
           expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -3350,6 +3377,34 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               workspaceRuntimeAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_local_open') {
+          expect(predicate({ localPathOpenAvailable: true })).toBe(true);
+          expect(predicate({ localPathOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localPathOpenAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_local_terminal') {
+          expect(predicate({ localTerminalOpenAvailable: true })).toBe(true);
+          expect(predicate({ localTerminalOpenAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              localTerminalOpenAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -4384,6 +4439,8 @@ describe('createServeApp', () => {
             // Mirror the server.ts probe so the expectation matches on both
             // GUI and headless hosts.
             nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
+            localPathOpenAvailable: isLocalPathOpenAvailable(),
+            localTerminalOpenAvailable: isLocalTerminalAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4419,6 +4476,46 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(disabled.body.features).not.toContain('native_directory_picker');
+    });
+
+    it('forwards the local path open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_open');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localPathOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_open');
+    });
+
+    it('forwards the local terminal open probe result to capabilities', async () => {
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('workspace_local_terminal');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          localTerminalOpenAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('workspace_local_terminal');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -4486,6 +4583,104 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('fans a user-scope Session Workflow write out to sibling workspace bridges (R6-4)', async () => {
+      // A user-scope write persists to the global user file and flips the
+      // gate for every workspace, but each runtime owns its own bridge. The
+      // legacy route's push must reach the sibling runtimes too, not just
+      // the primary.
+      const primaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryPublish = vi.fn();
+      const secondaryPublish = vi.fn();
+      const primaryBridge = {
+        ...fakeBridge({ knownClientIds: ['client-1'] }),
+        invokeWorkspaceCommand: primaryInvoke,
+        publishWorkspaceEvent: primaryPublish,
+      } as unknown as AcpSessionBridge;
+      const secondaryBridge = {
+        invokeWorkspaceCommand: secondaryInvoke,
+        publishWorkspaceEvent: secondaryPublish,
+      } as unknown as AcpSessionBridge;
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: '/workspace/secondary',
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        persistSetting: vi.fn(async () => undefined),
+      });
+
+      let releaseSiblingWrite!: () => void;
+      let siblingWriteStarted!: () => void;
+      const siblingWriteReady = new Promise<void>((resolve) => {
+        siblingWriteStarted = resolve;
+      });
+      const siblingWriteBlocked = new Promise<void>((resolve) => {
+        releaseSiblingWrite = resolve;
+      });
+      const heldSiblingWrite = withSessionWorkflowWriteLock(
+        '/workspace/secondary',
+        async () => {
+          siblingWriteStarted();
+          await siblingWriteBlocked;
+        },
+      );
+      await siblingWriteReady;
+
+      const response = request(app)
+        .post('/workspace/settings')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          scope: 'user',
+          key: 'experimental.sessionWorkflow',
+          value: true,
+        })
+        .then((res) => res);
+
+      await vi.waitFor(() => expect(primaryInvoke).toHaveBeenCalled());
+      expect(secondaryInvoke).not.toHaveBeenCalled();
+      releaseSiblingWrite();
+      const res = await response;
+      await heldSiblingWrite;
+
+      expect(res.status).toBe(200);
+      expect(primaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
+      expect(secondaryInvoke).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+        { enabled: expect.any(Boolean) },
+      );
+      const expectedEvent = {
+        type: 'settings_changed',
+        data: {
+          key: 'experimental.sessionWorkflow',
+          value: true,
+          scope: 'user',
+        },
+        originatorClientId: 'client-1',
+      };
+      expect(primaryPublish).toHaveBeenCalledWith(expectedEvent);
+      expect(secondaryPublish).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: expectedEvent.data,
+      });
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {
@@ -15843,6 +16038,8 @@ describe('createServeApp', () => {
       timestamp: string;
       prompt: string;
       mtime: Date;
+      customTitle?: string;
+      titleSource?: 'manual' | 'auto';
       state?: 'active' | 'archived';
       parentSessionId?: string;
       sourceType?: string;
@@ -15866,6 +16063,21 @@ describe('createServeApp', () => {
         cwd: input.cwd,
       };
       const lines = [JSON.stringify(record)];
+      if (input.customTitle !== undefined) {
+        lines.push(
+          JSON.stringify({
+            ...record,
+            uuid: `${input.sessionId}-title-1`,
+            parentUuid: record.uuid,
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: {
+              customTitle: input.customTitle,
+              ...(input.titleSource ? { titleSource: input.titleSource } : {}),
+            },
+          }),
+        );
+      }
       if (input.parentSessionId !== undefined) {
         // Mirror ChatRecordingService.recordParentSession: a single
         // `parent_session` system record near the head of the transcript that
@@ -16145,6 +16357,8 @@ describe('createServeApp', () => {
         timestamp: '2026-05-17T12:00:00.000Z',
         prompt: 'stored only prompt',
         mtime: new Date('2026-05-17T12:10:00.000Z'),
+        customTitle: 'Manual title',
+        titleSource: 'manual',
       });
       await writeStoredSession({
         sessionId: liveAndStoredId,
@@ -16183,7 +16397,8 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: storedOnlyId,
             workspaceCwd: WS_BOUND,
-            displayName: 'stored only prompt',
+            displayName: 'Manual title',
+            titleSource: 'manual',
             clientCount: 0,
             hasActivePrompt: false,
           }),
@@ -16645,11 +16860,109 @@ describe('createServeApp', () => {
       expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
     });
 
-    it('dedupes by number on merge, preferring the live url', async () => {
+    it('keeps sidecar binding-time order when a persisted-only binding is newer', async () => {
+      // Mixed-writer ordering: GitDialog binds #9500 (enters the live entry
+      // AND the sidecar), then the shell hook binds #9517 — the hook writes
+      // the sidecar directly but never updates the live entry, so the live
+      // entry stays [9500] while the sidecar is [9500, 9517]. The merged
+      // list must keep the sidecar's binding-time order [9500, 9517]
+      // (last = latest); positional concatenation (persisted-only first)
+      // would flip it to [9517, 9500] and render the OLDER PR as latest.
+      const id = '550e8400-e29b-41d4-a716-446655440006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            // Live entry only saw the GitDialog binding; the shell-hook
+            // binding (9517) is persisted-only.
+            prs: [{ number: 9500, url: 'https://github.com/o/r/pull/9500' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
+    it('drops a live-only binding the sidecar evicted at the cap', async () => {
+      // Sidecar-only writers (shell hook) evict the oldest binding once the
+      // cap overflows while the live entry still holds it; the merge must
+      // not re-append that evicted binding as the session's latest.
+      const id = '550e8400-e29b-41d4-a716-446655440007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      for (
+        let prNumber = 9501;
+        prNumber <= 9500 + SESSION_PR_LIST_LIMIT;
+        prNumber++
+      ) {
+        await upsertSessionPr(sidecarPath, {
+          number: prNumber,
+          url: `https://github.com/o/r/pull/${prNumber}`,
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 9500, url: 'https://github.com/o/r/pull/9500' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+      expect(merged?.prs?.map((p) => p.number)).toEqual(
+        Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) => 9501 + i),
+      );
+    });
+
+    it('dedupes by number on merge, keeping the live spelling of the same PR', async () => {
       // Overlap is the common production case (a route binding is persisted
       // AND enters the live entry). Without the number-keyed filter the
       // merged list duplicates the number and the badge renders `#9517 +1`
-      // for a one-PR session.
+      // for a one-PR session. The two spellings name the SAME PR (canonical
+      // urls are equal — a query is a cache-buster), so the live spelling
+      // is kept; only a canonically different url is another PR and hands
+      // the row to the sidecar (see the re-bind test below).
       const id = '550e8400-e29b-41d4-a716-446655440004';
       await writeStoredSession({
         sessionId: id,
@@ -16759,11 +17072,17 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('does not attach the sidecar snapshot to a live re-bind of another repository', async () => {
-      // Both bind paths mutate the live entry before the sidecar write, so a
-      // list built in that window still reads the previous binding's
-      // sidecar; matched by number alone, repo-a's issues would ride onto
-      // repo-b's same-numbered PR.
+    it('keeps the sidecar binding over a live re-bind of another repository', async () => {
+      // A same-numbered entry at a DIFFERENT canonical url is another PR.
+      // The sidecar row wins wholesale, carrying its OWN snapshot — repo-a's
+      // issues never ride onto repo-b's PR, which is the invariant here.
+      // The sidecar is the durable authority: sidecar-only writers (the
+      // shell hook binding from the session child process, backfill) re-bind
+      // without ever touching the live entry, so a live-wins merge would
+      // serve the stale binding indefinitely; the route bind paths mutate
+      // the live entry first, but reconcile it to the persisted list in the
+      // same request (setSessionPrs), so that window is sub-second and
+      // self-heals.
       const id = '550e8400-e29b-41d4-a716-44665544a006';
       await writeStoredSession({
         sessionId: id,
@@ -16816,7 +17135,12 @@ describe('createServeApp', () => {
 
       const merged = result.sessions.find((s) => s.sessionId === id);
       expect(merged?.prs).toEqual([
-        { number: 42, url: 'https://github.com/repo-b/o/pull/42' },
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/repo-a/o/issues/7' }],
+        },
       ]);
     });
 
@@ -16942,6 +17266,170 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('serves the persisted entry while a cross-repo re-bind is in flight', async () => {
+      // The same number in another repository is another PR. The sidecar is
+      // the append-only binding-time record, so a conflicted number is
+      // served from it: persisted url and the state resolved for that url.
+      // A live entry can only be NEWER inside the metadata bind route's
+      // live-write/sidecar-write window, and that race is bounded to one
+      // listing because the route invalidates the session-list cache after
+      // its sidecar write; serving the live url instead would keep a stale
+      // live entry's repo visible after a sidecar-only re-bind landed.
+      const id = '550e8400-e29b-41d4-a716-446655440008';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 5,
+        url: 'https://github.com/repo-a/r/pull/5',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 5, url: 'https://github.com/repo-b/r/pull/5' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 5,
+          url: 'https://github.com/repo-a/r/pull/5',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('keeps every newest live-only binding below the persisted cap', async () => {
+      // The live-only append gate must key on the PERSISTED size: below the
+      // cap a live-only entry is genuinely the newest binding (eviction
+      // only happens at the cap). Gating on the running merged length drops
+      // the newest bindings once the total fills up, and the badge's
+      // last-is-latest render shows the wrong PR until the next fresh
+      // listing. The final slice evicts the oldest persisted entry instead.
+      const id = '550e8400-e29b-41d4-a716-446655440009';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      for (let prNumber = 1; prNumber <= 8; prNumber++) {
+        await upsertSessionPr(sidecarPath, {
+          number: prNumber,
+          url: `https://github.com/o/r/pull/${prNumber}`,
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 101, url: 'https://github.com/o/r/pull/101' },
+              { number: 102, url: 'https://github.com/o/r/pull/102' },
+              { number: 103, url: 'https://github.com/o/r/pull/103' },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([
+        2, 3, 4, 5, 6, 7, 8, 101, 102, 103,
+      ]);
+    });
+
+    it('serves the persisted url when a sidecar-only writer re-bound a number', async () => {
+      // The shell hook / backfill re-bind a number by rewriting the sidecar
+      // alone; the live entry keeps the stale url until daemon restart. The
+      // merge must serve the persisted (re-bound) url, not the live one.
+      const id = '550e8400-e29b-41d4-a716-44665544a010';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 1,
+        url: 'https://github.com/o/r/pull/1',
+      });
+      await upsertSessionPr(sidecarPath, {
+        number: 5,
+        url: 'https://github.com/repo-b/r/pull/5',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 1, url: 'https://github.com/o/r/pull/1' },
+              {
+                number: 5,
+                url: 'https://github.com/repo-a/r/pull/5',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      // The re-bind's url wins; the live state belonged to the OLD url and
+      // must not carry over to another repo's PR.
+      expect(merged?.prs?.map((p) => p.url)).toEqual([
+        'https://github.com/o/r/pull/1',
+        'https://github.com/repo-b/r/pull/5',
+      ]);
+      expect(merged?.prs?.[1]?.state).toBeUndefined();
+    });
     it('reads the PR sidecar for live-only sessions so refreshed state wins', async () => {
       // The bind route persists the sidecar before the session's first
       // flush. Until then the row is live-only, and its bind-time state
@@ -21310,7 +21798,10 @@ describe('createServeApp', () => {
         },
       ];
       const bridge = fakeBridge({
-        setConfigOptionImpl: async () => ({ configOptions }),
+        setConfigOptionImpl: async () => ({
+          configOptions,
+          _meta: { 'qwenCode/reasoningSelectionPersisted': true },
+        }),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
 
@@ -21321,10 +21812,59 @@ describe('createServeApp', () => {
           sessionId: 'spoofed-B',
           configId: 'reasoning_effort',
           value: 'medium',
+          persist: true,
         });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ configOptions });
+      expect(res.body).toEqual({ configOptions, persisted: true });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+            _meta: { 'qwenCode/persistReasoningSelection': true },
+          },
+        },
+      ]);
+    });
+
+    it('rejects a non-boolean persist option', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          persist: 'yes',
+        });
+
+      expect(res.status).toBe(400);
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
+    it('does not trust persistence metadata when persist is omitted', async () => {
+      const configOptions = [{ id: 'reasoning_effort' }];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions, persisted: false });
       expect(bridge.setConfigOptionCalls).toEqual([
         {
           sessionId: 'session-A',
@@ -28277,6 +28817,14 @@ describe('createServeApp', () => {
             call.prs.map((p) => p.number),
           ),
         ).toEqual([[9000]]);
+        // After the upsert the route reconciles the live entry to the
+        // authoritative persisted list, or the bridge's positional cap
+        // diverges from the sidecar's authority cap past the list limit.
+        expect(
+          bridge.setSessionPrsCalls.map((call) =>
+            call.prs.map((p) => p.number),
+          ),
+        ).toEqual([[9000, 9002]]);
       } finally {
         await fsp.rm(sidecarPath, { force: true });
       }
@@ -28304,24 +28852,22 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
-    it('400 message names the state constraint for an invalid pr state', async () => {
+    it('400 invalid_metadata when the pr state is not open/merged/closed', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
-      const res = await auth(
-        request(app).patch(
-          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
-        ),
-      ).send({
-        pr: {
-          number: 1,
-          url: 'https://github.com/o/r/pull/1',
-          state: 'draft',
-        },
-      });
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_metadata');
-      expect(res.body.field).toBe('pr');
-      expect(res.body.error).toContain('`state`');
+      for (const state of ['draft', 'MERGED', '']) {
+        const res = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number: 1, url: 'https://github.com/o/r/pull/1', state },
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_metadata');
+        expect(res.body.field).toBe('pr');
+        expect(res.body.error).toContain('state');
+      }
       expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
@@ -28566,6 +29112,13 @@ describe('createServeApp', () => {
           call.prs.map((p) => p.number),
         ),
       ).toEqual([[9000]]);
+      // …and reconciles the live entry to the persisted list AFTER the
+      // upsert (see the primary metadata route).
+      expect(
+        secondaryBridge.setSessionPrsCalls.map((call) =>
+          call.prs.map((p) => p.number),
+        ),
+      ).toEqual([[9000, 9002]]);
     });
 
     it('binds an archived session at the archived sidecar without orphaning an active one', async () => {
@@ -36819,6 +37372,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(partialCapabilities.body.features).not.toContain(
       'standalone_sessions_v1',
     );
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_session_options_v1',
+    );
 
     const complete = setupLiveRuntime();
     const completeRoute = await supertest(complete.app)
@@ -36831,6 +37387,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(completeRoute.status).toBe(400);
     expect(completeCapabilities.body.features).toContain(
       'standalone_sessions_v1',
+    );
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_session_options_v1',
     );
   });
 
@@ -37122,6 +37681,128 @@ describe('Live conversation runtime lifecycle', () => {
       await expect(retryPromise).resolves.toMatchObject({ status: 200 });
       expect(onConversationRuntimeReady).toHaveBeenCalledOnce();
     } finally {
+      await restoreLiveSettings();
+    }
+  });
+
+  it('logs a boot failure once per episode with the full cause chain', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let captured = '';
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      captured += String(chunk);
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const driveBoot = async (settle: () => void) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      settle();
+      return promise;
+    };
+    try {
+      const first = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-ONE', {
+            cause: new Error('ROOT-CAUSE-ONE EACCES'),
+          }),
+        ),
+      );
+      expect(first.status).toBe(503);
+
+      const second = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-TWO', {
+            cause: new Error('ROOT-CAUSE-TWO'),
+          }),
+        ),
+      );
+      expect(second.status).toBe(503);
+      const firstEpisode = captured;
+      expect(firstEpisode).toContain(
+        'qwen serve: Conversations runtime boot failed:',
+      );
+      expect(firstEpisode).toContain('WRAPPED-BOOT-FAILURE-ONE');
+      expect(firstEpisode).toContain('ROOT-CAUSE-ONE');
+      expect(firstEpisode).not.toContain('WRAPPED-BOOT-FAILURE-TWO');
+      expect(firstEpisode).not.toContain('ROOT-CAUSE-TWO');
+
+      const recovered = await driveBoot(() => setup.resolveCreation());
+      expect(recovered.status).toBe(200);
+
+      vi.mocked(setup.conversationWorkspace.revalidate).mockRejectedValueOnce(
+        new Error('ROOT-CAUSE-THREE ENOENT'),
+      );
+      const third = await request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(third.status).toBe(503);
+      expect(captured).toContain('ROOT-CAUSE-THREE');
+      const episodeLines = captured
+        .split('\n')
+        .filter((line) =>
+          line.includes('qwen serve: Conversations runtime boot failed:'),
+        );
+      expect(episodeLines).toHaveLength(2);
+    } finally {
+      stderrSpy.mockRestore();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('keeps the classified boot rejection when the stderr write itself fails', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let writeAttempts = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      if (String(chunk).includes('qwen serve: Conversations runtime boot')) {
+        writeAttempts += 1;
+        throw new Error('EPIPE dead stderr');
+      }
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const failBootOnce = async (message: string) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      setup.rejectCreation(new Error(message));
+      return promise;
+    };
+    try {
+      const first = await failBootOnce('SENTINEL-BOOT-FAILURE-ONE');
+      expect(first.status).toBe(503);
+      expect(first.body.code).toBe('conversation_runtime_unavailable');
+
+      const second = await failBootOnce('SENTINEL-BOOT-FAILURE-TWO');
+      expect(second.status).toBe(503);
+      expect(second.body.code).toBe('conversation_runtime_unavailable');
+      expect(writeAttempts).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
       await restoreLiveSettings();
     }
   });

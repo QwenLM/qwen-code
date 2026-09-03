@@ -112,9 +112,13 @@ jobs:
     # the pool.
     runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
+      ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
         id: 'release_sync'
@@ -188,6 +192,158 @@ jobs:
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
 
+      # The product jobs later check out the PR head. Classify before that
+      # from an explicit base-SHA checkout so no fork can replace the
+      # classifier implementation it asks CI to execute. The event token only
+      # needs PR read access.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # actions/checkout reuses a leftover directory whose origin URL
+      # matches and runs git (hooks included) inside it, so the trusted
+      # classifier checkout below must not inherit a residue from an
+      # earlier run on the shared pool; the sweep removes it like the
+      # .qwen names (see the test job's sweep comment for the rule).
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Verify trusted classifier checkout is clean'
+        if: "${{ github.event_name == 'pull_request' }}"
+        run: |-
+          if [ -e "$GITHUB_WORKSPACE/trusted-ci-classifier" ] ||
+             [ -L "$GITHUB_WORKSPACE/trusted-ci-classifier" ]; then
+            echo "::error::trusted-ci-classifier survived cleanup; refusing to reuse it"
+            exit 1
+          fi
+
+      - name: 'Checkout trusted CI classifier'
+        if: "${{ github.event_name == 'pull_request' }}"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          repository: '${{ github.repository }}'
+          ref: '${{ github.event.pull_request.base.sha }}'
+          path: 'trusted-ci-classifier'
+          sparse-checkout: '.github/scripts/ci'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Classify CI profile from trusted base'
+        id: 'ci_profile'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+        run: |-
+          profile=full
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            set +e
+            profile="$(trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
+            classify_rc=$?
+            set -e
+            if [ "$classify_rc" -eq 2 ]; then
+              echo "::warning::Unable to list PR changed files; running full CI."
+              profile=full
+            elif [ "$classify_rc" -ne 0 ]; then
+              echo "::error::Trusted CI profile classifier exited non-zero; running full CI."
+              profile=full
+            fi
+          fi
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *)
+              echo "::error::Trusted CI profile classifier returned '${profile}'; running full CI."
+              profile=full
+              ;;
+          esac
+          echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
+          echo "Selected trusted CI profile: ${profile}"
+
   #
   # Test: Node
   #
@@ -253,11 +409,15 @@ jobs:
       # that producer's naming changes or a third residue name appears,
       # update the for-loop list in every sweep copy or the checkout
       # poisoning this sweep exists for silently recurs.
+      # `trusted-ci-classifier` is the third residue name: classify_pr's
+      # base-SHA checkout path. actions/checkout reuses a leftover copy
+      # whose origin URL matches and runs git (hooks included) inside it,
+      # so it is swept rather than warmed.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -379,36 +539,20 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
-      - name: 'Classify CI profile'
+      - name: 'Use trusted CI profile'
         id: 'ci_profile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
-          GH_TOKEN: '${{ github.token }}'
-          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+          TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
-          profile=full
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
-              # Fetch + classify through the shared wrapper (also used by the
-              # review workflow's docs-only gate) so the classifier's input
-              # contract lives in one place. Exit 2 = listing failed,
-              # 3 = classifier failed.
-              set +e
-              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
-              classify_rc=$?
-              set -e
-              if [ "$classify_rc" -eq 2 ]; then
-                echo "::warning::Unable to list PR changed files; running full CI."
-                profile=full
-              elif [ "$classify_rc" -ne 0 ]; then
-                echo "::error::CI profile classifier exited non-zero; running full CI."
-                profile=full
-              fi
-            else
-              echo "Fork PR detected; running full CI."
-            fi
+          if [ -z "${TRUSTED_CI_PROFILE}" ]; then
+            echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
           fi
+          profile="${TRUSTED_CI_PROFILE:-full}"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *) profile=full ;;
+          esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
@@ -652,6 +796,12 @@ jobs:
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          # Bound each Vitest process on the shared ECS host. Operators can
+          # tune the maximum without changing this workflow.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           OPENAI_API_KEY: ''
           DASHSCOPE_API_KEY: ''
           QWEN_API_KEY: ''
@@ -786,7 +936,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -1349,7 +1499,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
@@ -1440,34 +1590,21 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
-      # KEEP IN SYNC with the `test` job's classifier step: same wrapper, same
-      # fallbacks, so a docs-only or github-ci-only PR skips this gate exactly
-      # when it skips the unit run.
-      - name: 'Classify CI profile'
+      # KEEP IN SYNC with the `test` job's profile step so a docs-only or
+      # github-ci-only PR skips this gate exactly when it skips the unit run.
+      - name: 'Use trusted CI profile'
         id: 'ci_profile'
         env:
-          GH_TOKEN: '${{ github.token }}'
-          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
-          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
+          TRUSTED_CI_PROFILE: '${{ needs.classify_pr.outputs.ci_profile }}'
         run: |-
-          profile=full
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
-              set +e
-              profile="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}")"
-              classify_rc=$?
-              set -e
-              if [ "$classify_rc" -eq 2 ]; then
-                echo "::warning::Unable to list PR changed files; running full CI."
-                profile=full
-              elif [ "$classify_rc" -ne 0 ]; then
-                echo "::error::CI profile classifier exited non-zero; running full CI."
-                profile=full
-              fi
-            else
-              echo "Fork PR detected; running full CI."
-            fi
+          if [ -z "${TRUSTED_CI_PROFILE}" ]; then
+            echo "::warning::classify_pr produced no ci_profile output (classifier job failed or was skipped); running full CI."
           fi
+          profile="${TRUSTED_CI_PROFILE:-full}"
+          case "${profile}" in
+            docs_only|github_ci_only|full) ;;
+            *) profile=full ;;
+          esac
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
           echo "Selected CI profile: ${profile}"
 
@@ -1586,7 +1723,7 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
             if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               continue
             fi
