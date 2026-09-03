@@ -1148,6 +1148,42 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('waits for channel disconnect drains before stopping the bridge', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const channel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      waitForDisconnect: vi.fn(() => drain),
+      name: 'telegram',
+      runLoopPrompt: vi.fn().mockResolvedValue('done'),
+      validateWebhookTask: vi.fn(),
+    };
+    mockCreateChannel.mockReturnValueOnce(channel);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const closing = handle.close();
+    await vi.waitFor(() =>
+      expect(channel.waitForDisconnect).toHaveBeenCalled(),
+    );
+    expect(channel.disconnect).toHaveBeenCalledOnce();
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    await closing;
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
+  });
+
   it('starts named sessions with per-channel state and no loop controller', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([

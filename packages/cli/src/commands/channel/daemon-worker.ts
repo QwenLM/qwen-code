@@ -572,14 +572,24 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = () => {
+  const disconnectAll = async () => {
+    const drains: Array<Promise<void>> = [];
     for (const channel of channels.values()) {
       try {
         channel.disconnect();
+        const waitForDisconnect = (
+          channel as ChannelBase & {
+            waitForDisconnect?: () => Promise<void>;
+          }
+        ).waitForDisconnect;
+        if (waitForDisconnect) {
+          drains.push(waitForDisconnect.call(channel).catch(() => undefined));
+        }
       } catch {
         // best-effort
       }
     }
+    await Promise.all(drains);
   };
 
   let router: SessionRouter | undefined;
@@ -806,7 +816,7 @@ export async function runChannelDaemonWorker(
       },
       async close() {
         scheduler?.stop();
-        disconnectAll();
+        await disconnectAll();
         try {
           bridge.stop();
         } finally {
@@ -816,7 +826,7 @@ export async function runChannelDaemonWorker(
     };
   } catch (err) {
     scheduler?.stop();
-    disconnectAll();
+    await disconnectAll();
     try {
       bridge.stop();
     } catch {
