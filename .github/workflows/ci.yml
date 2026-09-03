@@ -792,8 +792,22 @@ jobs:
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        # A hung suite used to burn the whole job budget: #10490's run 3 was
+        # cancelled at ~60 minutes with the runner terminating orphaned test
+        # processes, which reads as a timeout rather than a failure. The
+        # healthy step is
+        # ~32 minutes and the worst measured is ~60, so this cap turns a hang
+        # into a legible failure without touching a slow-but-live run.
+        timeout-minutes: 90
         env:
           NO_COLOR: true
+          # Every attempt of a contended shard is a fresh roll: the same
+          # commit run three times on this fleet failed three disjoint test
+          # sets (#10490), and a shard of identical work measures 6.7min or
+          # 36min depending only on which host it lands on. A retry lets a
+          # contention flake pass; a real break still fails all three
+          # attempts. Operators can retune or disable ('off') without a PR.
+          VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || '2' }}"
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
           # Bound each Vitest process on the shared ECS host. Operators can
@@ -834,9 +848,17 @@ jobs:
           fi
           ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
           SAMPLER_PID=$!
+          retry_arg=()
+          if [ -n "${VITEST_RETRY:-}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
+            retry_arg=(--retry="${VITEST_RETRY}")
+          fi
           set +e
-          npm run test:ci
+          npm run test:ci:workspaces -- "${retry_arg[@]}"
           RC=$?
+          if [ "$RC" -eq 0 ]; then
+            npm run test:scripts -- "${retry_arg[@]}"
+            RC=$?
+          fi
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
           kill "$SAMPLER_PID" 2>/dev/null || true
