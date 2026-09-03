@@ -261,10 +261,9 @@ jobs:
             exit 1
           fi
 
-          # `ref` is a required input with a default, so the form gives no
-          # hint that promotion ignores it — the source revision comes from
-          # the nightly tag. Refuse a non-default value instead of silently
-          # releasing a different revision than the operator selected.
+          # Promotion takes its source from the nightly tag, but `ref` is a
+          # required input with a default, so the form gives no hint it is
+          # ignored: refuse it rather than release a different revision.
           if [[ -n "${PROMOTE_NIGHTLY}" && -n "${REF_INPUT}" && "${REF_INPUT}" != "main" ]]; then
             echo "::error::promote_nightly ignores the ref input; leave it at the default ('main'). The source revision is taken from the nightly tag."
             exit 1
@@ -316,17 +315,9 @@ jobs:
             echo "::error::promote_nightly cannot be combined with force_skip_tests"
             exit 1
           fi
-          PROMOTION_JSON="$(node scripts/verify-nightly-promotion.js "${PROMOTE_NIGHTLY}")"
-          echo "source_sha=$(jq -r .sourceSha <<<"${PROMOTION_JSON}")" >> "${GITHUB_OUTPUT}"
-          echo "reuse_validation=true" >> "${GITHUB_OUTPUT}"
-          {
-            echo "### Nightly promotion"
-            echo
-            echo "- Nightly: \`$(jq -r .nightlyTag <<<"${PROMOTION_JSON}")\`"
-            echo "- Source: \`$(jq -r .sourceSha <<<"${PROMOTION_JSON}")\`"
-            echo "- Validation: $(jq -r .validationRunUrl <<<"${PROMOTION_JSON}")"
-            jq -r '.warnings[]? | "- :warning: " + .' <<<"${PROMOTION_JSON}"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          # The script writes source_sha, reuse_validation, the evidence
+          # summary and any soft finding itself.
+          node scripts/verify-nightly-promotion.js "${PROMOTE_NIGHTLY}"
 
       - name: 'Resolve release commit'
         id: 'source'
@@ -337,11 +328,10 @@ jobs:
           echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
           printf '%s\n' "${release_sha}" > "${RUNNER_TEMP}/release-source.txt"
 
-      # Evidence for a possible future promotion, not a release requirement:
-      # a flaky artifact upload must not fail a release that is otherwise
-      # fine (and open a "Release Failed" issue). A missing record only makes
-      # this run's source unpromotable later, which the promotion check
-      # already treats as a fail-closed rejection.
+      # Evidence for a possible later promotion, not a release requirement:
+      # a flaky upload must not fail an otherwise fine release. A missing
+      # record only makes this run unpromotable (docs/design/
+      # nightly-release-promotion.md).
       - name: 'Record release source'
         continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -373,12 +363,10 @@ jobs:
         run: |-
           VERSION_ARGS=()
           if [[ -n "${PROMOTE_NIGHTLY}" ]]; then
-            # The nightly tag names the source revision, not the version:
-            # its numeric base is main's package.json version, which the
-            # ordinary stable path publishes on its own, so it is either
-            # already released or behind the `latest` dist-tag by the time a
-            # promotion runs. `version` names the stable release; left empty,
-            # the script derives the next minor after `latest`.
+            # The nightly tag names the source, not the version: its base is
+            # main's package.json version, which the stable path publishes on
+            # its own. `version` names the stable release; left empty, the
+            # script derives the next minor after `latest`.
             VERSION_ARGS+=(--type=promote-nightly "--promote_nightly_version=${PROMOTE_NIGHTLY}")
             if [[ -n "${MANUAL_VERSION}" ]]; then
               VERSION_ARGS+=("--promote_nightly_stable_version=${MANUAL_VERSION}")

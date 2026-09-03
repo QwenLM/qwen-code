@@ -7,6 +7,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseNightlyVersion } from './lib/release-helpers.js';
 
@@ -351,16 +352,46 @@ export function verifyNightlyPromotion(
   );
 }
 
+/**
+ * Report the verdict to the Release run: the source SHA and the
+ * validation-reuse flag as step outputs, the evidence as a step summary, and
+ * any soft finding as an annotation. Writing these here rather than piping
+ * the JSON through `jq` in the workflow keeps the reporting testable and
+ * keeps release.yml from carrying another block of shell.
+ */
+export function reportPromotion(result, env = process.env) {
+  for (const warning of result.warnings ?? []) {
+    console.error(`::warning::${warning}`);
+  }
+  if (env.GITHUB_OUTPUT) {
+    appendFileSync(
+      env.GITHUB_OUTPUT,
+      ['source_sha=' + result.sourceSha, 'reuse_validation=true', ''].join(
+        '\n',
+      ),
+    );
+  }
+  if (env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(
+      env.GITHUB_STEP_SUMMARY,
+      [
+        '### Nightly promotion',
+        '',
+        `- Nightly: \`${result.nightlyTag}\``,
+        `- Source: \`${result.sourceSha}\``,
+        `- Validation: ${result.validationRunUrl}`,
+        ...(result.warnings ?? []).map((warning) => `- :warning: ${warning}`),
+        '',
+      ].join('\n'),
+    );
+  }
+}
+
 export function runCli(args = process.argv.slice(2)) {
   try {
-    const result = verifyNightlyPromotion(
-      args[0],
-      process.env.GITHUB_REPOSITORY,
+    reportPromotion(
+      verifyNightlyPromotion(args[0], process.env.GITHUB_REPOSITORY),
     );
-    for (const warning of result.warnings ?? []) {
-      console.error(`::warning::${warning}`);
-    }
-    console.log(JSON.stringify(result));
     return 0;
   } catch (error) {
     console.error(`::error::${error.message}`);

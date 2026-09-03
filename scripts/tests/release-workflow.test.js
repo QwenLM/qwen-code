@@ -33,6 +33,10 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const promotionScript = readFileSync(
+  'scripts/verify-nightly-promotion.js',
+  'utf8',
+);
 const releaseYaml = parse(workflow);
 const audioCapturePrebuildsYaml = parse(
   readFileSync('.github/workflows/audio-capture-prebuilds.yml', 'utf8'),
@@ -850,8 +854,11 @@ describe('release workflow', () => {
       (step) => step.id === 'promotion',
     );
     expect(promotion.run).toContain('verify-nightly-promotion.js');
-    expect(promotion.run).toContain('reuse_validation=true');
     expect(promotion.run).toContain('force_skip_tests');
+    // The step's outputs are written by the script, not by jq in the
+    // workflow, so the output name has to stay in step with it.
+    expect(promotionScript).toContain('reuse_validation=true');
+    expect(promotionScript).toContain('source_sha=');
 
     // The nightly tag selects the source revision; the stable version is a
     // release decision taken from the `version` input (or derived from the

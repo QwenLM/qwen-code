@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { appendFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
 import {
   REQUIRED_JOBS,
+  reportPromotion,
   verifyNightlyPromotion,
 } from '../verify-nightly-promotion.js';
 
@@ -215,5 +217,48 @@ describe('verifyNightlyPromotion', () => {
 
   it('skips the workflow drift check when the current revision is unknown', () => {
     expect(verify({}, undefined).warnings).toEqual([]);
+  });
+});
+
+// test-setup mocks appendFileSync, so assert on the calls, not the files.
+describe('reportPromotion', () => {
+  const written = (name) =>
+    vi
+      .mocked(appendFileSync)
+      .mock.calls.filter(([path]) => path === name)
+      .map(([, body]) => body)
+      .join('');
+
+  it('writes the step outputs the workflow reads back', () => {
+    vi.mocked(appendFileSync).mockClear();
+    reportPromotion(verify(), { GITHUB_OUTPUT: 'out' });
+
+    expect(written('out').split('\n')).toEqual([
+      `source_sha=${sourceSha}`,
+      'reuse_validation=true',
+      '',
+    ]);
+  });
+
+  it('renders the evidence, and any soft finding, into the summary', () => {
+    vi.mocked(appendFileSync).mockClear();
+    reportPromotion(
+      verify({
+        workflowShaByRef: { [runHeadSha]: 'wf1', [currentSha]: 'wf2' },
+      }),
+      { GITHUB_STEP_SUMMARY: 'summary' },
+    );
+
+    const rendered = written('summary');
+    expect(rendered).toContain('### Nightly promotion');
+    expect(rendered).toContain(sourceSha);
+    expect(rendered).toContain('/actions/runs/42');
+    expect(rendered).toContain(':warning: ');
+  });
+
+  it('writes nothing outside a workflow run', () => {
+    vi.mocked(appendFileSync).mockClear();
+    reportPromotion(verify(), {});
+    expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
   });
 });
