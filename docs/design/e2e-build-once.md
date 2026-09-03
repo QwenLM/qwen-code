@@ -21,14 +21,19 @@ run, so this repeats many times a day.
 - A `build` job on `ubuntu-latest` installs (with `QWEN_SKIP_PREPARE=1`),
   builds, bundles, and packs the outputs with
   `.github/scripts/e2e-build-pack.sh`: the bundle (`dist/`), every workspace
-  `dist/` under `packages/` and `integrations/` (node_modules pruned), and an
-  `e2e-build.sha` stamp of the commit. The archive is one gzip tarball
-  uploaded as the `e2e-build` artifact with one day of retention.
+  `dist/` under the roots that root `package.json`'s `workspaces` declares
+  (node_modules pruned, a matched `dist/` not descended again), and an
+  `e2e-build.sha` stamp of the commit. The script fails closed — with an
+  `::error::` line — when the bundle is missing or when the scan finds no
+  workspace `dist/` at all, the same under-pack contract as release.yml's
+  Pack Build Outputs. The archive is one gzip tarball uploaded as the
+  `e2e-build` artifact with one day of retention.
 - Every leg gains `needs: [build]`, keeps its own `npm ci` (node_modules,
   native modules, and the `generate` step that `prepare` still runs), and
   replaces its build and bundle steps with a download plus
-  `.github/scripts/e2e-build-unpack.sh`, which refuses an archive stamped with
-  a different commit and checks that `dist/cli.js` arrived.
+  `.github/scripts/e2e-build-unpack.sh`, which refuses — before extracting
+  anything — an archive stamped with a different commit or one that holds no
+  `dist/cli.js`, and checks after extraction that the bundle is in place.
 - The docker sandbox image is unchanged: it builds inside Docker from the
   checkout under the per-host locks, so it is not part of the archive.
 - The build job carries the same fork gate as the legs, so a skipped build

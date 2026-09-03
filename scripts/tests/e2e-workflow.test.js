@@ -271,6 +271,13 @@ describe('e2e workflow', () => {
         (step) => step.name === 'Pack build outputs',
       );
       expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
+      // The same "the install must not build" premise as on the legs: without
+      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // build steps below then do it a second time on the critical path.
+      const install = build.steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
       const upload = build.steps.find(
         (step) => step.name === 'Upload build artifact',
       );
