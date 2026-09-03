@@ -20,6 +20,7 @@ import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
+import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
@@ -3300,6 +3301,9 @@ ${boardState}
     // retry), interleaved successful reads between failures, and the same
     // error returning on every call. No argument-based repetition signal
     // ever accumulates, so only the repeated error payload is evidence.
+    // The guard counts model ROUNDS: runtimes feed every result of a batch
+    // through one recordToolErrorBatch call, so sibling calls of one
+    // parallel batch collapse into a single piece of evidence.
     // Mirrored from loopDetectionService.ts.
     const REPEATED_TOOL_ERROR_THRESHOLD = 3;
 
@@ -3323,27 +3327,18 @@ ${boardState}
       },
     ];
 
-    it('halts when the same error keeps returning across distinct calls with interleaved successes', () => {
+    it('halts when the same error keeps returning across rounds with interleaved successes', () => {
       const gitError =
         'fatal: not a git repository (or any of the parent directories): .git';
       let fired = false;
       for (let i = 0; i < 10 && !fired; i++) {
-        // A successful read between failing calls must not mask the streak
-        // (interleaved reads are what let the reported loops slip past the
-        // stagnation detectors).
-        expect(
-          service.recordToolResult(
-            { name: 'read_file', args: { file_path: `f${i}.ts` } },
-            successResult(`content ${i}`, `ok-${i}`),
-          ),
-        ).toBe(false);
-        fired = service.recordToolResult(
-          {
-            name: 'run_shell_command',
-            args: { command: `git remote -v attempt-${i}` },
-          },
-          errorResult(gitError, `err-${i}`),
-        );
+        // One batch per round: a successful read between failing calls must
+        // not mask the streak (interleaved reads are what let the reported
+        // loops slip past the stagnation detectors).
+        fired = service.recordToolErrorBatch([
+          ...successResult(`content ${i}`, `ok-${i}`),
+          ...errorResult(gitError, `err-${i}`),
+        ]);
         if (i < REPEATED_TOOL_ERROR_THRESHOLD - 1) {
           expect(fired).toBe(false);
         }
@@ -3352,21 +3347,56 @@ ${boardState}
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
-    it('fires from recordToolResultByCallId for calls this service never streamed', () => {
+    it('counts sibling calls of one parallel batch as ONE round, not as retries', () => {
+      // A single assistant turn emitting N parallel calls that all hit the
+      // same fixed error (permission deny, user cancel, shared timeout)
+      // must not trip the guard: the model emitted all of them from one
+      // state and has not seen any of the errors yet.
+      const denied = 'Tool "run_shell_command" is denied.';
+      expect(
+        service.recordToolErrorBatch([
+          ...errorResult(denied, 'sib-1'),
+          ...errorResult(denied, 'sib-2'),
+          ...errorResult(denied, 'sib-3'),
+          ...errorResult(denied, 'sib-4'),
+        ]),
+      ).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+      // The same error returning on the NEXT rounds is the repeat.
+      expect(service.recordToolErrorBatch(errorResult(denied, 'round-2'))).toBe(
+        false,
+      );
+      expect(service.recordToolErrorBatch(errorResult(denied, 'round-3'))).toBe(
+        true,
+      );
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('still fires for unknown-callId errors fed through the round batch', () => {
       // client.ts records every functionResponse by callId, including calls
-      // the service never paired at request time.
+      // the service never paired at request time; those skip the
+      // request-dependent guards but their errors still reach the
+      // error-repetition guard through recordToolErrorBatch.
       const permDenied = 'bash: /usr/bin/foo: Permission denied';
-      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+      for (let i = 1; i < REPEATED_TOOL_ERROR_THRESHOLD; i++) {
         expect(
           service.recordToolResultByCallId(
             `unknown-${i}`,
             errorResult(permDenied, `unknown-${i}`),
           ),
         ).toBe(false);
+        expect(
+          service.recordToolErrorBatch(errorResult(permDenied, `unknown-${i}`)),
+        ).toBe(false);
       }
       expect(
         service.recordToolResultByCallId(
           `unknown-${REPEATED_TOOL_ERROR_THRESHOLD}`,
+          errorResult(permDenied, `unknown-${REPEATED_TOOL_ERROR_THRESHOLD}`),
+        ),
+      ).toBe(false);
+      expect(
+        service.recordToolErrorBatch(
           errorResult(permDenied, `unknown-${REPEATED_TOOL_ERROR_THRESHOLD}`),
         ),
       ).toBe(true);
@@ -3376,44 +3406,22 @@ ${boardState}
     it('does not halt below the threshold and restarts the streak on a different error', () => {
       const errA = 'fatal: not a git repository';
       const errB = 'npm ERR! code E404';
-      const call = (command: string) => ({
-        name: 'run_shell_command',
-        args: { command },
-      });
-      expect(service.recordToolResult(call('a1'), errorResult(errA))).toBe(
-        false,
-      );
-      expect(service.recordToolResult(call('a2'), errorResult(errA))).toBe(
-        false,
-      );
+      expect(service.recordToolErrorBatch(errorResult(errA))).toBe(false);
+      expect(service.recordToolErrorBatch(errorResult(errA))).toBe(false);
       // A different error signature restarts the streak...
-      expect(service.recordToolResult(call('b1'), errorResult(errB))).toBe(
-        false,
-      );
-      expect(service.recordToolResult(call('a3'), errorResult(errA))).toBe(
-        false,
-      );
-      expect(service.recordToolResult(call('a4'), errorResult(errA))).toBe(
-        false,
-      );
+      expect(service.recordToolErrorBatch(errorResult(errB))).toBe(false);
+      expect(service.recordToolErrorBatch(errorResult(errA))).toBe(false);
+      expect(service.recordToolErrorBatch(errorResult(errA))).toBe(false);
       expect(service.getLastLoopType()).toBeNull();
     });
 
     it('clears the error streak on reset()', () => {
       const err = 'fatal: not a git repository';
-      const call = (command: string) => ({
-        name: 'run_shell_command',
-        args: { command },
-      });
-      service.recordToolResult(call('a1'), errorResult(err));
-      service.recordToolResult(call('a2'), errorResult(err));
+      service.recordToolErrorBatch(errorResult(err));
+      service.recordToolErrorBatch(errorResult(err));
       service.reset('fresh-prompt');
-      expect(service.recordToolResult(call('a3'), errorResult(err))).toBe(
-        false,
-      );
-      expect(service.recordToolResult(call('a4'), errorResult(err))).toBe(
-        false,
-      );
+      expect(service.recordToolErrorBatch(errorResult(err))).toBe(false);
+      expect(service.recordToolErrorBatch(errorResult(err))).toBe(false);
       expect(service.getLastLoopType()).toBeNull();
     });
 
@@ -3421,14 +3429,84 @@ ${boardState}
       service.disableForSession();
       const err = 'fatal: not a git repository';
       for (let i = 0; i <= REPEATED_TOOL_ERROR_THRESHOLD; i++) {
+        expect(service.recordToolErrorBatch(errorResult(err))).toBe(false);
+      }
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('fires on repeated shell exit failures despite per-call volatile lines', () => {
+      // run_shell_command embeds the command, the directory, and a fresh
+      // process-group id in every failure block (shell.ts); the guard must
+      // key on the stable failure core, not the volatile lines — issue
+      // #10887 surfaced on repeated git exit-128 failures with varied
+      // arguments.
+      const shellBlock = (attempt: number) =>
+        [
+          `Command: git remote show origin attempt-${attempt}`,
+          `Directory: /work/dir-${attempt}`,
+          'Output: fatal: unable to access',
+          'Error: (none)',
+          'Exit Code: 128',
+          'Signal: (none)',
+          `Process Group PGID: ${10000 + attempt}`,
+        ].join('\n');
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
         expect(
-          service.recordToolResult(
-            { name: 'run_shell_command', args: { command: `c${i}` } },
-            errorResult(err),
+          service.recordToolErrorBatch(
+            errorResult(shellBlock(i), `shell-${i}`),
           ),
         ).toBe(false);
       }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(
+            shellBlock(REPEATED_TOOL_ERROR_THRESHOLD),
+            `shell-${REPEATED_TOOL_ERROR_THRESHOLD}`,
+          ),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('ignores synthetic session-recovery and cancellation payloads', () => {
+      // Session recovery feeds one byte-identical orphan-repair result per
+      // dangling call through client.ts on --resume; three or more dangling
+      // calls must not halt the resumed turn before any model round. User
+      // cancellations are the user's action, not tool failures.
+      const orphanBatch: Part[] = [
+        ...errorResult(ORPHAN_TOOL_USE_REPAIR_REASON, 'orphan-1'),
+        ...errorResult(ORPHAN_TOOL_USE_REPAIR_REASON, 'orphan-2'),
+        ...errorResult(ORPHAN_TOOL_USE_REPAIR_REASON, 'orphan-3'),
+      ];
+      for (let round = 0; round <= REPEATED_TOOL_ERROR_THRESHOLD; round++) {
+        expect(service.recordToolErrorBatch(orphanBatch)).toBe(false);
+      }
+      const cancelled =
+        '[Operation Cancelled] Reason: Tool call cancelled by user.';
+      for (let round = 0; round <= REPEATED_TOOL_ERROR_THRESHOLD; round++) {
+        expect(
+          service.recordToolErrorBatch([
+            ...errorResult(cancelled, 'cancelled-1'),
+            ...errorResult(cancelled, 'cancelled-2'),
+            ...errorResult(cancelled, 'cancelled-3'),
+          ]),
+        ).toBe(false);
+      }
       expect(service.getLastLoopType()).toBeNull();
+      // A real error riding alongside synthetic payloads still accumulates.
+      const real = 'fatal: not a git repository';
+      let fired = false;
+      for (
+        let round = 0;
+        round < REPEATED_TOOL_ERROR_THRESHOLD && !fired;
+        round++
+      ) {
+        fired = service.recordToolErrorBatch([
+          ...errorResult(ORPHAN_TOOL_USE_REPAIR_REASON, `orphan-r${round}`),
+          ...errorResult(real, `real-${round}`),
+        ]);
+      }
+      expect(fired).toBe(true);
     });
   });
 });

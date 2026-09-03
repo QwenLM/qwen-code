@@ -19,6 +19,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
@@ -39,20 +40,27 @@ export { getToolCallRepeatKey };
 // so the client breaks the loop before the server rejects the whole
 // conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
-// Consecutive tool results carrying the same error signature tolerated
-// before the always-on error-repetition guard halts the turn (issue
-// #10887). Dead-end sessions kept re-running failing operations with varied
-// arguments — every (tool, args) pair unique, so no argument-based
-// repetition signal ever accumulated — while the same error kept returning
-// (e.g. exit 128 / permission denied on every call). The streak is keyed by
-// a fingerprint of the error payload and counts across arbitrary calls:
+// Consecutive rounds carrying the same error signature tolerated before the
+// always-on error-repetition guard halts the turn (issue #10887). Dead-end
+// sessions kept re-running failing operations with varied arguments — every
+// (tool, args) pair unique, so no argument-based repetition signal ever
+// accumulated — while the same error kept returning (e.g. exit 128 /
+// permission denied on every call). The streak is keyed by a fingerprint of
+// the error payload and counts model ROUNDS, not individual calls: sibling
+// calls of one parallel batch collapse into a single piece of evidence (a
+// denied batch is one event the model has not yet seen, not N retries),
 // successful results in between neither advance nor reset it (interleaved
 // reads are exactly what let the reported loops slip past the stagnation
 // detectors), and a different error signature restarts it. Deliberately low:
-// a byte-identical error repeating across calls is never a productive
+// a byte-identical error repeating across rounds is never a productive
 // signal — a corrected approach that still fails identically is exactly the
 // dead end to surface to the user instead of burning tokens on.
 const REPEATED_TOOL_ERROR_THRESHOLD = 3;
+
+// Producer prefix of user-cancellation error payloads
+// (coreToolScheduler.ts createCancelledResponse / the scheduler's
+// auxiliary-cancel path): `[Operation Cancelled] Reason: <reason>`.
+const CANCELLED_TOOL_ERROR_PREFIX = '[Operation Cancelled] Reason:';
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 // Cap for the debug-log excerpt of a fired chanting region (~one period,
@@ -392,10 +400,11 @@ export class LoopDetectionService {
   >();
 
   // Consecutive identical tool-error signatures (issue #10887): fingerprint
-  // of the most recent error payload and how many consecutive error results
-  // carried it. Successful results neither advance nor reset the streak (an
-  // interleaved read must not mask a dead end); a different error signature
-  // restarts it at one.
+  // of the most recent error payload and how many consecutive rounds carried
+  // it. A round advances the streak at most once per distinct signature
+  // (sibling calls of one parallel batch collapse); successful results
+  // neither advance nor reset the streak (an interleaved read must not mask
+  // a dead end); a different error signature restarts it at one.
   private toolErrorStreakSignature: string | null = null;
   private toolErrorStreakCount = 0;
 
@@ -452,6 +461,10 @@ export class LoopDetectionService {
    * and before the model is re-prompted with the result. Runtime paths that
    * only hold the response (no name/args) can use recordToolResultByCallId.
    *
+   * The tool-agnostic error-repetition guard (issue #10887) is NOT fed
+   * here: it counts model rounds, so runtimes record it once per executed
+   * batch through recordToolErrorBatch.
+   *
    * Returns true when the recorded result itself trips a detector (the
    * result-aware global-duplicate count); callers must then halt the turn
    * the same way they do for an event-detected loop.
@@ -462,12 +475,6 @@ export class LoopDetectionService {
   ): boolean {
     if (this.loopDetected) return true;
     if (this.disabledForSession) return false;
-    // Repeated tool-error detection (issue #10887): applies to every tool,
-    // ahead of the stateful-read carve-out — the dead-end signal is the
-    // repeated error payload, not which call produced it.
-    if (this.checkRepeatedToolError(responseParts)) {
-      return true;
-    }
     if (!this.isStatefulReadTool(toolCall.name)) return false;
 
     const resultText = LoopDetectionService.extractResultText(responseParts);
@@ -551,25 +558,42 @@ export class LoopDetectionService {
    * Variant of recordToolResult for runtimes that only have the response:
    * the request is resolved through the callId pairing populated on
    * ToolCallRequest events. Unknown callIds (e.g. client-initiated calls
-   * that never streamed through this service) skip the request-dependent
-   * guards but still feed the error-repetition guard, which works from the
-   * result alone (issue #10887).
+   * that never streamed through this service) are ignored here — the
+   * request-dependent guards need name/args — but they still feed the
+   * error-repetition guard, which works from the result alone, through the
+   * round-level recordToolErrorBatch call on the same parts (issue #10887).
    */
   recordToolResultByCallId(
     callId: string,
     responseParts: readonly Part[],
   ): boolean {
     const request = this.requestByCallId.get(callId);
-    if (!request) {
-      if (this.loopDetected) return true;
-      if (this.disabledForSession) return false;
-      return this.checkRepeatedToolError(responseParts);
-    }
+    if (!request) return false;
     this.requestByCallId.delete(callId);
     return this.recordToolResult(
       { name: request.name, args: request.args },
       responseParts,
     );
+  }
+
+  /**
+   * Records one batch (one assistant round) of tool results for the
+   * error-repetition guard (issue #10887). Runtimes feed EVERY executed
+   * result of the round in a single call — client.ts once per ToolResult
+   * message, the agent runtime once per executed batch — so sibling calls
+   * of one parallel batch count as ONE round of evidence, not as
+   * sequential retries: a single denied/cancelled/timed-out batch must not
+   * trip the guard before the model has seen any of the errors. Call once
+   * per round, after the per-result recording (recordToolResult /
+   * recordToolResultByCallId).
+   *
+   * @returns true when the streak trips the threshold (loopDetected is
+   * set); callers halt the turn exactly as for an event-detected loop.
+   */
+  recordToolErrorBatch(responseParts: readonly Part[]): boolean {
+    if (this.loopDetected) return true;
+    if (this.disabledForSession) return false;
+    return this.checkRepeatedToolError(responseParts);
   }
 
   private isStatefulReadTool(toolName: string): boolean {
@@ -602,67 +626,116 @@ export class LoopDetectionService {
   }
 
   /**
-   * Extracts the error payload of a failed tool result, or null when the
-   * parts carry none. Failed calls surface their failure as a
-   * `functionResponse.response.error` string across every runtime (scheduler
-   * error responses, cancellations, timeouts). Oversized error messages
-   * arrive as persistence stubs whose envelope embeds a per-call unique
-   * path, so each value is reduced to its stable payload first
-   * (stripPersistenceEnvelope) — identical underlying errors fingerprint
-   * identically no matter where they were persisted.
+   * Synthetic payloads that must not feed the error-repetition guard: they
+   * are not real tool failures. Session recovery builds one byte-identical
+   * orphan-repair result per dangling call after a crash — three or more of
+   * them would otherwise trip the threshold on the resumed turn before any
+   * model round — and a cancellation records the user's action, not a
+   * failure the model can correct.
    */
-  private static extractToolErrorText(
+  private static isSyntheticToolError(error: string): boolean {
+    return (
+      error === ORPHAN_TOOL_USE_REPAIR_REASON ||
+      error.startsWith(CANCELLED_TOOL_ERROR_PREFIX)
+    );
+  }
+
+  /**
+   * run_shell_command exit failures embed per-call volatile lines — the
+   * command itself (a dead-end loop varies it by definition) and the
+   * spawned process-group id (fresh on every spawn) — so hashing them would
+   * fingerprint every retry of the same failure uniquely and the streak
+   * would never accumulate; issue #10887 surfaced on exactly this shape
+   * (repeated git exit-128 failures with varied arguments). Reduce
+   * shell-shaped blocks to their stable failure core (Output/Error/Exit
+   * Code/Signal); other text passes through unchanged.
+   */
+  private static stripShellBlockVolatiles(text: string): string {
+    if (!text.includes('Process Group PGID:')) return text;
+    return text
+      .split('\n')
+      .filter((line) => !/^(Command|Directory|Process Group PGID): /.test(line))
+      .join('\n');
+  }
+
+  /**
+   * Extracts the per-result error payloads of failed tool results (empty
+   * when the parts carry none). Failed calls surface their failure as a
+   * `functionResponse.response.error` string across every runtime
+   * (scheduler error responses, timeouts). Synthetic non-failure payloads
+   * (orphan repairs, user cancellations) are skipped; oversized errors
+   * arrive as persistence envelopes whose per-call unique paths are reduced
+   * to a stable payload first (stripPersistenceEnvelope); shell failure
+   * blocks drop their per-call volatile lines — identical underlying errors
+   * fingerprint identically no matter how they were produced (issue
+   * #10887).
+   */
+  private static extractToolErrorTexts(
     responseParts: readonly Part[],
-  ): string | null {
+  ): string[] {
     const errors: string[] = [];
     for (const part of responseParts) {
       const response = part.functionResponse?.response;
       if (!response) continue;
       const error = response['error'];
-      if (typeof error === 'string' && error.trim().length > 0) {
-        errors.push(stripPersistenceEnvelope(error));
-      }
+      if (typeof error !== 'string' || error.trim().length === 0) continue;
+      if (LoopDetectionService.isSyntheticToolError(error)) continue;
+      errors.push(
+        LoopDetectionService.stripShellBlockVolatiles(
+          stripPersistenceEnvelope(error),
+        ),
+      );
     }
-    return errors.length > 0 ? errors.join('\n') : null;
+    return errors;
   }
 
   /**
    * Repeated tool-error detection (issue #10887): halts the turn when the
-   * same error signature returns on REPEATED_TOOL_ERROR_THRESHOLD consecutive
-   * error results. Result-aware and tool-agnostic: dead-end loops vary their
-   * (tool, args) on every retry, so argument-based repetition never
-   * accumulates — the repeated error payload is the evidence. Always-on like
-   * the consecutive-identical-call guard (a byte-identical error repeating
-   * across calls is never productive, and the gated heuristics ship disabled
-   * by default in the CLI).
+   * same error signature returns on REPEATED_TOOL_ERROR_THRESHOLD
+   * consecutive rounds. Result-aware and tool-agnostic: dead-end loops vary
+   * their (tool, args) on every retry, so argument-based repetition never
+   * accumulates — the repeated error payload is the evidence. Always-on
+   * like the consecutive-identical-call guard (a byte-identical error
+   * repeating across rounds is never productive, and the gated heuristics
+   * ship disabled by default in the CLI).
+   *
+   * Batch counting: responseParts carries every result of ONE round.
+   * Sibling calls collapse — the streak advances at most once per distinct
+   * signature per round, in first-occurrence order — because N
+   * simultaneous calls are emitted from one model state and are not N
+   * retries; the repeat is the same signature returning on the NEXT round.
+   * Successful results are neither evidence of the dead end nor a reset:
+   * interleaved reads between failing calls must not mask the streak.
    *
    * @returns true when the streak trips the threshold (loopDetected is set);
    * callers halt the turn exactly as for an event-detected loop.
    */
   private checkRepeatedToolError(responseParts: readonly Part[]): boolean {
-    const errorText = LoopDetectionService.extractToolErrorText(responseParts);
-    if (errorText === null) {
-      // A successful result is neither evidence of the dead end nor a reset:
-      // interleaved reads between failing calls must not mask the streak.
-      return false;
+    const errorTexts =
+      LoopDetectionService.extractToolErrorTexts(responseParts);
+    const seen = new Set<string>();
+    for (const errorText of errorTexts) {
+      const signature = createHash('sha256').update(errorText).digest('hex');
+      // Collapse sibling calls of this round into one piece of evidence.
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      if (this.toolErrorStreakSignature === signature) {
+        this.toolErrorStreakCount++;
+      } else {
+        this.toolErrorStreakSignature = signature;
+        this.toolErrorStreakCount = 1;
+      }
+      if (this.toolErrorStreakCount >= REPEATED_TOOL_ERROR_THRESHOLD) {
+        this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
+        logLoopDetected(
+          this.config,
+          new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId),
+        );
+        this.loopDetected = true;
+        return true;
+      }
     }
-    const signature = createHash('sha256').update(errorText).digest('hex');
-    if (this.toolErrorStreakSignature === signature) {
-      this.toolErrorStreakCount++;
-    } else {
-      this.toolErrorStreakSignature = signature;
-      this.toolErrorStreakCount = 1;
-    }
-    if (this.toolErrorStreakCount < REPEATED_TOOL_ERROR_THRESHOLD) {
-      return false;
-    }
-    this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
-    logLoopDetected(
-      this.config,
-      new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId),
-    );
-    this.loopDetected = true;
-    return true;
+    return false;
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -858,8 +931,12 @@ export class LoopDetectionService {
     const stateful = this.isStatefulReadTool(event.value.name);
 
     // Pair requests with their later results (recordToolResultByCallId).
-    // Only stateful read tools participate: recordToolResult rejects every
-    // other tool, so tracking them would just accumulate full args objects
+    // Only stateful read tools participate: they are the only requests
+    // whose results feed a request-dependent guard (recordToolResult's
+    // result-aware counting needs name/args). The tool-agnostic
+    // error-repetition guard works from the result alone and is fed at
+    // round level through recordToolErrorBatch — unknown callIds included —
+    // so pairing any other tool would just accumulate full args objects
     // (write_file args can carry whole file contents) until eviction.
     if (event.value.callId && stateful) {
       this.requestByCallId.set(event.value.callId, {

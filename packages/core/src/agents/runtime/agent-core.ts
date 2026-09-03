@@ -1241,6 +1241,19 @@ export class AgentCore {
               break;
             }
           }
+          if (terminateMode !== AgentTerminateMode.LOOP_DETECTED) {
+            // Error-repetition guard (issue #10887): one batch-level
+            // recording per round — the sibling calls of this round are ONE
+            // round of evidence, not sequential retries, so a single
+            // denied/cancelled batch cannot trip the guard before the model
+            // has seen any of the errors.
+            const roundResultParts = toolCallResult.results.flatMap(
+              (toolResult) => toolResult.responseParts,
+            );
+            if (loopDetector.recordToolErrorBatch(roundResultParts)) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            }
+          }
           if (terminateMode === AgentTerminateMode.LOOP_DETECTED) {
             break;
           }

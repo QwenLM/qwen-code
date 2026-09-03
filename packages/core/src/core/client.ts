@@ -3863,6 +3863,8 @@ export class LlmClient {
         // loop (issue #9450). A detection here (the result-aware global
         // duplicate count) halts the turn exactly like the event-loop
         // guards below.
+        let loopHalt = false;
+        const toolResultParts: Part[] = [];
         for (const part of requestToSend) {
           if (
             typeof part !== 'object' ||
@@ -3873,26 +3875,39 @@ export class LlmClient {
           }
           const functionResponseId = (part as Part).functionResponse?.id;
           if (!functionResponseId) continue;
+          toolResultParts.push(part as Part);
           if (
             this.loopDetector.recordToolResultByCallId(functionResponseId, [
               part as Part,
             ])
           ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
-              yield goalEvent;
-            }
-            const loopType = this.loopDetector.getLastLoopType();
-            yield {
-              type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
-            };
-            await arenaAgentClient?.reportError('Loop detected');
-            this.lastApiCompletionTimestamp = Date.now();
-            endCurrentInteraction('error', 'loop detected', 'loop_detected');
-            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-            this.fireLoopDetectedStopFailure(loopType);
-            return turn;
+            loopHalt = true;
+            break;
           }
+        }
+        // Error-repetition guard (issue #10887): one batch-level recording
+        // per ToolResult message, so the sibling calls of this round count
+        // as ONE round of evidence, not as sequential retries — a single
+        // denied/cancelled batch must not trip the guard before the model
+        // has seen any of the errors.
+        if (!loopHalt) {
+          loopHalt = this.loopDetector.recordToolErrorBatch(toolResultParts);
+        }
+        if (loopHalt) {
+          for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            yield goalEvent;
+          }
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: LlmEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
+          await arenaAgentClient?.reportError('Loop detected');
+          this.lastApiCompletionTimestamp = Date.now();
+          endCurrentInteraction('error', 'loop detected', 'loop_detected');
+          this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+          this.fireLoopDetectedStopFailure(loopType);
+          return turn;
         }
         const toolResultMemory =
           await this.consumeManagedAutoMemoryRecall('tool_result');
