@@ -608,7 +608,8 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
           sample_disk() {
-            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true)
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
             echo "$sample"
             echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
           }
@@ -735,7 +736,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
           SAMPLER_PID=$!
           retry_arg=()
           if [ -n "${VITEST_RETRY:-}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
@@ -1067,7 +1068,8 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
           sample_disk() {
-            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
+            hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true)
+            sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${RUNNER_TEMP:-/tmp}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] inodes[$(df -i "${RUNNER_TEMP:-/tmp}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" || true
             echo "$sample"
             echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
           }
@@ -1527,7 +1529,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -1699,7 +1701,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[$(pgrep -fc '[v]itest' 2>/dev/null || echo 0)] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci

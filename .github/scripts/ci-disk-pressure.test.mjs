@@ -71,7 +71,18 @@ describe('ci.yml disk-pressure evidence', () => {
     // the count on every runner.
     assert.match(tests, /echo "DISKCONTEXT [^"]*cpus\[\$\(nproc /);
     assert.match(tests, /load\[\$\(cut -d' ' -f1-3 \/proc\/loadavg /);
-    assert.match(tests, /hosttests\[\$\(pgrep -fc '\[v\]itest' /);
+    // Capture-then-default, not `$(pgrep ... || echo 0)`: procps pgrep
+    // prints 0 AND exits 1 on zero matches, so the double fallback
+    // captures "0\n0" and splits the record after `hosttests[0`,
+    // orphaning the disk fields on a continuation line. The `:-unknown`
+    // default labels lanes without pgrep (Windows Git-Bash) instead of
+    // fabricating a measured zero — the honest sentinel `cpus[...]`
+    // uses one field over.
+    assert.match(
+      tests,
+      /hosttests=\$\(pgrep -fc '\[v\]itest' 2>\/dev\/null \|\| true\)/,
+    );
+    assert.match(tests, /hosttests\[\$\{hosttests:-unknown\}\]/);
 
     const sampleFormat = (script) => {
       const match = script.match(
@@ -160,6 +171,22 @@ describe('ci.yml disk-pressure evidence', () => {
       );
       assert.match(samples, /^DISKCONTEXT /m);
       assert.match(samples, /^DFSAMPLE /m);
+      // Every record must fit exactly one physical line: with zero vitest
+      // matches pgrep prints 0 AND exits 1, so a `|| echo 0` fallback
+      // would capture "0\n0" and split the record after hosttests[0] —
+      // space/inodes/memavail would land on an orphan continuation line
+      // that line-oriented (^DFSAMPLE) triage of the artifact loses, for
+      // exactly the install window this sampler exists to cover.
+      const lines = samples.split('\n').filter((line) => line !== '');
+      for (const line of lines) {
+        assert.match(line, /^(DISKCONTEXT|DFSAMPLE) /);
+      }
+      for (const line of lines.filter((l) => l.startsWith('DFSAMPLE '))) {
+        assert.match(
+          line,
+          /^DFSAMPLE \S+ tmpdir\[[^\]]*\] load\[[^\]]*\] hosttests\[[^\]]+\] space\[/,
+        );
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
