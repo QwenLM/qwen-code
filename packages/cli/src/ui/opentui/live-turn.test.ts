@@ -7,8 +7,9 @@
 /**
  * Pure-logic coverage for the live-turn driver: composer attachment folding
  * (unsupported/unreadable images must surface as notices, never vanish), the
- * replay-batch fold (the transcript reset path for session switches), and the
- * mid-turn queue hand-off to the next turn.
+ * replay-batch fold (the transcript reset path for session switches), the
+ * mid-turn queue hand-off to the next turn, and the queue taking back a
+ * steering batch the stream layer could not resolve.
  */
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -193,5 +194,39 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[1]?.prompt).toBe('look @notes.md');
     expect(live.turns[2]?.prompt).toBe('then do the other thing');
     expect(result.current.queueLength).toBe(0);
+  });
+
+  it('restores a dropped steering batch at the front of the queue', () => {
+    // The stream layer owns `@path` expansion and can hand a drained batch
+    // back when the turn dies resolving it. Front-prepend (ink's
+    // restoreMessages) keeps the steering order: restored first, then whatever
+    // the composer queued since.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    act(() => {
+      result.current.submit('queued after');
+    });
+    expect(result.current.queueLength).toBe(1);
+
+    const { restoreSteering } = live.turns[0]?.options as unknown as {
+      restoreSteering: (texts: readonly string[]) => void;
+    };
+    act(() => {
+      restoreSteering(['  steer me  ', '', 'then @b.ts']);
+    });
+    expect(result.current.queueLength).toBe(3);
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popQueue();
+    });
+
+    expect(result.current.queueLength).toBe(0);
+    expect(popped).toBe('steer me\nthen @b.ts\nqueued after');
   });
 });

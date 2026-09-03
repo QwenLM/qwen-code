@@ -52,6 +52,19 @@ The signal means "this process is going down", which is true of all three exits,
 gating it to one handler would reproduce the shape of the bug. Recorded here so the
 difference is not read as an accident.
 
+### Folded in from #10831 review (R4-1) — pinning the in-loop exit latch
+
+The deferred-command drain in `opentui-app-shell.tsx` checks `isExitInProgress()` twice:
+once at the effect edge, and once per iteration before each `gateway.dispatch`, because
+the exit can start while an earlier command is still awaiting its outcome. #10831's
+round-4 review noted that only the edge check was pinned — deleting the in-loop check
+left the suite green.
+
+New shell test: two commands are queued mid-turn, the fake dispatcher flips the exit latch
+_inside_ the first command's handler, and the assertion is that the second never runs. The
+drain is already past its edge check when the latch flips, so the in-loop check is the only
+thing that can keep the second command back.
+
 ### U-21 — steering text rides raw
 
 Text drained at the sampling boundary is pushed as `{ text }` with no `@path`
@@ -66,10 +79,13 @@ a 10 s timeout; on timeout or abort, that message and the ones behind it go back
 a new `restoreSteering` seam (ink's `midTurnRestoreRef`) so nothing is lost; segments are
 joined with a blank-line separator as ink does.
 
-Not ported, on purpose: ink's `GOAL_COMMAND_RE` slash interception and its two-phase
-`accept()` recording. OpenTUI has no goal-permit seam at that boundary, and its fresh hop
+Not ported, on purpose: ink's `GOAL_COMMAND_RE` slash interception, its two-phase
+`accept()` recording, and the `checkImageFormatsSupport` warning the steered hop adds
+after the bridge. OpenTUI has no goal-permit seam at that boundary, and its fresh hop
 already records through `handleAtCommand`; cloning the transaction would import a
-mechanism the renderer does not have.
+mechanism the renderer does not have. The format warning is a different case: OpenTUI's
+fresh hop never had it either, so adding it to the steering hop alone would make the two
+hops disagree about the same parts. It stays a renderer-wide gap, recorded below.
 
 ### U-25 — no prompt-side vision bridge
 
@@ -92,6 +108,13 @@ turn and the mapper's model name follows. Gates map one-to-one: a `submit_prompt
 override is ink's _inline_ override (the outcome is produced by the same code path that
 sets `isInline: true`), so an active override skips the bridge, and the bridge's own pick
 skips re-bridging at later boundaries.
+
+That "for the rest of the turn" is a per-boundary read, and a pick made at the steering
+boundary is the only case that can tell: a test where the image arrives on the composer
+already has the selector on both sends. So the pin routes an image in through a steered
+`@` mention and checks the first send carries no override while the continuation carries
+the selector — and names the vision model in its own notice, which the event mapper can
+only do by reading the override again.
 
 ### U-24 — the leg cannot prove any of it
 
@@ -138,12 +161,19 @@ scenario exists to measure; and the `self-test` override path runs identical emi
 argvs on both sides and asserts `both-pass` on purpose. A global tightening would have
 broken the instrument in order to fix one fixture.
 
-## Known adjacent gap, not fixed here
+## Known adjacent gaps, not fixed here
 
 Mid-turn steering text has no transcript echo. ink's `accept()` adds a `USER` item with
 `sentToModel: false` when the steered message lands; OpenTUI's queue shows a count and
 the drained text disappears. Registered as a new U-xx when this batch lands rather than
 silently widening the diff.
+
+No unsupported-image-format warning on either hop. ink calls `checkImageFormatsSupport`
+after building the request parts on both the fresh hop and the steering hop, and adds an
+INFO row naming the formats the model cannot read. OpenTUI has no equivalent on either
+hop, so a `@file` that expands to, say, a TIFF reaches the model with no disclosure. Also
+registered as a U-xx — porting it belongs to one change across both hops, not to the
+steering hop only.
 
 ## Verification plan
 
@@ -165,3 +195,9 @@ both legs on its first run proves nothing about the fix it is supposed to guard,
 one is checked red-then-green against the head before its own fix commit. The `@`-steering
 case exercises a read of a small text file; the bridge's conversion half needs a real
 vision-capable provider and is not covered by any E2E here.
+
+One probe survived, and it is worth naming: deleting the drain effect's _pre-loop_ exit-latch
+check leaves the suite green, because the in-loop check refuses every command the edge check
+would have stopped. That redundancy is why the R4-1 test has to flip the latch inside an
+in-flight dispatch rather than before the drain runs, and why the edge check itself stays
+unpinned.
