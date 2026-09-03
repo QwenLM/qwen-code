@@ -48,6 +48,7 @@ const MAX_RETAINED_TRANSCRIPT_ENTRIES = 512;
 export const REMAIN_SILENT_TOOL_NAME = 'remain_silent';
 const REALTIME_BACKEND_TEXT_PREFIX = '[BACKEND] ';
 const REALTIME_SPEAK_TO_USER_PREFIX = '[SPEAK_TO_USER] ';
+const REALTIME_MERGED_SPEECH_PREFIX = '[MERGE_WITH_USER] ';
 
 /**
  * OpenAI-style function tool declaration forwarded to the realtime provider.
@@ -57,6 +58,10 @@ const REALTIME_SPEAK_TO_USER_PREFIX = '[SPEAK_TO_USER] ';
  * the recent voice context into the backend prompt) and marks the response as
  * delegated, which keeps the same user turn out of the direct-answer
  * transcript collection.
+ *
+ * `continuesResponse` marks receipt tools whose result needs another model
+ * response. Asynchronous handoff receipts leave it unset because their later
+ * backend events are the user-visible result.
  */
 export interface RealtimeToolDefinition {
   type: 'function';
@@ -66,6 +71,7 @@ export interface RealtimeToolDefinition {
     parameters: Record<string, unknown>;
   };
   capturesTranscript?: boolean;
+  continuesResponse?: boolean;
 }
 export interface QwenRealtimeConfig {
   endpoint: string;
@@ -116,7 +122,10 @@ export interface RealtimeResponseEvent extends RealtimeEventContext {
   status?: string;
 }
 
-export type RealtimeResponseAuthority = 'direct' | 'backend_speech';
+export type RealtimeResponseAuthority =
+  | 'direct'
+  | 'tool_continuation'
+  | 'backend_speech';
 
 export interface RealtimeResponseCreatedEvent extends RealtimeResponseEvent {
   authority: RealtimeResponseAuthority;
@@ -145,6 +154,8 @@ export interface RealtimeTranscriptEntry {
 }
 
 export interface RealtimeDirectTranscriptEvent extends RealtimeEventContext {
+  responseId?: string;
+  inputItemId?: string;
   entries: readonly RealtimeTranscriptEntry[];
 }
 
@@ -308,14 +319,16 @@ interface PendingFunctionCall {
   dispatched: boolean;
   outputSubmitted: boolean;
   responseCompleted: boolean;
+  speechGeneration: number;
   pendingOutput?: {
     output: string;
   };
 }
 
 interface ResponseCreateRequest {
-  authority: Exclude<RealtimeResponseAuthority, 'direct'>;
+  authority: RealtimeResponseAuthority;
   speechMessage?: string;
+  inputItemId?: string;
   speechGeneration: number;
   cancelled: boolean;
 }
@@ -497,6 +510,8 @@ export function openQwenRealtimeSession(
     let pendingResponseCreate: ResponseCreateRequest | undefined;
     let responseCreateQueue: ResponseCreateRequest[] = [];
     let speechGeneration = 0;
+    let speechGenerationAdvancedForInput = false;
+    let directResponsePending = false;
     let activeResponseAuthority: RealtimeResponseAuthority | undefined;
     const toolsByName = new Map<string, RealtimeToolDefinition>(
       config.tools.map((tool) => [tool.function.name, tool]),
@@ -509,6 +524,8 @@ export function openQwenRealtimeSession(
     const cancelledResponseIds = new Set<string>();
     const recentEventIds = new Set<string>();
     const pendingCalls = new Map<string, PendingFunctionCall>();
+    const toolContinuationGenerations = new Map<string, number>();
+    const pendingSpeechItemIds = new Set<string>();
     const committedInputItemIds = new Set<string>();
     const completedInputTranscripts = new Map<string, string>();
     const responseInputItemIds = new Map<string, string>();
@@ -649,7 +666,10 @@ export function openQwenRealtimeSession(
       }
     };
 
-    const markResponseCancelled = (responseId: string): void => {
+    const markResponseCancelled = (
+      responseId: string,
+      retainActive = false,
+    ): void => {
       if (cancelledResponseIds.has(responseId)) return;
       cancelledResponseIds.add(responseId);
       for (const [callId, call] of pendingCalls) {
@@ -657,7 +677,7 @@ export function openQwenRealtimeSession(
           pendingCalls.delete(callId);
         }
       }
-      if (activeResponseId === responseId) {
+      if (!retainActive && activeResponseId === responseId) {
         activeResponseId = undefined;
         activeResponseAuthority = undefined;
       }
@@ -689,14 +709,12 @@ export function openQwenRealtimeSession(
       call.outputSubmitted = true;
       call.pendingOutput = undefined;
       pendingCalls.delete(call.callId);
+      maybeRequestToolContinuation(call.responseId);
       return true;
     };
 
     const sendResponseCreate = (request: ResponseCreateRequest): boolean => {
-      if (
-        request.authority === 'backend_speech' &&
-        request.speechGeneration !== speechGeneration
-      ) {
+      if (request.speechGeneration !== speechGeneration) {
         return true;
       }
       if (
@@ -712,9 +730,7 @@ export function openQwenRealtimeSession(
       if (
         sendJson({
           type: 'response.create',
-          ...(request.authority === 'backend_speech'
-            ? { response: { modalities: ['text', 'audio'] } }
-            : {}),
+          response: { modalities: ['text', 'audio'] },
         })
       ) {
         return true;
@@ -724,12 +740,45 @@ export function openQwenRealtimeSession(
     };
 
     const requestResponseCreate = (
-      authority: Exclude<RealtimeResponseAuthority, 'direct'>,
+      authority: RealtimeResponseAuthority,
       speechMessage?: string,
+      inputItemId?: string,
     ): boolean => {
+      if (authority !== 'direct' && directResponsePending) {
+        if (
+          speechMessage !== undefined &&
+          !sendBackendConversationItem(
+            speechMessage,
+            REALTIME_MERGED_SPEECH_PREFIX,
+          )
+        ) {
+          return false;
+        }
+        // The direct request has left the socket but has not been accepted by
+        // the provider yet. Cancel and replace it so the merged item, which is
+        // ordered after that first request on the wire, is guaranteed to be in
+        // the response context instead of becoming a second spoken turn.
+        if (
+          pendingResponseCreate?.authority === 'direct' &&
+          !pendingResponseCreate.cancelled
+        ) {
+          const pendingDirect = pendingResponseCreate;
+          pendingDirect.cancelled = true;
+          responseCreateQueue.unshift({
+            authority: 'direct',
+            ...(pendingDirect.inputItemId
+              ? { inputItemId: pendingDirect.inputItemId }
+              : {}),
+            speechGeneration,
+            cancelled: false,
+          });
+        }
+        return true;
+      }
       const request = {
         authority,
         ...(speechMessage !== undefined ? { speechMessage } : {}),
+        ...(inputItemId !== undefined ? { inputItemId } : {}),
         speechGeneration,
         cancelled: false,
       };
@@ -751,6 +800,21 @@ export function openQwenRealtimeSession(
         return;
       }
       sendResponseCreate(next);
+    };
+
+    const maybeRequestToolContinuation = (responseId: string): void => {
+      if (
+        [...pendingCalls.values()].some(
+          (call) => call.responseId === responseId,
+        )
+      ) {
+        return;
+      }
+      const generation = toolContinuationGenerations.get(responseId);
+      if (generation === undefined) return;
+      toolContinuationGenerations.delete(responseId);
+      if (generation !== speechGeneration) return;
+      requestResponseCreate('tool_continuation');
     };
 
     const sendBackendConversationItem = (
@@ -788,6 +852,9 @@ export function openQwenRealtimeSession(
       responseId: string,
       status: string | undefined,
     ): void => {
+      if (status === 'failed' || status === 'cancelled') {
+        toolContinuationGenerations.delete(responseId);
+      }
       for (const [callId, call] of [...pendingCalls]) {
         if (call.responseId !== responseId) continue;
         call.responseCompleted = true;
@@ -800,6 +867,7 @@ export function openQwenRealtimeSession(
         call.pendingOutput = undefined;
         sendFunctionCallOutput(call, pendingOutput.output);
       }
+      maybeRequestToolContinuation(responseId);
     };
 
     const rememberCompletedInputTranscript = (
@@ -888,6 +956,8 @@ export function openQwenRealtimeSession(
 
     const deliverDirectTranscript = (
       entries: readonly RealtimeTranscriptEntry[],
+      responseId?: string,
+      inputItemId?: string,
     ): void => {
       if (entries.length === 0) return;
       const copiedEntries = entries.map((entry) => ({ ...entry }));
@@ -899,6 +969,8 @@ export function openQwenRealtimeSession(
         !callback(() =>
           callbacks.onDirectTranscript?.({
             callEpoch: config.callEpoch,
+            ...(responseId ? { responseId } : {}),
+            ...(inputItemId ? { inputItemId } : {}),
             entries: copiedEntries,
           }),
         )
@@ -931,7 +1003,7 @@ export function openQwenRealtimeSession(
       }
       if (entries.length === 0) return;
       collectedDirectResponseIds.add(responseId);
-      deliverDirectTranscript(entries);
+      deliverDirectTranscript(entries, responseId, inputItemId);
     };
 
     const takeTranscriptTail = (): readonly RealtimeTranscriptEntry[] => {
@@ -1102,6 +1174,61 @@ export function openQwenRealtimeSession(
       return true;
     };
 
+    const commitInputItem = (
+      message: ProviderMessage,
+      type: string,
+      itemId: string,
+    ): void => {
+      if (
+        committedInputItemIds.has(itemId) ||
+        consumedInputItemIds.has(itemId)
+      ) {
+        pendingSpeechItemIds.delete(itemId);
+        ignoreEvent(message, type, 'duplicate_event');
+        return;
+      }
+      if (committedInputItemIds.size >= MAX_TRACKED_INPUT_ITEMS) {
+        protocolError(
+          'Realtime provider created too many pending input items.',
+          'too_many_pending_inputs',
+        );
+        return;
+      }
+      pendingSpeechItemIds.delete(itemId);
+      speechInputInProgress = false;
+      speechCommitPending = false;
+      if (!speechGenerationAdvancedForInput) speechGeneration += 1;
+      speechGenerationAdvancedForInput = false;
+      const activeDirectResponse =
+        activeResponseId !== undefined &&
+        activeResponseAuthority === 'direct' &&
+        !cancelledResponseIds.has(activeResponseId);
+      if (!activeDirectResponse) {
+        directResponsePending = true;
+      }
+      lastCompletedResponseId = undefined;
+      committedInputItemIds.add(itemId);
+      if (
+        activeDirectResponse &&
+        activeResponseId &&
+        !bindResponseInput(activeResponseId)
+      ) {
+        return;
+      }
+      callback(() =>
+        callbacks.onInputCommitted?.({
+          ...eventContext(message),
+          itemId,
+        }),
+      );
+      if (terminal) return;
+      if (activeDirectResponse) {
+        directResponsePending = false;
+      } else if (directResponsePending) {
+        requestResponseCreate('direct', undefined, itemId);
+      }
+    };
+
     /**
      * Best-effort extraction of the user-request text from a tool-call
      * argument payload. Only used to augment the captured transcript for
@@ -1160,6 +1287,7 @@ export function openQwenRealtimeSession(
         // handler will ever complete.
         call.arguments = rawArguments;
         call.dispatched = true;
+        toolContinuationGenerations.set(call.responseId, call.speechGeneration);
         queueFunctionCallOutput(
           call,
           JSON.stringify({
@@ -1171,6 +1299,9 @@ export function openQwenRealtimeSession(
       }
       call.arguments = rawArguments;
       call.dispatched = true;
+      if (tool.continuesResponse) {
+        toolContinuationGenerations.set(call.responseId, call.speechGeneration);
+      }
       let activeTranscript: readonly RealtimeTranscriptEntry[] = [];
       if (tool.capturesTranscript) {
         activeTranscript = takeHandoffTranscript(
@@ -1231,6 +1362,9 @@ export function openQwenRealtimeSession(
         if (sent) {
           speechInputInProgress = false;
           speechCommitPending = false;
+          speechGenerationAdvancedForInput = false;
+          directResponsePending = false;
+          pendingSpeechItemIds.clear();
         }
         return sent;
       },
@@ -1334,7 +1468,7 @@ export function openQwenRealtimeSession(
           instructions: config.instructions,
           turn_detection: {
             type: 'semantic_vad',
-            create_response: true,
+            create_response: false,
             interrupt_response: true,
           },
           // Strip the local-only `capturesTranscript` flag from the wire shape.
@@ -1433,22 +1567,53 @@ export function openQwenRealtimeSession(
         }
         case 'input_audio_buffer.speech_started': {
           const itemId = optionalString(message['item_id']);
+          const supersededInputItemIds = new Set<string>();
+          pendingSpeechItemIds.clear();
+          if (itemId) pendingSpeechItemIds.add(itemId);
           newInputEntry = true;
           speechInputInProgress = true;
           speechCommitPending = true;
-          speechGeneration += 1;
-          responseCreateQueue = responseCreateQueue.filter(
-            (request) => request.authority !== 'backend_speech',
-          );
-          if (pendingResponseCreate?.authority === 'backend_speech') {
+          directResponsePending = true;
+          if (!speechGenerationAdvancedForInput) {
+            speechGeneration += 1;
+            speechGenerationAdvancedForInput = true;
+          }
+          for (const request of responseCreateQueue) {
+            if (request.authority === 'direct' && request.inputItemId) {
+              supersededInputItemIds.add(request.inputItemId);
+            }
+            if (request.speechMessage !== undefined) {
+              sendBackendConversationItem(
+                request.speechMessage,
+                REALTIME_MERGED_SPEECH_PREFIX,
+              );
+            }
+          }
+          responseCreateQueue = [];
+          if (pendingResponseCreate) {
+            if (
+              pendingResponseCreate.authority === 'direct' &&
+              pendingResponseCreate.inputItemId
+            ) {
+              supersededInputItemIds.add(pendingResponseCreate.inputItemId);
+            }
             pendingResponseCreate.cancelled = true;
           }
+          for (const supersededInputItemId of supersededInputItemIds) {
+            consumeInputItem(supersededInputItemId);
+          }
           if (
-            activeResponseId &&
-            (activeAudioResponseId === activeResponseId ||
-              activeResponseAuthority === 'backend_speech') &&
-            !cancelledResponseIds.has(activeResponseId)
+            !callback(() =>
+              callbacks.onSpeechStarted?.({
+                ...eventContext(message),
+                itemId,
+                audioStartMs: optionalFiniteNumber(message['audio_start_ms']),
+              }),
+            )
           ) {
+            break;
+          }
+          if (activeResponseId && !cancelledResponseIds.has(activeResponseId)) {
             const interruptedResponseId = activeResponseId;
             callback(() =>
               callbacks.onBargeIn?.({
@@ -1456,16 +1621,8 @@ export function openQwenRealtimeSession(
                 responseId: interruptedResponseId,
               }),
             );
-            markResponseCancelled(interruptedResponseId);
-            finalizeCancelledResponse(interruptedResponseId);
+            markResponseCancelled(interruptedResponseId, true);
           }
-          callback(() =>
-            callbacks.onSpeechStarted?.({
-              ...eventContext(message),
-              itemId,
-              audioStartMs: optionalFiniteNumber(message['audio_start_ms']),
-            }),
-          );
           break;
         }
         case 'input_audio_buffer.speech_stopped': {
@@ -1480,6 +1637,25 @@ export function openQwenRealtimeSession(
           );
           break;
         }
+        case 'conversation.item.created': {
+          const item = isRecord(message['item']) ? message['item'] : undefined;
+          const itemId = optionalString(item?.['id']);
+          const content = Array.isArray(item?.['content'])
+            ? item['content']
+            : [];
+          const isPendingAudioInput =
+            itemId !== undefined &&
+            item?.['type'] === 'message' &&
+            content.some(
+              (part) => isRecord(part) && part['type'] === 'input_audio',
+            ) &&
+            (pendingSpeechItemIds.has(itemId) ||
+              (speechCommitPending && pendingSpeechItemIds.size === 0));
+          if (isPendingAudioInput) {
+            commitInputItem(message, type, itemId);
+          }
+          break;
+        }
         case 'input_audio_buffer.committed': {
           const itemId = optionalString(message['item_id']);
           if (!itemId) {
@@ -1489,40 +1665,7 @@ export function openQwenRealtimeSession(
             );
             break;
           }
-          if (
-            committedInputItemIds.has(itemId) ||
-            consumedInputItemIds.has(itemId)
-          ) {
-            protocolError(
-              'Realtime provider reused a committed input identifier.',
-              'ambiguous_input_transcript',
-            );
-            break;
-          }
-          if (committedInputItemIds.size >= MAX_TRACKED_INPUT_ITEMS) {
-            protocolError(
-              'Realtime provider created too many pending input items.',
-              'too_many_pending_inputs',
-            );
-            break;
-          }
-          speechInputInProgress = false;
-          speechCommitPending = false;
-          lastCompletedResponseId = undefined;
-          committedInputItemIds.add(itemId);
-          if (
-            activeResponseId &&
-            activeResponseAuthority === 'direct' &&
-            !bindResponseInput(activeResponseId)
-          ) {
-            break;
-          }
-          callback(() =>
-            callbacks.onInputCommitted?.({
-              ...eventContext(message),
-              itemId,
-            }),
-          );
+          commitInputItem(message, type, itemId);
           break;
         }
         case 'conversation.item.input_audio_transcription.delta':
@@ -1649,18 +1792,22 @@ export function openQwenRealtimeSession(
           activeResponseAuthority = responseAuthority;
           responseAuthorities.set(responseId, responseAuthority);
           newOutputEntry = true;
-          if (activeResponseAuthority === 'direct') {
-            bindResponseInput(responseId);
-            if (terminal) break;
-          }
           pendingResponseCreate = undefined;
           activeAudioResponseId = undefined;
           if (responseRequest?.cancelled) {
-            markResponseCancelled(responseId);
+            markResponseCancelled(responseId, true);
             sendJson({ type: 'response.cancel' });
-            finalizeCancelledResponse(responseId);
             break;
           }
+          if (activeResponseAuthority === 'direct') {
+            if (responseRequest?.inputItemId) {
+              responseInputItemIds.set(responseId, responseRequest.inputItemId);
+            } else {
+              bindResponseInput(responseId);
+            }
+            if (terminal) break;
+          }
+          if (responseAuthority === 'direct') directResponsePending = false;
           const response = isRecord(message['response'])
             ? message['response']
             : undefined;
@@ -1846,6 +1993,7 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
+            speechGeneration,
           };
           if (
             call.arguments.length + delta.length >
@@ -1920,6 +2068,7 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
+            speechGeneration,
           };
           call.name = name;
           pendingCalls.set(callId, call);
@@ -1972,6 +2121,7 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
+            speechGeneration,
           };
           call.name = name;
           pendingCalls.set(callId, call);

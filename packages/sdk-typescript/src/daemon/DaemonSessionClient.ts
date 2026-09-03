@@ -36,6 +36,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -511,6 +512,15 @@ export class DaemonSessionClient {
     return this.session.branch;
   }
 
+  /**
+   * Present when this client was created with a `modelServiceId`: `false`
+   * means the spawn-time model switch failed and the session is running on
+   * the agent default model.
+   */
+  get modelApplied(): DaemonSession['modelApplied'] {
+    return this.session.modelApplied;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }
@@ -779,14 +789,13 @@ export class DaemonSessionClient {
 
   setConfigOption(
     configId: 'reasoning_effort',
-    value: string,
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(
-      this.sessionId,
-      configId,
-      value,
-      this.clientId,
-    );
+    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
+      clientId: this.clientId,
+      persist: opts?.persist,
+    });
   }
 
   getRewindSnapshots(): Promise<{
