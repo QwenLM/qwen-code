@@ -1571,15 +1571,26 @@ export function EnhancedTable({
   // value box, which is what a read-only input would do.
   const handleCellDialogKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (
-        !(event.metaKey || event.ctrlKey) ||
-        event.key.toLowerCase() !== 'a'
-      ) {
+      // The browser's own select-all is keyed to the physical key, so match
+      // `code` as well: on a Cyrillic or Greek layout the A key reports
+      // `key === 'ф'` and matching `key` alone would let the keystroke through
+      // to the unscoped default.
+      const selectsAll =
+        event.code === 'KeyA' || event.key.toLowerCase() === 'a';
+      if (!(event.metaKey || event.ctrlKey) || !selectsAll) {
         return;
       }
       const valueNode = cellDialogValueRef.current;
       const selection = document.getSelection();
       if (!valueNode || !selection) {
+        return;
+      }
+      // Engines that follow the Selection spec ignore a range rooted in a
+      // ShadowRoot, which is where the value box lives when the Web Shell is
+      // embedded with `shadowDom: true` (portals). Consuming the keystroke
+      // there would clear the old selection and select nothing, so leave that
+      // configuration on the browser default.
+      if (valueNode.getRootNode() !== valueNode.ownerDocument) {
         return;
       }
       event.preventDefault();
