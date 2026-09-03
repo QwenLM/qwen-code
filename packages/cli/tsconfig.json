@@ -41,6 +41,8 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "src/**/*.json",
+    "scripts/**/*.ts",
+    "scripts/**/*.tsx",
     "./package.json",
     "../core/src/utils/toml-to-markdown-converter.test.ts",
     "../core/src/utils/toml-to-markdown-converter.ts"

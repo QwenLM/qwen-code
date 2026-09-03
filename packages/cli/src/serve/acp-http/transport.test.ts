@@ -81,6 +81,10 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import {
+  PersistedSessionListCache,
+  type PersistedSessionListCacheStatus,
+} from '../server/persisted-session-list-cache.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { tagListener } from '../local-control/listener-identity.js';
@@ -91,6 +95,7 @@ import {
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connection-registry.js';
 import type { TransportStream } from './transport-stream.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -434,10 +439,14 @@ class FakeBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }> = [];
+  setSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }> = [];
   /** Shared seed/update call sequence — pins that hydration runs BEFORE the
    * mutation (a seed-after-mutation order would let the bridge publish an
    * event carrying only this-daemon-lifetime bindings). */
-  metadataCallLog: Array<'seed' | 'update'> = [];
+  metadataCallLog: Array<'seed' | 'update' | 'set'> = [];
 
   seedSessionPrs(
     sessionId: string,
@@ -447,6 +456,18 @@ class FakeBridge {
     this.seedSessionPrsCalls.push({ sessionId, prs });
     const existing = this.metadataPrsBySession.get(sessionId) ?? [];
     if (existing.length > 0) return;
+    this.metadataPrsBySession.set(
+      sessionId,
+      prs.map(({ number, url }) => ({ number, url })),
+    );
+  }
+
+  setSessionPrs(
+    sessionId: string,
+    prs: Array<{ number: number; url: string }>,
+  ) {
+    this.metadataCallLog.push('set');
+    this.setSessionPrsCalls.push({ sessionId, prs });
     this.metadataPrsBySession.set(
       sessionId,
       prs.map(({ number, url }) => ({ number, url })),
@@ -3677,6 +3698,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         return scan;
       });
+    // The scan is cancelled the moment its waiter count reaches zero, and a
+    // request only becomes a waiter once it reaches `lookup()`. Posting both
+    // requests and waiting for the loader proves only that the *first* one
+    // attached: on a loaded runner the second can still be resolving params
+    // when the DELETE below tears the first connection down, which drops the
+    // count to zero, aborts the shared scan, and leaves the second request
+    // answering from a rejected promise. Watch `lookup()` for the
+    // single-flight join so the DELETE never lands before the second waiter
+    // is attached.
+    const lookupStatuses: PersistedSessionListCacheStatus[] = [];
+    const originalLookup = PersistedSessionListCache.prototype.lookup;
+    const lookupSpy = vi
+      .spyOn(PersistedSessionListCache.prototype, 'lookup')
+      .mockImplementation(function (
+        this: PersistedSessionListCache,
+        ...args: Parameters<typeof originalLookup>
+      ) {
+        const lookup = originalLookup.apply(this, args);
+        lookupStatuses.push(lookup.status);
+        return lookup;
+      });
 
     try {
       const firstConnId = await initialize();
@@ -3699,6 +3741,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       await waitUntil(() => loadSignal !== undefined);
       expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      await waitUntil(
+        () =>
+          lookupStatuses.filter((status) => status === 'single_flight')
+            .length === 1,
+        10_000,
+      );
 
       const deleted = await fetch(`${base}/acp`, {
         method: 'DELETE',
@@ -3716,6 +3764,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
     } finally {
       resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      lookupSpy.mockRestore();
       listSessionsSpy.mockRestore();
     }
   });
@@ -5722,12 +5771,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
-      expect(bridge.metadataCallLog).toEqual(['seed', 'update']);
+      expect(bridge.metadataCallLog).toEqual(['seed', 'update', 'set']);
       expect(bridge.seedSessionPrsCalls).toHaveLength(1);
       expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
       expect(
         bridge.seedSessionPrsCalls[0]?.prs.map((entry) => entry.number),
       ).toEqual([9100]);
+      // After the upsert, dispatch reconciles the live entry to the
+      // authoritative persisted list — the bridge merge caps positionally
+      // while the sidecar caps by provenance authority, and the two
+      // diverge past the list limit.
+      expect(bridge.setSessionPrsCalls).toHaveLength(1);
+      expect(bridge.setSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+      expect(
+        bridge.setSessionPrsCalls[0]?.prs.map((entry) => entry.number),
+      ).toEqual([9100, 9101]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
       expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
@@ -6489,9 +6547,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     // The guarantee is that the server CLOSES the stream (not a zombie that
     // heartbeats forever). A safety abort at 3s distinguishes "server closed"
-    // (loop ends fast) from "zombie" (only our timeout ends it).
+    // (loop ends fast) from "zombie" (only our timeout ends it); record which
+    // happened — a boolean holds on every lane, while elapsed time on the
+    // shared pool is placement noise.
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6501,8 +6565,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    // Server-initiated close arrives well under the 3s safety timeout.
-    expect(Date.now() - start).toBeLessThan(1500);
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    // Server-initiated close arrives well under the 3s safety timeout; the
+    // elapsed bound only means something off the shared pool.
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('concurrent session/close calls the bridge exactly once (no TOCTOU double-close)', async () => {
@@ -6534,7 +6601,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Subprocess ends cleanly → bridge event iterator returns done.
     bridge.queues.get('sess-1')?.end();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6544,7 +6615,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    expect(Date.now() - start).toBeLessThan(1500);
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('session-stream reconnect does NOT abort the in-flight prompt', async () => {

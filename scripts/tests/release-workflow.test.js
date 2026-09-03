@@ -537,8 +537,16 @@ describe('release workflow', () => {
     const testStep = job.steps.find(
       (step) => step.name === 'Run Workspace Tests',
     );
-    expect(testStep.run).toBe(
-      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests',
+    expect(testStep.run).toContain(
+      'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
+    );
+    expect(testStep.run).toContain('::warning title=Workspace tests exited');
+    // Every release schedule retries, stable included: running the stable
+    // lane with no retry let one flaky test out of ~30k red a release whose
+    // other gates were all green. The default is pinned here so a silent
+    // drop back to a no-retry stable lane fails this test.
+    expect(testStep.env.VITEST_RETRY).toBe(
+      "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
 
     const workspacePackages = getTestCiWorkspaces();
@@ -553,6 +561,164 @@ describe('release workflow', () => {
         packageJson.scripts['test:ci'].split('&&').pop()?.trim(),
         path,
       ).toMatch(/^vitest run(?:\s|$)/);
+    }
+  });
+
+  it('passes --retry unless the operator switched it off', () => {
+    // The flag reaches every workspace's vitest, where a command line option
+    // outranks the config. Every schedule now retries by default; the only
+    // way off is the operator sentinel, and it must omit the flag rather
+    // than zero it — --retry=0 would switch off a workspace's own retry
+    // (packages/sdk-typescript) on this lane alone.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [retry, expected] of [
+      ['2', '--retry=2'],
+      ['', null],
+      // 'off' must omit the flag, not pass --retry=0: that would outrank a
+      // workspace's own config-level retry.
+      ['off', null],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+      try {
+        const stub = join(dir, 'npm');
+        writeFileSync(stub, '#!/bin/sh\nprintf "%s\\0" "$@"\n');
+        chmodSync(stub, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: retry,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, result.stderr).toBe(0);
+        const args = result.stdout.split('\0');
+        expect(args.pop()).toBe('');
+        expect(args, retry).toContain('--passWithNoTests');
+        // An empty positional would reach vitest as a test-name filter.
+        expect(args, retry).not.toContain('');
+        if (expected) {
+          expect(args, retry).toContain(expected);
+        } else {
+          expect(
+            args.some((arg) => arg.startsWith('--retry')),
+            retry,
+          ).toBe(false);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('lets an operator retune the workspace shard timeout without a PR', () => {
+    // A shard's runtime tracks how busy the reserved host is, not the suite:
+    // the same third measured 6.7 minutes on a quiet host and 36 on a
+    // contended one, and 45 killed shards at the boundary with every executed
+    // suite green (run 33713579913, both attempts). release.yml is
+    // code-owned, so a literal here costs a review every time the fleet
+    // moves; the variable is the same runtime knob QWEN_CI_VITEST_MAX_WORKERS
+    // and QWEN_RELEASE_VITEST_RETRY already use.
+    expect(workflow).toContain(
+      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"`,
+    );
+    // fromJSON, not the bare variable: timeout-minutes takes a number, and an
+    // unset variable has to fall back rather than render an empty string.
+    expect(releaseYaml.jobs.workspace_tests['timeout-minutes']).toContain(
+      'fromJSON(',
+    );
+  });
+
+  it('names which failure this is, and never changes the exit code', () => {
+    // A shard that died on Vitest's own worker RPC timing out reads
+    // identically to a real break, and this release lost two attempts before
+    // anyone could tell them apart (run 33713579913). The annotation says
+    // which; the child's status is re-raised untouched either way, so no
+    // reading of the log can turn a failure green.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [label, stub, code, annotation, expected] of [
+      // A failing test names itself; an annotation would only add noise.
+      ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
+      // Vitest's worker RPC giving up says nothing about the product, and
+      // --retry cannot cover it. Passed only with proof the run reached its
+      // end: a normal exit, a passing tally, no failing tally, and no other
+      // unhandled error. It cost this release three attempts before that.
+      [
+        'transport timeout, run completed',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        0,
+      ],
+      [
+        'transport timeout, killed by a signal',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        137,
+        '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout beside a real one',
+        'Error: [vitest-worker]: Timeout calling "x"\nError: write after end\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout, no tally to back it',
+        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'unexplained',
+        'something odd',
+        7,
+        '::error title=Workspace tests exited 7 with no failing test::',
+      ],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
+      try {
+        const stubPath = join(dir, 'npm');
+        writeFileSync(stubPath, `#!/bin/sh\necho '${stub}'\nexit ${code}\n`);
+        chmodSync(stubPath, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: '2',
+              RUNNER_TEMP: dir,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, label).toBe(expected ?? code);
+        if (annotation) {
+          expect(result.stdout, label).toContain(annotation);
+        } else {
+          expect(result.stdout, label).not.toContain('::warning title=');
+          expect(result.stdout, label).not.toContain('::error title=');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1214,10 +1380,24 @@ describe('release workflow', () => {
       'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
     );
     expect(testStep.run).toContain('flock --shared --wait 1800 9');
-    expect(testStep.run).toContain('flock --shared 9');
-    expect(testStep.run).toContain('until flock --nonblock 9');
-    expect(testStep.run).toContain('integration-tests cli');
-    expect(testStep.run).toContain('integration-tests interactive');
+    // The daemon lock stays shared for the whole step: upgrading it to
+    // exclusive to build an image starves the build behind the test phase of
+    // any run already on the host (run 33637097713). Builds serialize on a
+    // separate host mutex that no test phase holds.
+    expect(testStep.run).toContain(
+      'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+    );
+    expect(testStep.run).toContain('flock --wait 1800 7');
+    expect(testStep.run).not.toContain('acquire_daemon_write_lock');
+    expect(testStep.run).not.toContain('flock --unlock 9');
+    expect(testStep.run).not.toContain('flock --nonblock 9');
+    // A flock lives on the open file description: a descendant inheriting
+    // the descriptor past the job would keep the lock on the host.
+    expect(testStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+    expect(testStep.run).toContain('exec 7>&-');
+    expect(testStep.run).toContain('exec 8>&-');
+    expect(testStep.run).toContain('integration-tests cli 9>&-');
+    expect(testStep.run).toContain('integration-tests interactive 9>&-');
   });
 
   it('digest-pins every sandbox base image', () => {
@@ -1256,7 +1436,10 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      workspace_tests: 45,
+      // The one bound an operator can retune without a PR; its default is
+      // pinned by its own test above.
+      workspace_tests:
+        "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,
@@ -1305,8 +1488,26 @@ describe('release workflow', () => {
 
   it('stages every integration package manifest after versioning', () => {
     expect(workflow).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json',
+      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
+  });
+
+  it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
+    const publishSteps = releaseYaml.jobs.publish.steps;
+    const mem0Step = publishSteps.find(
+      (step) => step.name === 'Publish @qwen-code/external-context-mem0',
+    );
+    const audioStepIndex = publishSteps.findIndex(
+      (step) => step.name === 'Publish @qwen-code/audio-capture',
+    );
+
+    expect(mem0Step.if).toContain(
+      "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    expect(mem0Step['working-directory']).toBe(
+      'integrations/external-context-mem0',
+    );
+    expect(publishSteps.indexOf(mem0Step)).toBeLessThan(audioStepIndex);
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
@@ -1539,7 +1740,7 @@ describe('Live Host feed contract', () => {
 
 describe('release lane runner routing', () => {
   const ecsRunsOn =
-    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
+    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
 
   it('routes validation jobs to ECS with a hosted emergency fallback', () => {
     const validationJobs = [
@@ -1557,6 +1758,28 @@ describe('release lane runner routing', () => {
       expect(job, `job missing from release.yml: ${name}`).toBeTruthy();
       expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(ecsRunsOn);
     }
+  });
+
+  it('classifies each schedule cron by the exact string it fires with', () => {
+    // prepare tells nightly from preview by comparing github.event.schedule
+    // against the cron text; a cron edited here without its comparison
+    // silently turns that schedule into a no-op run.
+    const crons = releaseYaml.on.schedule.map((entry) => entry.cron);
+    expect(crons).toHaveLength(2);
+    const vars = releaseYaml.jobs.prepare.steps.find(
+      (step) => step.id === 'vars',
+    );
+    for (const cron of crons) {
+      expect(vars.run).toContain(`"\${CRON}" == "${cron}"`);
+    }
+  });
+
+  it('serializes scheduled release validation without coupling manual runs', () => {
+    expect(releaseYaml.concurrency).toEqual({
+      group:
+        "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}",
+      'cancel-in-progress': false,
+    });
   });
 
   it('passes the runner environment to integration test configuration', () => {

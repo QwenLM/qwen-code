@@ -202,6 +202,15 @@ const verificationGateBodies = [
   verificationGateSteps[0] ?? '',
   reviewVerificationRunner,
 ];
+const quotedCriticalWitness = (label = '') =>
+  [
+    '**[Suggestion]** Add a regression assertion for the fallback path.',
+    '',
+    ...(label ? [label] : []),
+    '```text',
+    '**[Critical]** quoted fixture output',
+    '```',
+  ].join('\n');
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -7002,6 +7011,13 @@ exit 1
     // unclassified comments stay open instead of driving more code changes.
     expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
     expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const leadingCriticalDefinitions = (
+      `${workflow}\n${reviewVerificationRunner}`.match(
+        /def leading_critical:\s*\n\s*gsub\([^\n]+\)\s*\n\s*\| startswith\([^\n]+\);/g,
+      ) ?? []
+    ).map((definition) => definition.replace(/\s+/g, ' ').trim());
+    expect(leadingCriticalDefinitions).toHaveLength(9);
+    expect(new Set(leadingCriticalDefinitions).size).toBe(1);
     const inlineFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
@@ -7051,6 +7067,21 @@ exit 1
         author_association: 'MEMBER',
         body: 'The null branch still crashes.',
       },
+      {
+        id: 16,
+        created_at: '2026-01-02T00:00:05Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness('Witness:'),
+      },
+      {
+        id: 17,
+        in_reply_to_id: 16,
+        created_at: '2026-01-02T00:00:06Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'The assertion should cover the fallback path too.',
+      },
     ];
     const reviews = [
       {
@@ -7093,7 +7124,7 @@ exit 1
           },
         ),
       );
-    expect(countInline(false)).toBe(5);
+    expect(countInline(false)).toBe(7);
     // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
     // but MAINTAINER comments (13) stay actionable regardless of wording —
     // the lexical **[Critical]** test applies only to the bot's own
@@ -7129,7 +7160,10 @@ exit 1
         submitted_at: '2026-01-02T00:00:01Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: 'Looks good overall',
+        body: [
+          '<!-- hidden from readers',
+          '**[Critical]** invisible marker',
+        ].join('\n'),
       },
       {
         id: 22,
@@ -7137,7 +7171,16 @@ exit 1
         submitted_at: '2026-01-02T00:00:02Z',
         user: { login: 'qwen-code-ci-bot' },
         author_association: 'NONE',
-        body: '**[Critical]** memory leak in the owner route',
+        body: [
+          '<!-- rendered metadata -->',
+          '',
+          '\uFEFF',
+          '**[Critical]** Blocking finding(s) follow.',
+          '',
+          '⚠️ Downgraded from Request changes to Comment: self-PR.',
+          '',
+          '**[Critical]** memory leak in the owner route',
+        ].join('\n'),
       },
       {
         id: 23,
@@ -7146,6 +7189,14 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableReviews = (criticalOnly, over = []) =>
@@ -7176,10 +7227,11 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
         ),
       );
-    // All four are actionable while suggestions are in scope; in
-    // Critical-only mode only the BOT's non-Critical COMMENTED review is
-    // excluded — the maintainer's COMMENTED review stays actionable.
-    expect(countActionableReviews(false)).toBe(4);
+    // All five are actionable while suggestions are in scope. In Critical-only
+    // mode, the rendered-invisible residue ahead of 22 still leaves its
+    // Critical marker leading, while the unclosed comment in 21 and quoted
+    // marker in 24 stay non-Critical.
+    expect(countActionableReviews(false)).toBe(5);
     expect(countActionableReviews(true)).toBe(3);
     // Over-budget: the maintainer's COMMENTED review defers; their formal
     // CHANGES_REQUESTED (20) still cuts through.
@@ -7210,6 +7262,13 @@ exit 1
         user: { login: 'maintainer' },
         author_association: 'MEMBER',
         body: '@qwen-code /review',
+      },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
       },
     ];
     const countActionableIssue = (criticalOnly, over = []) =>
@@ -7244,7 +7303,7 @@ exit 1
     // scope; the command-style comment is always excluded. In Critical-only
     // mode the maintainer's comment STAYS actionable alongside the bot's
     // Critical one — only bot non-Critical output is filtered.
-    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(false)).toBe(3);
     expect(countActionableIssue(true)).toBe(2);
     // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
     // still counts.
@@ -7285,6 +7344,15 @@ exit 1
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
         html_url: 'https://github.com/test/pull/1#review-23',
       },
+      {
+        id: 24,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#review-24',
+      },
     ];
     const countDeferredReviews = (over = []) =>
       Number(
@@ -7311,11 +7379,9 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
         ),
       );
-    // Only the BOT's COMMENTED non-Critical review is deferred;
-    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
-    // COMMENTED review are not.
-    expect(countDeferredReviews()).toBe(1);
-    expect(countDeferredReviews(['maintainer'])).toBe(2);
+    // The ordinary suggestion and the fenced-marker suggestion are deferred.
+    expect(countDeferredReviews()).toBe(2);
+    expect(countDeferredReviews(['maintainer'])).toBe(3);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
       /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
@@ -7350,14 +7416,14 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
         ),
       );
-    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
-    // unclassified comment (13) stays actionable, and Critical (11),
-    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
-    // never deferred.
-    expect(countDeferredInline()).toBe(1);
+    // The ordinary suggestion (12), fenced-marker root (16), and its reply
+    // (17) defer together. The maintainer's unclassified comment (13) stays
+    // actionable, as do Critical (11), reply-to-Critical (14), and the
+    // CHANGES_REQUESTED-associated comment (15).
+    expect(countDeferredInline()).toBe(3);
     // Over-budget maintainer: their unclassified comment (13) joins the
     // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
-    expect(countDeferredInline(['maintainer'])).toBe(2);
+    expect(countDeferredInline(['maintainer'])).toBe(4);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
       /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -7396,6 +7462,14 @@ exit 1
         body: '**[Suggestion]** consider caching this lookup',
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
       },
+      {
+        id: 34,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: quotedCriticalWitness(),
+        html_url: 'https://github.com/test/pull/1#issuecomment-34',
+      },
     ];
     const countDeferredIssue = (over = []) =>
       Number(
@@ -7422,10 +7496,10 @@ exit 1
           { encoding: 'utf8', input: JSON.stringify(issueComments) },
         ),
       );
-    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
-    // comment (30), the Critical (31), and the command (32) are not.
-    expect(countDeferredIssue()).toBe(1);
-    expect(countDeferredIssue(['maintainer'])).toBe(2);
+    // Both bot suggestions are deferred; the maintainer's normal comment
+    // (30), the Critical (31), and the command (32) are not.
+    expect(countDeferredIssue()).toBe(2);
+    expect(countDeferredIssue(['maintainer'])).toBe(3);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
@@ -7503,6 +7577,18 @@ exit 1
           humanC('onetime', '2026-06-14T12:00:00Z'),
           humanC('looper', '2026-07-01T12:00:00Z'),
           humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC(
+            'quoted-issue',
+            '2026-07-02T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
+          humanC(
+            'quoted-issue',
+            '2026-07-03T13:30:00Z',
+            'MEMBER',
+            quotedCriticalWitness(),
+          ),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
           humanC(
             'looper',
@@ -7575,6 +7661,20 @@ exit 1
             submitted_at: '2026-07-02T12:30:00Z',
             body: 'feedback delivered through a review',
           },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reviewer' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-03T13:00:00Z',
+            body: quotedCriticalWitness(),
+          },
           // Request changes / APPROVED reviews are never deferrable, so two
           // consumed-span batches of each must not count (both authors absent):
           // the census mirrors the deferred renderer's `state == "COMMENTED"`.
@@ -7626,6 +7726,32 @@ exit 1
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:30:00Z',
             body: 'feedback delivered through an inline comment',
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-inline' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:15:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            id: 902,
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T13:20:00Z',
+            body: quotedCriticalWitness(),
+          },
+          {
+            user: { login: 'quoted-reply' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 902,
+            created_at: '2026-07-03T13:20:00Z',
+            body: 'The same fallback path is still uncovered.',
           },
           // Critical root comment (id 901) that replyguy's replies attach to.
           {
@@ -7689,17 +7815,31 @@ exit 1
         ],
         { encoding: 'utf8' },
       );
-      // Only the two looped authors land here; every protected author above
-      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
-      // two consumed-span batches yet stays absent — dropping any one of the
-      // census's deferral-mirroring exclusions surfaces one of them and fails.
-      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
+      // The four fenced-marker authors are regular feedback in every input
+      // shape, including a reply to a fenced-marker root. The protected
+      // authors (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/
+      // sentinelvictim) still stay absent.
+      expect(JSON.parse(overOut)).toEqual([
+        'looper',
+        'quoted-inline',
+        'quoted-issue',
+        'quoted-reply',
+        'quoted-reviewer',
+        'reviewer2',
+      ]);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
     }
     // The deferral note names over-budget authors with the escapes.
     expect(prepareBranchAndFeedbackStep).toContain('is at this window');
     expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'start your comment with **[Critical]**',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '请以 **[Critical]** 开头评论',
+    );
+    expect(designDoc).toContain('starting a comment with **[Critical]**');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the
@@ -10016,6 +10156,9 @@ exit 1
     for (const step of envCheckSteps) {
       expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
       expect(step).toContain('not an approved agent pool member');
+      expect(step).toContain(
+        'echo \'QWEN_SKIP_LATENCY_BUDGETS=1\' >> "${GITHUB_ENV}"',
+      );
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -14753,7 +14896,7 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  }, 30000);
+  });
 
   it.skipIf(!hasBashMapfile)(
     'bite check: rejects a round whose changed tests pass on the pre-round tree',
@@ -14947,6 +15090,62 @@ exit 1
       expect(testSide.out).toContain('SURVIVED');
       expect(testSide.out).not.toContain('REJECT:');
       expect(testSide.advisory).toContain('test-side defect claim');
+      // A fenced marker on a source comment is not a second Critical claim.
+      // The real test-side Critical keeps the advisory path; if either of the
+      // two gate predicates treats the quoted marker as a signal, this turns
+      // into a source-side rejection.
+      const quotedSource = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedSource.out).toContain('SURVIVED');
+      expect(quotedSource.out).not.toContain('REJECT:');
+      expect(quotedSource.advisory).toContain('test-side defect claim');
+      const quotedRootReply = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n103\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: quotedCriticalWitness(),
+            },
+            {
+              id: 103,
+              in_reply_to_id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: 'The same fallback path is still uncovered.',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(quotedRootReply.out).toContain('SURVIVED');
+      expect(quotedRootReply.out).not.toContain('REJECT:');
+      expect(quotedRootReply.advisory).toContain('test-side defect claim');
       // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
       // resolved alongside must not break the demotion.
       expect(

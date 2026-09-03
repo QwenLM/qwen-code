@@ -7057,9 +7057,18 @@ function composeReviewBody(
     ...clauses.slice(openerCount),
   ];
   const body = render(paragraphs, '\n\n');
+  // Critical-only consumers use a body-leading marker. This must happen after
+  // rendering because budget notices can otherwise precede the marked details.
+  const visibleBody =
+    attribution &&
+    event === 'COMMENT' &&
+    (bodyCriticalBlock.length > 0 || cannotTellBlock.length > 0) &&
+    !body.startsWith(CRITICAL_PREFIX)
+      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${body}`
+      : body;
   return {
     event,
-    body,
+    body: visibleBody,
     terminalState,
     capAxes,
     chunkLedger,

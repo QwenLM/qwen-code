@@ -363,6 +363,7 @@ async function startSingle(
     config.sessionScope,
     sessionsPath(),
   );
+  router.setChannelApprovalMode(name, config.approvalMode);
   const loopStore = cronEnabled
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
@@ -492,9 +493,10 @@ async function startAll(
   const loopController = loopStore
     ? createChannelLoopController(loopStore)
     : undefined;
-  // Register per-channel scope overrides so each channel uses its own sessionScope
+  // Register per-channel routing overrides.
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
+    router.setChannelApprovalMode(name, config.approvalMode);
   }
   const channels: Map<string, ChannelBase> = new Map();
 
