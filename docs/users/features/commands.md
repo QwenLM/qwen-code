@@ -823,6 +823,9 @@ qwen sessions ps
 qwen sessions ps --json | jq -r .cwd
 
 # Which background sessions are waiting on me?
+# Note: `jq -r` renders the raw recorded value in your terminal (see the
+# raw-data note above); a session name is session-generated text, so pipe
+# through a sanitizer if it is untrusted.
 qwen sessions ps --json | jq -r 'select(.state == "needs input") | .name'
 ```
 
