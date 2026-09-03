@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 
@@ -383,15 +383,6 @@ function runDevelopIssue(dir, stub) {
 const IDLE_NOW =
   'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
 const IDLE_HEAD = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
-
-// The heaviest cases here scan the whole rendered workflow (~15k lines)
-// repeatedly: 'upserts deferred findings into a per-PR issue that survives
-// the merge' alone measures ~14s on an idle machine against the 30s suite
-// default, and it exhausted that budget on a contended release runner in
-// runs 33676423730 and 33683912557 — the only failure in a job where the
-// other 75 files passed. Same reasoning as install-script.test.js: give the
-// file headroom rather than let host contention decide a release.
-vi.setConfig({ testTimeout: 90_000 });
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
