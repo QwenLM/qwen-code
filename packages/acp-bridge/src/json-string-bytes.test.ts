@@ -9,12 +9,19 @@ import { estimateJsonStringBytes } from './json-string-bytes.js';
 
 describe('estimateJsonStringBytes', () => {
   it('matches JSON.stringify UTF-8 bytes for every UTF-16 code unit', () => {
+    const mismatches: Array<{ code: number; got: number; want: number }> = [];
     for (let code = 0; code <= 0xffff; code++) {
       const value = String.fromCharCode(code);
-      expect(estimateJsonStringBytes(value, Number.MAX_SAFE_INTEGER)).toBe(
-        Buffer.byteLength(JSON.stringify(value)),
-      );
+      const got = estimateJsonStringBytes(value, Number.MAX_SAFE_INTEGER);
+      const want = Buffer.byteLength(JSON.stringify(value));
+      if (got !== want) mismatches.push({ code, got, want });
     }
+    expect({ count: mismatches.length, first: mismatches.slice(0, 5) }).toEqual(
+      {
+        count: 0,
+        first: [],
+      },
+    );
   });
 
   it('matches JSON.stringify for paired surrogates and mixed escaping', () => {

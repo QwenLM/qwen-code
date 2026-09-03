@@ -29,6 +29,10 @@ import {
   useRef,
   useState,
 } from 'react';
+// Must evaluate before '@opentui/core': the asset-root side effect has to be
+// in place before @opentui/core's module evaluation resolves the native
+// library path (see opentui-assets.ts).
+import './opentui-assets.js';
 import {
   createCliRenderer,
   type CliRenderer,
@@ -203,7 +207,7 @@ function OpenTuiEntryApp({
     }
     const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
     if (exitGuard.press(guardKey) === 'exit') {
-      void exitSession(EXIT_CODE_INTERRUPT);
+      void exitSession(config, EXIT_CODE_INTERRUPT);
     } else {
       setExitHint(exitGuardHint(guardKey));
     }
@@ -224,16 +228,19 @@ function OpenTuiEntryApp({
     [live.items, width, height, exitHint],
   );
 
-  const handleRenderError = useCallback((error: Error) => {
-    debugLogger.error(
-      `[FATAL_RENDER_ERROR] ${error.message}\n${error.stack ?? ''}`,
-    );
-    // ink parity: the fallback unmounted the composer and Ctrl+C handling;
-    // schedule a graceful exit so the session cannot hang.
-    setTimeout(() => {
-      void exitSession(1);
-    }, 5000);
-  }, []);
+  const handleRenderError = useCallback(
+    (error: Error) => {
+      debugLogger.error(
+        `[FATAL_RENDER_ERROR] ${error.message}\n${error.stack ?? ''}`,
+      );
+      // ink parity: the fallback unmounted the composer and Ctrl+C handling;
+      // schedule a graceful exit so the session cannot hang.
+      setTimeout(() => {
+        void exitSession(config, 1);
+      }, 5000);
+    },
+    [config],
+  );
 
   const handleStartNewSession = useCallback(
     (sessionId: string) => startNewSession(sessionId),
@@ -250,8 +257,8 @@ function OpenTuiEntryApp({
   );
 
   const handleQuit = useCallback(() => {
-    void exitSession(0);
-  }, []);
+    void exitSession(config, 0);
+  }, [config]);
 
   return (
     <OpenTuiApp
