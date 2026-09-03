@@ -8323,8 +8323,15 @@ export class Session implements SessionContext {
         // for. Recover that late response and inject it on the next batch instead
         // of discarding it (which would lose the messages from both queues —
         // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
-        // rejection.
-        if (drainPromise) void this.#recoverLateDrain(drainPromise);
+        // rejection, but only of the drain promise: anything that throws after
+        // that race — the debug logger among them — escapes a bare `void` as an
+        // unhandled rejection, which ends the process. This recovery is
+        // best-effort by construction, so nothing it does may take the session
+        // down with it. Swallow silently rather than log, since the logger is
+        // itself one of the things that can throw here.
+        if (drainPromise) {
+          void this.#recoverLateDrain(drainPromise).catch(() => {});
+        }
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the

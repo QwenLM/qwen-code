@@ -15,6 +15,14 @@
  * boundary as genuine steering content (`drainSteering`), and whatever is
  * still queued when the turn ends becomes the next turn — so user input is
  * never silently dropped.
+ *
+ * `@path` mentions are expanded where a prompt enters the stream
+ * ({@link livePromptEvents}), never here: an idle submit and queued text that
+ * becomes the next turn both reach the model with file content while the
+ * transcript keeps what was typed. Text drained as in-flight steering still
+ * rides raw — ink expands that hop too (`resolveSteeredMessages`, with a read
+ * timeout and a queue restore on cancel) — and the model can resolve the
+ * literal mention with a read tool.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -90,6 +98,13 @@ export interface OpenTuiSubmitOptions {
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
+  /**
+   * Raw typed text for `UserPromptSubmit` provenance. Set by the composer
+   * submit and by the follow-on turn built from the mid-turn queue; a slash
+   * command's `submit_prompt` outcome carries generated content, which ink
+   * also submits without provenance.
+   */
+  submittedPrompt?: string;
 }
 
 export interface OpenTuiLiveTurn {
@@ -187,6 +202,7 @@ export function useOpenTuiLiveTurn(
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
           modelOverride: turnOptions?.modelOverride,
+          submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           onWaitingCall: (call) => {
@@ -222,14 +238,21 @@ export function useOpenTuiLiveTurn(
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
           setBusy(false);
-          // Whatever survived the tool-boundary drain becomes the next turn.
+          // One queued submission per chained turn: a decline (e.g. an abort
+          // landing inside an @-expansion read) must consume only its own
+          // submission — the rest stay queued for the following boundaries,
+          // matching ink's pop-one-submission-per-settle drain.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const text = drainQueue().join('\n');
-            if (text.trim()) {
-              apply({ type: 'user', text });
-              void runTurn(text, nextLivePromptId(config));
-            }
+            const [text, ...remaining] = rest;
+            queueRef.current = remaining;
+            setQueueLength(remaining.length);
+            apply({ type: 'user', text });
+            // ink keeps provenance for a queued submission, and the raw text
+            // is what the stream layer expands `@path` mentions from.
+            void runTurn(text, nextLivePromptId(config), {
+              submittedPrompt: text,
+            });
           }
         }
       }
