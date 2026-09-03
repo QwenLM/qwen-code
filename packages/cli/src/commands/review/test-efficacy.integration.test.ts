@@ -16,6 +16,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   writeFileSync,
   readFileSync,
   rmSync,
@@ -1873,6 +1874,66 @@ process.stdout.write(JSON.stringify({
 
     expect(existsSync(canary)).toBe(false);
   });
+
+  // POSIX-only: the relink is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses the REVERT when the root is swapped after its escape check',
+    async () => {
+      // The revert takes its root verdict above the classification loop and
+      // used to act on it after the loop AND the filter screen — both
+      // attacker-sized. The relink target here is the SHARED review worktree,
+      // which is the scenario that matters: it holds `base`, so without the
+      // re-check `checkout base -- <paths>` SUCCEEDS there and rewrites the
+      // reviewer's PR-modified files back to the merge base.
+      //
+      // Deterministic rather than raced: `cat-file` is unique to the
+      // classification loop, so the shim arms there (with `modified` computed
+      // against the real probe tree) and swaps on the next config read — the
+      // revert's own screen — landing exactly in the window.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-revshim-'));
+      const savedPath = process.env['PATH'];
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      try {
+        const { wt, base } = scaffoldModifiedPr();
+        const probe = `${wt}-probe`;
+        const prFile = join(wt, 'packages/lib/src/f.ts');
+        const prContent = readFileSync(prFile, 'utf8');
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *cat-file*) touch ${shimDir}/armed ;;
+  *--file*)
+    if [ -e ${shimDir}/armed ] && [ ! -e ${shimDir}/done ] && [ -d ${probe} ]; then
+      touch ${shimDir}/done
+      mv ${probe} ${probe}.real && ln -s ${wt} ${probe}
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+
+        // The damage assertion: the shared worktree still holds the PR's
+        // version, not the merge base's.
+        expect(readFileSync(prFile, 'utf8')).toBe(prContent);
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('never deletes a line that does not hold the selected statement', () => {
     // `runOneMutant`'s mismatch guard, pinned directly: selection and the

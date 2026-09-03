@@ -1998,6 +1998,25 @@ describe('localFilterCommands', () => {
     expect(screen.keys[0]).toMatch(/^filter\..*\.smudge$/);
   });
 
+  it('refuses when an admin entry name did not survive the decode', () => {
+    // Entry names are the third attacker-influenced source of candidate bytes,
+    // after the two rev-parse answers. An invalid byte in the name comes back
+    // from `readdirSync` as U+FFFD, `join` re-encodes it, `existsSync` is then
+    // false, and the loop would skip a `config.worktree` that really exists
+    // and really defines a filter — the clean verdict authorising the
+    // checkout that runs it.
+    //
+    // The fixture uses a real U+FFFD in the name rather than an invalid byte:
+    // it is what the guard actually tests for, and unlike an invalid byte it
+    // can be created on every platform (macOS rejects those with EILSEQ).
+    mkdirSync(join(dir, '.git', 'worktrees', 'w\uFFFDx'), { recursive: true });
+
+    const screen = localFilterCommands(dir);
+
+    expect(screen.stopped).toBe('unreadable');
+    expect(screen.unreadable).toBe(join(dir, '.git', 'worktrees'));
+  });
+
   it('treats a transcoded rev-parse answer as unmeasured', () => {
     // `encoding: 'utf8'` turns an invalid byte in the repository path into
     // U+FFFD, so every candidate built from the answer names a file that does
