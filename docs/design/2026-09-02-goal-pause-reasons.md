@@ -4,15 +4,16 @@
 
 Two gaps, both visible the moment a user interrupts an autonomous Goal.
 
-**A cancelled tool batch does not always stop the Goal.** Cancelling a Goal
-turn already pauses the Goal on two paths: the model stream ending as
-`UserCancelled`, and a tool batch whose calls were all cancelled. A batch
-where some tools had already finished takes neither path. It falls through to
-the ordinary submit path, so the cancelled tool's `[Operation Cancelled]`
-result goes back to the model as one more tool result. The model reads it as a
-transient failure and keeps working on the objective the user just
-interrupted. This is the Goal-shaped form of the misattribution reported in
-issue #10170.
+**A cancelled tool batch leaves the Goal's history malformed.** Cancelling a
+Goal turn does stop the Goal -- pressing Esc while tools run aborts the
+continuation owner's signal, and the cancelled-continuation branch in
+`use-llm-stream.ts` pauses the turn. What that branch does not do is answer
+the model's function calls: it marks the batch submitted, which stops those
+callIds ever being submitted again, so the `functionCall` parts stay unpaired
+and the next `/goal resume` sends a history with a call that has no response.
+The all-cancelled branch below it writes those responses; the cancelled
+continuation, which is the branch a user's Esc actually reaches, does not.
+This is the Goal-shaped form of the misattribution reported in issue #10170.
 
 **No pause says why it happened.** `reduceGoalControl` leaves `lastReason`
 untouched on a pause, and no host supplies one. The field is rendered as the
@@ -44,10 +45,12 @@ accepts a reason only on `pause`, and only a non-empty string within
 `GOAL_PAUSE_REASON_MAX_CHARACTERS`, so the HTTP and ACP control paths cannot
 inject unbounded text into a card.
 
-For the first gap, a Goal tool batch that the user cancelled now stops the
-Goal even when only some of its tools were cancelled. The branch adds the
-responses to history first, so every function call stays paired with a
-response and the history the next Goal turn resumes from stays well-formed.
+For the first gap, the branch that a cancelled Goal tool batch actually takes
+now writes the batch's responses to history before it stops, so every function
+call stays paired with a response and the history the next Goal turn resumes
+from stays well-formed. The pairing belongs there rather than in a branch
+further down: a batch whose continuation was cancelled returns before either
+of them, and a second pause on an already-paused Goal throws.
 
 Ordinary tool cancellation outside a Goal turn is unchanged; that is the
 subject of #10170 and PR #10180.
@@ -56,10 +59,17 @@ subject of #10170 and PR #10180.
 
 - `goal-protocol.ts`: the optional `reason`, its validator and bound, the
   shared reason constants and the two builders.
-- `goal-reducer.ts`: pause writes or clears `lastReason`; the parser accepts a
-  reason on `pause` only.
+- `goal-reducer.ts`: pause writes or clears `lastReason`; resuming a paused
+  Goal clears it, so a running Goal never renders the prose that explains why
+  it stopped; the parser accepts a reason on `pause` only.
+- `client.ts`: the interrupted-exit pause carries a reason. It runs before
+  every host's own reasoned pause and a second pause on a non-active Goal
+  throws, so this is the dispatch that decides what the record says -- a
+  caller-aborted exit is a user interrupt, an exit that merely failed to
+  complete is a failed turn, and the Stop-hook cap names itself.
 - `use-llm-stream.ts`: `failClosedGoalTurn` takes a `userCancelled` flag and
-  picks the matching reason; the new partial-cancel branch.
+  picks the matching reason; the cancelled-continuation branch pairs the
+  batch's responses into history before it stops.
 - `goalCommand.ts`: `/goal pause` names itself.
 - `Session.ts`: four ACP pause sites choose among user interrupt, output
   limit, session disposal, turn failure, and the Stop-hook cap.
@@ -70,12 +80,17 @@ subject of #10170 and PR #10180.
 ## Verification
 
 - `goal-reducer.test.ts`: a supplied reason is recorded; a reasonless pause
-  clears a stale one; the parser accepts a valid reason and rejects empty,
-  oversized, non-string, and reasons on `resume`/`clear`.
+  clears a stale one; a resume clears a pause reason but keeps a blocked
+  Goal's; the parser accepts a valid reason and rejects empty, oversized,
+  non-string, and reasons on `resume`/`clear`.
+- `client-goal.test.ts`: the interrupted-exit pause carries the user-interrupt
+  reason when the caller aborted, the failed-turn reason when it did not, and
+  the Stop-hook cap reason at the cap.
 - `goal-runtime.test.ts`: the reason is journalled with the paused snapshot,
   and a `releaseTurn` arriving after the pause schedules no continuation.
 - `use-llm-stream.test.tsx`: a partly cancelled Goal tool batch pauses with
-  the user-interrupt reason and never reaches the model.
+  the user-interrupt reason, pairs both responses into history, and never
+  reaches the model.
 - `goalCommand.test.ts` and `Session.test.ts` pin the reason each pause site
   sends.
 - An E2E plan in `.qwen/e2e-tests/goal-pause-reasons.md` covers the three

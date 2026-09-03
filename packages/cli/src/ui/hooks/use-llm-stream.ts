@@ -5322,6 +5322,19 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
+        // This is the branch a cancelled Goal tool batch actually takes: the
+        // controller retained across tool execution feeds the continuation
+        // owner's signal, so pressing Esc while tools run aborts it here
+        // rather than at either of the branches below. `markToolsAsSubmitted`
+        // stops these callIds ever being submitted, so unless the responses
+        // are written now the model's function calls stay unanswered and the
+        // next `/goal resume` sends a history with an unpaired call. The
+        // all-cancelled branch below writes them for the batch it handles;
+        // this branch owes its own batch the same pairing, whether or not
+        // every tool in it was cancelled.
+        if (toolGoalBinding && llmClient) {
+          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
         );
@@ -5365,32 +5378,6 @@ export const useLlmStream = (
             { userCancelled: turnCancelledRef.current },
           );
         }
-        endToolInteraction('cancelled');
-        return;
-      }
-
-      // A Goal tool batch the user cancelled stops the Goal, even when some
-      // of its tools had already finished. Without this, the batch falls
-      // through to the ordinary submit path below: the cancelled tool's
-      // `[Operation Cancelled]` result goes back to the model as one more
-      // tool result, the model reads it as a transient failure, and the Goal
-      // keeps running the objective the user just interrupted. The
-      // all-cancelled branch above already stops for the simpler shape.
-      const someToolsCancelled = llmTools.some(
-        (toolCall) => toolCall.status === 'cancelled',
-      );
-      if (toolGoalBinding && someToolsCancelled && turnCancelledRef.current) {
-        // Keep every function call paired with a response before stopping, so
-        // the history the next Goal turn resumes from stays well-formed.
-        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
-        markToolsAsSubmitted(
-          llmTools.map((toolCall) => toolCall.request.callId),
-        );
-        await failClosedGoalTurn(
-          toolGoalBinding,
-          'Goal tool batch was cancelled',
-          { userCancelled: true },
-        );
         endToolInteraction('cancelled');
         return;
       }

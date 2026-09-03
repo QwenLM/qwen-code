@@ -4772,9 +4772,10 @@ describe('useLlmStream', () => {
         mockMarkToolsAsSubmitted,
       ];
     });
+    const client = new MockedLlmClientClass(mockConfig);
     const { result, rerender } = renderHook(() =>
       useLlmStream(
-        new MockedLlmClientClass(mockConfig),
+        client,
         [],
         mockAddItem,
         mockConfig,
@@ -4796,10 +4797,17 @@ describe('useLlmStream', () => {
       ),
     );
 
-    // Bind an active Goal turn whose stream schedules another tool, so the
-    // binding is still live when the next batch arrives.
+    // Bind an active Goal turn whose stream schedules the next batch, so the
+    // binding is still live when that batch completes. Both tools are
+    // scheduled by the same stream, which is what makes them one batch under
+    // one interaction owner -- a tool from a different owner is peeled off as
+    // a secondary tool long before the cancel branches see the batch.
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'done-tool', name: 'testTool', args: {} },
+        };
         yield {
           type: ServerLlmEventType.ToolCallRequest,
           value: { callId: 'cont-tool', name: 'testTool', args: {} },
@@ -4813,29 +4821,30 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    // The user interrupts while the scheduled tool is still running. One tool
-    // in the batch had already finished, so the batch that follows is neither
-    // "all cancelled" nor a clean continuation: without the partial-cancel
-    // branch it goes back to the model as an ordinary tool result and the
-    // Goal keeps running the objective the user just interrupted.
-    currentToolCalls = [
-      {
-        request: {
-          callId: 'cont-tool',
-          name: 'testTool',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'prompt-partial-cancel',
-          goalContext: permit,
-        },
-        status: 'executing',
-        tool: { displayName: 'MockTool' },
-        invocation: {
-          getDescription: () => 'cont-tool',
-        } as unknown as AnyToolInvocation,
-        startTime: Date.now(),
-      } as unknown as TrackedExecutingToolCall,
-    ];
+    // The user interrupts while one of the scheduled tools is still running.
+    // Esc aborts the controller retained across tool execution, which feeds
+    // the continuation owner's signal -- so the batch that follows takes the
+    // cancelled-continuation branch, and that branch is where the responses
+    // have to be paired into history before the Goal stops.
+    currentToolCalls = ['done-tool', 'cont-tool'].map(
+      (callId) =>
+        ({
+          request: {
+            callId,
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-partial-cancel',
+            goalContext: permit,
+          },
+          status: 'executing',
+          tool: { displayName: 'MockTool' },
+          invocation: {
+            getDescription: () => callId,
+          } as unknown as AnyToolInvocation,
+          startTime: Date.now(),
+        }) as unknown as TrackedExecutingToolCall,
+    );
     rerender();
     act(() => {
       result.current.cancelOngoingRequest();
@@ -4857,6 +4866,15 @@ describe('useLlmStream', () => {
       });
     });
     expect(finishTurn).toHaveBeenCalledWith(permit);
+    // Every function call in the batch is paired with a response before the
+    // Goal stops, so the history the next `/goal resume` sends is well-formed.
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        { text: 'done-tool response' },
+        { text: '[Operation Cancelled]' },
+      ],
+    });
     // No second model call: the interrupted batch never reached the model.
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
