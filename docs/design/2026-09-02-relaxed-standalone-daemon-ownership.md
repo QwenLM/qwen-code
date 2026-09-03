@@ -12,9 +12,11 @@ until the source changes in this design are delivered.
 
 This decision adopts Issue #10810's session-keyed concurrency boundary,
 identity-qualified stale-writer recovery, legacy-owner migration guard, and
-minimum Web Shell degradation. Backend and Web Shell implementation may land in
-separate pull requests, but both are required in the same release. A proactive
-`activeElsewhere` listing hint remains a follow-up.
+minimum Web Shell degradation. It corrects the issue's Live assumption: the
+locator record gates publication but not activation today, so the same release
+must add a Live-start publisher gate. Backend and Web Shell implementation may
+land in separate pull requests, but both are required in the same release. A
+proactive `activeElsewhere` listing hint remains a follow-up.
 
 ## Decision
 
@@ -43,6 +45,13 @@ lifecycle mutations for the same session remain serialized by that session's
 writer lease. The change does not add cross-daemon routing, a shared live-state
 index, atomic multi-session operations, or distributed cache invalidation.
 
+Live activation remains a machine-global exception. Only the daemon whose PID
+and instance nonce exactly match the stable Live discovery record may start or
+replace a Live call. Other updated daemons may still serve standalone sessions,
+but their `/live/start` and `/live/new` requests return the existing retryable
+`503 conversation_runtime_in_use`; host-originated toggle and new actions are
+also rejected before call activation.
+
 ## Motivation
 
 The current user-global owner record makes the first daemon that touches
@@ -61,9 +70,9 @@ boundary.
 - `GET /standalone/session-options` and every `/standalone/sessions` route may
   initialize the local daemon's Conversations runtime even when another updated
   daemon process is alive.
-- Another updated daemon no longer causes `conversation_runtime_in_use`. During
-  migration, a live legacy runtime-owner record still returns that error until
-  the old daemon exits.
+- Another updated daemon no longer causes `conversation_runtime_in_use` on the
+  standalone surface. During migration, a live legacy runtime-owner record
+  still returns that error until the old daemon exits.
 - If daemon A has session S loaded, daemon B may still list the shared catalog,
   create a new standalone session, and create, restore, or use a different
   session that is not held by another writer. Different session IDs may remain
@@ -82,9 +91,11 @@ boundary.
   scheduled-task sessions, uses the same mandatory lease. This prevents
   background keepalive or task rehydration from silently restoring an already
   active transcript through a non-standalone source.
-- Live discovery remains single-publisher, but a Live session on its elected
-  daemon may coexist with different standalone sessions on another daemon.
-  Standalone routes continue to reject Live records.
+- Live discovery and Live activation remain single-publisher. `/live/start`,
+  `/live/new`, and host-originated start actions succeed only on the daemon
+  whose PID and instance nonce match the stable Live discovery record. A Live
+  session on that daemon may coexist with different standalone sessions on
+  another daemon. Standalone routes continue to reject Live records.
 - An unsealed active lock left by a non-cooperative process exit is reclaimed
   only when the new daemon can prove that the record belongs to the same local
   identity domain and that the recorded process has exited or its PID has been
@@ -140,7 +151,8 @@ ordinary user-selected workspace. The implementation retains:
 - mandatory active-session writer leases throughout the Conversations runtime;
 - identity-qualified recovery of provably stale same-domain active locks;
 - the legacy runtime-owner compatibility check during migration;
-- Live discovery's own single-publisher record and validation.
+- Live discovery's single-publisher record and validation;
+- Live-start admission that accepts only the exact stable locator publisher.
 
 Daemon-local create admission, live owner indexes, lifecycle coordinators,
 directory state, reconciliation singleflight, and cache invalidation are not
@@ -148,11 +160,26 @@ cross-process authorities. They may make remote live state appear inactive or
 delay catalog freshness, but they do not decide write ownership. The
 cross-process writer lease remains authoritative for each transcript and its
 lifecycle, scheduled-task file mutations retain their existing cross-process
-file lock, and deletion reconciliation acquires the affected session's lease.
-The contract does not promise globally fresh live state, cross-daemon event
-routing, or atomic operations spanning multiple session IDs.
+file lock, deletion reconciliation acquires the affected session's lease, and
+the stable locator record remains authoritative for Live publication,
+discovery, and machine-global activation, but not transcript ownership. The
+contract does not promise globally fresh live state, cross-daemon event routing,
+or atomic operations spanning multiple session IDs.
 
 ## Implementation
+
+The long-lived Conversations acquire currently supplies three behavioral gates.
+Removing it is complete only when every consumer has an explicit replacement:
+
+| Consumer                                | Replacement                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Standalone access to the shared runtime | No process-global gate; session writers and lifecycle operations use the mandatory writer lease            |
+| Scheduled-task activation               | Mandatory writer lease for bound sessions, plus the unbound-task eligibility and binding transaction below |
+| Machine-global Live activation          | Exact stable-locator publisher admission before every Live start path                                      |
+
+The acquire's state-directory bootstrap and stable Live handoff side effects are
+separately moved to the deletion journal and Live publication paths below. No
+consumer continues to rely on the removed lifetime owner implicitly.
 
 ### Replace the outer owner with a legacy compatibility check
 
@@ -414,15 +441,20 @@ record is durably removed. The lock remains a transient guard for this
 compatibility operation and is not held for the runtime lifetime.
 
 The server retains `conversation_runtime_in_use` only for this old-version
-migration case and for existing Live-specific mappings. Updated daemons do not
-emit it merely because another updated daemon has mounted Conversations.
+migration case and for Live-start admission on a non-publisher. Updated daemons
+do not emit it merely because another updated daemon has mounted Conversations.
 `conversation_runtime_unavailable`, `conversation_root_compromised`, and
 daemon-local runtime-invariant failures remain unchanged.
 
 ### Keep Live discovery separate
 
 Keep the ownership protocol in `live/discovery.ts` unchanged. Its owner record
-selects one discoverable Live host and protects publication of that endpoint.
+selects one discoverable Live host and protects publication of that endpoint;
+publication alone does not currently gate activation through `/live/start`,
+`/live/new`, or Host shortcut actions. Today the removed Conversations acquire
+indirectly supplies that activation gate. The replacement must therefore cover
+both publication and every start path.
+
 The removed Conversations owner currently performs the stable-base discovery
 handoff as a side effect of runtime acquisition, while the publication path
 performs that handoff only for non-stable target bases. Move that responsibility
@@ -447,11 +479,34 @@ validated handoff before publication. An active foreign Live owner still blocks
 publication, and failure to publish Live discovery does not disable standalone
 routes on that daemon.
 
-Live discovery remains single-publisher, while the Conversations writer lease
-is session-scoped. A Live session on the elected publisher may therefore run at
-the same time as a different standalone session on another daemon. If another
-daemon reaches the same transcript, the writer lease rejects it; standalone
-routes continue to reject Live-owned records regardless of lease availability.
+Add a read-only Live-start admission using the same stable-base directory
+identity checks, lock, safe record parser, and exact owner comparison. After
+awaiting publication and immediately before call activation, it rereads the
+stable locator and requires the current protocol version plus a
+`{ pid, instanceNonce }` match with the local daemon. It never creates,
+replaces, removes, or reclaims a record. A valid different publisher maps to
+the existing retryable
+`conversation_runtime_in_use`; a missing or transiently unreadable locator is
+`conversation_runtime_unavailable`, and malformed or unsafe state remains
+non-retryable `conversation_runtime_ownership_compromised`. These failures are
+Live-local and do not quarantine the Conversations runtime or disable
+standalone routes.
+
+Route-originated `/live/start` and `/live/new` requests and Host-originated
+`toggle` and `new` actions must enter one asynchronous admission seam before
+`LiveHostCoordinator.start()`. The HTTP routes retain their existing structured
+503 serialization. A rejected Host action publishes the existing non-secret
+Live unavailable/error state and must not invoke the Live session coordinator,
+microphone capture, or Appshot capture. No production start caller may bypass
+this seam; stop and mute remain daemon-local operations on an already admitted
+call.
+
+Live discovery and activation remain single-publisher, while the Conversations
+writer lease is session-scoped. A Live session on the elected publisher may
+therefore run at the same time as a different standalone session on another
+daemon. If another daemon reaches the same transcript, the writer lease rejects
+it; standalone routes continue to reject Live-owned records regardless of lease
+availability.
 
 ### Harden scheduled-task activation without adding another lease
 
@@ -543,6 +598,8 @@ mixed-mode compatibility problem without serving the requested default.
 | A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose a new candidate, or terminally quarantine an existing runtime; every request remains non-retryable `503 conversation_root_compromised` |
 | A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                                                                             |
 | Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response                                                      |
+| A daemon that is not the stable Live locator publisher attempts to start Live    | `503 conversation_runtime_in_use` for `/live/start` or `/live/new`; standalone remains available                                                          |
+| Stable Live locator state is missing, unreadable, malformed, or unsafe at start  | Fail Live start closed with the existing unavailable or ownership-compromised mapping; standalone remains available                                       |
 
 For every writer-state row, a batch lifecycle route preserves the same error
 kind in its existing `200` per-item result rather than changing the batch's
@@ -603,6 +660,8 @@ Release notes must state that:
 - standalone sessions always use the writer lease, even when the experimental
   setting is absent or false;
 - Live and scheduled-task writers in the Conversations runtime use it as well;
+- only the exact stable Live locator publisher may activate Live; another daemon
+  continues to serve standalone but receives the existing 503 on Live start;
 - simultaneous scheduled-task rehydration admits only one resident owner and
   does not provide exactly-once delivery beyond the scheduler's existing
   persistence semantics;
@@ -675,8 +734,8 @@ Conversations root and verifies:
 
 1. daemon A and daemon B both return `200` from
    `GET /standalone/session-options` and `GET /standalone/sessions`;
-2. neither daemon returns `conversation_runtime_in_use` merely because the
-   other process is alive;
+2. neither daemon's standalone routes return `conversation_runtime_in_use`
+   merely because the other process is alive;
 3. a live legacy runtime-owner record returns
    `503 conversation_runtime_in_use`, and after its process exits the next
    request retires the stale record and returns `200` without restarting;
@@ -710,9 +769,11 @@ Conversations root and verifies:
 12. two daemons reconciling the same prepared deletion elect one lease holder;
     the contender skips that UUID without failing the unrelated triggering
     operation or reporting journal compromise;
-13. a Live session on the elected Live daemon and a different standalone
-    session on the other daemon remain usable concurrently, while standalone
-    routes continue to reject the Live record;
+13. with Live enabled on both daemons, only the exact stable locator publisher
+    can activate a call: the other daemon's `/live/start`, `/live/new`, Host
+    toggle, and Host new paths fail before the Live session coordinator or
+    capture devices start; that daemon still serves a different standalone
+    session, and standalone routes continue to reject the Live record;
 14. root compromise and unavailable generations still fail closed without
     falling back to the primary workspace.
 
@@ -722,10 +783,16 @@ for the stable base as well as custom bases, and that a stale stable-base record
 can be reclaimed after its previous owner exits. It verifies the no-op
 `commitOwner` handoff, that the existing grace runs after the handoff lock is
 released and before publication, and that a competing publisher during that
-gap is rejected by the publication lock. Standalone availability
-remains independent of discovery publication failure and of which daemon
-published the record. It also covers a Live-enabled daemon and a second daemon
-serving a different standalone session at the same time.
+gap is rejected by the publication lock. Start-admission coverage accepts only
+the current protocol version and an exact stable-locator PID and instance
+nonce, rejects a valid different publisher with the existing retryable error,
+and fails missing, malformed, unsafe, or unreadable locator state closed without
+quarantining standalone.
+Both HTTP start routes and both Host-originated start actions use the same
+admission and perform no session or capture work on rejection. Standalone
+availability remains independent of discovery publication failure and of which
+daemon published the record. It also covers the elected daemon running Live
+while a second Live-enabled daemon serves a different standalone session.
 
 Web Shell regression coverage verifies that switching sessions does not emit a
 toast when standalone listing fails, that a transitional
@@ -754,6 +821,10 @@ state, cross-daemon event routing, or atomic multi-session operations.
 - **Enabling the lease only for `sourceType=standalone`:** misses Live and
   scheduled-task sources hosted by the same Conversations runtime, including
   background rehydration that occurs without a standalone API request.
+- **Treating single-publisher discovery as an activation fence:** publication
+  and activation are separate paths today. Without explicit admission before
+  every start path, a client connected directly to a non-publisher daemon can
+  start a second Live host despite the locator remaining single-publisher.
 - **Adding `activeElsewhere` to listings now:** requires an authoritative shared
   live-state index or owner-discovery protocol. The minimum Web Shell behavior
   can use the existing attach-time error contract without adding that backend
