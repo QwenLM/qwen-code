@@ -179,6 +179,7 @@ function serializeWorkflowSnapshot(
     kind: 'workflow',
     id: snapshot.runId,
     isHistorical: true,
+    ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
     ...optionalField('startMode', snapshot.startMode),

@@ -515,14 +515,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // successful run. Mitigation: WorkflowTool's failure message
       // already names the error; the banner is meta-documentation
       // about a separate env knob, not run-specific guidance.
-      const display =
-        phases || logs || meta
-          ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
-              ...(meta ? { meta } : {}),
-              phases: phases ?? [],
-              logs: logs ?? [],
-            })}`
-          : `Workflow failed: ${message}`;
+      const display = `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload(
+        {
+          runId: handle.runId,
+          ...(meta ? { meta } : {}),
+          phases: phases ?? [],
+          logs: logs ?? [],
+        },
+      )}`;
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
         returnDisplay: display,

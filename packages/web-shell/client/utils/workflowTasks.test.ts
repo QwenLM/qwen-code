@@ -79,6 +79,33 @@ describe('findWorkflowTaskForTool', () => {
     ).toBe('wf_expected');
   });
 
+  it('matches a failed workflow by its terminal run payload', () => {
+    expect(
+      findWorkflowTaskForTool(
+        tasks,
+        workflowTool({
+          status: 'completed',
+          rawOutput:
+            'Workflow failed: boom\n\n{"runId":"wf_expected","phases":[]}',
+        }),
+      )?.id,
+    ).toBe('wf_expected');
+  });
+
+  it('does not use the runId fallback for a task linked to another tool', () => {
+    const linkedElsewhere = workflowTask('wf_expected');
+    linkedElsewhere.toolUseId = 'another-workflow-call';
+
+    expect(
+      findWorkflowTaskForTool(
+        [linkedElsewhere],
+        workflowTool({
+          rawOutput: '{"runId":"wf_expected","status":"running"}',
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
   it('does not guess when the tool contains no run identity', () => {
     expect(
       findWorkflowTaskForTool(

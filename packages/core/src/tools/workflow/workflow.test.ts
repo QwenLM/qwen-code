@@ -1098,6 +1098,9 @@ await agent('scan package.json')
     expect(result.error).toBeDefined();
     expect(result.error!.message).toContain('scripted failure');
     expect(JSON.stringify(result.llmContent)).toContain('Workflow failed');
+    expect(String(result.returnDisplay)).toMatch(
+      /"runId"\s*:\s*"wf_[0-9a-f]+"/,
+    );
     // T4 (PR #4732 R1): assert the machine-readable error type so a
     // refactor removing the field doesn't go uncaught.
     expect(result.error!.type).toBe('execution_failed');

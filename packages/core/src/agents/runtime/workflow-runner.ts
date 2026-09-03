@@ -178,7 +178,10 @@ export class WorkflowRunner {
           : undefined;
       script = loaded?.script ?? options.script ?? '';
       scriptPath = loaded?.scriptPath ?? options.scriptPath;
-      const workflowName = options.workflowName ?? loaded?.savedWorkflowName;
+      const workflowName =
+        options.workflowName ??
+        loaded?.savedWorkflowName ??
+        registry?.get(runId)?.workflowName;
 
       try {
         compileWorkflowScript(script);

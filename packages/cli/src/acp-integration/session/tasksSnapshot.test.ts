@@ -350,6 +350,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       [
         workflowSnapshot({
           meta: null,
+          toolUseId: 'workflow-call-1',
           workflowName: 'review-and-fix',
           description: 'wf_saved',
         }),
@@ -361,6 +362,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       expect.objectContaining({
         kind: 'workflow',
         id: 'wf_saved',
+        toolUseId: 'workflow-call-1',
         label: 'review-and-fix',
         status: 'failed',
         runtimeMs: 500,

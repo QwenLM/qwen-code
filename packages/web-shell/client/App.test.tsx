@@ -532,6 +532,7 @@ const {
         planTodos?: Array<{ id: string }>;
         agentTools?: Array<{ callId: string }>;
         includeWorkflows?: boolean;
+        onWorkflowRunStarted?: () => void;
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
@@ -2029,6 +2030,7 @@ vi.doMock('./components/messages/TasksStatusMessage', async () => {
       planTodos?: Array<{ id: string }>;
       agentTools?: Array<{ callId: string }>;
       includeWorkflows?: boolean;
+      onWorkflowRunStarted?: () => void;
       onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     }) => {
       testState.latestTasksStatusProps = props;
@@ -28993,6 +28995,22 @@ describe('App workflow history entry', () => {
     expect(testState.latestTasksStatusProps?.includeWorkflows).toBe(true);
   });
 
+  it('refreshes background-task polling when a task-dialog workflow starts', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestStatusBarOnOpenTasks?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+    act(() => testState.latestTasksStatusProps?.onWorkflowRunStarted?.());
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
   it('refreshes background-task polling when a saved workflow starts', async () => {
     mockConnection.supportedCommands = { workflowsEnabled: true };
     const { container } = renderApp();
@@ -29115,6 +29133,25 @@ describe('App workflow history entry', () => {
     expect(
       container.querySelector('[data-testid="workflow-runs-page"]'),
     ).toBeNull();
+  });
+
+  it('forwards /workflows in a non-workspace session', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/workflows',
+      expect.any(Object),
+    );
   });
 
   it('does not expose the local workflow page when workflows are disabled', async () => {

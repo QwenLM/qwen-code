@@ -49,6 +49,8 @@ export function findWorkflowTaskForTool(
   if (!runId) return undefined;
   return tasks.find(
     (task): task is DaemonSessionWorkflowTaskStatus =>
-      task.kind === 'workflow' && task.id === runId,
+      task.kind === 'workflow' &&
+      task.id === runId &&
+      task.toolUseId === undefined,
   );
 }

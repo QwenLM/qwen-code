@@ -11365,6 +11365,7 @@ export function App({
           }
           if (
             cmd === 'workflows' &&
+            workspaceContextActive &&
             workflowsEnabled &&
             text.slice(match[0].length).trim().length === 0
           ) {
@@ -13844,6 +13845,9 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 includeWorkflows={workflowsEnabled}
+                onWorkflowRunStarted={() =>
+                  setBackgroundTasksRefreshTrigger((value) => value + 1)
+                }
                 onClose={() => setTasksDialogMessage(null)}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={
