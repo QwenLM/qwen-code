@@ -228,16 +228,10 @@ import {
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
-import { sanitizeCwd } from '../utils/paths.js';
 import {
   clearRuntimeStatus,
-  readRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
-import {
-  isSameProcess,
-  readPidNamespaceId,
-} from '../utils/process-liveness.js';
 import {
   deriveSessionName,
   patchSessionRecord,
@@ -3066,25 +3060,6 @@ export class Config {
       options?.signal?.throwIfAborted();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      // Runtime status is liveness/membership evidence, not a transcript.
-      // Claim it even when chat recording is disabled; failures still
-      // degrade best-effort and must not block session startup.
-      try {
-        await writeRuntimeStatus(
-          this.storage.getRuntimeStatusPath(this.sessionId),
-          {
-            sessionId: this.sessionId,
-            workDir: this.getTargetDir(),
-            qwenVersion: this.cliVersion ?? null,
-          },
-        );
-        // Arm the session-swap refresh for every kind, not just the
-        // interactive UI: /clear, /resume and ACP session switches
-        // must keep the sidecar on the session this pid now serves.
-        this.markRuntimeStatusEnabled();
-      } catch {
-        // ignored: best-effort, never block session startup.
-      }
       await this.initializeInternal(options);
     } catch (error) {
       this.clearSessionRestoreProjection();
@@ -3647,29 +3622,22 @@ export class Config {
       })();
     }
 
-    // Fire-and-forget sweep of stale sidecar-only entries whose metadata
-    // identifies a vanished temporary project root.
     setImmediate(() => {
-      void Storage.cleanOrphanProjectDirs(
-        sanitizeCwd(this.storage.getProjectRoot()),
-      )
-        .then(({ removed, errors }) => {
-          for (const name of removed) {
-            this.debugLogger.info(
-              `Orphan project snapshot removed by startup sweep: ${name}`,
-            );
-          }
-          for (const { entry, error } of errors) {
-            this.debugLogger.warn(
-              `Orphan project sweep failed for ${entry} (non-fatal): ${error}`,
-            );
-          }
-        })
-        .catch((error: unknown) => {
+      try {
+        const { removed, errors } = this.storage.cleanOrphanProjectDirs();
+        removed.forEach((entry) =>
+          this.debugLogger.info(`Removed orphan project snapshot: ${entry}`),
+        );
+        errors.forEach(({ entry, error }) =>
           this.debugLogger.warn(
-            `Orphan project sweep failed (non-fatal): ${error}`,
-          );
-        });
+            `Failed to clean orphan project snapshot ${entry}: ${error}`,
+          ),
+        );
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to scan orphan project snapshots: ${error}`,
+        );
+      }
     });
   }
 
@@ -4578,28 +4546,28 @@ export class Config {
     // so handling the swap centrally covers every same-PID session
     // transition. Best-effort: must never block /clear or /resume.
     //
-    // Always write the new per-pid sidecar: if the startup write failed,
-    // a later session transition can heal this process's membership
-    // evidence. The clear decision is evaluated inside the serialized
-    // write chain so back-to-back transitions observe earlier queued heals.
+    // Only refresh when THIS process established its own sidecar at
+    // startup (interactive UI). A non-interactive `/clear` (e.g.
+    // qwen --prompt-interactive) must not delete a sibling shell's
+    // sidecar that happens to share the outgoing session id
+    // mirrors the kimi-cli "write only when a session is
+    // established for this process" rule.
     if (isSessionTransition) {
-      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
-      const cliVersion = this.cliVersion ?? null;
-      const workDir = this.targetDir;
-      const newSessionId = this.sessionId;
-      this.queueRuntimeStatusWrite(async () => {
-        if (this.runtimeStatusEnabled) {
-          await clearRuntimeStatus(
-            this.storage.getRuntimeStatusPath(previousSessionId),
-          );
-        }
-        await writeRuntimeStatus(newPath, {
-          sessionId: newSessionId,
-          workDir,
-          qwenVersion: cliVersion,
+      if (this.runtimeStatusEnabled) {
+        const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+        const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+        const cliVersion = this.cliVersion ?? null;
+        const workDir = this.targetDir;
+        const newSessionId = this.sessionId;
+        this.queueRuntimeStatusWrite(async () => {
+          await clearRuntimeStatus(oldPath);
+          await writeRuntimeStatus(newPath, {
+            sessionId: newSessionId,
+            workDir,
+            qwenVersion: cliVersion,
+          });
         });
-        this.markRuntimeStatusEnabled();
-      });
+      }
       if (this.sessionRegistryActive) {
         const workDir = this.targetDir;
         const newSessionId = this.sessionId;
@@ -4670,12 +4638,12 @@ export class Config {
 
   /**
    * Marks this Config as the owner of a runtime.json sidecar for the
-   * current PID. Called once from `initializeOnce` after the initial
-   * sidecar write succeeds. When set, subsequent startNewSession()
-   * calls will refresh the sidecar on session swap; when unset (the
-   * initial write failed), startNewSession() leaves sibling sidecars
-   * alone so this process can't trample a sidecar that happens to
-   * share the outgoing session id.
+   * current PID. Call once after the initial sidecar write succeeds
+   * (typically from the interactive UI bootstrap). When set, subsequent
+   * startNewSession() calls will refresh the sidecar on session swap;
+   * when unset, startNewSession() leaves sibling sidecars alone so a
+   * short-lived non-interactive process can't trample a concurrent
+   * shell's sidecar that happens to share the outgoing session id.
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
@@ -4817,15 +4785,16 @@ export class Config {
     // (see queueSessionRegistryWrite): a sidecar failure on the
     // project filesystem must neither skip the patch nor hang `/cd` on
     // the HOME write. The failure domains are independent.
-    const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
-    this.queueRuntimeStatusWrite(async () => {
-      await writeRuntimeStatus(sidecarPath, {
-        sessionId,
-        workDir,
-        qwenVersion: this.cliVersion ?? null,
+    if (this.runtimeStatusEnabled) {
+      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
+      this.queueRuntimeStatusWrite(async () => {
+        await writeRuntimeStatus(sidecarPath, {
+          sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        });
       });
-      this.markRuntimeStatusEnabled();
-    });
+    }
     if (this.sessionRegistryActive) {
       this.queueSessionRegistryWrite(async () => {
         // The registry's DIRECTORY column is how a user tells two live
@@ -5682,23 +5651,14 @@ export class Config {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     return [
-      {
-        from: path.join(oldChatsDir, `${this.sessionId}.jsonl`),
-        to: path.join(newChatsDir, `${this.sessionId}.jsonl`),
-      },
-      {
-        from: oldStorage.getRuntimeStatusPath(this.sessionId),
-        to: newStorage.getRuntimeStatusPath(this.sessionId),
-      },
-      {
-        from: path.join(oldChatsDir, `${this.sessionId}.worktree.json`),
-        to: path.join(newChatsDir, `${this.sessionId}.worktree.json`),
-      },
-      {
-        from: path.join(oldChatsDir, `${this.sessionId}.pr.json`),
-        to: path.join(newChatsDir, `${this.sessionId}.pr.json`),
-      },
-    ];
+      `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
+      `${this.sessionId}.worktree.json`,
+      `${this.sessionId}.pr.json`,
+    ].map((fileName) => ({
+      from: path.join(oldChatsDir, fileName),
+      to: path.join(newChatsDir, fileName),
+    }));
   }
 
   private moveFile(from: string, to: string): void {
@@ -6061,37 +6021,6 @@ export class Config {
       // construction (publishModelEnv), so it is released on every shutdown —
       // same daemon-mode leak rationale as the project dir above.
       unregisterSessionModel(this.sessionId);
-
-      // Demote the runtime sidecar when this Config stops serving the
-      // session, keeping dead-pid evidence for ownership checks.
-      if (this.runtimeStatusEnabled) {
-        this.runtimeStatusEnabled = false;
-        await this.flushRuntimeStatusWrites();
-        if (!this.sessionWriterHandoffRequested) {
-          try {
-            const statusPath = this.storage.getRuntimeStatusPath(
-              this.sessionId,
-            );
-            const status = await readRuntimeStatus(statusPath);
-            const currentNamespace = readPidNamespaceId();
-            if (
-              status?.pid === process.pid &&
-              status.sessionId === this.sessionId &&
-              (status.pidNamespaceId ?? null) === currentNamespace &&
-              isSameProcess(process.pid, status.procStartToken)
-            ) {
-              await writeRuntimeStatus(statusPath, {
-                sessionId: this.sessionId,
-                workDir: this.getTargetDir(),
-                pid: 0,
-                qwenVersion: this.cliVersion ?? null,
-              });
-            }
-          } catch {
-            // ignored: best-effort cleanup
-          }
-        }
-      }
 
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.rejectGoalRestoreActivation?.(

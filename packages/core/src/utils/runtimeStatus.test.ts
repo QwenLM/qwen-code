@@ -4,24 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-  readdir,
-  symlink,
-} from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readPidNamespaceId, readProcStartToken } from './process-liveness.js';
 import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
-  hasActiveRuntimeStatusClaimSync,
-  isRuntimeStatusActive,
-  readRuntimeStatusClaims,
   readRuntimeStatus,
   writeRuntimeStatus,
 } from './runtimeStatus.js';
@@ -49,183 +38,6 @@ afterEach(async () => {
 
 const targetPath = () => path.join(tmpDir, 'runtime.json');
 
-describe('runtime status discovery', () => {
-  it('discovers matching sidecars by payload session id', async () => {
-    const statusPath = path.join(tmpDir, 'abc.extra.runtime.json');
-    await writeRuntimeStatus(statusPath, {
-      sessionId: 'abc',
-      workDir: '/relocated',
-      pid: process.pid,
-    });
-    await writeRuntimeStatus(path.join(tmpDir, 'other.extra.runtime.json'), {
-      sessionId: 'other',
-      workDir: '/other',
-      pid: process.pid,
-    });
-
-    const { statuses, incomplete } = await readRuntimeStatusClaims(
-      tmpDir,
-      'abc',
-    );
-
-    expect(statuses).toHaveLength(1);
-    expect(statuses[0]?.workDir).toBe('/relocated');
-    expect(incomplete).toBe(false);
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'discovers sidecars by name even when the dirent is a symlink',
-    async () => {
-      const realPath = path.join(tmpDir, 'real.runtime.json');
-      const linkPath = path.join(tmpDir, 'abc.runtime.json');
-      await writeRuntimeStatus(realPath, {
-        sessionId: 'abc',
-        workDir: '/relocated',
-        pid: process.pid,
-      });
-      await symlink(realPath, linkPath);
-
-      const { statuses, incomplete } = await readRuntimeStatusClaims(
-        tmpDir,
-        'abc',
-      );
-
-      expect(statuses.map((status) => status.workDir)).toContain('/relocated');
-      expect(incomplete).toBe(false);
-      expect(hasActiveRuntimeStatusClaimSync(tmpDir)).toBe(true);
-    },
-  );
-
-  it('treats foreign-host claims as active keep-only evidence', async () => {
-    const claimPath = path.join(tmpDir, 'abc.runtime.json');
-    await writeRuntimeStatus(claimPath, {
-      sessionId: 'abc',
-      workDir: '/remote',
-      pid: 2_000_000_000,
-    });
-    const foreign = JSON.parse(await readFile(claimPath, 'utf8'));
-    foreign.hostname = 'another-machine.example';
-    await writeFile(claimPath, JSON.stringify(foreign));
-
-    const { statuses } = await readRuntimeStatusClaims(tmpDir, 'abc');
-    expect(statuses.some(isRuntimeStatusActive)).toBe(true);
-
-    expect(isRuntimeStatusActive({ ...statuses[0]!, pid: 0 })).toBe(false);
-  });
-
-  it.skipIf(process.platform !== 'linux')(
-    'treats claims from a different pid namespace as active keep-only evidence',
-    () => {
-      const currentNamespace = readPidNamespaceId();
-      expect(currentNamespace).not.toBeNull();
-
-      expect(
-        isRuntimeStatusActive({
-          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: 2_000_000_000,
-          sessionId: 'abc',
-          workDir: '/remote',
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace! + 1,
-          procStartToken: null,
-        }),
-      ).toBe(true);
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'treats identity-less claims as active under a namespace-aware reader',
-    () => {
-      expect(readPidNamespaceId()).not.toBeNull();
-
-      expect(
-        isRuntimeStatusActive({
-          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: 2_000_000_000,
-          sessionId: 'abc',
-          workDir: '/remote',
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: null,
-          procStartToken: null,
-        }),
-      ).toBe(true);
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'uses the proc start token for claims in the current pid namespace',
-    () => {
-      const currentNamespace = readPidNamespaceId();
-      expect(currentNamespace).not.toBeNull();
-
-      expect(
-        isRuntimeStatusActive({
-          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid,
-          sessionId: 'abc',
-          workDir: process.cwd(),
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace,
-          procStartToken: readProcStartToken(process.pid),
-        }),
-      ).toBe(true);
-      expect(
-        isRuntimeStatusActive({
-          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid,
-          sessionId: 'abc',
-          workDir: process.cwd(),
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace,
-          procStartToken: 'not-this-process:1',
-        }),
-      ).toBe(false);
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'treats a foreign boot id as active keep-only evidence',
-    () => {
-      const currentNamespace = readPidNamespaceId();
-      expect(currentNamespace).not.toBeNull();
-
-      expect(
-        isRuntimeStatusActive({
-          schemaVersion: RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid,
-          sessionId: 'abc',
-          workDir: '/remote',
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace,
-          procStartToken: '00000000-0000-0000-0000-000000000000:1',
-        }),
-      ).toBe(true);
-    },
-  );
-
-  it('treats an unreadable runtime sidecar as unknown keep-only evidence', async () => {
-    await writeRuntimeStatus(path.join(tmpDir, 'abc.runtime.json'), {
-      sessionId: 'abc',
-      workDir: '/old',
-      pid: 0,
-    });
-    await writeFile(path.join(tmpDir, 'other.runtime.json'), '{not json');
-
-    const { incomplete } = await readRuntimeStatusClaims(tmpDir, 'abc');
-    expect(incomplete).toBe(true);
-  });
-});
-
 describe('writeRuntimeStatus', () => {
   it('writes the expected fields', async () => {
     const written = await writeRuntimeStatus(targetPath(), {
@@ -245,13 +57,6 @@ describe('writeRuntimeStatus', () => {
     expect(data.hostname.length).toBeGreaterThan(0);
     expect(typeof data.started_at).toBe('number');
     expect(data.qwen_version).toBe('0.15.3');
-    expect(
-      data.pid_namespace_id === null || Number.isInteger(data.pid_namespace_id),
-    ).toBe(true);
-    expect(
-      data.proc_start_token === null ||
-        typeof data.proc_start_token === 'string',
-    ).toBe(true);
   });
 
   it('defaults pid to process.pid and qwen_version to null', async () => {
@@ -469,5 +274,35 @@ describe('clearRuntimeStatus', () => {
 
   it('does not throw on a non-existent directory', async () => {
     await clearRuntimeStatus(path.join(tmpDir, 'does-not-exist', 'r.json'));
+  });
+});
+
+describe('same-PID session swap', () => {
+  // Models the /clear, /reset, /new and /resume flow: same PID transitions
+  // from session A to session B. The old sidecar must be removed before the
+  // new one is written so external observers can't double-claim the PID.
+  it('clears the old sidecar before writing the new one', async () => {
+    const oldPath = path.join(tmpDir, 'session-a.runtime.json');
+    const newPath = path.join(tmpDir, 'session-b.runtime.json');
+    await writeRuntimeStatus(oldPath, {
+      sessionId: 'session-a',
+      workDir: '/w',
+      pid: 4242,
+      qwenVersion: '0.0.0-test',
+    });
+    expect(await readRuntimeStatus(oldPath)).not.toBeNull();
+
+    await clearRuntimeStatus(oldPath);
+    await writeRuntimeStatus(newPath, {
+      sessionId: 'session-b',
+      workDir: '/w',
+      pid: 4242,
+      qwenVersion: '0.0.0-test',
+    });
+
+    expect(await readRuntimeStatus(oldPath)).toBeNull();
+    const after = await readRuntimeStatus(newPath);
+    expect(after?.sessionId).toBe('session-b');
+    expect(after?.pid).toBe(4242);
   });
 });

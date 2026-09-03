@@ -22,10 +22,7 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
-import {
-  readRuntimeStatus,
-  readRuntimeStatusClaims,
-} from '../utils/runtimeStatus.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   SessionTranscriptDurabilityError,
@@ -38,7 +35,6 @@ import {
 } from './sessionService.js';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
-  SessionTranscriptReader,
   SessionTranscriptTooLargeError,
 } from './session-transcript-reader.js';
 import {
@@ -50,7 +46,6 @@ import { SessionTranscriptChangedError } from './session-writer-lease.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { Storage } from '../config/storage.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 
@@ -148,16 +143,6 @@ describe('SessionService', () => {
     );
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
-    vi.mocked(readRuntimeStatusClaims).mockImplementation(
-      async (chatsDir, sessionId, options) => {
-        const statusPath = path.join(chatsDir, `${sessionId}.runtime.json`);
-        const status = await readRuntimeStatus(statusPath, options);
-        return {
-          statuses: status ? [status] : [],
-          incomplete: false,
-        };
-      },
-    );
 
     type MaintenanceInternals = {
       getSessionFilePath: (
@@ -421,29 +406,22 @@ describe('SessionService', () => {
           ? 'test-project-hash'
           : 'other-project-hash',
       );
-      vi.mocked(readRuntimeStatusClaims).mockResolvedValue({
-        statuses: [
-          {
-            schemaVersion: 1,
-            pid: 123,
-            sessionId: sessionIdA,
-            workDir: '/test/project/root',
-            hostname: 'host',
-            startedAt: 1,
-            qwenVersion: null,
-          },
-        ],
-        incomplete: false,
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
       });
       const controller = new AbortController();
 
       await sessionService.listSessions({ signal: controller.signal });
 
-      expect(readRuntimeStatusClaims).toHaveBeenCalledWith(
-        expect.any(String),
-        sessionIdA,
-        { signal: controller.signal },
-      );
+      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
+        signal: controller.signal,
+      });
     });
 
     it('should return empty list when chats directory does not exist', async () => {
@@ -1045,19 +1023,14 @@ describe('SessionService', () => {
         cwd: '/old/project',
       };
       vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
-      vi.mocked(readRuntimeStatusClaims).mockResolvedValue({
-        statuses: [
-          {
-            schemaVersion: 1,
-            pid: 123,
-            sessionId: sessionIdA,
-            workDir: '/test/project/root',
-            hostname: 'host',
-            startedAt: 1,
-            qwenVersion: null,
-          },
-        ],
-        incomplete: false,
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'
@@ -1094,56 +1067,6 @@ describe('SessionService', () => {
   });
 
   describe('loadSession', () => {
-    it('claims the project entry before reading an active transcript', async () => {
-      const callOrder: string[] = [];
-      vi.spyOn(
-        Storage.prototype,
-        'runWithProjectDirReadClaim',
-      ).mockImplementation(async (operation) => {
-        callOrder.push('claim');
-        return operation();
-      });
-      vi.mocked(jsonl.read).mockImplementation(async () => {
-        callOrder.push('read');
-        return [recordB1, recordB2];
-      });
-
-      await sessionService.loadSession(sessionIdB);
-
-      expect(callOrder).toEqual(['claim', 'read']);
-    });
-
-    it('claims the project entry before restore projection reads', async () => {
-      const callOrder: string[] = [];
-      vi.spyOn(
-        Storage.prototype,
-        'runWithProjectDirReadClaim',
-      ).mockImplementation(async (operation) => {
-        callOrder.push('claim');
-        return operation();
-      });
-      vi.spyOn(
-        SessionTranscriptReader.prototype,
-        'readRestoreProjection',
-      ).mockImplementation(async () => {
-        callOrder.push('restore');
-        return undefined;
-      });
-      vi.spyOn(
-        SessionTranscriptReader.prototype,
-        'readLiveRestoreProjection',
-      ).mockImplementation(async () => {
-        callOrder.push('live');
-        return undefined;
-      });
-
-      const options = { replay: { kind: 'none' as const } };
-      await sessionService.readRestoreProjection(sessionIdB, options);
-      await sessionService.readLiveRestoreProjection(sessionIdB, options);
-
-      expect(callOrder).toEqual(['claim', 'restore', 'claim', 'live']);
-    });
-
     it('should load a session by id and reconstruct history', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({

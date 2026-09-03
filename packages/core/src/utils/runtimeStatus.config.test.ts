@@ -5,17 +5,18 @@
  *
  * Integration coverage for the runtime.json sidecar wiring through
  * Config.startNewSession(). The unit tests in runtimeStatus.test.ts
- * exercise the module in isolation; this file pins that /clear,
- * /reset, /new and /resume move the sidecar to the new session.
+ * exercise the module in isolation; this file pins the contract that
+ * /clear, /reset, /new and /resume — all of which flow through
+ * startNewSession() — actually drive the sidecar swap, and only when
+ * the interactive UI bootstrap has flipped runtimeStatusEnabled on.
  */
 
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import * as runtimeStatus from './runtimeStatus.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtimeStatus.js';
 import {
   listLiveSessions,
@@ -73,11 +74,37 @@ async function waitFor<T>(
 }
 
 describe('Config.startNewSession runtime.json swap', () => {
-  it('clears the old sidecar and writes a new one when enabled', async () => {
+  it('leaves sibling sidecars alone when this process did not bootstrap one', async () => {
     const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
 
+    // Pretend a *different* process owns this session id and wrote its
+    // own sidecar (e.g. a long-lived shell). A non-interactive `/clear`
+    // in our process must not delete it.
+    const aPath = config.storage.getRuntimeStatusPath(sessionA);
+    await writeRuntimeStatus(aPath, {
+      sessionId: sessionA,
+      workDir: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+
+    config.startNewSession(sessionB);
+    // Drain microtasks + any in-flight I/O the IIFE could have queued.
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(await readRuntimeStatus(aPath)).not.toBeNull();
+    const bPath = config.storage.getRuntimeStatusPath(sessionB);
+    expect(await readRuntimeStatus(bPath)).toBeNull();
+  });
+
+  it('clears the old sidecar and writes a new one when this process owns it', async () => {
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const config = makeConfig(sessionA);
+
+    // Mimic what startInteractiveUI() does on launch: write the initial
+    // sidecar, then mark this Config as the owner.
     const aPath = config.storage.getRuntimeStatusPath(sessionA);
     await writeRuntimeStatus(aPath, {
       sessionId: sessionA,
@@ -94,11 +121,7 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(after!.sessionId).toBe(sessionB);
     expect(after!.pid).toBe(process.pid);
 
-    const released = await waitFor(async () => {
-      const s = await readRuntimeStatus(aPath);
-      return s === null ? { cleared: true } : null;
-    });
-    expect(released?.cleared).toBe(true);
+    expect(await readRuntimeStatus(aPath)).toBeNull();
   });
 
   it('skips the swap when the session id does not change', async () => {
@@ -127,49 +150,8 @@ describe('Config.startNewSession runtime.json swap', () => {
     const chatsDir = path.dirname(aPath);
     const entries = await readdir(chatsDir);
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
-      `${sessionA}.${process.pid}.runtime.json`,
+      `${sessionA}.runtime.json`,
     ]);
-  });
-
-  it('clears an intermediate healed sidecar during queued transitions', async () => {
-    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
-    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
-    const sessionC = 'cccccccc-1111-2222-3333-cccccccccccc';
-    const config = makeConfig(sessionA);
-    const actualWriteRuntimeStatus = writeRuntimeStatus;
-    let firstWriteStarted!: () => void;
-    let finishFirstWrite!: () => void;
-    const firstWriteStartedPromise = new Promise<void>((resolve) => {
-      firstWriteStarted = resolve;
-    });
-    const finishFirstWritePromise = new Promise<void>((resolve) => {
-      finishFirstWrite = resolve;
-    });
-    const writeSpy = vi
-      .spyOn(runtimeStatus, 'writeRuntimeStatus')
-      .mockImplementation(async (filePath, fields) => {
-        if (fields.sessionId === sessionB) {
-          firstWriteStarted();
-          await finishFirstWritePromise;
-        }
-        return actualWriteRuntimeStatus(filePath, fields);
-      });
-
-    config.startNewSession(sessionB);
-    await firstWriteStartedPromise;
-    config.startNewSession(sessionC);
-    finishFirstWrite();
-
-    const cPath = config.storage.getRuntimeStatusPath(sessionC);
-    const finalStatus = await waitFor(() => readRuntimeStatus(cPath));
-    expect(finalStatus?.sessionId).toBe(sessionC);
-
-    const entries = await readdir(path.dirname(cPath));
-    expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
-      `${sessionC}.${process.pid}.runtime.json`,
-    ]);
-
-    writeSpy.mockRestore();
   });
 });
 
@@ -259,21 +241,10 @@ describe('Config.startNewSession session-registry patch', () => {
 });
 
 describe('Storage.getRuntimeStatusPath', () => {
-  it('co-locates this process sidecar under <projectDir>/chats/', () => {
+  it('co-locates the sidecar under <projectDir>/chats/', () => {
     const storage = new Storage(tmpDir);
     const p = storage.getRuntimeStatusPath('abc-123');
-    expect(
-      p.endsWith(path.join('chats', `abc-123.${process.pid}.runtime.json`)),
-    ).toBe(true);
-    expect(p.startsWith(storage.getProjectDir())).toBe(true);
-  });
-
-  it('can address another pid claim for the same session', () => {
-    const storage = new Storage(tmpDir);
-    const p = storage.getRuntimeStatusPathForPid('abc-123', 12345);
-    expect(p.endsWith(path.join('chats', 'abc-123.12345.runtime.json'))).toBe(
-      true,
-    );
+    expect(p.endsWith(path.join('chats', 'abc-123.runtime.json'))).toBe(true);
     expect(p.startsWith(storage.getProjectDir())).toBe(true);
   });
 });

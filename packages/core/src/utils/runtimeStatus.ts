@@ -3,10 +3,10 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Runtime status sidecar for an active Qwen Code session.
+ * Runtime status sidecar for an active interactive Qwen Code session.
  *
  * This module writes a small JSON file alongside the session's chat log
- * while a session is alive. It exists so that **external**
+ * while an interactive session is alive. It exists so that **external**
  * tools (terminal multiplexers, tab managers, IDE integrations,
  * observability daemons) can answer the question:
  *
@@ -19,11 +19,15 @@
  * cross-platform signal.
  *
  * Lifecycle:
- * - Written per process on session start (clean launch or resume) at
- *   `<sessionId>.<pid>.runtime.json`.
- * - Demoted to `pid: 0` when the same PID stops serving the recorded
- *   session. Crashed processes skip demotion; a liveness check is
- *   sufficient there.
+ * - Written on session start (clean launch or resume); the resume case
+ *   atomically overwrites whatever the previous PID wrote.
+ * - **Not** deleted on clean `/quit` or on crash. From an external
+ *   observer's standpoint the recorded PID no longer exists in either
+ *   case, so a liveness check is sufficient and an explicit cleanup
+ *   adds nothing.
+ * - `clearRuntimeStatus` exists for the narrow case where the same PID
+ *   keeps running while no longer serving the recorded session
+ *   (e.g. a hypothetical future mode-switch). Not currently invoked.
  *
  * The file is written via `atomicWriteJSON` (write-to-temp + rename,
  * with in-place fallback when ownership differs).
@@ -31,18 +35,10 @@
  * unknown fields as forward-compatible additions.
  */
 
-import * as syncFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isNodeError } from './errors.js';
-import {
-  isPidAlive,
-  isSameProcess,
-  readLocalBootId,
-  readPidNamespaceId,
-  readProcStartToken,
-} from './process-liveness.js';
+import { atomicWriteJSON } from './atomicFileWrite.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -56,8 +52,6 @@ export interface RuntimeStatus {
   /** Epoch seconds (with sub-second precision). Matches kimi-cli's format. */
   startedAt: number;
   qwenVersion: string | null;
-  pidNamespaceId?: number | null;
-  procStartToken?: string | null;
 }
 
 /**
@@ -73,8 +67,6 @@ interface RuntimeStatusOnDisk {
   hostname: string;
   started_at: number;
   qwen_version: string | null;
-  pid_namespace_id?: number | null;
-  proc_start_token?: string | null;
 }
 
 export interface WriteRuntimeStatusFields {
@@ -84,23 +76,6 @@ export interface WriteRuntimeStatusFields {
   pid?: number;
   /** Defaults to `null`. Pass the value of `getCliVersion()`. */
   qwenVersion?: string | null;
-}
-
-function createRuntimeStatusPayload(
-  fields: WriteRuntimeStatusFields,
-): RuntimeStatusOnDisk {
-  const pid = fields.pid ?? process.pid;
-  return {
-    schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-    pid,
-    session_id: fields.sessionId,
-    work_dir: fields.workDir,
-    hostname: os.hostname(),
-    started_at: Date.now() / 1000,
-    qwen_version: fields.qwenVersion ?? null,
-    pid_namespace_id: readPidNamespaceId(),
-    proc_start_token: readProcStartToken(pid),
-  };
 }
 
 /**
@@ -114,9 +89,18 @@ export async function writeRuntimeStatus(
   filePath: string,
   fields: WriteRuntimeStatusFields,
 ): Promise<string> {
+  const payload: RuntimeStatusOnDisk = {
+    schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+    pid: fields.pid ?? process.pid,
+    session_id: fields.sessionId,
+    work_dir: fields.workDir,
+    hostname: os.hostname(),
+    started_at: Date.now() / 1000,
+    qwen_version: fields.qwenVersion ?? null,
+  };
+
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const { atomicWriteJSON } = await import('./atomicFileWrite.js');
-  await atomicWriteJSON(filePath, createRuntimeStatusPayload(fields));
+  await atomicWriteJSON(filePath, payload);
   return filePath;
 }
 
@@ -161,110 +145,6 @@ export async function readRuntimeStatus(
   }
   options.signal?.throwIfAborted();
 
-  return parseRuntimeStatus(data);
-}
-
-/** Read every runtime sidecar for `sessionId` in one chats directory. */
-export async function readRuntimeStatusClaims(
-  chatsDir: string,
-  sessionId: string,
-  options: { signal?: AbortSignal } = {},
-): Promise<{ statuses: RuntimeStatus[]; incomplete: boolean }> {
-  let entries: syncFs.Dirent[];
-  try {
-    options.signal?.throwIfAborted();
-    entries = await fs.readdir(chatsDir, { withFileTypes: true });
-  } catch (error) {
-    options.signal?.throwIfAborted();
-    if (isNodeError(error) && error.code === 'ENOENT') {
-      return { statuses: [], incomplete: false };
-    }
-    return { statuses: [], incomplete: true };
-  }
-
-  const statuses: RuntimeStatus[] = [];
-  let incomplete = false;
-  for (const entry of entries) {
-    options.signal?.throwIfAborted();
-    if (!entry.name.endsWith('.runtime.json')) continue;
-    const claimPath = path.join(chatsDir, entry.name);
-    const status = await readRuntimeStatus(claimPath, options);
-    if (status === null) {
-      incomplete = true;
-      continue;
-    }
-    if (status.sessionId === sessionId) {
-      statuses.push(status);
-    }
-  }
-  return { statuses, incomplete };
-}
-
-/**
- * Synchronous cleanup predicate. Any active local or foreign-host sidecar
- * keeps the entry. `maxAgeMs` is used only by the sweep's early heuristic;
- * its final destructive gate calls without an age limit.
- */
-export function hasActiveRuntimeStatusClaimSync(
-  chatsDir: string,
-  maxAgeMs?: number,
-): boolean {
-  let entries: syncFs.Dirent[];
-  try {
-    entries = syncFs.readdirSync(chatsDir, { withFileTypes: true });
-  } catch (error) {
-    return !(isNodeError(error) && error.code === 'ENOENT');
-  }
-  for (const entry of entries) {
-    if (!entry.name.endsWith('.runtime.json')) continue;
-    const claimPath = path.join(chatsDir, entry.name);
-    try {
-      if (
-        maxAgeMs !== undefined &&
-        Date.now() - syncFs.statSync(claimPath).mtimeMs > maxAgeMs
-      ) {
-        continue;
-      }
-      const status = parseRuntimeStatus(
-        JSON.parse(syncFs.readFileSync(claimPath, 'utf8')),
-      );
-      if (status === null || isRuntimeStatusActive(status)) return true;
-    } catch {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
-  if (status.pid <= 0) return false;
-  if (status.hostname !== os.hostname()) return true;
-  const currentNamespace = readPidNamespaceId();
-  if ((status.pidNamespaceId != null) !== (currentNamespace != null)) {
-    return true;
-  }
-  if (status.pidNamespaceId == null && status.procStartToken != null) {
-    return true;
-  }
-  if (status.pidNamespaceId != null && currentNamespace != null) {
-    if (status.pidNamespaceId !== currentNamespace) return true;
-    if (hasForeignOrUnverifiableBootId(status.procStartToken)) return true;
-    return isSameProcess(status.pid, status.procStartToken);
-  }
-  return isPidAlive(status.pid);
-}
-
-function hasForeignOrUnverifiableBootId(
-  procStartToken: string | null | undefined,
-): boolean {
-  if (procStartToken == null) return false;
-  const match = /^([0-9a-f-]+):\d+$/i.exec(procStartToken);
-  if (!match) return false;
-  const localBootId = readLocalBootId();
-  return localBootId === null || match[1] !== localBootId;
-}
-
-function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     return null;
   }
@@ -282,8 +162,6 @@ function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
   const hostname = obj['hostname'];
   const startedAt = obj['started_at'];
   const qwenVersion = obj['qwen_version'];
-  const pidNamespaceId = obj['pid_namespace_id'];
-  const procStartToken = obj['proc_start_token'];
 
   if (!isFiniteInteger(schemaVersion)) return null;
   if (!isFiniteInteger(pid)) return null;
@@ -303,16 +181,17 @@ function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
     hostname,
     startedAt,
     qwenVersion,
-    pidNamespaceId: isFiniteInteger(pidNamespaceId) ? pidNamespaceId : null,
-    procStartToken: typeof procStartToken === 'string' ? procStartToken : null,
   };
 }
 
 /**
  * Remove the runtime status file at `filePath`, if present.
  *
- * Called only when the **same PID continues running** but stops serving
- * the recorded session.
+ * Intentionally **not** called on `/quit` — when the qwen-code process
+ * exits, an external observer's PID-liveness check already detects the
+ * missing process, so a stale record is harmless. This helper exists
+ * for the narrow case where the **same PID continues running** but
+ * stops serving the recorded session.
  *
  * Safe to call multiple times and on paths that no longer exist;
  * `ENOENT` and other `OSError`-class failures are swallowed so cleanup

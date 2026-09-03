@@ -35,9 +35,6 @@ vi.mock('./dreamAgentPlanner.js', () => ({
   planManagedAutoMemoryDreamByAgent: vi.fn(),
 }));
 
-const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
-
 describe('managed auto-memory lifecycle integration', () => {
   let tempDir: string;
   let projectRoot: string;
@@ -48,12 +45,6 @@ describe('managed auto-memory lifecycle integration', () => {
   beforeEach(async () => {
     mgr = new MemoryManager();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-lifecycle-int-'));
-    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
-      tempDir,
-      'memory-base',
-    );
-    clearAutoMemoryRootCache();
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
     await ensureAutoMemoryScaffold(
@@ -122,17 +113,6 @@ describe('managed auto-memory lifecycle integration', () => {
 
   afterEach(async () => {
     mgr.resetExtractStateForTests();
-    clearAutoMemoryRootCache();
-    if (originalMemoryBaseDir === undefined) {
-      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-    } else {
-      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
-    }
-    if (originalMemoryLocal === undefined) {
-      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    } else {
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
-    }
     await fs.rm(tempDir, {
       recursive: true,
       force: true,

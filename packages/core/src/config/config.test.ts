@@ -30,7 +30,7 @@ import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
-import os from 'node:os';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
 import {
@@ -66,8 +66,6 @@ import {
   getSessionProjectDir,
   sessionIdContext,
 } from '../utils/sessionIdContext.js';
-import { sanitizeCwd } from '../utils/paths.js';
-import { readPidNamespaceId } from '../utils/process-liveness.js';
 import {
   createDebugLogger,
   resetDebugLoggingState,
@@ -541,7 +539,6 @@ describe('Server Config (config.ts)', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
-  const TEST_PID_NAMESPACE_ID = 12345;
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -566,16 +563,9 @@ describe('Server Config (config.ts)', () => {
     }
     (fs.existsSync as Mock).mockReturnValue(true);
     (fs.readdirSync as Mock).mockReturnValue([]);
-    (fs.statSync as Mock).mockImplementation((filePath) =>
-      filePath.toString() === '/proc/self/ns/pid'
-        ? {
-            ino: TEST_PID_NAMESPACE_ID,
-            isDirectory: vi.fn().mockReturnValue(false),
-          }
-        : {
-            isDirectory: vi.fn().mockReturnValue(true),
-          },
-    );
+    (fs.statSync as Mock).mockReturnValue({
+      isDirectory: vi.fn().mockReturnValue(true),
+    });
     vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
     (fs.mkdirSync as Mock).mockImplementation(() => undefined);
     (fs.writeFileSync as Mock).mockImplementation(() => undefined);
@@ -2417,283 +2407,6 @@ describe('Server Config (config.ts)', () => {
     it('returns the same cache instance on repeated getter calls within one Config', () => {
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
-    });
-  });
-
-  describe('initialize() runtime sidecar', () => {
-    it('writes the runtime sidecar at session establishment for every process kind', async () => {
-      const config = new Config({ ...baseParams, chatRecording: true });
-      const sessionId = config.getSessionId();
-      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(statusPath);
-
-      await config.initialize();
-
-      // The orphan sweep's pid-liveness gate reads only these sidecars;
-      // without this sidecar a headless/ACP/SDK/serve session has no
-      // liveness proof and is judged dead from file age alone.
-      expect(writeSpy).toHaveBeenCalledWith(
-        statusPath,
-        expect.objectContaining({
-          sessionId,
-          workDir: config.getTargetDir(),
-        }),
-      );
-
-      writeSpy.mockRestore();
-    });
-
-    it('writes the runtime sidecar even when chat recording is disabled', async () => {
-      const config = new Config({ ...baseParams, chatRecording: false });
-      const sessionId = config.getSessionId();
-      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(statusPath);
-
-      await config.initialize();
-
-      expect(writeSpy).toHaveBeenCalledWith(
-        statusPath,
-        expect.objectContaining({
-          sessionId,
-          workDir: config.getTargetDir(),
-        }),
-      );
-
-      writeSpy.mockRestore();
-    });
-  });
-
-  describe('shutdown() runtime sidecar cleanup', () => {
-    function mockCurrentProcessAsRunning(): void {
-      (fs.readFileSync as Mock).mockImplementation((filePath) =>
-        filePath.toString() === `/proc/${process.pid}/stat`
-          ? `${process.pid} (qwen) S`
-          : undefined,
-      );
-    }
-
-    it('demotes the sidecar so a closed session stops claiming a live pid', async () => {
-      // In multi-session processes (the `qwen serve` ACP child) the pid
-      // outlives the session; a leftover live claim would shield the
-      // closed session's entry from the sweep forever. Keep a dead
-      // claim so worktree ownership checks can distinguish clean exit
-      // from missing evidence.
-      mockCurrentProcessAsRunning();
-      const config = new Config(baseParams);
-      const sessionId = config.getSessionId();
-      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-      const currentNamespace = readPidNamespaceId();
-      config.markRuntimeStatusEnabled(); // models the successful write
-      const readSpy = vi
-        .spyOn(runtimeStatus, 'readRuntimeStatus')
-        .mockResolvedValue({
-          schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid,
-          sessionId,
-          workDir: config.getTargetDir(),
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace,
-          procStartToken: null,
-        });
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(statusPath);
-
-      await config.shutdown();
-
-      expect(writeSpy).toHaveBeenCalledWith(
-        statusPath,
-        expect.objectContaining({
-          sessionId,
-          workDir: config.getTargetDir(),
-          pid: 0,
-        }),
-      );
-
-      readSpy.mockRestore();
-      writeSpy.mockRestore();
-    });
-
-    it('does not demote a sidecar claimed by another process', async () => {
-      const config = new Config(baseParams);
-      const sessionId = config.getSessionId();
-      const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-      config.markRuntimeStatusEnabled();
-      const readSpy = vi
-        .spyOn(runtimeStatus, 'readRuntimeStatus')
-        .mockResolvedValue({
-          schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid + 1,
-          sessionId,
-          workDir: config.getTargetDir(),
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: null,
-          procStartToken: null,
-        });
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(statusPath);
-
-      await config.shutdown();
-
-      expect(readSpy).toHaveBeenCalledWith(statusPath);
-      expect(writeSpy).not.toHaveBeenCalled();
-
-      readSpy.mockRestore();
-      writeSpy.mockRestore();
-    });
-
-    it.skipIf(process.platform !== 'linux')(
-      'does not demote an equal-pid sidecar from another pid namespace',
-      async () => {
-        const currentNamespace = readPidNamespaceId();
-        expect(currentNamespace).not.toBeNull();
-        const config = new Config(baseParams);
-        const sessionId = config.getSessionId();
-        const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-        config.markRuntimeStatusEnabled();
-        const readSpy = vi
-          .spyOn(runtimeStatus, 'readRuntimeStatus')
-          .mockResolvedValue({
-            schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-            pid: process.pid,
-            sessionId,
-            workDir: config.getTargetDir(),
-            hostname: os.hostname(),
-            startedAt: Date.now() / 1000,
-            qwenVersion: null,
-            pidNamespaceId: currentNamespace! + 1,
-            procStartToken: null,
-          });
-        const writeSpy = vi
-          .spyOn(runtimeStatus, 'writeRuntimeStatus')
-          .mockResolvedValue(statusPath);
-
-        await config.shutdown();
-
-        expect(readSpy).toHaveBeenCalledWith(statusPath);
-        expect(writeSpy).not.toHaveBeenCalled();
-
-        readSpy.mockRestore();
-        writeSpy.mockRestore();
-      },
-    );
-
-    it.skipIf(process.platform === 'linux')(
-      'does not demote an equal-pid sidecar that carries a foreign pid namespace',
-      async () => {
-        expect(readPidNamespaceId()).toBeNull();
-        const config = new Config(baseParams);
-        const sessionId = config.getSessionId();
-        const statusPath = config.storage.getRuntimeStatusPath(sessionId);
-        config.markRuntimeStatusEnabled();
-        const readSpy = vi
-          .spyOn(runtimeStatus, 'readRuntimeStatus')
-          .mockResolvedValue({
-            schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-            pid: process.pid,
-            sessionId,
-            workDir: config.getTargetDir(),
-            hostname: os.hostname(),
-            startedAt: Date.now() / 1000,
-            qwenVersion: null,
-            pidNamespaceId: 1,
-            procStartToken: null,
-          });
-        const writeSpy = vi
-          .spyOn(runtimeStatus, 'writeRuntimeStatus')
-          .mockResolvedValue(statusPath);
-
-        await config.shutdown();
-
-        expect(readSpy).toHaveBeenCalledWith(statusPath);
-        expect(writeSpy).not.toHaveBeenCalled();
-
-        readSpy.mockRestore();
-        writeSpy.mockRestore();
-      },
-    );
-
-    it('leaves sibling same-session sidecars intact when shutting down', async () => {
-      mockCurrentProcessAsRunning();
-      const config = new Config(baseParams);
-      const sessionId = config.getSessionId();
-      const ownStatusPath = config.storage.getRuntimeStatusPath(sessionId);
-      const currentNamespace = readPidNamespaceId();
-      const siblingStatusPath = config.storage.getRuntimeStatusPathForPid(
-        sessionId,
-        process.pid + 1,
-      );
-      config.markRuntimeStatusEnabled();
-      await runtimeStatus.writeRuntimeStatus(siblingStatusPath, {
-        sessionId,
-        workDir: config.getTargetDir(),
-        pid: process.pid + 1,
-        qwenVersion: null,
-      });
-      const readSpy = vi
-        .spyOn(runtimeStatus, 'readRuntimeStatus')
-        .mockResolvedValue({
-          schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-          pid: process.pid,
-          sessionId,
-          workDir: config.getTargetDir(),
-          hostname: os.hostname(),
-          startedAt: Date.now() / 1000,
-          qwenVersion: null,
-          pidNamespaceId: currentNamespace,
-          procStartToken: null,
-        });
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue(ownStatusPath);
-
-      await config.shutdown();
-
-      expect(readSpy).toHaveBeenCalledWith(ownStatusPath);
-      expect(writeSpy).toHaveBeenCalledWith(
-        ownStatusPath,
-        expect.objectContaining({ pid: 0, sessionId }),
-      );
-      expect(writeSpy).not.toHaveBeenCalledWith(
-        siblingStatusPath,
-        expect.anything(),
-      );
-
-      readSpy.mockRestore();
-      writeSpy.mockRestore();
-    });
-
-    it('keeps the sidecar when a session-writer handoff was requested', async () => {
-      // The successor resumes from this very entry; its own sidecar write
-      // lands at initializeOnce.
-      const config = new Config(baseParams);
-      config.markRuntimeStatusEnabled();
-      (
-        config as unknown as { sessionWriterHandoffRequested: boolean }
-      ).sessionWriterHandoffRequested = true;
-      const clearSpy = vi
-        .spyOn(runtimeStatus, 'clearRuntimeStatus')
-        .mockResolvedValue(undefined);
-      const writeSpy = vi
-        .spyOn(runtimeStatus, 'writeRuntimeStatus')
-        .mockResolvedValue('');
-
-      await config.shutdown();
-
-      expect(clearSpy).not.toHaveBeenCalled();
-      expect(writeSpy).not.toHaveBeenCalled();
-
-      clearSpy.mockRestore();
-      writeSpy.mockRestore();
     });
   });
 
@@ -4602,9 +4315,8 @@ describe('Server Config (config.ts)', () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
       const runtimeBaseDir = path.join(root, 'runtime');
       const projectDir = path.join(root, 'project');
-      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
       await mkdir(projectDir, { recursive: true });
-      process.env['QWEN_RUNTIME_DIR'] = runtimeBaseDir;
+      Storage.setRuntimeBaseDir(runtimeBaseDir);
       const config = new Config({
         ...baseParams,
         sessionId: 'pending-baseline',
@@ -4689,11 +4401,6 @@ describe('Server Config (config.ts)', () => {
         releaseRead();
         read.mockRestore();
         Storage.setRuntimeBaseDir(null);
-        if (previousRuntimeDir === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-        }
         await rm(root, { recursive: true, force: true });
       }
     });
@@ -8161,15 +7868,20 @@ describe('Server Config (config.ts)', () => {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
-    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    config.markRuntimeStatusEnabled();
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
     const oldWorktreeSessionPath = path.join(
       oldChatsDir,
       `${sessionId}.worktree.json`,
     );
     const oldPrSessionPath = path.join(oldChatsDir, `${sessionId}.pr.json`);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
-    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
     const newWorktreeSessionPath = path.join(
       newChatsDir,
       `${sessionId}.worktree.json`,
@@ -8212,32 +7924,6 @@ describe('Server Config (config.ts)', () => {
       newPrSessionPath,
     );
     expect(config.getTranscriptPath()).toBe(newTranscriptPath);
-
-    chdirSpy.mockRestore();
-    cwdSpy.mockRestore();
-  });
-
-  it('relocateWorkingDirectory moves the canonical runtime sidecar', async () => {
-    const config = new Config(baseParams);
-    const sessionId = config.getSessionId();
-    const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(config.getTargetDir());
-    const newStorage = new Storage(newDir);
-    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
-    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
-    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
-      const checked = pathToCheck.toString();
-      return checked === newDir || checked === oldRuntimeStatusPath;
-    });
-
-    await config.relocateWorkingDirectory(newDir);
-
-    expect(fs.renameSync).toHaveBeenCalledWith(
-      oldRuntimeStatusPath,
-      newRuntimeStatusPath,
-    );
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -8309,7 +7995,7 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
-  it('relocateWorkingDirectory should heal the sidecar when the startup write failed', async () => {
+  it('relocateWorkingDirectory should patch the registry even when the sidecar write failed at startup', async () => {
     // Mirror of the startNewSession divergence pin: registration writes
     // to the global dir, the sidecar to the project's chats/ dir —
     // independent failure domains, so the registered-but-sidecar-off
@@ -8342,14 +8028,7 @@ describe('Server Config (config.ts)', () => {
         name: sessionRegistry.deriveSessionName(newDir, sessionId),
       }),
     );
-    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(
-      new Storage(newDir).getRuntimeStatusPath(sessionId),
-      {
-        sessionId,
-        workDir: newDir,
-        qwenVersion: null,
-      },
-    );
+    expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();
@@ -8429,55 +8108,6 @@ describe('Server Config (config.ts)', () => {
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();
-  });
-
-  it('drains a pending session sidecar write before demoting it at shutdown', async () => {
-    (fs.readFileSync as Mock).mockImplementation((filePath) =>
-      filePath.toString() === `/proc/${process.pid}/stat`
-        ? `${process.pid} (qwen) S`
-        : undefined,
-    );
-    const config = new Config(baseParams);
-    config.markRuntimeStatusEnabled();
-    let finishWrite!: () => void;
-    const pendingWrite = new Promise<string>((resolve) => {
-      finishWrite = () => resolve('');
-    });
-    const writeSpy = vi
-      .spyOn(runtimeStatus, 'writeRuntimeStatus')
-      .mockReturnValue(pendingWrite);
-    const readSpy = vi
-      .spyOn(runtimeStatus, 'readRuntimeStatus')
-      .mockResolvedValue({
-        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: process.pid,
-        sessionId: 'replacement-session',
-        workDir: config.getTargetDir(),
-        hostname: os.hostname(),
-        startedAt: Date.now() / 1000,
-        qwenVersion: null,
-        pidNamespaceId: readPidNamespaceId(),
-        procStartToken: null,
-      });
-
-    const newSessionId = config.startNewSession('replacement-session');
-    const newPath = config.storage.getRuntimeStatusPath(newSessionId);
-    const shutdown = config.shutdown();
-    await vi.waitFor(() => expect(writeSpy).toHaveBeenCalled());
-    expect(writeSpy).not.toHaveBeenCalledWith(
-      newPath,
-      expect.objectContaining({ pid: 0 }),
-    );
-
-    finishWrite();
-    await shutdown;
-
-    expect(writeSpy).toHaveBeenCalledWith(
-      newPath,
-      expect.objectContaining({ pid: 0 }),
-    );
-    readSpy.mockRestore();
-    writeSpy.mockRestore();
   });
 
   it('serializes pending registration, transitions, and unregister', async () => {
@@ -8751,10 +8381,15 @@ describe('Server Config (config.ts)', () => {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
-    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    config.markRuntimeStatusEnabled();
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
-    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
     const moveError = new Error('move failed');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
@@ -8805,7 +8440,6 @@ describe('Server Config (config.ts)', () => {
     const oldStorage = new Storage(oldDir);
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
-    config.markRuntimeStatusEnabled();
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
     const cleanupError = new Error('cleanup failed');
     const exdevError = Object.assign(new Error('cross device'), {
@@ -9182,6 +8816,25 @@ describe('Server Config (config.ts)', () => {
     expect(directories).toContain('/path/to/dir2');
   });
 
+  it('schedules orphan project cleanup after initialization', async () => {
+    const cleanup = vi
+      .spyOn(Storage.prototype, 'cleanOrphanProjectDirs')
+      .mockReturnValue({
+        removed: [],
+        errors: [],
+      });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      cleanup.mockClear();
+      const config = new Config(baseParams);
+      await config.initialize();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(cleanup).toHaveBeenCalledOnce();
+    } finally {
+      cleanup.mockRestore();
+    }
+  });
+
   it('Config constructor should set telemetry to true when provided as true', () => {
     const paramsWithTelemetry: ConfigParameters = {
       ...baseParams,
@@ -9230,40 +8883,6 @@ describe('Server Config (config.ts)', () => {
     await config.shutdown();
 
     expect(shutdownTelemetry).not.toHaveBeenCalled();
-  });
-
-  describe('Config startup orphan-project sweep wiring (issue #7906)', () => {
-    it('schedules cleanOrphanProjectDirs with the project id', async () => {
-      const sweepSpy = vi
-        .spyOn(Storage, 'cleanOrphanProjectDirs')
-        .mockResolvedValue({ removed: [], errors: [] });
-      try {
-        const config = new Config(baseParams);
-        await config.initialize();
-        // The sweep runs on setImmediate; flushing one tick guarantees it
-        // already fired (immediates run FIFO).
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(sweepSpy).toHaveBeenCalledWith(
-          sanitizeCwd(config.storage.getProjectRoot()),
-        );
-      } finally {
-        sweepSpy.mockRestore();
-      }
-    });
-
-    it('initializes successfully even when the sweep rejects', async () => {
-      const sweepSpy = vi
-        .spyOn(Storage, 'cleanOrphanProjectDirs')
-        .mockRejectedValue(new Error('sweep exploded'));
-      try {
-        const config = new Config(baseParams);
-        await expect(config.initialize()).resolves.not.toThrow();
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(sweepSpy).toHaveBeenCalled();
-      } finally {
-        sweepSpy.mockRestore();
-      }
-    });
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {

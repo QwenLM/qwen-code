@@ -19,10 +19,7 @@ import { getProjectHash } from '../utils/paths.js';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import {
-  readRuntimeStatus,
-  readRuntimeStatusClaims,
-} from '../utils/runtimeStatus.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
@@ -122,17 +119,6 @@ describe('SessionService - rename and custom title', () => {
       }),
     );
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
-    vi.mocked(readRuntimeStatus).mockResolvedValue(null);
-    vi.mocked(readRuntimeStatusClaims).mockImplementation(
-      async (chatsDir, sessionId, options) => {
-        const statusPath = path.join(chatsDir, `${sessionId}.runtime.json`);
-        const status = await readRuntimeStatus(statusPath, options);
-        return {
-          statuses: status ? [status] : [],
-          incomplete: false,
-        };
-      },
-    );
   });
 
   afterEach(() => {

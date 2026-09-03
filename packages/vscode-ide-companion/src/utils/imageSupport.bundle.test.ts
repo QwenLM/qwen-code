@@ -48,5 +48,5 @@ describe('imageSupport browser bundling', () => {
 
     expect(output).not.toContain('@qwen-code/qwen-code-core');
     expect(output).not.toContain('tokenLimits.js');
-  }, 15_000);
+  });
 });

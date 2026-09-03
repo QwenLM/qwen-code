@@ -12,10 +12,10 @@ import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { glob } from 'glob';
 import {
-  type LanguageDefinition,
+  MUST_TRANSLATE_KEYS,
   SUPPORTED_LANGUAGES,
-} from '../packages/cli/src/i18n/languages.js';
-import { MUST_TRANSLATE_KEYS } from '../packages/cli/src/i18n/mustTranslateKeys.js';
+} from '../packages/cli/src/i18n/index.js';
+import type { LanguageDefinition } from '../packages/cli/src/i18n/languages.js';
 import {
   getTranslationModuleExport,
   isTranslationDict,

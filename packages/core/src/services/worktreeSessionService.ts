@@ -5,14 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
-import {
-  isRuntimeStatusActive,
-  readRuntimeStatusClaims,
-} from '../utils/runtimeStatus.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const RUNTIME_STATUS_SCAN_SKIP_DIRS = new Set([
@@ -158,13 +156,15 @@ export async function isSessionRuntimeActive(
 
   for (const runtimeBase of runtimeBases) {
     for (const projectRoot of roots) {
-      const chatsDir = await Storage.runWithRuntimeBaseDir(
+      const statusPath = await Storage.runWithRuntimeBaseDir(
         runtimeBase,
         undefined,
-        async () =>
-          path.join(new Storage(projectRoot).getProjectDir(), 'chats'),
+        async () => new Storage(projectRoot).getRuntimeStatusPath(sessionId),
       );
-      const statusState = await getRuntimeStatusState(chatsDir, sessionId);
+      const statusState = await getRuntimeStatusPathState(
+        statusPath,
+        sessionId,
+      );
       if (statusState === 'active') {
         return true;
       }
@@ -225,8 +225,13 @@ async function getRuntimeStatusStateInBase(
     if (!entry.isDirectory()) {
       continue;
     }
-    const chatsDir = path.join(projectsDir, entry.name, 'chats');
-    const statusState = await getRuntimeStatusState(chatsDir, sessionId);
+    const statusPath = path.join(
+      projectsDir,
+      entry.name,
+      'chats',
+      `${sessionId}.runtime.json`,
+    );
+    const statusState = await getRuntimeStatusPathState(statusPath, sessionId);
     if (statusState === 'active') {
       return 'active';
     }
@@ -236,18 +241,6 @@ async function getRuntimeStatusStateInBase(
 }
 
 type RuntimeStatusScanResult = 'active' | 'dead' | 'not-found' | 'incomplete';
-
-async function getRuntimeStatusState(
-  chatsDir: string,
-  sessionId: string,
-): Promise<RuntimeStatusState> {
-  const { statuses, incomplete } = await readRuntimeStatusClaims(
-    chatsDir,
-    sessionId,
-  );
-  if (incomplete || statuses.some(isRuntimeStatusActive)) return 'active';
-  return statuses.length > 0 ? 'dead' : 'missing';
-}
 
 async function scanRuntimeStatusUnderRoots(
   roots: readonly string[],
@@ -328,6 +321,30 @@ function shouldSkipRuntimeStatusScanDir(name: string, parent: string): boolean {
     return true;
   }
   return name === 'worktrees' && path.basename(parent) === '.qwen';
+}
+
+async function getRuntimeStatusPathState(
+  statusPath: string,
+  sessionId: string,
+): Promise<RuntimeStatusState> {
+  const status = await readRuntimeStatus(statusPath);
+  if (!status || status.sessionId !== sessionId) {
+    return 'missing';
+  }
+
+  if (status.hostname !== os.hostname()) {
+    return 'active';
+  }
+
+  try {
+    process.kill(status.pid, 0);
+    return 'active';
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ESRCH') {
+      return 'dead';
+    }
+    return 'active';
+  }
 }
 
 function uniquePaths(paths: readonly string[]): string[] {

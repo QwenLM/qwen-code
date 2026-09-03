@@ -40,21 +40,14 @@ const sample: WorktreeSession = {
 
 let tmpDir: string;
 let filePath: string;
-const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
 
 beforeEach(async () => {
   fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-session-test-'));
   filePath = path.join(tmpDir, 'test.worktree.json');
-  process.env['QWEN_RUNTIME_DIR'] = path.join(tmpDir, 'runtime');
 });
 
 afterEach(async () => {
-  if (originalRuntimeEnv === undefined) {
-    delete process.env['QWEN_RUNTIME_DIR'];
-  } else {
-    process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
-  }
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -186,53 +179,6 @@ describe('isSessionRuntimeActive', () => {
 
     await expect(
       isSessionRuntimeActive('owner-session', [repoRoot, worktreePath]),
-    ).resolves.toBe(true);
-  });
-
-  it('treats a demoted clean-shutdown runtime status as dead', async () => {
-    const repoRoot = path.join(tmpDir, 'repo');
-    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
-    const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
-      'owner-session',
-    );
-    await writeRuntimeStatus(statusPath, {
-      sessionId: 'owner-session',
-      workDir: repoRoot,
-      pid: process.pid,
-    });
-    await writeRuntimeStatus(statusPath, {
-      sessionId: 'owner-session',
-      workDir: repoRoot,
-      pid: 0,
-    });
-
-    await expect(
-      isSessionRuntimeActive('owner-session', repoRoot),
-    ).resolves.toBe(false);
-  });
-
-  it('keeps a session active while a matching runtime sidecar is live', async () => {
-    const repoRoot = path.join(tmpDir, 'repo');
-    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
-    const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
-      'owner-session',
-    );
-    await writeRuntimeStatus(statusPath, {
-      sessionId: 'owner-session',
-      workDir: repoRoot,
-      pid: 0,
-    });
-    await writeRuntimeStatus(
-      path.join(path.dirname(statusPath), 'owner-session.extra.runtime.json'),
-      {
-        sessionId: 'owner-session',
-        workDir: repoRoot,
-        pid: process.pid,
-      },
-    );
-
-    await expect(
-      isSessionRuntimeActive('owner-session', repoRoot),
     ).resolves.toBe(true);
   });
 

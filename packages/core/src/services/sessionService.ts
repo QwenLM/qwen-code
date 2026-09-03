@@ -38,7 +38,7 @@ import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
-import { readRuntimeStatusClaims } from '../utils/runtimeStatus.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
@@ -955,13 +955,14 @@ export class SessionService {
       }
     }
 
-    const chatsDir = path.join(this.storage.getProjectDir(), 'chats');
-    const { statuses } = signal
-      ? await readRuntimeStatusClaims(chatsDir, sessionId, { signal })
-      : await readRuntimeStatusClaims(chatsDir, sessionId);
+    const runtimeStatusPath = this.storage.getRuntimeStatusPath(sessionId);
+    const status = signal
+      ? await readRuntimeStatus(runtimeStatusPath, { signal })
+      : await readRuntimeStatus(runtimeStatusPath);
     signal?.throwIfAborted();
-    return statuses.some(
-      (status) => getProjectHash(status.workDir) === this.projectHash,
+    return (
+      status?.sessionId === sessionId &&
+      getProjectHash(status.workDir) === this.projectHash
     );
   }
 
@@ -2921,24 +2922,20 @@ export class SessionService {
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionRestoreProjection | undefined> {
-    return this.storage.runWithProjectDirReadClaim(() =>
-      this.transcriptReader.readRestoreProjection(sessionId, options, {
-        validateFirstRecord: (record) =>
-          this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
-      }),
-    );
+    return this.transcriptReader.readRestoreProjection(sessionId, options, {
+      validateFirstRecord: (record) =>
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
   }
 
   async readLiveRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionLiveRestoreProjection | undefined> {
-    return this.storage.runWithProjectDirReadClaim(() =>
-      this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
-        validateFirstRecord: (record) =>
-          this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
-      }),
-    );
+    return this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
+      validateFirstRecord: (record) =>
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
   }
 
   /**
@@ -2976,16 +2973,6 @@ export class SessionService {
   }
 
   private async loadSessionFromState(
-    sessionId: string,
-    state: SessionArchiveState,
-    stats?: fs.Stats,
-  ): Promise<ResumedSessionData | undefined> {
-    const load = () =>
-      this.loadSessionFromStateAfterClaim(sessionId, state, stats);
-    return this.storage.runWithProjectDirReadClaim(load);
-  }
-
-  private async loadSessionFromStateAfterClaim(
     sessionId: string,
     state: SessionArchiveState,
     stats?: fs.Stats,

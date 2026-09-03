@@ -1019,7 +1019,6 @@ describe('SessionMessageHandler', () => {
   });
 
   it('intercepts /export html and uses the VSCode export flow instead of sending a prompt', async () => {
-    const exportedPath = '/workspace/export.html';
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
@@ -1060,7 +1059,8 @@ describe('SessionMessageHandler', () => {
       type: 'message',
       data: expect.objectContaining({
         role: 'assistant',
-        content: `Session exported to HTML: [export.html](${pathToFileURL(exportedPath).href})`,
+        content:
+          'Session exported to HTML: [export.html](file:///workspace/export.html)',
         // The confirmation never flows through ACP transcriptUpdate; without
         // localOnly the WebShell transcript renders it nowhere.
         localOnly: true,
@@ -1318,10 +1318,9 @@ describe('SessionMessageHandler', () => {
   });
 
   it('encodes exported file links before rendering markdown', async () => {
-    const exportedPath = '/workspace/export (#1).html';
     mockExportSessionToFile.mockResolvedValue({
       filename: 'export (#1).html',
-      uri: { fsPath: exportedPath },
+      uri: { fsPath: '/workspace/export (#1).html' },
     });
 
     const agentManager = {
@@ -1357,7 +1356,8 @@ describe('SessionMessageHandler', () => {
       type: 'message',
       data: expect.objectContaining({
         role: 'assistant',
-        content: `Session exported to HTML: [export (#1).html](${pathToFileURL(exportedPath).href.replace(/\(/g, '%28').replace(/\)/g, '%29')})`,
+        content:
+          'Session exported to HTML: [export (#1).html](file:///workspace/export%20%28%231%29.html)',
       }),
     });
   });
