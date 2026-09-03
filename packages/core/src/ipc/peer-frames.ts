@@ -45,7 +45,15 @@ export type PeerMessagePriority = 'now' | 'next';
 /** Terminal states a sent message can reach on the receiving side. */
 export type PeerDeliveryStatus =
   | 'held'
+  /** A person reviewed the message and declined it. */
   | 'denied'
+  /**
+   * The receiving session's policy turns peer messages away, so no
+   * person ever saw this one. Distinct from `denied`, which is a
+   * decision: a sender that is refused should stop rather than wait for
+   * a review that will not happen.
+   */
+  | 'refused'
   | 'expired'
   | 'delivered'
   /**
@@ -198,6 +206,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     if (
       status !== 'held' &&
       status !== 'denied' &&
+      status !== 'refused' &&
       status !== 'expired' &&
       status !== 'delivered' &&
       status !== 'misaddressed'
@@ -267,6 +276,8 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your message is held for the recipient user to review before it reaches their Qwen Code session.';
     case 'denied':
       return 'The recipient declined your message; it was not delivered.';
+    case 'refused':
+      return "The recipient session does not accept messages from other sessions, so nobody saw this one. Don't re-send it; reach that session's user another way.";
     case 'expired':
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':

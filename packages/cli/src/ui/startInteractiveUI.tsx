@@ -11,6 +11,7 @@ import React from 'react';
 import {
   createDebugLogger,
   type InboundPolicy,
+  parseHeldExpiry,
   isDebugLogFileEnabled,
   registerSession,
   type Config,
@@ -451,6 +452,8 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
+          getHeldExpiryMs: () =>
+            parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),
