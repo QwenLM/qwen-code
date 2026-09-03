@@ -568,6 +568,36 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('normalizes bare quit tokens ahead of the mid-turn gate and the dispatch', async () => {
+    // ink normalizes the whole quit family where its handleFinalSubmit puts the
+    // check — before the queue — so an `exit` typed mid-response stops the stream
+    // instead of queueing behind it or reaching the model as text. The text the
+    // gate is asked about is the ordering witness: `/quit`, never `exit`.
+    const gateSeen: string[] = [];
+    mocks.state.deferGate = (text) => {
+      gateSeen.push(text);
+      const command = text.trim();
+      return command.startsWith('/') && command !== '/quit';
+    };
+    const onQuit = vi.fn();
+    const onSubmitPrompt = vi.fn();
+    renderApp({ streaming: true, onQuit, onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages: [],
+    } satisfies OpenTuiDispatchOutcome;
+
+    const tokens = ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'];
+    for (const token of tokens) await submit(token);
+
+    expect(gateSeen).toEqual(tokens.map(() => '/quit'));
+    expect(mocks.state.handledTexts).toEqual(tokens.map(() => '/quit'));
+    expect(onQuit).toHaveBeenCalledTimes(tokens.length);
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Queued/)).toBeNull();
+  });
+
   it('drains a held command whose defer verdict lands after the idle edge', async () => {
     // The gate awaits the command registry, so its verdict can land after the
     // turn it was asked about has already ended (R1-1).
