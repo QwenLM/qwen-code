@@ -237,6 +237,7 @@ import {
   useMessagesFromBlocks,
 } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
+import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -372,6 +373,7 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellSessionArtifactsChange,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
@@ -1129,6 +1131,8 @@ export interface WebShellProps {
    * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
+  /** Called with the complete Artifact snapshot after restore or change. */
+  onSessionArtifactsChange?: (change: WebShellSessionArtifactsChange) => void;
   /**
    * Called when a critical error occurs (auth failure, session gone, etc).
    * Each distinct connection error value is reported once; reporting resets
@@ -2208,6 +2212,7 @@ export function App({
   loadingPhrases,
   onAgentTasksChange,
   onTranscriptChange,
+  onSessionArtifactsChange,
   onToast,
   composerRef,
   onComposerReady,
@@ -3227,6 +3232,7 @@ export function App({
     artifacts,
     loading: artifactsLoading,
     error: artifactsError,
+    hydrated: artifactsHydrated,
   } = useSessionArtifacts();
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
@@ -3353,6 +3359,18 @@ export function App({
       ),
     [displayMessages, artifacts, connection.workspaceCwd],
   );
+  useSessionArtifactsChange({
+    sessionId: connection.sessionId,
+    ready:
+      connection.status === 'connected' &&
+      !connection.loadingTranscript &&
+      !connection.catchingUp &&
+      !artifactsLoading,
+    hydrated: artifactsHydrated,
+    artifacts,
+    artifactsByTurn,
+    onChange: onSessionArtifactsChange,
+  });
   const fileChangesByTurn = useMemo(
     () =>
       getFileChangesByTurn(

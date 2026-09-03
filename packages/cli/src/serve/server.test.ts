@@ -219,6 +219,7 @@ import {
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -5343,6 +5344,13 @@ describe('createServeApp', () => {
     });
   });
 
+  // `vi.waitFor` defaults to a 1000ms deadline, which is a developer-machine
+  // figure: on the shared pool the archive install and its settle take longer
+  // than that, and release run 33713579913 lost both of these cases with
+  // --retry=2 already on. The wait is scaffolding for the state these cases
+  // assert, never the thing under test, so it gets the room the host needs.
+  const ARCHIVE_WAIT = { timeout: 15_000 };
+
   describe('read-only status routes', () => {
     it('registers workspace permissions without settings persistence and requires a live session for writes', async () => {
       const wsRoot = await fsp.mkdtemp(
@@ -6218,7 +6226,7 @@ describe('createServeApp', () => {
             source: 'upload:DEMO.TAR.GZ',
             name: 'uploaded-ext',
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(
           /^upload:v1:[0-9a-f-]{36}:DEMO\.TAR\.GZ$/,
         );
@@ -6243,7 +6251,7 @@ describe('createServeApp', () => {
             status: 'installed',
             source: `upload:${maxLengthFilename}`,
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:/);
         expect(recordedSource.endsWith(`:${maxLengthFilename}`)).toBe(true);
         expect(localSourcePath).toMatch(/extension\.zip$/);
@@ -6589,7 +6597,10 @@ describe('createServeApp', () => {
             .send(Buffer.from('archive'));
 
         const first = await upload();
-        await vi.waitFor(() => expect(requestSetting).toBeDefined());
+        await vi.waitFor(
+          () => expect(requestSetting).toBeDefined(),
+          ARCHIVE_WAIT,
+        );
         const second = await upload();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6597,7 +6608,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
         releaseFirst?.();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6605,7 +6616,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
 
         await expect(
           requestSetting?.({
@@ -32354,7 +32365,10 @@ describe('runQwenServe', () => {
     // promptly; this assertion mainly proves the close didn't hang on the
     // live connection. Even if the connection had stayed open, the 5s
     // force-close timer would unblock us.
-    expect(elapsed).toBeLessThan(5_500);
+    // The bound must stay under the pool's 60s testTimeout or vitest — not
+    // the assertion — decides a hung close; 10x covers a force-close window
+    // stretched by host contention while a real stall still fails the timeout.
+    expectWithinLatencyBudget(elapsed, 5_500, { poolMultiplier: 10 });
     // Drain the fetch promise so vitest doesn't complain about open handles.
     try {
       const res = await sseFetch;
