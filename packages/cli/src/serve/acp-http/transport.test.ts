@@ -6547,9 +6547,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     // The guarantee is that the server CLOSES the stream (not a zombie that
     // heartbeats forever). A safety abort at 3s distinguishes "server closed"
-    // (loop ends fast) from "zombie" (only our timeout ends it).
+    // (loop ends fast) from "zombie" (only our timeout ends it); record which
+    // happened — a boolean holds on every lane, while elapsed time on the
+    // shared pool is placement noise.
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6559,8 +6565,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    // Server-initiated close arrives well under the 3s safety timeout.
-    expectWithinLatencyBudget(Date.now() - start, 1500, { poolMultiplier: 20 });
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    // Server-initiated close arrives well under the 3s safety timeout; the
+    // elapsed bound only means something off the shared pool.
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('concurrent session/close calls the bridge exactly once (no TOCTOU double-close)', async () => {
@@ -6592,7 +6601,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Subprocess ends cleanly → bridge event iterator returns done.
     bridge.queues.get('sess-1')?.end();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6602,7 +6615,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    expectWithinLatencyBudget(Date.now() - start, 1500, { poolMultiplier: 20 });
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('session-stream reconnect does NOT abort the in-flight prompt', async () => {

@@ -32349,7 +32349,10 @@ describe('runQwenServe', () => {
     // promptly; this assertion mainly proves the close didn't hang on the
     // live connection. Even if the connection had stayed open, the 5s
     // force-close timer would unblock us.
-    expectWithinLatencyBudget(elapsed, 5_500, { poolMultiplier: 20 });
+    // The bound must stay under the pool's 60s testTimeout or vitest — not
+    // the assertion — decides a hung close; 10x covers a force-close window
+    // stretched by host contention while a real stall still fails the timeout.
+    expectWithinLatencyBudget(elapsed, 5_500, { poolMultiplier: 10 });
     // Drain the fetch promise so vitest doesn't complain about open handles.
     try {
       const res = await sseFetch;
