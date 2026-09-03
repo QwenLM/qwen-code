@@ -35,8 +35,12 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   runId: string;
+  /** Tool call that launched the run. Absent on legacy snapshots. */
+  toolUseId?: string;
   /** Human-readable fallback when a workflow has no exported meta block. */
   description?: string;
+  /** Saved workflow definition name. Absent for inline and legacy runs. */
+  workflowName?: string;
   /** Prior run used by retry or rerun. Absent on legacy snapshots. */
   sourceRunId?: string;
   /** How this run was started from sourceRunId. */
@@ -72,7 +76,9 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   }
   return {
     runId: task.runId,
+    ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
+    ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
     meta: task.meta,
@@ -114,14 +120,15 @@ function safeResult(result: unknown): unknown {
  * Write a run snapshot to `<projectDir>/workflows/<runId>.json`, then prune
  * the oldest snapshots beyond `MAX_RETAINED_SNAPSHOTS`. Best-effort: a write
  * failure is logged, not thrown (persistence is a convenience, not a
- * correctness requirement).
+ * correctness requirement). Returns true when the snapshot file was written,
+ * so the caller can tell persistence apart from a swallowed failure.
  */
 export async function writeWorkflowSnapshot(
   config: Config,
   task: WorkflowTask,
-): Promise<void> {
+): Promise<boolean> {
   const storage = config.storage;
-  if (!storage) return;
+  if (!storage) return false;
   try {
     // Project BEFORE the first await: the caller captures this at
     // settlement, but in-flight dispatches keep mutating the live
@@ -136,8 +143,10 @@ export async function writeWorkflowSnapshot(
       'utf8',
     );
     await pruneSnapshots(dir);
+    return true;
   } catch (e) {
     debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    return false;
   }
 }
 
@@ -364,7 +373,9 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   return (
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
+    isOptionalString(value['toolUseId']) &&
     isOptionalString(value['description']) &&
+    isOptionalString(value['workflowName']) &&
     isOptionalString(value['sourceRunId']) &&
     (value['startMode'] === undefined ||
       value['startMode'] === 'retry' ||

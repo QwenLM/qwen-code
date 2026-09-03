@@ -61,6 +61,7 @@ import {
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowStartCancelledError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
 import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
@@ -231,6 +232,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
+    private readonly workflowName?: string,
   ) {
     super(params);
   }
@@ -361,7 +363,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   ): Promise<WorkflowToolResult> {
     const runInBackground = this.params.run_in_background === true;
     if (runInBackground && signal.aborted) {
-      return backgroundStartCancelledResult();
+      return startCancelledResult();
     }
     let handle: WorkflowRunHandle;
     try {
@@ -369,6 +371,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         config: this.config,
         signal,
         toolUseId: this.callId,
+        ...(this.workflowName ? { workflowName: this.workflowName } : {}),
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
@@ -381,8 +384,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
             : undefined,
       });
     } catch (error) {
-      if (runInBackground && signal.aborted) {
-        return backgroundStartCancelledResult();
+      // Two cancel sources reach a start before it registers: the caller's
+      // own signal (background only — a foreground start registers and
+      // settles `cancelled` instead), and a registry-side cancel
+      // (`cancelStarting`, `abortAll`) that aborts the run's controller
+      // while the caller's signal stays live, in either mode. The runner
+      // reports the latter with a typed error; both are the same outcome
+      // to the model.
+      if (
+        error instanceof WorkflowStartCancelledError ||
+        (runInBackground && signal.aborted)
+      ) {
+        return startCancelledResult();
       }
       // A script that never compiled has no run behind it, so reporting it as
       // a failed workflow would be wrong twice: it invites the model to go
@@ -502,14 +515,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // successful run. Mitigation: WorkflowTool's failure message
       // already names the error; the banner is meta-documentation
       // about a separate env knob, not run-specific guidance.
-      const display =
-        phases || logs || meta
-          ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
-              ...(meta ? { meta } : {}),
-              phases: phases ?? [],
-              logs: logs ?? [],
-            })}`
-          : `Workflow failed: ${message}`;
+      const display = `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload(
+        {
+          runId: handle.runId,
+          ...(meta ? { meta } : {}),
+          phases: phases ?? [],
+          logs: logs ?? [],
+        },
+      )}`;
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
         returnDisplay: display,
@@ -522,7 +535,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   }
 }
 
-function backgroundStartCancelledResult(): WorkflowToolResult {
+function startCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',
@@ -969,6 +982,27 @@ export class WorkflowTool extends BaseDeclarativeTool<
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
       /* canUpdateOutput */ true,
+    );
+  }
+
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
+    const validationError = this.validateToolParams(params);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+    if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+      throw new Error(
+        'WorkflowTool: session-owned background runs require an active workflow completion channel.',
+      );
+    }
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      { ...params, run_in_background: true },
+      workflowName,
     );
   }
 

@@ -8,7 +8,7 @@
     "en": "Configurable retrieval from an administrator-bound Mem0-compatible service",
     "zh": "从管理员绑定的 Mem0 兼容服务检索外部上下文"
   },
-  "version": "0.1.0",
+  "version": "0.23.0",
   "mcpServers": {
     "external-context-mem0": {
       "command": "node",

@@ -13,6 +13,8 @@ import {
   extractLastJsonStringField,
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
+  extractJsonStringFieldFromLastMatchingLine,
+  readLastMatchingLineFieldSync,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
   unescapeJsonString,
@@ -176,6 +178,426 @@ describe('sessionStorageUtils', () => {
         (_, i) => `{"customTitle":"title-${i}"}`,
       ).join('\n');
       expect(extractLastJsonStringField(lines, 'customTitle')).toBe('title-9');
+    });
+  });
+
+  describe('extractJsonStringFieldFromLastMatchingLine', () => {
+    const GOAL = '"subtype":"goal_state"';
+    const create = (objective: string) =>
+      `{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":{"objective":"${objective}"}}}}`;
+    const isGoalStateRecord = (record: unknown) =>
+      typeof record === 'object' &&
+      record !== null &&
+      (record as Record<string, unknown>)['type'] === 'system' &&
+      (record as Record<string, unknown>)['subtype'] === 'goal_state';
+    const readGoalStateObjective = (record: unknown) => {
+      if (!isGoalStateRecord(record)) {
+        return { matched: false, value: undefined };
+      }
+      const payload = (record as Record<string, unknown>)['systemPayload'];
+      return {
+        matched: true,
+        value:
+          typeof payload === 'object' && payload !== null
+            ? extractJsonStringField(JSON.stringify(payload), 'objective')
+            : undefined,
+      };
+    };
+    const nestedGoal = {
+      type: 'system',
+      subtype: 'goal_state',
+      systemPayload: {
+        snapshot: { goal: { objective: 'injected' } },
+      },
+    };
+    const nestedMarkerLine = JSON.stringify({
+      type: 'assistant',
+      functionCall: { args: nestedGoal },
+    });
+    // `/goal clear` writes `goal: null` and a `clearedGoal` order — the line
+    // carries no `objective` at all.
+    const clear =
+      '{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":null,"clearedGoal":{"goalId":"g1"}}}}';
+
+    it('reads the field from the last matching line', () => {
+      const text = [create('first'), create('second')].join('\n');
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: 'second' });
+    });
+
+    it('reports a matched line that omits the field, rather than an older value', () => {
+      const text = [create('first'), clear].join('\n');
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('reports no match when no line carries the marker', () => {
+      const text = '{"type":"user","message":"hi"}';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          text,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+
+    it('uses a complete suffix record after an earlier torn record', () => {
+      const torn = '{"type":"system","subtype":"note","text":"torn';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${torn}${clear}`,
+          GOAL,
+          'objective',
+          true,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('rejects a nested marker when the containing record does not match', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          nestedMarkerLine,
+          GOAL,
+          'objective',
+          true,
+          isGoalStateRecord,
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+
+    it('rejects a nested marker at the end of a torn containing record', () => {
+      const nestedJson = JSON.stringify(nestedGoal);
+      const torn = nestedMarkerLine.slice(
+        0,
+        nestedMarkerLine.indexOf(nestedJson) + nestedJson.length,
+      );
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          torn,
+          GOAL,
+          'objective',
+          true,
+          isGoalStateRecord,
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+
+    it('does not read a goal-shaped array element from a torn containing record', () => {
+      const nestedJson = JSON.stringify(nestedGoal);
+      const containing = JSON.stringify({
+        type: 'assistant',
+        parts: [nestedGoal],
+      });
+      const torn = containing.slice(
+        0,
+        containing.indexOf(nestedJson) + nestedJson.length,
+      );
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          torn,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('does not read a comma-positioned goal-shaped array element from a torn record', () => {
+      const nestedJson = JSON.stringify(nestedGoal);
+      const containing = JSON.stringify({
+        type: 'assistant',
+        parts: [{ type: 'text', text: 'before' }, nestedGoal],
+      });
+      const torn = containing.slice(
+        0,
+        containing.indexOf(nestedJson) + nestedJson.length,
+      );
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          torn,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('uses the newest value-returning Goal record on a glued line', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${create('real')}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: 'real' });
+    });
+
+    it('re-attributes a rejected nested marker to an earlier glued Goal record', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('real')}${nestedMarkerLine}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: 'real' });
+    });
+
+    it('does not recover an older value when the newest marker cannot be attributed', () => {
+      const torn = '{"type":"system","subtype":"note","systemPayload":';
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${torn}${clear}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('continues past a rejected marker to an older matching record', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          [create('real'), nestedMarkerLine].join('\n'),
+          GOAL,
+          'objective',
+          true,
+          isGoalStateRecord,
+        ),
+      ).toEqual({ matched: true, value: 'real' });
+    });
+
+    it('ignores a leading partial line unless told the text starts on a boundary', () => {
+      // A tail-window read starts mid-record: the marker is in view but the
+      // fields that precede it are not.
+      const partial = `"goal":{"objective":"cut off"}}}\n${create('whole')}`;
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `{"subtype":"goal_state","x":${partial}`,
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: true, value: 'whole' });
+
+      const onlyPartial = '{"snapshot":{}},"subtype":"goal_state"}\n';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          onlyPartial,
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: false, value: undefined });
+    });
+  });
+
+  describe('readLastMatchingLineFieldSync', () => {
+    const GOAL = '"subtype":"goal_state"';
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-lastline-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    const create = (objective: string) =>
+      `{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":{"objective":"${objective}"}}}}`;
+    const clear =
+      '{"type":"system","subtype":"goal_state","systemPayload":{"snapshot":{"goal":null}}}';
+    const filler = (bytes: number) =>
+      Array.from(
+        { length: Math.ceil(bytes / 100) },
+        (_, i) => `{"type":"user","message":"${'x'.repeat(80)}-${i}"}`,
+      ).join('\n');
+
+    function writeFile(name: string, lines: string[]): string {
+      const p = path.join(tmpDir, name);
+      fs.writeFileSync(p, lines.join('\n') + '\n');
+      return p;
+    }
+
+    it('returns the objective of the only goal record', () => {
+      const p = writeFile('small.jsonl', [create('Ship it')]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: 'Ship it',
+      });
+    });
+
+    it('does not resurrect a cleared objective from an earlier record', () => {
+      const p = writeFile('cleared.jsonl', [
+        create('Write the release notes'),
+        clear,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('uses the newest goal record on a glued physical line', () => {
+      const p = writeFile('glued.jsonl', [
+        `${create('Write the release notes')}${clear}`,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('recovers a clear glued after a torn goal record', () => {
+      const torn =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('torn-glued.jsonl', [`${torn}${clear}`]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('skips a crash-truncated objective record', () => {
+      const truncated =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('truncated.jsonl', [create('Ship it'), truncated]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: 'Ship it',
+      });
+    });
+
+    it('keeps a clear authoritative before a crash-truncated record', () => {
+      const truncated =
+        '{"type":"system","subtype":"goal_state","objective":"partial';
+      const p = writeFile('cleared-then-truncated.jsonl', [
+        create('Ship it'),
+        clear,
+        truncated,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('reads the clear record when it sits at EOF of a long transcript', () => {
+      const p = writeFile('long-cleared.jsonl', [
+        create('Write the migration guide'),
+        filler(LITE_READ_BUF_SIZE * 3),
+        clear,
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('does not fall back to the head window when the goal record is out of reach', () => {
+      // The clear record fell out of the tail window along with the create
+      // record. A head-window hit would resurrect the long-cleared objective.
+      const p = writeFile('out-of-reach.jsonl', [
+        create('Write the migration guide'),
+        clear,
+        filler(LITE_READ_BUF_SIZE * 3),
+      ]);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'out-of-window',
+      });
+    });
+
+    it('reports an absent record for a file with no goal line', () => {
+      const p = writeFile('none.jsonl', ['{"type":"user","message":"hi"}']);
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
+    });
+
+    it('re-reads a clear appended during the first tail read', () => {
+      const legacy = '{"type":"system","subtype":"slash_command"}';
+      const p = writeFile('grows-with-clear.jsonl', [legacy, clear]);
+      const initialSize = Buffer.byteLength(`${legacy}\n`);
+      const originalFstatSync = fs.fstatSync;
+      let fstatCalls = 0;
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+        const stats = originalFstatSync(fd);
+        if (fstatCalls++ === 0) stats.size = initialSize;
+        return stats;
+      }) as typeof fs.fstatSync);
+
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: true,
+        value: undefined,
+      });
+    });
+
+    it('reports absent when contiguous growth crosses the tail threshold', () => {
+      const initial = `${'x'.repeat(60 * 1024 - 1)}\n`;
+      const p = path.join(tmpDir, 'grows-past-window.jsonl');
+      fs.writeFileSync(p, initial + 'y'.repeat(6 * 1024));
+      const initialSize = Buffer.byteLength(initial);
+      const originalFstatSync = fs.fstatSync;
+      let fstatCalls = 0;
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+        const stats = originalFstatSync(fd);
+        if (fstatCalls++ === 0) stats.size = initialSize;
+        return stats;
+      }) as typeof fs.fstatSync);
+
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
+    });
+
+    it('reports an unreadable file rather than an absent record', () => {
+      expect(
+        readLastMatchingLineFieldSync(
+          path.join(tmpDir, 'nope.jsonl'),
+          GOAL,
+          'objective',
+        ),
+      ).toEqual({ matched: false, reason: 'unreadable' });
+    });
+
+    it('treats an empty file as an absent record', () => {
+      const p = path.join(tmpDir, 'empty.jsonl');
+      fs.writeFileSync(p, '');
+      expect(readLastMatchingLineFieldSync(p, GOAL, 'objective')).toEqual({
+        matched: false,
+        reason: 'absent',
+      });
     });
   });
 
@@ -773,4 +1195,102 @@ describe('sessionStorageUtils', () => {
       ).toEqual({ customTitle: 'new', titleSource: 'auto' });
     });
   });
+});
+
+describe('sessionStorageUtils when O_NOFOLLOW is unavailable (Windows flag set)', () => {
+  // Windows has no O_NOFOLLOW; the constant is `undefined` there and flag
+  // expressions like `(O_RDONLY | (O_NOFOLLOW ?? 0))` silently collapse to a
+  // plain open that follows symlinks (#8227). Stub the constant away to run
+  // that exact path on Linux CI and pin the compensating refusal.
+  const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+  itNoSymlink(
+    'does not read session metadata through a symlinked session file',
+    async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'session-storage-nofollow-'),
+      );
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        // sessionStorageUtils uses a DEFAULT import of node:fs, so the
+        // `default` property must carry the stubbed constants too.
+        const modified = {
+          ...actual,
+          constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        };
+        return { ...modified, default: modified };
+      });
+
+      try {
+        const secretPath = path.join(dir, 'secret.jsonl');
+        const sessionPath = path.join(dir, 'session.jsonl');
+        fs.writeFileSync(
+          secretPath,
+          '{"subtype":"custom_title","customTitle":"leaked-secret"}\n',
+        );
+        fs.symlinkSync(secretPath, sessionPath);
+
+        const { readLastJsonStringFieldSync: readFieldUnmocked } = await import(
+          './sessionStorageUtils.js'
+        );
+        expect(
+          readFieldUnmocked(sessionPath, 'customTitle', 'custom_title'),
+        ).toBeUndefined();
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itNoSymlink(
+    'does not read session metadata through a symlinked session file (multi-field)',
+    async () => {
+      // Mirror of the single-field refusal test for the plural variant,
+      // rerouted through the same helper in the same pass: a symlink
+      // planted over the session file must not leak customTitle /
+      // titleSource through readLastJsonStringFieldsSync either.
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'session-storage-nofollow-fields-'),
+      );
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        // sessionStorageUtils uses a DEFAULT import of node:fs, so the
+        // `default` property must carry the stubbed constants too.
+        const modified = {
+          ...actual,
+          constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        };
+        return { ...modified, default: modified };
+      });
+
+      try {
+        const secretPath = path.join(dir, 'secret.jsonl');
+        const sessionPath = path.join(dir, 'session.jsonl');
+        fs.writeFileSync(
+          secretPath,
+          '{"subtype":"custom_title","customTitle":"leaked-secret","titleSource":"auto"}\n',
+        );
+        fs.symlinkSync(secretPath, sessionPath);
+
+        const { readLastJsonStringFieldsSync: readFieldsUnmocked } =
+          await import('./sessionStorageUtils.js');
+        expect(
+          readFieldsUnmocked(
+            sessionPath,
+            'customTitle',
+            ['titleSource'],
+            'custom_title',
+          ),
+        ).toEqual({ customTitle: undefined, titleSource: undefined });
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
