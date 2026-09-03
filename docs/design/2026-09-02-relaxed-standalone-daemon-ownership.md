@@ -113,6 +113,15 @@ boundary.
 - Daemons share persisted standalone sessions only when they resolve the same
   Conversations root and runtime base. Custom runtime bases retain the same
   storage separation they have for ordinary workspaces.
+- The supported topology is several daemons on one machine under one OS user.
+  Sharing the stable state base that holds the Live locator, the legacy owner
+  artifacts, and the deletion journal, or sharing a runtime base that holds
+  transcripts and session writer locks, across different physical machines is
+  outside this contract. That boundary is load-bearing rather than cosmetic: a
+  stable base reachable from more than one machine would turn the
+  single-publisher Live locator from a machine-global election into a
+  filesystem-global one, and the Darwin and Windows reclaim rule below carries
+  no boot or namespace component to separate two hosts that share a hostname.
 - Cross-process catalog changes are eventually visible through the existing
   persisted-session cache. Live state is merged only from the receiving
   daemon, so daemon B may list a session active in daemon A as persisted but
@@ -402,6 +411,12 @@ a supported identity probe, the record remains live for reclaim purposes. PID
 reuse may therefore cause a safe false conflict but never permits an unproven
 takeover.
 
+These two platforms therefore depend on the single-machine topology stated in
+the behavioral contract. With no boot or namespace component, an exact hostname
+is the whole identity domain, so two hosts that share both a hostname and a
+runtime base could each classify the other host's live writer as a locally
+absent PID. Linux is additionally separated by boot ID and PID namespace.
+
 A PID with a matching live start identity remains `session_writer_conflict`,
 including when its event loop is stalled. Foreign-host, foreign-boot,
 foreign-namespace, identity-less, malformed, non-regular, and uncertain records
@@ -688,6 +703,10 @@ Release notes must state that:
 
 - multiple daemons may expose standalone sessions for the same user;
 - active sessions are daemon-local;
+- the supported topology is several daemons on one machine under one OS user;
+  sharing the stable state base or a runtime base across physical machines is
+  unsupported, and on Darwin and Windows the stale-writer recovery rule depends
+  on that boundary;
 - different session IDs may be active concurrently across updated daemons,
   while a second writer or lifecycle mutation for the same session is fenced;
 - a safe working directory recreated after its local session generation exits
