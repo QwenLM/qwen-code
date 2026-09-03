@@ -157,6 +157,35 @@ describe('ci.yml disk-pressure evidence', () => {
       step('Upload disk-pressure samples').with.name,
       'artifact names must differ or the second failing job cannot upload',
     );
+
+    // Position is the collector's contract: failure() is evaluated when the
+    // step is reached and never revisited, so a collector parked just after
+    // install has already been passed (and skipped — nothing yet failed) by
+    // the time any lint/static step can die. It must be the job's last step.
+    const names = ciJobs.lint_and_static.steps.map((s) => s.name);
+    assert.equal(
+      names.indexOf('Upload disk-pressure samples'),
+      names.length - 1,
+      'the collector must be the last step of lint_and_static',
+    );
+    assert.ok(
+      names.indexOf('Upload disk-pressure samples') >
+        names.indexOf('Run .github/scripts helper tests'),
+    );
+
+    // The install sampler dies with that step's trap … EXIT, so the 19
+    // substantive steps after it write no samples; the failure-gated dump
+    // is what puts state-at-failure into the artifact. It must APPEND —
+    // a bare > would truncate the install-window samples — and must sit
+    // before the collector.
+    const dump = lintStep('Dump disk state on failure');
+    assert.equal(dump.if, '${{ failure() }}');
+    assert.match(dump.run, />> "\$DISK_SAMPLES"/);
+    assert.doesNotMatch(dump.run, /[^>]> "\$DISK_SAMPLES"/);
+    assert.ok(
+      names.indexOf('Dump disk state on failure') <
+        names.indexOf('Upload disk-pressure samples'),
+    );
   });
 
   it('keeps install failure status while writing the pre-install sample', () => {
