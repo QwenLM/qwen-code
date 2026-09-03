@@ -18628,6 +18628,100 @@ describe('Session', () => {
         ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
       }, 20_000);
 
+      it('keeps a logger failure inside late drain recovery from escaping', async () => {
+        // Regression for the timeout branch's `.catch(() => {})` guard: the
+        // recovery is best-effort by construction, and anything thrown after
+        // the drain race — the debug logger among them — would escape a bare
+        // `void` as an unhandled rejection and end the daemon process. Same
+        // shape as the recovery test above, but the module-graph logger mock
+        // faults exactly on the recovery's own debug line, and the run must
+        // surface zero escaped rejections (vitest fails a file on one).
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        let resolveLate: (value: { messages: string[] }) => void = () => {};
+        const latePromise = new Promise<{ messages: string[] }>((res) => {
+          resolveLate = res;
+        });
+        let drainCalls = 0;
+        mockClient.extMethod = vi.fn((method: string) => {
+          if (method !== 'craft/drainMidTurnQueue') return Promise.resolve({});
+          drainCalls += 1;
+          return drainCalls === 1
+            ? latePromise
+            : Promise.resolve({ messages: [] });
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'c',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        // Fault through the module graph (sessionIdContext.run in a real turn
+        // bypasses any process-wide logger session): the recovery's own debug
+        // line throws, everything else logs normally.
+        debugLoggerDebugSpy.mockImplementation((message: unknown) => {
+          if (
+            typeof message === 'string' &&
+            message.includes('timed-out drain')
+          ) {
+            throw new Error('debug logger unavailable');
+          }
+        });
+
+        const unhandled = vi.fn();
+        process.on('unhandledRejection', unhandled);
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text' as const, text: 'read file' }],
+          });
+
+          // The daemon's late answer lands; flush so the recovery race
+          // settles and its throwing logger call runs inside this test.
+          resolveLate({ messages: ['late message'] });
+          await new Promise((r) => setTimeout(r, 0));
+          await new Promise((r) => setImmediate(r));
+
+          // The recovery did reach its debug line (the fault actually fired).
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('timed-out drain'),
+          );
+          expect(unhandled).not.toHaveBeenCalled();
+        } finally {
+          process.off('unhandledRejection', unhandled);
+          debugLoggerDebugSpy.mockImplementation(() => {});
+        }
+      }, 20_000);
+
       it('keeps mid-turn drain enabled after a transient error', async () => {
         const tool = {
           name: 'read_file',
