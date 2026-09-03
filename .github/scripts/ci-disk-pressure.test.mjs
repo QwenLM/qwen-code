@@ -48,6 +48,15 @@ describe('ci.yml disk-pressure evidence', () => {
     );
     assert.ok(tests.indexOf('export TMPDIR=') > tests.indexOf('DISK_SAMPLES='));
 
+    // The samples carry host occupancy, not just this job's disk. A shard of
+    // identical work measures 6.7min or 36min on this fleet depending only on
+    // which host it lands on (#10490), and nothing in the logs said how busy
+    // that host was. `cpus` sizes the machine, `load` and `hosttests` say how
+    // many neighbours were competing for it at each 10-second tick.
+    assert.match(tests, /echo "DISKCONTEXT [^"]*cpus\[\$\(nproc /);
+    assert.match(tests, /load\[\$\(cut -d' ' -f1-3 \/proc\/loadavg /);
+    assert.match(tests, /hosttests\[\$\(pgrep -fc vitest /);
+
     const sampleFormat = (script) => {
       const match = script.match(
         /sample="DFSAMPLE .*\/proc\/meminfo 2>\/dev\/null(?: \|\| true)?\)\]"/,
