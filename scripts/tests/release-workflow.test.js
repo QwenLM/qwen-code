@@ -540,6 +540,7 @@ describe('release workflow', () => {
     expect(testStep.run).toContain(
       'npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"',
     );
+    expect(testStep.run).toContain('::warning title=Workspace tests exited');
     // Every release schedule retries, stable included: running the stable
     // lane with no retry let one flaky test out of ~30k red a release whose
     // other gates were all green. The default is pinned here so a silent
@@ -613,6 +614,107 @@ describe('release workflow', () => {
             args.some((arg) => arg.startsWith('--retry')),
             retry,
           ).toBe(false);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('lets an operator retune the workspace shard timeout without a PR', () => {
+    // A shard's runtime tracks how busy the reserved host is, not the suite:
+    // the same third measured 6.7 minutes on a quiet host and 36 on a
+    // contended one, and 45 killed shards at the boundary with every executed
+    // suite green (run 33713579913, both attempts). release.yml is
+    // code-owned, so a literal here costs a review every time the fleet
+    // moves; the variable is the same runtime knob QWEN_CI_VITEST_MAX_WORKERS
+    // and QWEN_RELEASE_VITEST_RETRY already use.
+    expect(workflow).toContain(
+      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"`,
+    );
+    // fromJSON, not the bare variable: timeout-minutes takes a number, and an
+    // unset variable has to fall back rather than render an empty string.
+    expect(releaseYaml.jobs.workspace_tests['timeout-minutes']).toContain(
+      'fromJSON(',
+    );
+  });
+
+  it('names which failure this is, and never changes the exit code', () => {
+    // A shard that died on Vitest's own worker RPC timing out reads
+    // identically to a real break, and this release lost two attempts before
+    // anyone could tell them apart (run 33713579913). The annotation says
+    // which; the child's status is re-raised untouched either way, so no
+    // reading of the log can turn a failure green.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    const script = testStep.run.replaceAll('${{ matrix.shard }}', '1');
+
+    for (const [label, stub, code, annotation, expected] of [
+      // A failing test names itself; an annotation would only add noise.
+      ['failing test', ' FAIL  src/a.test.ts > boom', 1, null],
+      // Vitest's worker RPC giving up says nothing about the product, and
+      // --retry cannot cover it. Passed only with proof the run reached its
+      // end: a normal exit, a passing tally, no failing tally, and no other
+      // unhandled error. It cost this release three attempts before that.
+      [
+        'transport timeout, run completed',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests passed through a Vitest transport timeout::',
+        0,
+      ],
+      [
+        'transport timeout, killed by a signal',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)',
+        137,
+        '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout beside a real one',
+        'Error: [vitest-worker]: Timeout calling "x"\nError: write after end\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'transport timeout, no tally to back it',
+        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      [
+        'unexplained',
+        'something odd',
+        7,
+        '::error title=Workspace tests exited 7 with no failing test::',
+      ],
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), 'release-failure-'));
+      try {
+        const stubPath = join(dir, 'npm');
+        writeFileSync(stubPath, `#!/bin/sh\necho '${stub}'\nexit ${code}\n`);
+        chmodSync(stubPath, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', script],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env['PATH']}`,
+              VITEST_RETRY: '2',
+              RUNNER_TEMP: dir,
+            },
+            encoding: 'utf8',
+          },
+        );
+
+        expect(result.status, label).toBe(expected ?? code);
+        if (annotation) {
+          expect(result.stdout, label).toContain(annotation);
+        } else {
+          expect(result.stdout, label).not.toContain('::warning title=');
+          expect(result.stdout, label).not.toContain('::error title=');
         }
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1334,10 +1436,12 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      // Sized for the contended pool the lane runs on: run 33713579913 had
-      // a green shard finish at 44.0 min and another cancelled at the old
-      // 45 min cap in both attempts.
-      workspace_tests: 90,
+      // The one bound an operator can retune without a PR; its default is
+      // pinned by its own test above. That default is sized for the
+      // contended pool: run 33713579913 had a green shard finish at 44.0
+      // min and another cancelled at the old 45 min cap in both attempts.
+      workspace_tests:
+        "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}",
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,

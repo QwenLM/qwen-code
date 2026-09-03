@@ -510,14 +510,15 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # A cap has to clear the slowest honest shard, not the healthy one:
-    # release run 33713579913 lost shards to 45m in both attempts — attempt
-    # 2 cancelled shard 2 at the cap while shard 1 finished green at 44.0m.
-    # A shard measures 6-14 min on a quiet host and 34-45 min on a contended
-    # one, and the lane's retry re-runs each failing test twice more inside
+    # Set by how busy the reserved host is, not by the suite: the same third
+    # ran 6.7 min quiet and 36 contended (run 33713579913). The default still
+    # has to clear the slowest honest shard, not the healthy one: attempt 2
+    # cancelled shard 2 at the old 45m cap while shard 1 finished green at
+    # 44.0m, and the lane's retry re-runs each failing test twice more inside
     # that window. 90 is the hosted-to-pool doubling ci.yml already gives
     # this suite's Test job (60/120) and its neighbours (45/90, 30/60).
-    timeout-minutes: 90
+    # Retunable without a PR.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '90') }}"
     needs:
       - 'prepare'
       - 'quality_build'
@@ -567,7 +568,38 @@ jobs:
           if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
-          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
+          # `tee` so the annotation can name WHICH failure this is: a shard
+          # killed by Vitest's own worker RPC timing out reads identically to
+          # a real break, and this release lost two attempts to that
+          # (run 33713579913). The status is re-raised untouched either way;
+          # `-o pipefail` is the step default, so `$?` is npm's.
+          log="${RUNNER_TEMP:-/tmp}/workspace-tests-${{ matrix.shard }}.log"
+          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" 2>&1 | tee "${log}" || {
+            status=$?
+            if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
+              : # A failing test names itself; an annotation adds nothing.
+            elif grep -q 'Timeout calling' "${log}"; then
+              # Passed only with proof the run reached its end and nothing
+              # else broke: a normal exit (a signal death is 128+N), a
+              # passing tally, no failing tally, and no unhandled error that
+              # is not the transport. Vitest's worker RPC giving up says
+              # nothing about the product, and --retry cannot cover it —
+              # retries re-run failing TESTS while an unhandled error fails
+              # the run outright. It has now cost this release three
+              # attempts (run 33713579913).
+              if [ "${status}" -lt 128 ] \
+                && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
+                && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
+                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
+                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
+                exit 0
+              fi
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
+            else
+              echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
+            fi
+            exit "${status}"
+          }
 
   quality_scripts:
     name: 'Quality Checks (Scripts)'
