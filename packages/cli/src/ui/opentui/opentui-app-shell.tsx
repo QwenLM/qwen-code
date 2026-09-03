@@ -53,11 +53,15 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import type { WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  normalizeQuitSubmission,
+  OpenTuiSlashGateway,
+} from './slash-gateway.js';
 import {
   OpenTuiSlashDispatcher,
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
@@ -291,6 +295,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
+  // Slash submissions held back while a model turn streams (ink's message
+  // queue, restricted to commands: a queued prompt is the live turn's job).
+  const deferredCommandsRef = useRef<string[]>([]);
+  // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
+  // ref so re-queueing behind a turn or a dialog does not re-trigger the
+  // effect, but a push has to: the mid-turn gate awaits the registry, and a
+  // verdict that lands after the idle edge would otherwise strand the command
+  // until some future streaming transition.
+  const [deferredRevision, setDeferredRevision] = useState(0);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -349,6 +362,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return;
         case 'quit':
+          // Nothing queued may run behind an exit: the interrupt below creates
+          // the idle edge that wakes the drain, and the same abort promotes
+          // the live turn's steering queue into a fresh model turn. Both are
+          // discarded first, or the session spends another turn after the user
+          // asked to leave.
+          deferredCommandsRef.current = [];
+          onPopQueue?.();
+          // ink's quit action cancels the ongoing request before the exit
+          // drains, so a mid-turn /quit stops the stream instead of racing the
+          // cleanup chain (recording flush, config.shutdown) against a turn
+          // that is still writing. A no-op when nothing is in flight.
+          onInterrupt?.();
           onQuit?.(outcome.messages);
           return;
         default: {
@@ -357,26 +382,100 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, notify],
+    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify],
   );
 
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
-      const settlement = await gateway.dispatch(text);
+      // Ahead of the gate and the dispatch, exactly where ink's
+      // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
+      // it must not be deferred behind the turn or reach the model as text.
+      const submission = normalizeQuitSubmission(text);
+      // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
+      // only a command that opted into canRunDuringStreaming runs now — the
+      // rest wait for idle instead of racing the stream.
+      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
+        const command = submission.trim();
+        deferredCommandsRef.current.push(command);
+        setDeferredRevision((revision) => revision + 1);
+        notify(
+          `Queued ${command} — it will run when the current response ends.`,
+        );
+        return;
+      }
+      const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
       }
       if (settlement.outcome === false) {
-        if (onSubmitPrompt) onSubmitPrompt(text, imagePaths);
-        else notify('The live prompt turn is not wired in this shell.');
+        if (!onSubmitPrompt) {
+          notify('The live prompt turn is not wired in this shell.');
+          return;
+        }
+        // The raw typed text is both the prompt and the `UserPromptSubmit`
+        // provenance; `@path` expansion happens where the prompt enters the
+        // stream (live-session), so text queued mid-turn expands too.
+        const query = text.trim();
+        onSubmitPrompt(query, imagePaths, {
+          submittedPrompt: query || undefined,
+        });
         return;
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify],
+    [gateway, onSubmitPrompt, applyOutcome, notify, streaming],
   );
+
+  // Runs the commands the mid-turn gate held back, in submission order, once
+  // the turn ends and no dialog owns the UI (ink's shouldDrainMessageQueue
+  // gates the drain on both).
+  useEffect(() => {
+    // Nothing queued may run behind an exit either way: the exits that bypass
+    // this shell's quit branch (Ctrl+C/Ctrl+D double press, render-error
+    // bailout) never clear this ref, so the drain itself must consult the
+    // shared exit latch — at the edge and between dispatches, since the exit
+    // can start while an earlier command is still awaiting its outcome.
+    if (isExitInProgress()) return;
+    if (streaming || dialog || deferredCommandsRef.current.length === 0) {
+      return;
+    }
+    const pending = deferredCommandsRef.current;
+    deferredCommandsRef.current = [];
+    void (async () => {
+      for (const [i, command] of pending.entries()) {
+        if (isExitInProgress()) return;
+        const settlement = await gateway.dispatch(command);
+        if (settlement.kind === 'rejected') {
+          notify(settlement.reason);
+          continue;
+        }
+        if (settlement.outcome === false) continue;
+        const outcome = settlement.outcome;
+        applyOutcome(outcome);
+        // A submit_prompt outcome starts a turn and an open_dialog outcome
+        // takes the UI over, so the commands behind either wait for that turn
+        // to end or that dialog to close rather than racing the stream or
+        // overwriting the dialog with a second setDialog().
+        const holdsUi =
+          outcome.kind === 'open_dialog' ||
+          (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
+        if (holdsUi && i + 1 < pending.length) {
+          deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+          return;
+        }
+      }
+    })();
+  }, [
+    streaming,
+    dialog,
+    deferredRevision,
+    gateway,
+    notify,
+    applyOutcome,
+    onSubmitPrompt,
+  ]);
 
   const userMessages = useMemo(
     () =>
