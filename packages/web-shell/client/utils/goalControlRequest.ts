@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GoalControlRequest, GoalRecord } from '@qwen-code/sdk/daemon';
+import {
+  GOAL_PAUSE_REASON_COMMAND,
+  type GoalControlRequest,
+  type GoalRecord,
+} from '@qwen-code/sdk/daemon';
 
 export type GoalControlAction =
   | 'create'
@@ -43,9 +47,13 @@ export function buildGoalControlRequest(
       : { action: 'create', objective };
   }
   if (!goal) throw new Error(errors.goalUnavailable);
+  // A pause without a reason clears `lastReason`, and this card renders that
+  // field -- so an unreasoned pause here would blank the very line the user
+  // is looking at. The daemon accepts `reason` on `pause` alone.
   return {
     action,
     ...(action === 'edit' ? { objective: objective ?? goal.objective } : {}),
+    ...(action === 'pause' ? { reason: GOAL_PAUSE_REASON_COMMAND } : {}),
     expectedGoalId: goal.goalId,
     expectedRevision: goal.revision,
   } as GoalControlRequest;

@@ -52,6 +52,26 @@ from stays well-formed. The pairing belongs there rather than in a branch
 further down: a batch whose continuation was cancelled returns before either
 of them, and a second pause on an already-paused Goal throws.
 
+A declined tool confirmation is a user action, not a failed turn. The dialog
+consumes the Esc, so `turnCancelledRef` never flips and the batch settles on
+the all-cancelled branch; that branch selects the user-interrupt reason
+unconditionally rather than reading a ref only `cancelOngoingRequest` writes.
+What it does _not_ do is stop a Goal whose batch was only partly declined --
+that batch still goes back to the model, as it always has outside Goals, so
+the model can adapt. Whether an autonomous Goal should stop on a per-tool
+denial is a separate design question from this change, which is about what a
+stop _says_; the inconsistency between the two batch shapes is recorded here
+rather than settled.
+
+Every host that pauses supplies a reason, the Web Shell included: a pause
+without one now clears `lastReason`, and the Web Shell card renders that
+field, so an unreasoned pause there would blank the line the user is reading.
+The SDK's hand-duplicated `GoalControlRequest` splits `pause` out of its
+shared arm to carry the field, because the daemon's parser rejects any extra
+key on `resume` and `clear`. Known follow-up: both Web Shell sites label the
+field `t('goal.lastCheck')` ("Last check"), wording written for verifier text
+and not for a pause reason.
+
 Ordinary tool cancellation outside a Goal turn is unchanged; that is the
 subject of #10170 and PR #10180.
 
@@ -62,6 +82,14 @@ subject of #10170 and PR #10180.
 - `goal-reducer.ts`: pause writes or clears `lastReason`; resuming a paused
   Goal clears it, so a running Goal never renders the prose that explains why
   it stopped; the parser accepts a reason on `pause` only.
+- `goal-protocol.ts` (second pass): the validator bounds its work by the
+  limit rather than by the input, since the control routes are
+  network-reachable and synchronous on the CLI's event loop; a headless run
+  that outlives its Goal gets its own reason rather than being framed as a
+  failed turn.
+- `sdk-typescript/daemon/types.ts` + `web-shell/utils/goalControlRequest.ts`:
+  the pause variant carries `reason`, and the Web Shell attaches the shared
+  `/goal pause` prose.
 - `client.ts`: the interrupted-exit pause carries a reason. It runs before
   every host's own reasoned pause and a second pause on a non-active Goal
   throws, so this is the dispatch that decides what the record says -- a
@@ -73,8 +101,12 @@ subject of #10170 and PR #10180.
 - `goalCommand.ts`: `/goal pause` names itself.
 - `Session.ts`: four ACP pause sites choose among user interrupt, output
   limit, session disposal, turn failure, and the Stop-hook cap.
-- `nonInteractiveCli.ts`: the headless helper takes an explicit pause reason,
-  and the run-budget site names the budget that tripped.
+- `nonInteractiveCli.ts`: the headless helper takes an explicit pause reason;
+  the two writers that actually settle a budget stop -- the outer catch and
+  the abort listener inside `finishGoalTurn` -- name the budget that tripped;
+  a successful structured-output exit no longer reads as a failed turn; and
+  TEXT output prints the reason for every non-active status, not just
+  `blocked` and `usage_limited`.
 - `docs/users/features/goals.md`: a section on interrupting a Goal.
 
 ## Verification
@@ -93,5 +125,10 @@ subject of #10170 and PR #10180.
   reaches the model.
 - `goalCommand.test.ts` and `Session.test.ts` pin the reason each pause site
   sends.
+- `goal-protocol.test.ts`: the shared constants validate, the bound is
+  measured in code points and accepts exactly the limit, and both builders
+  produce reasons the validator accepts however long the detail.
+- `goalControlRequest.test.ts`: a Web Shell pause carries the reason and
+  `resume`/`clear` carry no `reason` key.
 - An E2E plan in `.qwen/e2e-tests/goal-pause-reasons.md` covers the three
   interactive cancel shapes and `/goal pause`.
