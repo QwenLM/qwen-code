@@ -64,10 +64,17 @@ export function isMainModule(importMetaUrl) {
   // module — compared as-is, any invocation through a symlinked path (stock
   // macOS, where os.tmpdir() links into /private/var, is one) makes the
   // guard false and the caller's entry point silently never runs.
-  return (
-    fs.realpathSync(path.resolve(process.argv[1])) ===
-    fs.realpathSync(fileURLToPath(importMetaUrl))
-  );
+  try {
+    return (
+      fs.realpathSync(path.resolve(process.argv[1])) ===
+      fs.realpathSync(fileURLToPath(importMetaUrl))
+    );
+  } catch {
+    // An entry that no longer resolves (removed after startup, permissions,
+    // a symlink loop) is not the main module. The guard's contract is a
+    // boolean, never a throw: six release scripts call it at import time.
+    return false;
+  }
 }
 
 /**

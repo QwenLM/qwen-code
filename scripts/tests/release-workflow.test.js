@@ -19,9 +19,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { isMainModule } from '../release-script-utils.js';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -1694,5 +1696,47 @@ describe('release lane runner routing', () => {
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
+  });
+});
+
+describe('isMainModule', () => {
+  it('returns false without throwing when the entry path does not resolve', () => {
+    const argv1 = process.argv[1];
+    process.argv[1] = join(tmpdir(), 'qwen-release-guard-missing', 'gone.js');
+    try {
+      expect(isMainModule(import.meta.url)).toBe(false);
+    } finally {
+      process.argv[1] = argv1;
+    }
+  });
+
+  it('returns false for an entry that is a different existing file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-release-guard-'));
+    const other = join(dir, 'other.js');
+    writeFileSync(other, '');
+    const argv1 = process.argv[1];
+    process.argv[1] = other;
+    try {
+      expect(isMainModule(import.meta.url)).toBe(false);
+    } finally {
+      process.argv[1] = argv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('matches an entry invoked through a symlinked path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-release-guard-'));
+    const real = join(dir, 'entry.js');
+    writeFileSync(real, '');
+    const linked = join(dir, 'entry-link.js');
+    symlinkSync(real, linked);
+    const argv1 = process.argv[1];
+    process.argv[1] = linked;
+    try {
+      expect(isMainModule(pathToFileURL(real).href)).toBe(true);
+    } finally {
+      process.argv[1] = argv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
