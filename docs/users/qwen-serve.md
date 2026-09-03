@@ -145,7 +145,8 @@ operators: `GET /daemon/status`, `GET /workspace/mcp`,
 `GET /workspace/:id/session-info`,
 `GET /session/:id/status`, `GET /session/:id/context`,
 `GET /session/:id/supported-commands`, and
-`GET /session/:id/tasks`, `GET /session/:id/lsp`, and
+`GET /session/:id/tasks`, `GET /session/:id/lsp`,
+`GET /session/:id/resources`, and
 `GET /session/:id/transcript`.
 
 `GET /workspace/:id/session-info` (and the plural
@@ -195,6 +196,13 @@ prompt. `/status` instead reports the live session's own `createdAt`, omits
 `GET /session/:id/lsp` returns structured per-session LSP status. Start the
 daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
 otherwise the route returns `enabled: false` with no servers.
+
+`GET /session/:id/resources` returns the sanitized Skill and MCP snapshots
+from that live session's own Config. Use it when a session may run from a
+worktree or another effective directory whose resources differ from the base
+workspace. Workspace-owned MCP authentication, pool, budget, and discovery
+error details are omitted from this session view. Check the
+`session_resources` capability before calling it.
 
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,
