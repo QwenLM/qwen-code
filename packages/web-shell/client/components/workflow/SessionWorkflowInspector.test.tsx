@@ -147,4 +147,119 @@ describe('SessionWorkflowInspector', () => {
     act(() => root.unmount());
     container.remove();
   });
+
+  it('selects the referenced step from a dependency, by number and title', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onSelectedTodoIdChange = vi.fn();
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const upstream = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-dependency-prepare"]',
+    );
+    // The reference reads as the step it points at — the step number the list
+    // and graph both show, plus its title — not the bare `prepare` id.
+    expect(upstream).toBeTruthy();
+    expect(upstream?.textContent).toContain('1');
+    expect(upstream?.textContent).toContain('Prepare inputs');
+
+    onSelectedTodoIdChange.mockClear();
+    act(() => upstream?.click());
+    expect(onSelectedTodoIdChange).toHaveBeenCalledWith('prepare');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps every activity row reachable past the preview cap', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'build', content: 'Build', status: 'in_progress' },
+    ];
+    const tools: ACPToolCall[] = Array.from({ length: 8 }, (_, index) => ({
+      callId: `agent-${index}`,
+      toolName: 'Agent',
+      title: `Agent ${index}`,
+      status: 'completed' as const,
+      args: { todo_id: 'build' },
+    }));
+    const tasks = tools.map((tool, index) => ({
+      kind: 'agent' as const,
+      id: `task-${index}`,
+      label: `Agent ${index}`,
+      description: `Ran step ${index}`,
+      status: 'completed' as const,
+      startTime: 1_000 + index,
+      endTime: 2_000 + index,
+      runtimeMs: 1_000,
+      isBackgrounded: true,
+      toolUseId: tool.callId,
+    }));
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={tools}
+            tasks={tasks}
+            artifacts={[]}
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const activityList = () =>
+      Array.from(container.querySelectorAll('button')).filter((button) =>
+        /^\d{1,2}:\d{2}/.test(button.textContent?.trim() ?? ''),
+      );
+    const beforeExpand = activityList().length;
+    const showAll = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-activity-show-all"]',
+    );
+    // The count beside the list reports the true total, so the cap has to be
+    // an invitation rather than a silent truncation.
+    expect(beforeExpand).toBe(6);
+    expect(showAll?.textContent).toContain('8');
+
+    act(() => showAll?.click());
+    expect(activityList().length).toBe(8);
+    expect(
+      container.querySelector('[data-testid="workflow-activity-show-all"]'),
+    ).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });

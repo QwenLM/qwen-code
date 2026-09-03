@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   DaemonSessionArtifact,
   DaemonSessionTaskStatus,
@@ -20,6 +20,12 @@ import {
   workflowTaskStatusKey,
 } from './session-workflow-model';
 import styles from './SessionWorkflowInspector.module.css';
+
+/**
+ * Activity rows shown before the list asks to be expanded. The summary beside
+ * it reports the true total, so the remainder must stay reachable.
+ */
+const ACTIVITY_PREVIEW_COUNT = 6;
 
 export interface SessionWorkflowInspectorProps {
   todos: readonly TodoItem[];
@@ -52,6 +58,15 @@ export function SessionWorkflowInspector({
     [tasks, todos, tools],
   );
   const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
+  // Dependencies are stated as Todo ids, which are addresses, not labels. The
+  // step number is what the list and the graph both show, so carry it into
+  // every dependency reference.
+  const stepNumberById = useMemo(() => {
+    const numbers = new Map<string, number>();
+    todos.forEach((todo, index) => numbers.set(todo.id, index + 1));
+    return numbers;
+  }, [todos]);
+  const [showAllActivity, setShowAllActivity] = useState(false);
   const effectiveSelectedTodoId = projection.todosById.has(selectedTodoId ?? '')
     ? selectedTodoId
     : defaultTodoId;
@@ -90,6 +105,29 @@ export function SessionWorkflowInspector({
     ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
     : [];
 
+  // A dependency reference selects the step it names: the list of ids was
+  // read-only text, so following an edge meant finding the row by eye.
+  const dependencyLink = (todoId: string) => {
+    const target = projection.todosById.get(todoId);
+    const number = stepNumberById.get(todoId);
+    return (
+      <li key={todoId}>
+        <button
+          className={styles.dependencyLink}
+          data-testid={`workflow-dependency-${todoId}`}
+          onClick={() => onSelectedTodoIdChange(todoId)}
+          title={target?.content}
+          type="button"
+        >
+          {number !== undefined && (
+            <span className={styles.dependencyNumber}>{number}</span>
+          )}
+          <span>{target?.content ?? todoId}</span>
+        </button>
+      </li>
+    );
+  };
+
   const detail = selectedTodo && selectedState && (
     <section className={styles.detail} data-testid="workflow-step-detail">
       <div className={styles.sectionHeading}>
@@ -106,17 +144,25 @@ export function SessionWorkflowInspector({
         <div>
           <dt>{t('workflow.dependencies.upstream')}</dt>
           <dd>
-            {upstream?.length
-              ? upstream.join(', ')
-              : t('workflow.dependencies.none')}
+            {upstream?.length ? (
+              <ul className={styles.dependencyList}>
+                {upstream.map((id) => dependencyLink(id))}
+              </ul>
+            ) : (
+              t('workflow.dependencies.none')
+            )}
           </dd>
         </div>
         <div>
           <dt>{t('workflow.dependencies.unblocks')}</dt>
           <dd>
-            {downstream.length
-              ? downstream.map((todo) => todo.id).join(', ')
-              : t('workflow.dependencies.noDownstream')}
+            {downstream.length ? (
+              <ul className={styles.dependencyList}>
+                {downstream.map((todo) => dependencyLink(todo.id))}
+              </ul>
+            ) : (
+              t('workflow.dependencies.noDownstream')
+            )}
           </dd>
         </div>
       </dl>
@@ -156,7 +202,13 @@ export function SessionWorkflowInspector({
                         task.description}
                     </small>
                   )}
-                  {metrics.length > 0 && <small>{metrics.join(' · ')}</small>}
+                  {metrics.length > 0 && (
+                    <small className={styles.metrics}>
+                      {metrics.map((metric) => (
+                        <span key={metric}>{metric}</span>
+                      ))}
+                    </small>
+                  )}
                 </span>
                 {task && (
                   <span className={styles.stateLabel} data-status={task.status}>
@@ -302,7 +354,10 @@ export function SessionWorkflowInspector({
           <small>{projection.activity.length}</small>
         </summary>
         <div className={styles.activityList}>
-          {projection.activity.slice(0, 6).map((task) => {
+          {(showAllActivity
+            ? projection.activity
+            : projection.activity.slice(0, ACTIVITY_PREVIEW_COUNT)
+          ).map((task) => {
             const tool = projection.toolsByTaskId.get(task.id);
             const at = task.endTime ?? task.startTime;
             const content = (
@@ -340,6 +395,19 @@ export function SessionWorkflowInspector({
           {projection.activity.length === 0 && (
             <p>{t('workflow.activity.empty')}</p>
           )}
+          {!showAllActivity &&
+            projection.activity.length > ACTIVITY_PREVIEW_COUNT && (
+              <button
+                className={styles.showAllActivity}
+                data-testid="workflow-activity-show-all"
+                onClick={() => setShowAllActivity(true)}
+                type="button"
+              >
+                {t('workflow.activity.showAll', {
+                  count: projection.activity.length,
+                })}
+              </button>
+            )}
         </div>
       </details>
 
@@ -358,8 +426,9 @@ export function SessionWorkflowInspector({
             >
               <span className={styles.itemText}>
                 <strong>{artifact.title}</strong>
-                <small>
-                  {artifact.kind} · {artifact.status}
+                <small className={styles.metrics}>
+                  <span>{artifact.kind}</span>
+                  <span>{artifact.status}</span>
                 </small>
               </span>
               <ArrowUpRightIcon aria-hidden="true" />

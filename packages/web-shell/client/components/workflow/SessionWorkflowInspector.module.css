@@ -44,35 +44,39 @@
   gap: 3px;
 }
 
+/* Section labels name what follows; they are not decoration. Tracked-out
+   uppercase made every one of them shout over the content it introduces, so
+   they read as chrome. Sentence case at a muted weight puts the emphasis back
+   on the step title and the status beside it. Kept scoped to the heading's
+   inner div so the count beside it keeps its own tone. */
 .summaryHeading > div span,
 .sectionHeading > div > span {
   color: var(--muted-foreground);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-weight: 500;
 }
 
 .summaryHeading strong {
   font-size: 16px;
 }
 
+/* Completed-over-total is a reading of the progress bar directly beneath it,
+   and the status word sits to its left, so a third tinted surface said the
+   same thing a third time. The count keeps the tone as ink and drops the
+   pill. */
 .summaryCount {
-  padding: 5px 8px;
-  border-radius: 999px;
   color: var(--status-running-fg);
-  background: var(--status-running-bg);
-  font-size: 12px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .summaryCount[data-status='attention'] {
   color: var(--status-attention-fg);
-  background: var(--status-attention-bg);
 }
 
 .summaryCount[data-status='completed'] {
   color: var(--status-done-fg);
-  background: var(--status-done-bg);
 }
 
 .progress {
@@ -276,6 +280,71 @@
   overflow-wrap: anywhere;
 }
 
+/* A dependency is an edge in the graph beside it, so it is rendered as the
+   step it points at — number and title — and selects that step on click. The
+   previous comma-joined id list made the reader find the row by eye. */
+.dependencyList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dependencyLink {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.dependencyLink > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependencyLink:hover {
+  border-color: color-mix(in srgb, var(--agent-blue-500) 45%, var(--border));
+  background: var(--accent);
+}
+
+.dependencyNumber {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  place-items: center;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The summary beside the list reports the true total, so the preview cap
+   needs a way out of it rather than a silent truncation. */
+.showAllActivity {
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.showAllActivity:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
 .linkedAgents {
   margin-top: 14px;
   padding-top: 12px;
@@ -429,6 +498,22 @@
 .activityList small {
   color: var(--muted-foreground);
   font-size: 11px;
+}
+
+/* Runtime, tool calls and tokens are separate facts, so they are separate
+   elements with real spacing rather than one string glued with middle dots —
+   which also let them wrap as a unit and be read out as one run of text. */
+/* Specificity note: `.linkedAgents button small` (0,1,2) and
+   `.deliverables small` (0,1,1) both declare the single-line ellipsis shape
+   these rows use, so the wrapping metrics row has to out-specify them rather
+   than rely on source order. */
+.linkedAgents button small.metrics,
+.deliverables button small.metrics {
+  display: flex;
+  overflow: visible;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  white-space: normal;
 }
 
 .stateLabel {
