@@ -161,6 +161,11 @@ scenario exists to measure; and the `self-test` override path runs identical emi
 argvs on both sides and asserts `both-pass` on purpose. A global tightening would have
 broken the instrument in order to fix one fixture.
 
+A gate failure has to name its own cause: `both-pass` under `expectBaseFailure` adds a
+`Gate:` line to `report.md` and appends the reason to the scenario's console line, so a
+red run reads as "the base fixture emitted no defect" rather than an unexplained outcome
+mismatch.
+
 ## Known adjacent gaps, not fixed here
 
 Mid-turn steering text has no transcript echo. ink's `accept()` adds a `USER` item with
