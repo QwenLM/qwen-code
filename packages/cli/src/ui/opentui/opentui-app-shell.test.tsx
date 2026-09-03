@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Wiring tests for the OpenTUI app shell (Batch 5 — backend composition root).
