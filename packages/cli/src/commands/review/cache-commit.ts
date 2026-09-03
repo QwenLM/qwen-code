@@ -64,16 +64,6 @@ function readJsonObject(path: string, what: string): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
-/** The candidate-owned fields — the ONLY keys a candidate may contribute.
- *  Everything else in a candidate file is ignored: an allowlist, so a
- *  tampered candidate cannot smuggle `round`, `verdict` or `findings` past
- *  the ledger, exactly as the ledger cannot overwrite the anchor.
- *
- *  This list is the one place that decides what survives promotion, so a
- *  field added on the producer side has to be added HERE too — a candidate
- *  field the local flow wrote and this list omitted was silently dropped,
- *  and the next round's gate then refused its own anchor for ever, blaming
- *  a stale cache format. */
 /**
  * The names the LEDGER owns. Everything else the candidate carries is anchor
  * state and travels with it.
@@ -103,6 +93,32 @@ function candidateFieldsOf(candidate: Record<string, unknown>): string[] {
   );
 }
 
+/**
+ * Where, if anywhere, `value` carries a control character: every string at
+ * any depth, map KEYS included — a verdicts map is keyed by file paths, and
+ * git permits almost any byte in one. Null when clean; otherwise the dotted
+ * location, for the refusal to name.
+ */
+function controlledAt(value: unknown, at: string): string | null {
+  if (typeof value === 'string') return CONTROL.test(value) ? at : null;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = controlledAt(value[i], `${at}[${i}]`);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+  if (typeof value === 'object' && value !== null) {
+    for (const [key, inner] of Object.entries(value)) {
+      const here = `${at}.${key}`;
+      if (CONTROL.test(key)) return here;
+      const hit = controlledAt(inner, here);
+      if (hit !== null) return hit;
+    }
+  }
+  return null;
+}
+
 function runCacheCommit(args: CacheCommitArgs): void {
   const candidate = readJsonObject(args.candidate, 'the cache candidate');
   const ledger = readJsonObject(args.ledger, 'the round ledger');
@@ -125,33 +141,6 @@ function runCacheCommit(args: CacheCommitArgs): void {
         'what records who certified it.',
     );
   }
-  // The promoted cache is read back by commands that print these values on a
-  // refusal, and the next round hands `lastCommitSha` to git as an argument;
-  // a control-charactered value would make the cache the intake for a forged
-  // terminal line. Refuse at the writing end, where a human is present,
-  // rather than escaping it at every reader. Every persisted STRING is
-  // checked — the ledger's model id and each candidate-owned anchor field —
-  // because the threat this command polices is a tampered candidate, and
-  // policing one field of it is policing none.
-  // ONE class, imported rather than re-derived. Two sweeps of the same idea
-  // drifted twice already: this one was widened to C1 while `inertText`'s was
-  // not, then `inertText`'s classifier was widened while its own replacement
-  // was not — and each half-fix read as done. A value that passes here is
-  // persisted raw at a deterministic in-repo path and printed back through
-  // `inertText` on a refusal, so a gap in either sweep is a forged terminal
-  // line either way.
-  const controlled = (v: unknown): boolean =>
-    typeof v === 'string' && CONTROL.test(v);
-  for (const key of candidateFieldsOf(candidate)) {
-    if (controlled(candidate[key])) {
-      throw new Error(
-        `cache-commit: the candidate's \`${key}\` carries control ` +
-          'characters — refusing to persist a value that forges terminal ' +
-          'output (or a git argument) when read back.',
-      );
-    }
-  }
-
   // Bind the promotion to its target: `pr-7`'s candidate committed to
   // `pr-8.json` erases pr-8's ledger under pr-7's anchor. The out path's
   // basename IS the target by the cache's naming contract — except for a FILE
@@ -216,6 +205,28 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // exists to prevent, in its own output.
   merged['lastReviewDate'] = new Date().toISOString();
 
+  // The promoted cache is read back by commands that print these values on a
+  // refusal, and the next round hands `lastCommitSha` to git as an argument;
+  // a control-charactered value would make the cache the intake for a forged
+  // terminal line. Refuse at the writing end, where a human is present,
+  // rather than escaping it at every reader. Swept over what is about to be
+  // PERSISTED — the merged object, keys and values, at every depth — rather
+  // than over a list of fields: the list drifted twice (top-level candidate
+  // scalars only, while the verdicts map is keyed by file paths and the
+  // ledger's findings are model prose), and a sweep of the output cannot.
+  // ONE class, imported rather than re-derived: this sweep and `inertText`'s
+  // classifier drifted apart twice as well, and a value that passes here is
+  // persisted raw at a deterministic in-repo path and printed back through
+  // `inertText` on a refusal, so a gap in either is a forged terminal line.
+  const hit = controlledAt(merged, 'cache');
+  if (hit !== null) {
+    throw new Error(
+      `cache-commit: \`${inertText(hit)}\` carries control characters — ` +
+        'refusing to persist a value that forges terminal output (or a git ' +
+        'argument) when read back.',
+    );
+  }
+
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
   assertUnredirectedParent(args.out, 'cache', 'cache-commit');
   // `noFollow`: the target path is deterministic and lives in the repo, so a
@@ -227,7 +238,7 @@ function runCacheCommit(args: CacheCommitArgs): void {
   atomicWriteFileSync(args.out, `${JSON.stringify(merged, null, 2)}\n`, {
     noFollow: true,
   });
-  writeStdoutLine(`Committed review cache to ${args.out}`);
+  writeStdoutLine(`Committed review cache to ${inertText(args.out)}`);
 }
 
 export const cacheCommitCommand: CommandModule = {
@@ -247,8 +258,8 @@ export const cacheCommitCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe:
-          'A small JSON file with the round ledger: lastModelId, round, ' +
-          'verdict, findingsCount, findings[]',
+          'A small JSON file with the round ledger: round, verdict, ' +
+          'findingsCount, findings[]',
       })
       .option('out', {
         type: 'string',

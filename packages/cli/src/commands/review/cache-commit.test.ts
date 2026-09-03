@@ -10,7 +10,7 @@
 // merge out of prose. The rest is boundary manners: refuse loudly on inputs
 // that would write a cache no next round could trust.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   rmSync,
@@ -24,11 +24,22 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const { stdoutLines } = vi.hoisted(() => ({ stdoutLines: [] as string[] }));
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn((line: string) => {
+    stdoutLines.push(line);
+  }),
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
+
 import { cacheCommitCommand } from './cache-commit.js';
 
 let dir: string;
 
 beforeEach(() => {
+  stdoutLines.length = 0;
   // `realpathSync`, like every sibling fixture here: the handler refuses to
   // write through a symlinked parent (`assertUnredirectedParent`), and
   // `tmpdir()` IS a symlink on macOS (`/var/folders/…` →
@@ -292,7 +303,7 @@ describe('cache-commit', () => {
     ).toThrow(/FLATTENED repo-relative path/);
   });
 
-  it('refuses control characters in the ledger model AND in any candidate anchor field', () => {
+  it('refuses control characters in the candidate\u2019s model id and its scalar anchor fields', () => {
     // The command's stated posture: refuse at the writing end, where a human
     // is present, rather than escaping at every reader. Policing one field of
     // a tampered candidate is policing none — the next round hands
@@ -437,5 +448,134 @@ describe('cache-commit', () => {
     expect('fileVerdicts' in cache).toBe(false);
     expect('junk' in cache).toBe(false);
     expect(cache['round']).toBe(1);
+  });
+
+  it('sweeps the verdicts map — keys and nested values — not just top-level scalars', () => {
+    // The map's keys are file paths, and git permits almost any byte in one;
+    // a tampered candidate at the deterministic in-repo path is the threat
+    // the sweep exists for, and its map is where the strings are.
+    const csi = '\u009b';
+    const byKey = seed(
+      {
+        v: 1,
+        target: 'pr-7',
+        fileVerdicts: { [`a${csi}.ts`]: { base: 'b', head: 'h' } },
+      },
+      { round: 1 },
+    );
+    expect(() => run(byKey)).toThrow(/carries control/);
+    expect(existsSync(byKey['out'])).toBe(false);
+    const byValue = seed(
+      {
+        v: 1,
+        target: 'pr-7',
+        fileVerdicts: { 'a.ts': { base: `b${csi}`, head: 'h' } },
+      },
+      { round: 1 },
+    );
+    expect(() => run(byValue)).toThrow(/carries control/);
+    expect(existsSync(byValue['out'])).toBe(false);
+  });
+
+  it('sweeps the LEDGER strings that survive the merge', () => {
+    // The ledger half is model prose, persisted at the same path and read
+    // back by the same readers; the sweep runs over what is persisted, so it
+    // cannot be scoped to one side by accident.
+    const verdict = seed(
+      { v: 1, target: 'pr-7' },
+      { round: 1, verdict: 'Approve\u2028Committed', findings: [] },
+    );
+    expect(() => run(verdict)).toThrow(/carries control/);
+    expect(existsSync(verdict['out'])).toBe(false);
+    const nested = seed(
+      { v: 1, target: 'pr-7' },
+      { round: 1, findings: [{ id: 'R1-1', title: 'x\u202ey' }] },
+    );
+    expect(() => run(nested)).toThrow(/cache\.findings\[0\]\.title/);
+    expect(existsSync(nested['out'])).toBe(false);
+  });
+
+  it('a control-charactered KEY is refused, and the refusal does not echo the raw byte', () => {
+    const esc = String.fromCharCode(0x1b);
+    const argv = seed(
+      { v: 1, target: 'pr-7', [`evil${esc}key`]: 'clean' },
+      { round: 1 },
+    );
+    let message = '';
+    try {
+      run(argv);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/carries control/);
+    expect(message).not.toContain(esc);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
+  it('prints the --out path inert on the success line', () => {
+    // The one print site in a file that escapes every other untrusted
+    // string: the path comes off the plan an orchestrator is told to use.
+    const argv = seed({ v: 1, target: 'pr-7' }, { round: 1 });
+    argv['out'] = join(dir, 'ca\u009bhe', 'pr-7.json');
+    run(argv);
+    const line = stdoutLines.find((l) =>
+      l.startsWith('Committed review cache'),
+    );
+    expect(line).toBeDefined();
+    expect(line).not.toContain('\u009b');
+    expect(existsSync(argv['out'])).toBe(true);
+  });
+
+  it('refuses a candidate with NO lastModelId key at all — not only an empty one', () => {
+    // `seed()` injects a default into every keyless fixture, so this one
+    // writes the file itself: a hand-edited candidate, or one from a capture
+    // that predates the field, must be refused rather than promoted with
+    // the merge deleting the identity.
+    const argv = seed({ v: 1, target: 'pr-7' }, { round: 1 });
+    writeFileSync(argv['candidate'], JSON.stringify({ v: 1, target: 'pr-7' }));
+    expect(() => run(argv)).toThrow(/lastModelId/);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
+  it('reads the model off the CANDIDATE, never the ledger', () => {
+    // A weak candidate beside a ledger that carries the field: the bare
+    // token an orchestrator could type must not stand in for the identity
+    // the capture failed to record.
+    const argv = seed(
+      { v: 1, target: 'pr-7', lastModelId: '' },
+      { lastModelId: 'm1', round: 1 },
+    );
+    expect(() => run(argv)).toThrow(/lastModelId/);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
+  it('refuses a JSON null or primitive on either side by name', () => {
+    for (const raw of ['null', '42', '"str"']) {
+      const candidate = seed({ v: 1, target: 'pr-7' }, { round: 1 });
+      writeFileSync(candidate['candidate'], raw);
+      expect(() => run(candidate)).toThrow(/not a JSON object/);
+      const ledger = seed({ v: 1, target: 'pr-7' }, { round: 1 });
+      writeFileSync(ledger['ledger'], raw);
+      expect(() => run(ledger)).toThrow(/not a JSON object/);
+    }
+  });
+
+  it('refuses to promote a file candidate into another source path\u2019s cache', () => {
+    // `src/foo.ts` and `src_foo.ts` flatten to one token; the digest in the
+    // file-form name is the only thing that tells the two caches apart.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'src_foo.ts',
+        source: 'src/foo.ts',
+        headSha: 'h',
+        files: {},
+        stateId: 's',
+      },
+      { round: 1 },
+    );
+    argv['out'] = join(dir, 'cache/file-src_foo.ts-00000000.json');
+    expect(() => run(argv)).toThrow(/different source path/);
+    expect(existsSync(argv['out'])).toBe(false);
   });
 });
