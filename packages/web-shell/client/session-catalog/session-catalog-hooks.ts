@@ -193,11 +193,26 @@ export function useSessionActivePromptState(
         : () => undefined,
     [store, workspaceCwd],
   );
-  const hasLiveSessions = useSyncExternalStore(
+  // Track the session's own live flag, not just whether the workspace has any
+  // live-state coverage: a coverage boolean stays `true` across polls, so
+  // `useSyncExternalStore` would bail out of re-rendering on the one change
+  // that matters — this session's prompt starting or finishing — and the
+  // reader would keep serving whatever it last happened to render (#9487).
+  // `undefined` distinguishes "no live-state response covers this workspace"
+  // from "covered, and this session has no prompt in flight".
+  const getLiveActivePrompt = useCallback((): boolean | undefined => {
+    if (!workspaceCwd || !store.hasLiveSessions(workspaceCwd)) return undefined;
+    if (!sessionId) return false;
+    return (
+      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
+    );
+  }, [sessionId, store, workspaceCwd]);
+  const liveActivePrompt = useSyncExternalStore(
     subscribeLiveSessions,
-    () => (workspaceCwd ? store.hasLiveSessions(workspaceCwd) : false),
-    () => false,
+    getLiveActivePrompt,
+    () => undefined,
   );
+  const hasLiveSessions = liveActivePrompt !== undefined;
   // The live-state response is authoritative and independent of catalog
   // paging. Arm the full-catalog fallback only when nothing tracks live-state
   // for this workspace — i.e. the daemon lacks workspace_session_live_state.
@@ -229,12 +244,8 @@ export function useSessionActivePromptState(
   if (!workspaceCwd || !sessionId) {
     return { hasActivePrompt: false, known: false };
   }
-  if (hasLiveSessions) {
-    return {
-      hasActivePrompt:
-        store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true,
-      known: true,
-    };
+  if (liveActivePrompt !== undefined) {
+    return { hasActivePrompt: liveActivePrompt, known: true };
   }
   return {
     hasActivePrompt: sessions.some(

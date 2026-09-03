@@ -10042,6 +10042,80 @@ describe('DaemonSessionProvider', () => {
       }
     });
 
+    it('survives a replay_complete that lands mid-turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // Reconnecting mid-turn replays history and ends with
+        // replay_complete. That means "history caught up", not "turn
+        // finished" — and inside a long silent tool call there is no next
+        // event to revive the indicator, so settling here would drop it for
+        // the rest of the turn.
+        const silentToolGap = createDeferred<void>();
+        const replayGate = createDeferred<void>();
+        const session = createMockSession({
+          events: async function* replayThenSilence(
+            opts: { signal?: AbortSignal } = {},
+          ) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            // Hold the sentinel until the test has published the daemon's
+            // live prompt state, so replay_complete lands with the turn
+            // already known to be in flight.
+            await replayGate.promise;
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { lastEventId: 9, replayedCount: 1 },
+            };
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              void silentToolGap.promise.then(() => resolve());
+            });
+          },
+        });
+        sdkMocks.sessions.push(session);
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          replayGate.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('still settles on silence when no daemon prompt state is available', async () => {
       vi.useFakeTimers();
       try {

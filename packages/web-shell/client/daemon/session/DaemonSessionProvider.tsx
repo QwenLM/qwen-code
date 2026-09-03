@@ -3108,7 +3108,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       type: 'assistant.done',
                       reason: 'replay_complete',
                     });
-                    setPromptStatus('idle');
+                    // "History caught up" is not "turn finished". Finishing the
+                    // replayed streaming block above is right either way, but
+                    // an observer pane reconnecting mid-turn would otherwise
+                    // settle here and — inside a long silent tool call there is
+                    // no next event to revive it — stay settled (#9487).
+                    if (daemonActivePromptRef.current !== true) {
+                      setPromptStatus('idle');
+                    }
                   }
                 }
               }
@@ -3192,7 +3199,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Resync asks us to rebuild transcript state, but it is not a
                   // prompt terminal signal. Keep loading alive for local/restored
                   // prompts until turn_complete, turn_error, or prompt_cancelled.
-                  if (!hasSessionActivePrompt()) {
+                  if (
+                    !hasSessionActivePrompt() &&
+                    daemonActivePromptRef.current !== true
+                  ) {
                     setPromptStatus('idle');
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,

@@ -375,6 +375,41 @@ describe('useSessionHasActivePrompt (#9487)', () => {
     expect(container.textContent).toBe('false/true');
   });
 
+  it('tracks a live flip for a workspace it is already covering', async () => {
+    // Regression: the subscription used to expose only "does this workspace
+    // have live state", which stays true across polls — so useSyncExternalStore
+    // bailed out of re-rendering on the one change that matters, and the reader
+    // kept serving a stale answer through exactly the silent gaps this signal
+    // exists to cover.
+    setQualifiedPage([]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    const live = (hasActivePrompt: boolean) => [
+      {
+        sessionId: 'sess-1',
+        clientCount: 1,
+        hasActivePrompt,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+    ];
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    // Establish live-state coverage first, so hasLiveSessions is already true.
+    act(() => {
+      store.applyLiveState('/work', live(false));
+    });
+    expect(container.textContent).toBe('false');
+    // Now only the per-session flag flips.
+    act(() => {
+      store.applyLiveState('/work', live(true));
+    });
+    expect(container.textContent).toBe('true');
+  });
+
   it('sees an active prompt the loaded catalog page does not contain', async () => {
     // The connected session fell off the bounded first page (20+ fresher
     // sessions): only the live-state snapshot can still see it.
