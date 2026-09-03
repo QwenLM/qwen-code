@@ -15,17 +15,27 @@ the sidebar git chip with the repo in each state:
    `branch.<name>.remote = upstream`, `branch.<name>.pushRemote = origin`,
    **and `push.default = current`** (required — under the default
    `push.default=simple`, git refuses to resolve `@{push}` in this shape and
-   the listing reports configured-but-unknown); behind `upstream/main` by 3,
+   the listing names no push destination); behind `upstream/main` by 3,
    ahead of `origin/main` by 2.
-7. Same config but `push.default` left at its default `simple`: the push
-   side is configured-but-unresolvable.
+7. Same config but `push.default` left at its default `simple`: git names no
+   push destination, though a bare `git push` still succeeds via the
+   configured `pushRemote`.
 8. `branch.<name>.pushRemote = origin` with `push.default = current`, never
    pushed to origin — the push ref does not exist yet.
-9. Detached HEAD (`git checkout --detach`).
+9. A tracking upstream whose name the branch does not match — from `master`,
+   `git push origin master:bar`, `git branch --set-upstream-to=origin/bar`,
+   then one local commit — with `push.default` at its default, so the branch
+   is ahead 1 of an upstream git will not turn into a push destination. Git
+   names no destination *and* refuses the bare push (`exit 128`).
+   `push.default = nothing` on an otherwise plain tracking branch is the
+   sibling shape.
+10. A branch with no upstream at all, in a repo that configures a repo-wide
+    push override (`remote.pushDefault`, or a `remote.<name>.push` refspec).
+11. Detached HEAD (`git checkout --detach`).
 
 ## Checks
 
-Only state 9 disables Push — a detached HEAD is the one push failure provable
+Only state 11 disables Push — a detached HEAD is the one push failure provable
 from local state alone. Everything count-based warns on an enabled row and
 lets git answer authoritatively on click:
 
@@ -39,10 +49,16 @@ lets git answer authoritatively on click:
   enabled. Clicking Push clears the panel and shows the push outcome.
 - State 6: Update Project shows `↓3 · upstream/main`; Push shows `↑2`
   (push-side counts), enabled.
-- State 7: Push shows **no hint** — git declined to name a destination, so
-  the row makes no count claim; enabled.
+- State 7: Push shows **no hint** — git named no destination, so the row
+  makes no count claim; enabled.
 - State 8: Push shows "Creates origin/<branch>", enabled.
-- State 9: Update Project and Push disabled with "Detached HEAD".
+- State 9: Push shows **no hint**, enabled. The upstream `↑1` must not appear
+  as a push count here: git refuses this push outright, and clicking surfaces
+  git's own refusal in the status line.
+- State 10: Push shows "Sets upstream on push", enabled — the daemon pushes a
+  branch with no upstream through an explicit `--set-upstream` refspec, which
+  ignores `push.default` and the repo-wide override.
+- State 11: Update Project and Push disabled with "Detached HEAD".
 - After a **failed** Update Project against a force-reset upstream (reset the
   remote branch to an ancestor in a second clone, no fetch in between): the
   pull fails, and the re-fetched listing updates the rows in place — the pull
@@ -58,12 +74,19 @@ Round 2 pivoted from disabling on `behind > 0` to warn-only after review
 measured the disable misfiring across independent config axes
 (`remote.<name>.push` refspecs / Gerrit, forcing refspecs, triangular
 `push.default=simple`, `checkout -b` name-mismatch shapes, stale last-fetch
-counts): remote acceptance is not locally decidable. Unit coverage pins the
-warn-only rule, the push-side count display, the configured-but-unknown
-silence, the `pushGone` copy, and the failure-refresh render effect; core
-pins the push atoms and the `pushConfigured` probe (pushRemote,
-remote.pushDefault, remote.<name>.push refspec, per-branch case-preserving
-scoping, nonzero real-git `pushBehind`) under a hermetic env.
+counts): remote acceptance is not locally decidable. Round 3 then re-keyed the
+row's silence from "a push override is configured" to "git named no
+destination for a live upstream" — the boundary the rule site states. The old
+key was wrong in both directions: state 9 showed pull-side counts for a push
+git refuses, and state 10 dropped the accurate "Sets upstream on push". The
+`pushConfigured` atom it read had no other consumer, so it and the
+`git config --get-regexp` probe that produced it are gone. Unit coverage pins
+the warn-only rule, the push-side count display, the silence boundary on both
+real-git shapes, the `pushGone` copy, the status-only fallback, and the
+post-failure refresh (both actions, its best-effort failure path, and the
+resolution panel staying usable while the refresh is in flight); core pins the
+push atoms — including that git names no destination in the three silence
+shapes — and a nonzero real-git `pushBehind`, under a hermetic env.
 
 ```sh
 cd packages/web-shell && npx vitest run \

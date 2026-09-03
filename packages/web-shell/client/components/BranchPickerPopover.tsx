@@ -197,21 +197,19 @@ export function deriveActionHints(
   let push: ActionHint | undefined;
   // The push row's *information* comes from the push destination — git's own
   // `%(push)` answer, which may differ from the tracking upstream in
-  // triangular workflows. Shapes:
-  //  - `pushTarget` resolved: its counts rule.
-  //  - `pushGone`: the destination resolves but its ref is missing — a push
-  //    would create it; there are no counts to show.
-  //  - `pushConfigured` without a target (`push.default=simple` in a
-  //    triangular repo, or a `remote.<name>.push` refspec): git declined to
-  //    name a branch, so the push side is unknown — say nothing rather than
-  //    presenting pull-side numbers as push-side ones.
-  //  - Neither: git named no override, so the upstream-side counts stand in
-  //    (that is also all a status-only fallback can know).
+  // triangular workflows:
+  //  - `pushTarget` resolved: its counts rule; `pushGone` means the
+  //    destination's ref is missing, so a push would create it.
+  //  - A live upstream but no `pushTarget`: git declined to name a
+  //    destination (`push.default` the branch name does not satisfy, a
+  //    `remote.<name>.push` refspec, `nothing`) and refuses some of those
+  //    pushes outright, so the upstream counts are no stand-in — say nothing
+  //    rather than dress a pull-side number as a push-side one.
+  //  - No upstream: the push publishes the branch and sets one.
+  // With no listing at all the status counters are all there is.
   const pushKnown = head?.pushTarget !== undefined && head.pushGone !== true;
   const pushSideUnknown =
-    head !== undefined &&
-    head.pushTarget === undefined &&
-    head.pushConfigured === true;
+    head !== undefined && head.pushTarget === undefined && hasUpstream === true;
   const pushAhead = pushKnown ? (head.pushAhead ?? 0) : ahead;
   const pushBehind = pushKnown ? (head.pushBehind ?? 0) : behind;
   // Only a detached HEAD disables: it is the one push failure provable from
@@ -383,24 +381,29 @@ export function BranchPickerPopover({
   const onStatusRefreshedRef = useRef(onStatusRefreshed);
   onStatusRefreshedRef.current = onStatusRefreshed;
 
-  const fetchBranches = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await ws.workspaceGitBranches(gitCwd);
-      if (requestId !== requestIdRef.current) return;
-      setData(result);
-      setListingFetchedAt(Date.now());
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setLoading(false);
+  // `silent` is the post-action refresh: the listing on screen is stale but
+  // usable, so a failed re-read must not replace the rows with its error.
+  const fetchBranches = useCallback(
+    async (silent = false) => {
+      const requestId = ++requestIdRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await ws.workspaceGitBranches(gitCwd);
+        if (requestId !== requestIdRef.current) return;
+        setData(result);
+        setListingFetchedAt(Date.now());
+      } catch (err) {
+        if (requestId !== requestIdRef.current || silent) return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
-    }
-  }, [ws, gitCwd]);
+    },
+    [ws, gitCwd],
+  );
 
   const fetchStatus = useCallback(async () => {
     const requestId = ++statusRequestIdRef.current;
@@ -417,6 +420,13 @@ export function BranchPickerPopover({
       // Keep whatever the caller passed; the hints degrade to the listing.
     }
   }, [ws, gitCwd]);
+
+  // Re-read the listing and the status together so the hints never mix a
+  // fresh listing with a pre-action tree snapshot.
+  const refreshAfterAction = useCallback(async () => {
+    await fetchBranches(true);
+    void fetchStatus();
+  }, [fetchBranches, fetchStatus]);
 
   // A status fetched for a previous workspace must not seed the next one.
   useEffect(() => {
@@ -565,9 +575,8 @@ export function BranchPickerPopover({
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
       // A rejected push is the strongest evidence the last-fetch counts are
-      // stale; re-read both the listing and the working-tree status.
-      await fetchBranches();
-      void fetchStatus();
+      // stale. Awaited so the row spinner stays up until the refresh lands.
+      await refreshAfterAction();
     } finally {
       setBusyAction(null);
     }
@@ -575,7 +584,7 @@ export function BranchPickerPopover({
     ws,
     busyAction,
     gitCwd,
-    fetchStatus,
+    refreshAfterAction,
     fetchBranches,
     onBranchChanged,
     showStatus,
@@ -635,10 +644,10 @@ export function BranchPickerPopover({
         }
         // A failed pull has usually still fetched (the force-reset shape
         // self-heals here; a deleted upstream ref defeats the fetch itself
-        // and needs a prune). Refresh the listing and the status together so
-        // the hints don't mix a new listing with a pre-pull tree snapshot.
-        await fetchBranches();
-        void fetchStatus();
+        // and needs a prune). Not awaited: the resolution panel this catch
+        // just opened must not sit disabled for a listing round-trip it
+        // never needed.
+        void refreshAfterAction();
       } finally {
         setBusyAction(null);
       }
@@ -648,7 +657,7 @@ export function BranchPickerPopover({
       busyAction,
       gitCwd,
       fetchBranches,
-      fetchStatus,
+      refreshAfterAction,
       onBranchChanged,
       showStatus,
       clearPullPanel,

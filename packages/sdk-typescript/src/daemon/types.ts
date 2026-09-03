@@ -319,10 +319,6 @@ export interface DaemonGitBranchInfo {
   pushBehind?: number;
   /** Push destination resolves but its ref is missing (push creates it). */
   pushGone?: boolean;
-  /** A push override is configured (`branch.<name>.pushRemote` /
-   *  `remote.pushDefault`); with `pushTarget` absent the push side is
-   *  configured-but-unknown (triangular under `push.default=simple`). */
-  pushConfigured?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;

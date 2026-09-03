@@ -44,15 +44,6 @@ export interface GitBranchInfo {
    * would create the remote branch). `pushAhead`/`pushBehind` are absent.
    */
   pushGone?: boolean;
-  /**
-   * A push destination override is configured for this branch
-   * (`branch.<name>.pushRemote` or `remote.pushDefault`). Notably,
-   * `%(push)` cannot resolve a destination under the default
-   * `push.default=simple` in exactly this triangular shape even though a
-   * plain `git push` succeeds — so when this is set and `pushTarget` is
-   * absent, the push side is configured-but-unknown, not "the upstream".
-   */
-  pushConfigured?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -147,29 +138,6 @@ export async function fetchGitBranches(
   // error and returning an empty-but-"available" result.
   await runGit(cwd, ['rev-parse', '--git-dir'], env);
 
-  // Which branches have a push destination override: a per-branch
-  // `pushRemote`, a global `remote.pushDefault`, or a `remote.<name>.push`
-  // refspec (e.g. Gerrit's `refs/heads/*:refs/for/*`, which `%(push)` cannot
-  // express as a branch at all). `--get-regexp` exits 1 on no matches; treat
-  // that as empty. Keys print lowercased but the branch subsection keeps its
-  // case.
-  const pushConfigRaw = await runGit(
-    cwd,
-    [
-      'config',
-      '--get-regexp',
-      '^branch\\..*\\.pushremote$|^remote\\.pushdefault$|^remote\\..*\\.push$',
-    ],
-    env,
-  ).catch(() => '');
-  const pushDefaultSet = /^remote\.pushdefault /m.test(pushConfigRaw);
-  const pushRefspecSet = /^remote\..*\.push /m.test(pushConfigRaw);
-  const pushRemoteBranches = new Set(
-    [...pushConfigRaw.matchAll(/^branch\.(.*)\.pushremote /gm)].map(
-      (m) => m[1],
-    ),
-  );
-
   const [localRaw, remoteRaw, tagsRaw, headRaw, reflogRaw] = await Promise.all([
     runGit(
       cwd,
@@ -207,11 +175,7 @@ export async function fetchGitBranches(
     ).catch(() => ''),
   ]);
 
-  const local = parseBranchLines(localRaw).map((b) =>
-    pushDefaultSet || pushRefspecSet || pushRemoteBranches.has(b.name)
-      ? { ...b, pushConfigured: true }
-      : b,
-  );
+  const local = parseBranchLines(localRaw);
   const remote = parseBranchLines(remoteRaw);
   const tags = parseTagLines(tagsRaw);
   const recent = parseRecentBranches(reflogRaw, headRaw.trim());

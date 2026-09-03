@@ -316,18 +316,15 @@ describe('fetchGitBranches push-side tracking', () => {
     const env = hermeticEnv();
     // Under the default `push.default=simple`, git refuses to resolve
     // `@{push}` in a triangular repo even though a plain `git push`
-    // succeeds — the listing reports configured-but-unknown.
+    // succeeds — the listing names no push destination.
     const simpleHead = (await fetchGitBranches(dir, env)).local.find(
       (b) => b.name === 'master',
     );
     expect(simpleHead?.upstream).toBe('upstream/master');
     expect(simpleHead?.behind).toBe(1);
     expect(simpleHead?.pushTarget).toBeUndefined();
-    expect(simpleHead?.pushConfigured).toBe(true);
 
-    // With a resolvable push.default the push-side counts come through —
-    // this is also the shape where `pushTarget` and `pushConfigured` are
-    // both set at once.
+    // With a resolvable push.default the push-side counts come through.
     git(dir, 'config', 'push.default', 'current');
     const head = (await fetchGitBranches(dir, env)).local.find(
       (b) => b.name === 'master',
@@ -336,7 +333,6 @@ describe('fetchGitBranches push-side tracking', () => {
     expect(head?.pushAhead).toBe(1);
     expect(head?.pushBehind).toBe(0);
     expect(head?.pushGone).toBeUndefined();
-    expect(head?.pushConfigured).toBe(true);
   });
 
   it('marks a resolvable push destination whose ref is missing as pushGone', async () => {
@@ -370,7 +366,6 @@ describe('fetchGitBranches push-side tracking', () => {
     expect(head?.pushTarget).toBe('origin/master');
     expect(head?.pushAhead).toBe(0);
     expect(head?.pushBehind).toBe(0);
-    expect(head?.pushConfigured).toBeUndefined();
   });
 
   it('reports a nonzero pushBehind when the push remote has advanced', async () => {
@@ -399,54 +394,58 @@ describe('fetchGitBranches push-side tracking', () => {
     expect(head?.pushAhead).toBe(0);
   });
 
-  it('flags remote.pushDefault and remote.<name>.push refspecs as configured', async () => {
-    // remote.pushDefault: no per-branch override, global push remote.
-    const a = makeRepo();
-    const remoteA = makeBareRemote();
-    const remoteB = makeBareRemote();
-    git(a, 'remote', 'add', 'origin', remoteA);
-    git(a, 'remote', 'add', 'fork', remoteB);
-    git(a, 'push', '-q', '-u', 'origin', 'master');
-    git(a, 'config', 'remote.pushDefault', 'fork');
-    const headA = (await fetchGitBranches(a, hermeticEnv())).local.find(
+  it('reports no push destination when git declines to name one', async () => {
+    // A live upstream git cannot turn into an `@{push}` answer. The push row
+    // stays silent on these: the bare `git push` is either refused outright
+    // or routed somewhere the listing cannot name, so the upstream counts
+    // are never a stand-in for push-side ones.
+    const env = hermeticEnv();
+
+    // The tracking upstream's name does not match the branch and
+    // `push.default` is the default `simple`.
+    const mismatch = makeRepo();
+    const remoteM = makeBareRemote();
+    git(mismatch, 'remote', 'add', 'origin', remoteM);
+    git(mismatch, 'push', '-q', 'origin', 'master:bar');
+    git(mismatch, 'fetch', '-q', 'origin');
+    git(mismatch, 'branch', '--set-upstream-to=origin/bar', 'master');
+    commitFile(mismatch, 'b.txt', 'two\n');
+    const headM = (await fetchGitBranches(mismatch, env)).local.find(
       (b) => b.name === 'master',
     );
-    expect(headA?.pushConfigured).toBe(true);
+    expect(headM?.upstream).toBe('origin/bar');
+    expect(headM?.ahead).toBe(1);
+    expect(headM?.pushTarget).toBeUndefined();
+    expect(headM?.pushAhead).toBeUndefined();
+    expect(headM?.pushBehind).toBeUndefined();
 
-    // remote.<name>.push refspec (the Gerrit shape): `%(push)` cannot name a
-    // branch, but a plain `git push` honors the refspec — the listing must
-    // say "configured", not "plain clone".
-    const g = makeRepo();
+    // `push.default=nothing`: the upstream matches, git still names nothing.
+    const nothing = makeRepo();
+    const remoteN = makeBareRemote();
+    git(nothing, 'remote', 'add', 'origin', remoteN);
+    git(nothing, 'push', '-q', '-u', 'origin', 'master');
+    commitFile(nothing, 'c.txt', 'three\n');
+    git(nothing, 'config', 'push.default', 'nothing');
+    const headN = (await fetchGitBranches(nothing, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(headN?.upstream).toBe('origin/master');
+    expect(headN?.ahead).toBe(1);
+    expect(headN?.pushTarget).toBeUndefined();
+    expect(headN?.pushAhead).toBeUndefined();
+
+    // A `remote.<name>.push` refspec (Gerrit): `%(push)` cannot express
+    // `refs/for/*` as a branch at all.
+    const gerrit = makeRepo();
     const remoteG = makeBareRemote();
-    git(g, 'remote', 'add', 'origin', remoteG);
-    git(g, 'push', '-q', '-u', 'origin', 'master');
-    git(g, 'config', 'remote.origin.push', 'refs/heads/*:refs/for/*');
-    const headG = (await fetchGitBranches(g, hermeticEnv())).local.find(
+    git(gerrit, 'remote', 'add', 'origin', remoteG);
+    git(gerrit, 'push', '-q', '-u', 'origin', 'master');
+    git(gerrit, 'config', 'remote.origin.push', 'refs/heads/*:refs/for/*');
+    const headG = (await fetchGitBranches(gerrit, env)).local.find(
       (b) => b.name === 'master',
     );
+    expect(headG?.upstream).toBe('origin/master');
     expect(headG?.pushTarget).toBeUndefined();
-    expect(headG?.pushConfigured).toBe(true);
-  });
-
-  it('scopes per-branch pushRemote to that branch, preserving subsection case', async () => {
-    const dir = makeRepo();
-    const remoteA = makeBareRemote();
-    const remoteB = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remoteA);
-    git(dir, 'remote', 'add', 'fork', remoteB);
-    git(dir, 'push', '-q', '-u', 'origin', 'master');
-    git(dir, 'checkout', '-q', '-b', 'Feature/X');
-    git(dir, 'push', '-q', '-u', 'origin', 'Feature/X');
-    git(dir, 'config', 'branch.Feature/X.pushRemote', 'fork');
-    git(dir, 'checkout', '-q', 'master');
-
-    const locals = (await fetchGitBranches(dir, hermeticEnv())).local;
-    expect(locals.find((b) => b.name === 'Feature/X')?.pushConfigured).toBe(
-      true,
-    );
-    expect(
-      locals.find((b) => b.name === 'master')?.pushConfigured,
-    ).toBeUndefined();
   });
 });
 
