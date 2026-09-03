@@ -610,6 +610,9 @@ export function installTerminalResizeReflow(
       // was computed for a narrower width and would over-erase past the live
       // frame into committed scrollback.
       pendingAmplify = 0;
+      if (model.content.length > 0) {
+        model.columns = width;
+      }
     }
     lastWidth = width;
   };

@@ -1516,6 +1516,30 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('refreshes the modeled width after a write-free grow', () => {
+    const stdout = new FakeStdout();
+    stdout.columns = 50;
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      stdout.write(ansiEscapes.clearTerminal);
+      const frame = frameLines(10, 10);
+      stdout.write(frame.join('\n'));
+
+      stdout.columns = 120;
+      stdout.emit('resize');
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written).toEqual([
+        ansiEscapes.clearViewport + frame.join('\n'),
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
   it('replays styled (SGR) and OSC-8 hyperlink rewrites byte-intact', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
