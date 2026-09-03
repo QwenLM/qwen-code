@@ -66,6 +66,7 @@ import {
 } from './lib/receipt.js';
 import {
   ENTRY_FENCE_DELIMITER_RE,
+  INLINE_SUGGESTIONS_CLAUSE,
   composeReview,
   normalizeSeverityFloor,
   tryIngestBodyCriticals,
@@ -377,6 +378,24 @@ function authorization(
  * disagreed with every other. GitHub accepts all of it — none of it is invalid
  * to the API — so the only place it can be caught is here.
  */
+/**
+ * The composed body without its inline-Suggestions opener clause, in both
+ * languages. The opener is one space-joined paragraph, so the clause is
+ * removed with the space that joined it to its neighbour; the first
+ * occurrence is the opener's — the opener is the body's first paragraph.
+ */
+function stripInlineSuggestionsClause(body: string): string {
+  return [INLINE_SUGGESTIONS_CLAUSE.en, INLINE_SUGGESTIONS_CLAUSE.zh].reduce(
+    (b, clause) =>
+      b.includes(` ${clause}`)
+        ? b.replace(` ${clause}`, '')
+        : b.includes(`${clause} `)
+          ? b.replace(`${clause} `, '')
+          : b.replace(clause, ''),
+    body,
+  );
+}
+
 /**
  * The verdict, computed — from the states the caller established and the comments
  * it actually attached.
@@ -1710,6 +1729,22 @@ function submit(
       if (plan.replies.length > 0) {
         const diverted = new Set(plan.replies.map((r) => r.index));
         reviewComments = finalComments.filter((_, i) => !diverted.has(i));
+        // The opener's "Suggestions are inline." was keyed to the count
+        // compose took from the PRE-diversion posting set; when the
+        // diversion drains every inline Suggestion into thread replies,
+        // the clause would post beside an empty comments array — the
+        // count-beside-the-thing collision this file's header describes,
+        // reproduced by a transformation that runs after the compose.
+        // Reconcile the CLAUSE only: the event stays keyed to the
+        // confirmed count, carried findings included — a diverted finding
+        // still stands, it just answers in its own thread (#9940 review,
+        // round 23).
+        if (
+          countInlineFindings(finalComments).suggestionsInline > 0 &&
+          countInlineFindings(reviewComments).suggestionsInline === 0
+        ) {
+          body = stripInlineSuggestionsClause(body);
+        }
         carriedReplies = plan.replies.map((r) => ({
           commentId: r.commentId,
           // The normalized drafted body, footer and all — the same text

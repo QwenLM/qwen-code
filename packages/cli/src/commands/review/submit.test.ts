@@ -4075,6 +4075,48 @@ describe('the thread lifecycle', () => {
     expect(replyCalls()[0]![0]).toContain('R1-2: still stands at HEAD');
     expect(resolveCalls()).toHaveLength(0);
     expect(stdoutJson()).toMatchObject({ posted: true, carriedReplies: 1 });
+    // A fresh Suggestion still posts inline, so the opener's clause stays.
+    expect(reviewPost().body).toContain('Suggestions are inline.');
+  });
+
+  it('drops the "Suggestions are inline." clause when the diversion drains every inline Suggestion (#9940 review, round 23)', () => {
+    // The steady state of a long-lived review: every inline finding is a
+    // carried re-post into a live own thread. Compose keyed the clause to
+    // the pre-diversion count; the diversion then empties comments[], and
+    // the body claimed inline suggestions over an empty array while the
+    // JSON honestly reported inlineComments: 0.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD — the retry guard drops a valid case',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }));
+
+    expect(reviewPost().comments).toEqual([]);
+    expect(replyCalls()).toHaveLength(1);
+    const body = reviewPost().body as string;
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body).not.toContain('建议见行内评论。');
+    // The neighbouring clauses survive, joined cleanly.
+    expect(body).not.toContain('  ');
+    expect(body).toContain('could not be anchored');
+    // The EVENT is untouched — the diverted finding still stands, it just
+    // answers in its own thread.
+    expect(reviewPost().event).toBe('COMMENT');
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      inlineComments: 0,
+      carriedReplies: 1,
+    });
   });
 
   it('a fixed ruling replies `R<id> fixed by <what>` and resolves the thread', () => {

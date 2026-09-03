@@ -3579,6 +3579,20 @@ export const FIXED_BY_MAX = 240;
  * stands, exactly the dedup the ledger builder applies to a second draft
  * under a carried id.
  */
+/**
+ * The opener's inline-Suggestions clause, named once because TWO ends act
+ * on it: this module writes it off the posting count, and `submit` strips
+ * it again when the thread lifecycle's diversion — which runs AFTER the
+ * compose — drains every inline Suggestion into thread replies, so the
+ * clause would otherwise post beside an empty comments array (#9940
+ * review, round 23). A restated string at either end is the drift class
+ * this file's header describes.
+ */
+export const INLINE_SUGGESTIONS_CLAUSE = {
+  en: 'Suggestions are inline.',
+  zh: '建议见行内评论。',
+} as const;
+
 export function ingestFixedFindings(value: unknown): FixedFinding[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -6853,11 +6867,7 @@ function composeReviewBody(
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
   if (suggestionsInline > 0) {
-    clauses.push({
-      keep: 1,
-      en: 'Suggestions are inline.',
-      zh: '建议见行内评论。',
-    });
+    clauses.push({ keep: 1, ...INLINE_SUGGESTIONS_CLAUSE });
   }
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
