@@ -1892,6 +1892,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [
       focus,
       buffer,
+      slashCommands,
       completion,
       shellModeActive,
       setShellModeActive,
