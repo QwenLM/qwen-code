@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The delivery check, and the two ways it was wrong.
 //
 // It began as a straight substring test — "the built prompt must appear in the

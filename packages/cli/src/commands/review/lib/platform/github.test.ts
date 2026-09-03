@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // githubReader.composeUrl is pure assembly — no API call — so its whole
 // surface is the PR-page grammar and the host precedence: the routed gh
 // host, else an operator-exported GH_HOST, else FAIL CLOSED with ''. gh's

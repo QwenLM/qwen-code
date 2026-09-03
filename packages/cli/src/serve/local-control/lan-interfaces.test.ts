@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import type { NetworkInterfaceInfo } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { listLanCandidates } from './lan-interfaces.js';

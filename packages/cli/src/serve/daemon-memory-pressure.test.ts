@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { getHeapStatistics } from 'node:v8';
 import { describe, expect, it } from 'vitest';
 import {

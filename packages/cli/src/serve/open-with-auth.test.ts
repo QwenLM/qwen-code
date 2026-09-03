@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServeOptions } from './types.js';
 import { applyOpenWithAuth } from './open-with-auth.js';

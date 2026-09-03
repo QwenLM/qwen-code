@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // Runs the committed guard suite the way the Windows merge lane executes it
 // (win32 + cmd.exe, no Git-Bash markers), so a lane-red defect is caught on
 // every platform instead of first going red inside the merge queue. The

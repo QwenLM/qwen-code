@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,

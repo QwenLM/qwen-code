@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { expectWithinLatencyBudget } from './latency-budget.js';

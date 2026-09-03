@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The risk is silent wrongness, not crashes: extracting the same-named step
 // from the wrong job, dropping the env that changes the script's behaviour —
 // including the two levels, job and workflow, that the step's own text does not

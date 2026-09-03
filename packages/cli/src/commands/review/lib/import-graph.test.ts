@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The widening heuristic's contract is directional: a false positive costs one
 // extra review, a false negative keeps the pre-widening floor. These tests pin
 // the resolution rules (ESM-TS `.js` → `.ts`, index forms, workspace names)

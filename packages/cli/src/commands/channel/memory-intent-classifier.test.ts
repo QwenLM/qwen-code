@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelAgentBridge } from '@qwen-code/channel-base';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';

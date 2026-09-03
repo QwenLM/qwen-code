@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { EventEmitter } from 'node:events';
 import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application, RequestHandler } from 'express';

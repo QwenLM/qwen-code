@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, expect, it, vi } from 'vitest';
 import {
   SPEAK_TO_USER_TOOL_NAME,

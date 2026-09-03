@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // One parser for the identity line `agent-prompt` bakes into every launch —
 // shared by cost-ledger (row labels) and coverage (disclosure labels), which
 // previously each carried their own copy of this grammar.

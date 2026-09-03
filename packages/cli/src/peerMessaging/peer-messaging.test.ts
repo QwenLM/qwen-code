@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 /**
  * End-to-end over a real socket: a frame written by the client comes out
  * of the gate and lands in the submit function, wrapped and attributed.

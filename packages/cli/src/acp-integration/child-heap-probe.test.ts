@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, expect, it } from 'vitest';
 import type * as v8 from 'node:v8';
 import { constants as perfConstants } from 'node:perf_hooks';

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import stringWidth from 'string-width';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';

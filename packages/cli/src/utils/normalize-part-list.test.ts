@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect } from 'vitest';
 import type { Part } from '@google/genai';
 import { normalizePartList } from './normalize-part-list.js';

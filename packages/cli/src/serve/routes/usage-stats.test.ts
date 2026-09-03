@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';

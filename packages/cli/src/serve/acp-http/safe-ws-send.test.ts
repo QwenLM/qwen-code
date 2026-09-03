@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect, vi } from 'vitest';
 import type { WebSocket } from 'ws';
 import { safeWsSend } from './safe-ws-send.js';

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sendNotification } from './notificationService.js';
 import type { TerminalNotification } from '../ui/hooks/useTerminalNotification.js';

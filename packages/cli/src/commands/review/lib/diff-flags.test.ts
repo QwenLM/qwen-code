@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The pinned knobs are a contract with every parser downstream, and each one
 // is here because its default breaks one of them. A pin deleted as
 // "redundant" fails nothing else in the suite — the handler tests mock the

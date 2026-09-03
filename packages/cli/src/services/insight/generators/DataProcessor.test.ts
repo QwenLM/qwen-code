@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DataProcessor } from './DataProcessor.js';
 import { dayKey } from '../dates.js';

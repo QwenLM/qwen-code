@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { createServer } from 'node:http';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { describe, expect, it } from 'vitest';

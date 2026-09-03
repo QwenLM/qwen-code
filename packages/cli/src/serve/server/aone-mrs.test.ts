@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // `vi.mock('node:child_process')` cannot intercept in this package (see
 // git-branch-ops.test.ts), so detection runs the real git binary against
 // throwaway repositories, the a1 body parsing is exercised through its

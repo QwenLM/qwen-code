@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect } from 'vitest';
 import { V5ToV4Migration } from './v5-to-v4.js';
 

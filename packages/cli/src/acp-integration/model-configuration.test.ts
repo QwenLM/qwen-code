@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import {

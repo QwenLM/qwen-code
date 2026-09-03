@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The fixture half of 94 hand-written mock servers: SSE framing (93%), a
 // `[DONE]` terminator (92%), `/v1/chat/completions` (73%), a usage block (69%),
 // a request log (62%). Driven here over real HTTP, because a mock asserted

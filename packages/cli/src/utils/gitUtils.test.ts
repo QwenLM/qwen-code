@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { vi, describe, expect, it, afterEach, beforeEach } from 'vitest';
 import * as child_process from 'node:child_process';
 import {

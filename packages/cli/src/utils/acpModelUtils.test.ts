@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect } from 'vitest';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import {

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, expect, it } from 'vitest';
 import { dayKey, hourOfDay, parseDayKey, todayKey } from './dates.js';
 

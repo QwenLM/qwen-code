@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The digest must cover exactly the review sources the bundle contains.
 //
 // Deciding that by filename has now been wrong four times: `.test.ts` files,

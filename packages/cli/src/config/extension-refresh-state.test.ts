@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExtensionRefreshState } from './extension-refresh-state.js';
 import { AppEvent } from '../utils/events.js';

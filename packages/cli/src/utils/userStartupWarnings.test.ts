@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { getUserStartupWarnings } from './userStartupWarnings.js';
 import * as os from 'node:os';

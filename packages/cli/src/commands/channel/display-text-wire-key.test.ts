@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/channel-base';
 import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';

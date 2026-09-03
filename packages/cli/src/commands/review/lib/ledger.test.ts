@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // The marker rides inside a posted review body — another account's writable
 // surface — so the parse half is tested as an untrusted-input boundary: every
 // malformation contributes nothing, and nothing throws.

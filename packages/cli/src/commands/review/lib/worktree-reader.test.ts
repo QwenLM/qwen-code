@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 // Real filesystem. The bug this locks down lives in the kernel's path
 // resolution, and a mocked `fs` would happily "pass" against a fiction —
 // which is exactly how the lexically-inside form got through the first gate.

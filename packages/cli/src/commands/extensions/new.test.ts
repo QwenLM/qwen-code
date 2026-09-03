@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { newCommand } from './new.js';
 import yargs from 'yargs';

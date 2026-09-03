@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { describe, it, expect } from 'vitest';
 import { basename, dirname, join, resolve } from 'node:path';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';

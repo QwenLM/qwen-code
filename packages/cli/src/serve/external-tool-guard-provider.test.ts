@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';

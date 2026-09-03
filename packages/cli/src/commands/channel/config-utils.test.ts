@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as os from 'node:os';

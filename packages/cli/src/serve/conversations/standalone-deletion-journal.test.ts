@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment node
+
 import * as fs from 'node:fs/promises';
 import type { PathLike } from 'node:fs';
 import { tmpdir } from 'node:os';
