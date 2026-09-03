@@ -218,6 +218,16 @@ export interface ChannelAgentBridge {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  /**
+   * Answer a side question without interrupting the session's active turn.
+   * The result must echo the request's sessionId. Bridges whose agent
+   * connection cannot answer side questions omit it and channels fail closed.
+   */
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
 }
