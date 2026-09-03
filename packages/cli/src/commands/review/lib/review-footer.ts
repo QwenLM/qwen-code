@@ -415,7 +415,10 @@ function projectInvisibles(input: string): Projection {
  * one character.
  */
 function stripByProjection(line: string, re: RegExp): string {
-  const proj = projectInvisibles(line);
+  // The projection reads a NUL as `blankQuotedCode`'s sentinel, and this line
+  // has not been blanked — normalize the source NULs out first. Both strings
+  // are the same length, so the cut still returns the ORIGINAL bytes.
+  const proj = projectInvisibles(normalizeSourceNuls(line));
   re.lastIndex = 0;
   const first = re.exec(proj.text);
   if (first === null) return line;
@@ -576,9 +579,15 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  * the fold removed. It stays UNCAPPED: this is the trailing strip the capped
  * anywhere-strips hand their over-long forged footers to, so a middle bound
  * here would let a 400-character forged footer post as ballast.
+ *
+ * A model part ENDING in `_—` is re-admitted by the lookahead group: its only
+ * following space belongs to the marker literal, so it cannot open a footer of
+ * its own and admitting it keeps the single parse. The guard still blocks a
+ * middle that reaches a `_— ` followed by anything else — the two-space
+ * `_—  via` shape IS a self-sufficient empty-middle footer of its own.
  */
 export const REVIEW_FOOTER_RE =
-  /\s*(?:_— (?:(?!_— | via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?\s*)+$/;
+  /\s*(?:_— (?:(?!_— | via Qwen Code \/review)[^\n])*(?:_—(?= via Qwen Code \/review))? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_?\s*)+$/;
 
 /** The widest slice `stripReviewFooter` runs the strip regex over. */
 const STRIP_TAIL_LIMIT = 8192;
@@ -660,16 +669,21 @@ function canProjectFooterMarker(s: string): boolean {
  * before one: all three render nothing. An UNCLOSED opener is the one
  * comment shape the projection keeps: it renders as escaped literal
  * prose on GitHub, so the footer after it strips — and its delimiter is
- * neutralized same-length first, or the opener's bytes would survive
- * the cut and blind the raw-body readers the posted line joins. The
- * neutralization stays length-equal to the line, or the cut arithmetic
- * would map into the wrong bytes.
+ * neutralized same-length, both in the copy the match runs on and in the
+ * cut's output, or the opener's bytes would survive the cut and blind the
+ * raw-body readers the posted line joins. The neutralization stays
+ * length-equal to the line, or the cut arithmetic would map into the
+ * wrong bytes.
  */
 export function stripReviewFooterLine(line: string): string {
-  return stripTrailingFooter(
+  const stripped = stripTrailingFooter(
     line,
     neutralizeUnclosedOpeners(normalizeSourceNuls(line)),
   );
+  // The cut slices the ORIGINAL line, so an unclosed opener with visible
+  // prose between it and the footer comes back with its delimiter intact —
+  // line-leading, that opens a type-2 block swallowing the rest of the post.
+  return stripped === line ? line : neutralizeUnclosedOpeners(stripped);
 }
 
 /**
@@ -791,21 +805,35 @@ export const LINE_ENDING_RE = /\r\n?|\n/g;
 const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 
 /**
- * The CommonMark type-2-5 raw-HTML block openers — comment, processing
- * instruction, declaration, CDATA. An `html_block` token opening with one
- * renders NOTHING on GitHub (the sanitizer drops all four classes), unlike
- * the tag-based blocks whose content renders visibly — the kind split the
- * marker-exposure gate reads.
+ * The CommonMark type 1-5 `html_block` classes markdown-it itself tables: the
+ * opener each starts on, the terminator it ends on, and the kind its content
+ * renders as. The type 2-5 raw classes — comment, processing instruction,
+ * declaration, CDATA — render NOTHING on GitHub (the sanitizer drops all
+ * four), unlike the tag-based classes whose content renders visibly: the kind
+ * split the marker-exposure gate reads. Type 1 is tag-based too, but ends ON
+ * its closing-tag line instead of at a blank line, so that line is a quotation
+ * edge. Types 6/7 match no class: they end at a blank line and have no
+ * terminator line to protect.
+ *
+ * The terminator doubles as the terminated/dangling test — markdown-it ends a
+ * block on the FIRST line holding one, so a block whose last line lacks it ran
+ * to end of input unclosed. Such a block has no terminator line, and
+ * protecting its last line anyway kept a forged footer riding one through the
+ * whole attribution-off chain.
  */
-const RAW_HTML_BLOCK_OPEN_RE = /^ {0,3}(?:<!--|<\?|<!\[CDATA\[|<![A-Z])/;
-
-/**
- * The type-1 raw-HTML block openers. Tag-based like the types 6/7 whose
- * content renders visibly, but type 1 ends ON its closing-tag line instead of
- * at a blank line, so that line is a quotation edge too.
- */
-const TERMINATING_TAG_OPEN_RE =
-  /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i;
+const HTML_BLOCK_CLASSES: ReadonlyArray<
+  readonly [open: RegExp, terminator: RegExp, kind: 'rawHtml' | 'html']
+> = [
+  [/^ {0,3}<!--/, /-->/, 'rawHtml'],
+  [/^ {0,3}<\?/, /\?>/, 'rawHtml'],
+  [/^ {0,3}<!\[CDATA\[/, /\]\]>/, 'rawHtml'],
+  [/^ {0,3}<![A-Z]/, />/, 'rawHtml'],
+  [
+    /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i,
+    /<\/(?:script|pre|style|textarea)>/i,
+    'html',
+  ],
+];
 
 /** Structural classes a line falls into. */
 type LineKind =
@@ -824,10 +852,12 @@ interface ScannedLine {
   /** The line's content after its blockquote prefix. */
   content: string;
   /**
-   * The line an `html_block` type 1-5 ENDS ON, carrying its terminator.
-   * Dropping it uncloses the block and re-renders everything after it, so the
-   * maps keep it verbatim: a forged footer riding one survives — fails open —
-   * instead of swallowing the reviewer's own content.
+   * The line a TERMINATED `html_block` type 1-5 ENDS ON, carrying its
+   * terminator. Dropping it uncloses the block and re-renders everything after
+   * it, so a DROP of it fails open — the line is kept verbatim, and a forged
+   * footer riding one survives instead of swallowing the reviewer's own
+   * content. An in-place rewrite still reaches it: rewriting never unclosed
+   * anything, and a footer glued AFTER the terminator renders as visible text.
    */
   endEdge: boolean;
 }
@@ -849,7 +879,7 @@ interface ScannedLine {
  *
  * Tag-based HTML blocks (types 1, 6, 7) render their content visibly, so
  * it maps like text — the one droppable quotation kind. The type 2-5 raw
- * blocks open on their first line's grammar (the opener regex) and carry
+ * blocks open on their first line's grammar (the class openers) and carry
  * their own kind: a marker a DANGLING one swallows renders as nothing,
  * not the visible exposure `swallowsAppendedMarker` refuses.
  *
@@ -872,19 +902,19 @@ function scanLines(body: string): ScannedLine[] {
     if (token.type === 'fence') kind = 'fence';
     else if (token.type === 'code_block') kind = 'code';
     else if (token.type === 'html_block') {
-      const first = lines[token.map[0]] ?? '';
-      const quote = QUOTE_PREFIX_RE.exec(first);
-      const opener = quote === null ? first : first.slice(quote[0].length);
-      const raw = RAW_HTML_BLOCK_OPEN_RE.test(opener);
-      kind = raw ? 'rawHtml' : 'html';
-      // Types 1-5 end ON the terminator line; types 6/7 end at a blank line
-      // and have no terminator line to protect. A block that opens and closes
-      // on ONE line is not protected: dropping that line removes the whole
-      // block, so nothing is left unclosed — and protecting it would keep the
-      // bare marker line `stripCommentMarkerLines` exists to remove.
+      const opener = (lines[token.map[0]] ?? '').replace(QUOTE_PREFIX_RE, '');
+      const cls = HTML_BLOCK_CLASSES.find(([open]) => open.test(opener));
+      kind = cls?.[2] ?? 'html';
+      // A block that opens and closes on ONE line is not protected: dropping
+      // that line removes the whole block, so nothing is left unclosed — and
+      // protecting it would keep the bare marker line
+      // `stripCommentMarkerLines` exists to remove. A DANGLING one has no
+      // terminator line either, so its last line stays droppable.
+      const last = (lines[token.map[1] - 1] ?? '').replace(QUOTE_PREFIX_RE, '');
       if (
         token.map[1] - 1 > token.map[0] &&
-        (raw || TERMINATING_TAG_OPEN_RE.test(opener))
+        cls !== undefined &&
+        cls[1].test(last)
       ) {
         endEdges.add(token.map[1] - 1);
       }
@@ -928,12 +958,18 @@ function mapLinesAware(
   // them — those blanks belong to the quotation and render.
   const quotedDrops = new Set<number>();
   for (const { line, kind, endEdge } of scanLines(body)) {
-    if (endEdge || (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml')) {
+    if (kind !== 'text' && kind !== 'html' && kind !== 'rawHtml') {
       out.push(line);
       continue;
     }
     const mapped = map(line);
     if (mapped === null) {
+      // Only a DROP of a terminator line uncloses its block, so only the drop
+      // fails open — the in-place maps reach that line as any other.
+      if (endEdge) {
+        out.push(line);
+        continue;
+      }
       changed = true;
       drops.add(out.length);
       // The type 2-5 raw kind renders nothing — its blanks do not render
@@ -1037,12 +1073,17 @@ function linkRefDefLines(lines: string[], i: number): number {
  */
 export function rendersAsNothing(text: string): boolean {
   let stripped = text
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    // One pass, earliest opener wins: these constructs never nest, so the
+    // first one claims its own closer. Sequential strips let a `<?` or `<!--`
+    // quoted INSIDE a CDATA payload eat past the `]]>` to end of input and
+    // take the visible text after the section with it. Each arm keeps its
+    // unclosed-opener-runs-to-end-of-input semantics.
+    .replace(
+      /<!--[\s\S]*?(?:-->|$)|<\?[\s\S]*?(?:\?>|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<![A-Za-z][\s\S]*?(?:>|$)/g,
+      '',
+    )
     .replace(/<script\b[\s\S]*?(?:<\/script\s*>|$)/gi, '')
     .replace(/<style\b[\s\S]*?(?:<\/style\s*>|$)/gi, '')
-    .replace(/<\?[\s\S]*?(?:\?>|$)/g, '')
-    .replace(/<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, '')
-    .replace(/<![A-Za-z][\s\S]*?(?:>|$)/g, '')
     .replace(/\p{Cf}/gu, '')
     // No-break, space, and invisible named/numeric entity families.
     .replace(
@@ -1120,7 +1161,9 @@ const FORGED_FOOTER_LINE_ANYWHERE_RE =
 export function stripForgedFooterLines(body: string): string {
   if (!body.includes('/review') && !body.includes('&')) return body;
   return mapLinesAware(body, (line) =>
-    FORGED_FOOTER_LINE_ANYWHERE_RE.test(projectInvisibles(line).text)
+    FORGED_FOOTER_LINE_ANYWHERE_RE.test(
+      projectInvisibles(normalizeSourceNuls(line)).text,
+    )
       ? null
       : line,
   );

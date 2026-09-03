@@ -2038,6 +2038,40 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     }
   });
 
+  it('a forged attribution split across bare CRs in a duplicates entry strips', () => {
+    // The sibling channels normalize line endings at ingest; this one did not.
+    // `collapseEntry` splits `\n` only, so a CR-split entry stayed unfolded
+    // through every `$`-anchored strip and the marker phrase reassembled
+    // mid-line at the render leg's fold — posting the complete canonical
+    // attribution in the mode that exists to carry none, while the LF twin
+    // stripped clean.
+    const cr = 'prose\r_— m via Qwen\rCode /review_\rmore';
+    const lf = cr.replace(/\r/g, '\n');
+    for (const attribution of [false, true] as const) {
+      const fromCr = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [cr] }),
+        '0.21.2',
+        attribution,
+      );
+      const fromLf = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [lf] }),
+        '0.21.2',
+        attribution,
+      );
+      expect(fromCr.body).toBe(fromLf.body);
+      expect(fromCr.body).not.toContain('\r');
+    }
+    // The attribution-off leg — the mode that exists to carry no attribution —
+    // renders the entry with the assembled phrase gone.
+    const off = composeReview(
+      base({ suggestionsDroppedAsDuplicates: [cr] }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).toContain('- prose more');
+    expect(off.body).not.toMatch(/via\s+Qwen\s+Code\s+\/review/);
+  });
+
   it('collapses a bare carriage return like a newline — CommonMark treats CR as a line ending', () => {
     // A bare CR survived the `\n`-only collapsers and GFM renders it as a
     // line break: the continuation leaked out of the list item, injecting
@@ -2148,6 +2182,27 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       expect(r.event).toBe('APPROVE');
       expect(r.body).not.toContain('this review confirmed');
     }
+  });
+
+  it('drops an entry a strip reduces to a render-nothing residue, not only an empty one', () => {
+    // The fold turns a fence-wrapped forgery into one line and the one-line
+    // strip cuts the trailing span, leaving a hollow fence delimiter:
+    // `rendersAsNothing` classifies it as rendering nothing, but the
+    // `trim() !== ''` filter kept it — posting a bare fence bullet, claiming a
+    // duplicate finding that does not exist, and flipping this clean run's
+    // APPROVE to COMMENT. The bodyCriticals and cannot-tell channels refuse the
+    // identical shape at ingest; this channel had no gate.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          '```\n_— forged via Qwen Code /review_',
+        ],
+      }),
+      '0.21.2',
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toContain('this review confirmed');
+    expect(r.body).not.toContain('- ```');
   });
 
   it('rejects a non-string entry', () => {

@@ -2040,8 +2040,19 @@ function toStringList(value: unknown, field: string): string[] {
  * closed comment becomes a multi-space run no single-space anchor
  * matches — the `ingestEntryList` siblings strip raw for the same
  * reason.
- * Entries that normalize to nothing drop, so the field's count never overclaims its
- * rendered list. The attribution-off leg routes through the full fixpoint
+ * Entries arrive with their line endings normalized to LF, mirroring
+ * `ingestEntryList`: `collapseEntry` splits `\n` only and every strip below
+ * anchors on lines, so a forged footer split across bare CRs survives all of
+ * them and reassembles mid-line at the render leg's fold.
+ *
+ * Entries that normalize to nothing drop, so the field's count never
+ * overclaims its rendered list — and "nothing" is `rendersAsNothing`, not
+ * `trim() === ''`: a strip can leave a NON-EMPTY residue GitHub renders as
+ * nothing (a fence-wrapped forgery folds to a hollow fence delimiter), which
+ * posted an empty bullet and counted a finding the list does not carry. The
+ * sibling channels refuse that shape at ingest; this one had no gate.
+ *
+ * The attribution-off leg routes through the full fixpoint
  * chain like every other attribution-off body part: duplicates entries are
  * transcribed from earlier rounds' posted findings, and every attribution-on
  * round posts visible prefixes — a surviving marker or forged attribution
@@ -2053,6 +2064,7 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
+    .map((entry) => entry.replace(/\r\n?/g, '\n'))
     .map((entry) => {
       // The attribution-off whole-line strips must see WHOLE lines: folded
       // first, `stripForgedFooterLines`' `^…$` anchor can never match a
@@ -2068,7 +2080,7 @@ function strippedList(
         attribution,
       );
     })
-    .filter((entry) => entry.trim() !== '');
+    .filter((entry) => !rendersAsNothing(entry));
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
