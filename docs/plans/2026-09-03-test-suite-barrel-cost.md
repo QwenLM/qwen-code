@@ -1,6 +1,7 @@
 # 测试套件耗时根因：core barrel import
 
 **日期**：2026-09-03
+**状态**：根因已定位并实测验证；迁移写法已确定（见 6.1）。
 **结论**：CI 测试慢的根因不是调度，是**每个测试文件为了跑几毫秒的断言，要先把 core 的整个 barrel（约 612 个模块）求值一遍**。过去一个月围绕超时、重试、分片、并发做的工作都是在给一个 90% 时间花在 import 上的负载做负载均衡，天花板固定。
 
 ---
@@ -141,7 +142,7 @@ origin/main 上：**871 / 1242** 个 cli 源文件导入 barrel（70%），322 /
 
 验证用的改写涉及 15 个源文件（34 增 54 删），仅改导入语句，未改任何测试断言。
 
-> ⚠️ **这个补丁用的是相对源码路径（`../../../core/src/...`），只能用于测量，不能作为迁移写法。** 原因见第 6 节。
+> ⚠️ **这个改写用的是相对源码路径，只能用于隔离测量变量，不能作为迁移写法。** 正确写法见 6.1。
 
 ---
 
@@ -152,7 +153,7 @@ origin/main 上：**871 / 1242** 个 cli 源文件导入 barrel（70%），322 /
 | 阶段 | 工作量 | 覆盖 | cli | job |
 |---|---|---|---|---|
 | 现状 | — | — | 27.8 min | **44.0 min** |
-| ① 改 barrel 导入 + lint 规则 | 脚本批改 | 25% 文件 | 22.5 min | **~39 min** (−11%) |
+| ① 补 vitest 通配 alias → codemod 改导入 → lint 规则 | 脚本批改 | 25% 文件 | 22.5 min | **~39 min** (−11%) |
 | ② + 抽 19 个符号出 hub | ~1 天 | 58% 文件 | 15.0 min | **~31 min** (−30%) |
 | ③ + jsdom 按需 | ~半天 | — | 12.9 min | **~29 min** (−34%) |
 | ④ + workspace 并行 | 改 CI 调度 | — | — | **~20 min** (−55%) |
@@ -168,32 +169,48 @@ origin/main 上：**871 / 1242** 个 cli 源文件导入 barrel（70%），322 /
 
 ---
 
-## 6. 风险与未决项
+## 6. 迁移写法与风险
 
-### 6.1 模块同一性 —— 最高风险
+### 6.1 迁移写法（已确定）
 
-cli 的产物是 esbuild 单文件 bundle（`bundle: true, packages: 'bundle'`，入口 `packages/cli/src/cli.ts`，发布物只有 `dist/`）。**运行时没有模块解析，全部内联。**
+cli 的产物是 esbuild 单文件 bundle（`bundle: true, packages: 'bundle'`，入口 `packages/cli/src/cli.ts`，发布物只有 `dist/`）。**运行时没有模块解析，全部内联**，所以 barrel vs 深路径纯粹是构建期问题，对 npm 安装后的执行没有直接影响。
 
-这意味着 barrel vs 深路径是**构建期**问题，但有一个致命陷阱：如果同一个 core 模块通过两种解析路径进入 bundle，会出现**两份副本** —— singleton 失效、`instanceof` 失败、模块级缓存分裂。
+解析链已经查清：
 
-esbuild 实测（`metafile.inputs`）：
+| 环节 | 机制 | 落点 |
+|---|---|---|
+| 构建（esbuild） | `packages/cli/tsconfig.json` 的 `paths`（esbuild 会读） | `packages/core/src/*.ts` |
+| 测试（vitest） | `packages/cli/vitest.config.ts` 的手写 `alias` | `packages/core/src/*.ts` |
+| `package.json` 的 `exports` | **两条链都不会咨询它** —— paths / alias 先命中 | — |
+
+两条链都落在 core 的 **TypeScript 源码**上，从来不碰 `dist/`。所以正确的迁移写法是包说明符 + core/src 下的相对路径：
+
+```ts
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+```
+
+三处配置的现状：
+
+- **tsconfig**：`"@qwen-code/qwen-code-core/*": ["../core/src/*"]` —— **已经存在，不用改**
+- **vitest alias**：目前只有 4 个具名 subpath（`/goalWire`、`/transcriptRecords`、`/memoryScopes`、`/userPromptSubmitContext`）加一个 barrel，**没有通配**。深路径导入今天在测试里会解析失败，**必须先补一条通配 alias**，这是 phase ① 的第一步。
+- **`package.json` 的 `exports`**：只有 `"./dist/*"` 和 `"./src/*"`，没有 `"./*"` 兜底。构建和测试都不经过它，所以不阻塞迁移；但为了包的外部消费者（vscode-ide-companion 21 个文件、acp-bridge 9 个）行为一致，建议补一条 `"./*": "./dist/src/*"`。
+
+### 6.2 模块重复 —— 只要写法统一就不会发生
+
+如果同一个 core 模块通过两条不同的解析路径进入 bundle，会出现**两份副本**：singleton 失效、`instanceof` 失败、模块级缓存分裂。这不是假设，esbuild `metafile.inputs` 实测：
 
 ```
-混用 dist 深路径 + 相对源码路径:
+barrel + '@qwen-code/qwen-code-core/dist/src/utils/debugLogger.js':
   debugLogger 副本数: 2
-    - packages/core/dist/src/utils/debugLogger.js
-    - packages/core/src/utils/debugLogger.ts
+    - packages/core/src/utils/debugLogger.ts     ← barrel 经 tsconfig paths 命中源码
+    - packages/core/dist/src/utils/debugLogger.js ← /dist/ 说明符不匹配 paths，回落到 node 解析
 ```
 
-**所以迁移必须统一走包说明符**（`@qwen-code/qwen-code-core/<subpath>`），配 vitest alias，**绝不能用相对路径**。core 的 `package.json` 已有 `"./dist/*"` 和 `"./src/*"` 通配 exports，加具名 subpath 也有先例（`/goalWire`、`/memoryScopes` 等 4 个，且 `memoryScopes` 已在生产代码 `serve/run-qwen-serve.ts:62` 用着）。
+根因就是 6.1 那张表：`@qwen-code/qwen-code-core/*` 这条 paths 规则匹配不到 `dist/...` 前缀（会拼成不存在的 `../core/src/dist/...`），于是回落到 `exports` 的 `"./dist/*"`，落到编译产物上，和走源码的 barrel 撞成两份。
 
-### 6.2 ⚠️ 未验证：barrel 在 bundle 里解析到了源码而不是 dist
+**规则很简单：只用 `@qwen-code/qwen-code-core/<core/src 下的路径>`，绝不用 `/dist/...`，绝不用相对路径。** 只要统一这一种写法，barrel 和深路径都落在 `core/src/` 同一批文件上，不会重复。
 
-esbuild 实测：`import { createDebugLogger } from '@qwen-code/qwen-code-core'` 拉进 **612 个 `packages/core/src/*.ts`，0 个 `dist/`**。
-
-这与 `package.json` 的 `exports: { ".": { "import": "./dist/index.js" } }` 预期不符（`dist/index.js` 和 `dist/src/index.js` 都确实存在，1210 个 js 文件）。根 tsconfig 里没有 `paths`，esbuild 配置里也没有 core 的 alias。
-
-**原因未查明，但它直接决定迁移写法**：如果 barrel 实际解析到 `src/`，那深路径也必须指向 `src/`，否则就是 6.1 描述的重复。**这一条必须在动手前查清。**
+> 早先的验证补丁用的是相对源码路径（`../../../core/src/...`），那只是为了隔离测量变量，**不能作为迁移写法** —— 它在 bundle 里同样会和别处的 barrel 撞成两份。
 
 ### 6.3 `vi.mock` 会静默失效
 
