@@ -6,7 +6,10 @@
 
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  McpAuthenticationInProgressError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionIdCaseConflictError,
   SessionTranscriptChangedError,
@@ -45,6 +48,18 @@ function responseMock(): {
 }
 
 describe('sendBridgeError session writer errors', () => {
+  it('maps concurrent MCP authentication to conflict', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new McpAuthenticationInProgressError());
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Another MCP authentication is already in progress',
+      code: 'mcp_authentication_in_progress',
+    });
+  });
+
   it('serializes the structured session-closing code', () => {
     const { response, status, json } = responseMock();
 
