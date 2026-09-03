@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  HELD_EXPIRY_OPTIONS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -327,6 +328,25 @@ describe('SettingsSchema', () => {
         { value: 'hold', label: 'Hold for review' },
         { value: 'refuse', label: 'Refuse' },
       ]);
+    });
+
+    it('should offer exactly the hold lifetimes core knows how to parse', () => {
+      // Three copies of this vocabulary exist: core's table, these
+      // options, and the generated JSON schema. Adding an option here
+      // without a core entry fails nowhere -- `parseHeldExpiry` takes its
+      // unrecognized branch, logs at debug level (off by default), and
+      // returns the five-minute default. A user who hand-edits
+      // settings.json to the new value gets a silently shorter review
+      // window, with the whole suite green.
+      const crossSessionHeldExpiry =
+        getSettingsSchema().agents.properties.crossSessionHeldExpiry;
+
+      expect(crossSessionHeldExpiry.options?.map((o) => o.value)).toEqual(
+        HELD_EXPIRY_OPTIONS,
+      );
+      // And the declared default must be one core resolves to a real
+      // lifetime, not one that happens to fall back to it.
+      expect(HELD_EXPIRY_OPTIONS).toContain(crossSessionHeldExpiry.default);
     });
 
     it('should define model grade settings', () => {
