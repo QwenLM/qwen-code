@@ -6,6 +6,19 @@
 
 import { expect } from 'vitest';
 
+/** Options for {@link expectWithinLatencyBudget}. */
+export interface LatencyBudgetOptions {
+  /**
+   * Multiple of the budget still asserted on the shared pool. Pass it when the
+   * duration *is* the property under test — a complexity bound, a stream that
+   * must not go zombie — so the case keeps asserting something there instead of
+   * running and checking nothing. Contention on this fleet is ~5x, so a
+   * multiple well above that still catches a quadratic regression, which
+   * overruns any bound, while tolerating a busy host.
+   */
+  poolMultiplier?: number;
+}
+
 /**
  * Assert that a measured duration fits a millisecond budget, except on the
  * shared ECS pool.
@@ -20,8 +33,14 @@ import { expect } from 'vitest';
 export function expectWithinLatencyBudget(
   elapsedMs: number,
   budgetMs: number,
+  options?: LatencyBudgetOptions,
 ): void {
   if (process.env['QWEN_SKIP_LATENCY_BUDGETS']) {
+    const multiplier = options?.poolMultiplier;
+    if (multiplier === undefined) {
+      return;
+    }
+    expect(elapsedMs).toBeLessThan(budgetMs * multiplier);
     return;
   }
   expect(elapsedMs).toBeLessThan(budgetMs);

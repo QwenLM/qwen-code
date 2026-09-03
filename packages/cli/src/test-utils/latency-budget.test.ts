@@ -31,4 +31,19 @@ describe('expectWithinLatencyBudget', () => {
     process.env['QWEN_SKIP_LATENCY_BUDGETS'] = '';
     expect(() => expectWithinLatencyBudget(1762, 1000)).toThrow();
   });
+
+  it('keeps asserting on the pool when the duration is the property', () => {
+    // Five of the quarantined cases have no other expect() — a complexity
+    // bound or a no-zombie guarantee is the whole test. Skipping there would
+    // leave them running and checking nothing, so they keep a relaxed bound:
+    // wide enough for a 5x-contended host, far too tight for a quadratic
+    // regression.
+    process.env['QWEN_SKIP_LATENCY_BUDGETS'] = '1';
+    expect(() =>
+      expectWithinLatencyBudget(1500, 100, { poolMultiplier: 20 }),
+    ).not.toThrow();
+    expect(() =>
+      expectWithinLatencyBudget(2500, 100, { poolMultiplier: 20 }),
+    ).toThrow();
+  });
 });

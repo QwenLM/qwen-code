@@ -112,7 +112,7 @@ describe('defangEnvelopeTags', () => {
     // loop while a reviewing receiver auto-accepts.
     const start = Date.now();
     defangEnvelopeTags(`<${' '.repeat(200_000)}not a tag`);
-    expectWithinLatencyBudget(Date.now() - start, 1000);
+    expectWithinLatencyBudget(Date.now() - start, 1000, { poolMultiplier: 20 });
   });
 });
 

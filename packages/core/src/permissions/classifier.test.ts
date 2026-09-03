@@ -351,7 +351,7 @@ describe('sanitizeClassifierReason', () => {
     const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
     const t0 = Date.now();
     sanitizeClassifierReason(adversarial);
-    expectWithinLatencyBudget(Date.now() - t0, 1000);
+    expectWithinLatencyBudget(Date.now() - t0, 1000, { poolMultiplier: 20 });
   });
 
   it('collapses whitespace and newlines to single spaces', () => {
