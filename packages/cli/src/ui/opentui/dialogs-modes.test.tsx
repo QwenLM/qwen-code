@@ -210,8 +210,10 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '● Concise',
+      ),
     );
     press('return');
 
@@ -243,6 +245,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('down');
     press('return');
 
@@ -264,8 +267,10 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '● Concise',
+      ),
     );
     press('return');
 
@@ -295,6 +300,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('up');
     press('return');
 
@@ -328,6 +334,70 @@ describe('OpenTuiOutputStyleDialog', () => {
     expect(harness.setValue).not.toHaveBeenCalled();
   });
 
+  it('does not mount selectable rows before the catalog is ready', async () => {
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    let releaseLoad: (() => void) | undefined;
+    mocks.loadSessionOutputStyles.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLoad = () => resolve([...BUILT_IN_OUTPUT_STYLES, custom]);
+        }),
+    );
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText('Loading output styles…')).not.toBeNull();
+    expect(mocks.state.keyboardHandlers).toHaveLength(0);
+    expect(screen.queryByText('default')).toBeNull();
+
+    await act(async () => {
+      releaseLoad?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    expect(harness.setOutputStyle).not.toHaveBeenCalled();
+    expect(harness.setValue).not.toHaveBeenCalled();
+  });
+
+  it('closes and notifies when the catalog cannot be read', async () => {
+    mocks.loadSessionOutputStyles.mockRejectedValue(new Error('EACCES'));
+    const harness = createHarness();
+    const onClose = vi.fn();
+    const notify = vi.fn();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={onClose}
+        notify={notify}
+      />,
+    );
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+    expect(screen.queryByText('default')).toBeNull();
+    expect(harness.setOutputStyle).not.toHaveBeenCalled();
+    expect(harness.setValue).not.toHaveBeenCalled();
+  });
+
   it('notifies when persistence fails', async () => {
     const setValue = vi.fn(() => {
       throw new Error('disk full');
@@ -343,6 +413,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('return');
 
     await waitFor(() => expect(notify).toHaveBeenCalledWith('disk full'));

@@ -17,7 +17,6 @@ import { useRenderer, useKeyboard } from '@opentui/react';
 import {
   applyReasoningEffort,
   APPROVAL_MODES,
-  BUILT_IN_OUTPUT_STYLES,
   REASONING_EFFORT_TIERS,
   type ApprovalMode,
   type OutputStyleDefinition,
@@ -241,54 +240,61 @@ export function OpenTuiOutputStyleDialog(props: {
   // renderer-agnostic `/output-style <name>`), and a list of built-ins alone
   // would leave it unlisted -- pre-selecting `default` and persisting that
   // over the user's setting on the first Enter.
-  const [styles, setStyles] = useState<readonly OutputStyleDefinition[]>(
-    BUILT_IN_OUTPUT_STYLES,
-  );
+  const [styles, setStyles] = useState<
+    readonly OutputStyleDefinition[] | undefined
+  >();
   useEffect(() => {
     let cancelled = false;
     void loadSessionOutputStyles(config).then(
       (loaded) => {
         if (!cancelled) setStyles(loaded);
       },
-      () => {
-        // Keep the built-ins; the ink path degrades the same way.
+      (error: unknown) => {
+        if (!cancelled) {
+          notify(
+            `Failed to load output styles: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          onClose();
+        }
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [config]);
+  }, [config, notify, onClose]);
 
   const items: Array<{
     key: string;
     label: string;
     desc: string;
     style: OutputStyleDefinition | undefined;
-  }> = [
-    {
-      key: 'default',
-      label: 'default',
-      desc: DEFAULT_STYLE_DESC,
-      style: undefined,
-    },
-    ...styles.map((style) => ({
-      key: style.name,
-      label: style.name,
-      desc:
-        style.source === 'built-in'
-          ? style.description
-          : `${style.description} (${style.source})`,
-      style,
-    })),
-  ];
+  }> = styles
+    ? [
+        {
+          key: 'default',
+          label: 'default',
+          desc: DEFAULT_STYLE_DESC,
+          style: undefined,
+        },
+        ...styles.map((style) => ({
+          key: style.name,
+          label: style.name,
+          desc:
+            style.source === 'built-in'
+              ? style.description
+              : `${style.description} (${style.source})`,
+          style,
+        })),
+      ]
+    : [];
   // Unlike /effort, "no style configured" genuinely is the first entry
   // (default), so pre-selecting index 0 in that case tells the truth (ink
   // OutputStyleDialog parity).
   const current = config.getOutputStyle()?.name;
-  // `useState` runs its initialiser once, so the catalog arriving later would
-  // leave the `-1 -> 0` clamp in place; re-derive when the list changes.
+  // Derive the selection after the catalog is ready.
   const [sel, setSel] = useState(0);
   useEffect(() => {
+    if (!styles) return;
     const index = items.findIndex((item) => item.key === current);
     setSel(index >= 0 ? index : 0);
     // The item list is derived from `styles`, so that is the real dependency.
@@ -309,14 +315,18 @@ export function OpenTuiOutputStyleDialog(props: {
   };
   return (
     <Shell title="Output Style">
-      <RadioList
-        items={items}
-        selected={sel}
-        onMove={(d) =>
-          setSel((s) => Math.min(items.length - 1, Math.max(0, s + d)))
-        }
-        onPick={pick}
-      />
+      {styles ? (
+        <RadioList
+          items={items}
+          selected={sel}
+          onMove={(d) =>
+            setSel((s) => Math.min(items.length - 1, Math.max(0, s + d)))
+          }
+          onPick={pick}
+        />
+      ) : (
+        <text fg={C.dim}>Loading output styles…</text>
+      )}
     </Shell>
   );
 }

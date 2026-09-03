@@ -49,26 +49,6 @@ export const useOutputStyleCommand = (
   // next Enter would be captured by it and write `general.outputStyle`.
   const openGenerationRef = useRef(0);
 
-  const openOutputStyleDialog = useCallback(() => {
-    const generation = ++openGenerationRef.current;
-    // Read the style files first so the picker opens complete rather than
-    // growing custom entries a moment later.
-    void (async () => {
-      let choices: readonly OutputStyleDefinition[] = BUILT_IN_OUTPUT_STYLES;
-      try {
-        choices = await loadSessionOutputStyles(config);
-      } catch (error) {
-        debugLogger.warn('Failed to load custom output styles:', error);
-      }
-      if (openGenerationRef.current !== generation) {
-        return;
-      }
-      choicesRef.current = choices;
-      setOutputStyleChoices(choices);
-      setIsOutputStyleDialogOpen(true);
-    })();
-  }, [config]);
-
   const report = useCallback(
     (type: MessageType.INFO | MessageType.ERROR, text: string) => {
       if (!addItem) {
@@ -87,6 +67,38 @@ export const useOutputStyleCommand = (
     },
     [addItem, config],
   );
+
+  const openOutputStyleDialog = useCallback(() => {
+    const generation = ++openGenerationRef.current;
+    choicesRef.current = [];
+    setOutputStyleChoices([]);
+    setIsOutputStyleDialogOpen(true);
+    // Keep the selector non-interactive until the complete catalog is ready.
+    void (async () => {
+      let choices: readonly OutputStyleDefinition[];
+      try {
+        choices = await loadSessionOutputStyles(config);
+      } catch (error) {
+        if (openGenerationRef.current !== generation) {
+          return;
+        }
+        debugLogger.warn('Failed to load custom output styles:', error);
+        setIsOutputStyleDialogOpen(false);
+        report(
+          MessageType.ERROR,
+          t('Failed to load output styles: {{error}}', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        return;
+      }
+      if (openGenerationRef.current !== generation) {
+        return;
+      }
+      choicesRef.current = choices;
+      setOutputStyleChoices(choices);
+    })();
+  }, [config, report]);
 
   const handleOutputStyleSelect = useCallback(
     (styleName: string | undefined) => {

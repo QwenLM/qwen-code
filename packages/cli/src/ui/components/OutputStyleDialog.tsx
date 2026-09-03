@@ -85,13 +85,17 @@ export function OutputStyleDialog({
         </Text>
       </Text>
       <Box height={1} />
-      <RadioButtonSelect
-        items={items}
-        initialIndex={initialIndex}
-        onSelect={onSelect}
-        isFocused
-        showNumbers
-      />
+      {styles.length === 0 ? (
+        <Text color={theme.text.secondary}>{t('Loading output styles…')}</Text>
+      ) : (
+        <RadioButtonSelect
+          items={items}
+          initialIndex={initialIndex}
+          onSelect={onSelect}
+          isFocused
+          showNumbers
+        />
+      )}
       <Box marginTop={1}>
         <Text color={theme.text.secondary} wrap="truncate">
           {t('(Use Enter to select, Esc to cancel)')}

@@ -80,24 +80,34 @@ describe('useOutputStyleCommand', () => {
     expect(result.current.outputStyleChoices).toEqual(BUILT_IN_OUTPUT_STYLES);
 
     act(() => result.current.openOutputStyleDialog());
+    expect(result.current.isOutputStyleDialogOpen).toBe(true);
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
     );
     expect(mockedLoadCatalog).toHaveBeenCalledWith({ projectRoot: '/repo' });
     expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE);
   });
 
-  it('opens with the built-ins when the catalog cannot be read', async () => {
+  it('reports a catalog read failure and closes without a selection', async () => {
     mockedLoadCatalog.mockRejectedValue(new Error('EACCES'));
+    config.getOutputStyle = vi.fn().mockReturnValue(CUSTOM_STYLE);
     const { result } = renderHook(() =>
-      useOutputStyleCommand(settings, config),
+      useOutputStyleCommand(settings, config, addItem),
     );
 
     act(() => result.current.openOutputStyleDialog());
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.isOutputStyleDialogOpen).toBe(false),
     );
-    expect(result.current.outputStyleChoices).toEqual(BUILT_IN_OUTPUT_STYLES);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('EACCES'),
+      }),
+      expect.any(Number),
+    );
+    expect(setOutputStyle).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('applies and persists the selected style, then reports it', async () => {
@@ -106,7 +116,7 @@ describe('useOutputStyleCommand', () => {
     );
     act(() => result.current.openOutputStyleDialog());
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
     );
 
     await act(async () => result.current.handleOutputStyleSelect('Concise'));
@@ -135,7 +145,7 @@ describe('useOutputStyleCommand', () => {
     );
     act(() => result.current.openOutputStyleDialog());
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
     );
 
     await act(async () => result.current.handleOutputStyleSelect('Reviewer'));
@@ -171,7 +181,7 @@ describe('useOutputStyleCommand', () => {
     );
     act(() => result.current.openOutputStyleDialog());
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
     );
 
     await act(async () => result.current.handleOutputStyleSelect('default'));
@@ -195,7 +205,8 @@ describe('useOutputStyleCommand', () => {
     mockedLoadCatalog.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          releaseLoad = () => resolve(BUILT_IN_OUTPUT_STYLES);
+          releaseLoad = () =>
+            resolve([...BUILT_IN_OUTPUT_STYLES, CUSTOM_STYLE]);
         }),
     );
 
@@ -203,6 +214,8 @@ describe('useOutputStyleCommand', () => {
       useOutputStyleCommand(settings, config),
     );
     act(() => result.current.openOutputStyleDialog());
+    expect(result.current.isOutputStyleDialogOpen).toBe(true);
+    expect(result.current.outputStyleChoices).toEqual([]);
     await act(async () => result.current.handleOutputStyleSelect(undefined));
     expect(result.current.isOutputStyleDialogOpen).toBe(false);
 
@@ -212,6 +225,42 @@ describe('useOutputStyleCommand', () => {
     });
 
     expect(result.current.isOutputStyleDialogOpen).toBe(false);
+    expect(result.current.outputStyleChoices).toEqual([]);
+  });
+
+  it('ignores the first catalog when a second open resolves sooner', async () => {
+    const staleStyle: OutputStyleDefinition = {
+      ...CUSTOM_STYLE,
+      name: 'Stale',
+    };
+    let releaseFirstLoad: (() => void) | undefined;
+    mockedLoadCatalog
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirstLoad = () =>
+              resolve([...BUILT_IN_OUTPUT_STYLES, staleStyle]);
+          }),
+      )
+      .mockResolvedValueOnce([...BUILT_IN_OUTPUT_STYLES, CUSTOM_STYLE]);
+
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config),
+    );
+    act(() => result.current.openOutputStyleDialog());
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
+    );
+
+    await act(async () => {
+      releaseFirstLoad?.();
+      await Promise.resolve();
+    });
+
+    expect(result.current.isOutputStyleDialogOpen).toBe(true);
+    expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE);
+    expect(result.current.outputStyleChoices).not.toContainEqual(staleStyle);
   });
 
   it('cancels without mutating config or settings on undefined', async () => {
@@ -220,7 +269,7 @@ describe('useOutputStyleCommand', () => {
     );
     act(() => result.current.openOutputStyleDialog());
     await waitFor(() =>
-      expect(result.current.isOutputStyleDialogOpen).toBe(true),
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
     );
 
     await act(async () => result.current.handleOutputStyleSelect(undefined));
