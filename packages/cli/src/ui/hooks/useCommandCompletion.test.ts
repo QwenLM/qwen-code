@@ -28,7 +28,6 @@ vi.mock('./useSlashCompletion', () => ({
   useSlashCompletion: vi.fn(() => ({
     completionStart: 0,
     completionEnd: 0,
-    isPerfectMatch: false,
   })),
 }));
 
@@ -38,21 +37,13 @@ const setupMocks = ({
   slashSuggestions = [],
   isLoading = false,
   isPerfectMatch = false,
-  slashCompletionRange = {
-    completionStart: 0,
-    completionEnd: 0,
-    isPerfectMatch,
-  },
+  slashCompletionRange = { completionStart: 0, completionEnd: 0 },
 }: {
   atSuggestions?: Suggestion[];
   slashSuggestions?: Suggestion[];
   isLoading?: boolean;
   isPerfectMatch?: boolean;
-  slashCompletionRange?: {
-    completionStart: number;
-    completionEnd: number;
-    isPerfectMatch?: boolean;
-  };
+  slashCompletionRange?: { completionStart: number; completionEnd: number };
 }) => {
   // Mock for @-completions
   (useAtCompletion as vi.Mock).mockImplementation(
@@ -86,10 +77,7 @@ const setupMocks = ({
         }
       }, [enabled, setSuggestions, setIsLoadingSuggestions, setIsPerfectMatch]);
       // The hook returns a range, which we can mock simply
-      return {
-        ...slashCompletionRange,
-        isPerfectMatch: slashCompletionRange.isPerfectMatch ?? isPerfectMatch,
-      };
+      return slashCompletionRange;
     },
   );
 };
@@ -139,30 +127,6 @@ describe('useCommandCompletion', () => {
         expect(result.current.visibleStartIndex).toBe(0);
         expect(result.current.showSuggestions).toBe(false);
         expect(result.current.isLoadingSuggestions).toBe(false);
-      });
-
-      it('uses the current slash perfect match before published state catches up', () => {
-        setupMocks({
-          isPerfectMatch: false,
-          slashCompletionRange: {
-            completionStart: 1,
-            completionEnd: 5,
-            isPerfectMatch: true,
-          },
-        });
-
-        const { result } = renderHook(() =>
-          useCommandCompletion(
-            useTextBufferForTest('/quit'),
-            testRootDir,
-            [],
-            mockCommandContext,
-            false,
-            mockConfig,
-          ),
-        );
-
-        expect(result.current.isPerfectMatch).toBe(true);
       });
 
       it('should reset state when completion mode becomes IDLE', async () => {
