@@ -1685,27 +1685,37 @@ describe('tool row rendering', () => {
   });
 
   it('shows a live elapsed and current activity for a running foreground agent', () => {
-    const container = renderToolGroup([
-      makeTool({
-        callId: 'foreground-agent',
-        toolName: 'agent',
-        status: 'in_progress',
-        executionMode: 'foreground',
-        startTime: Date.now() - 45_000,
-        subTools: [
-          makeTool({
-            callId: 'sub-read',
-            toolName: 'read',
-            status: 'in_progress',
-            args: { file_path: 'src/app.ts' },
-          }),
-        ],
-      }),
-    ]);
+    // Fake timers: the elapsed string is rounded from a wall-clock gap, so a
+    // live-clock fixture flips 45s to 46s on a loaded worker with no code
+    // regression.
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
 
-    expect(container.textContent).toContain('Running');
-    expect(container.textContent).toContain('(ReadFile src/app.ts)');
-    expect(container.textContent).toMatch(/\b45s\b/);
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-read',
+              toolName: 'read',
+              status: 'in_progress',
+              args: { file_path: 'src/app.ts' },
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('Running');
+      expect(container.textContent).toContain('(ReadFile src/app.ts)');
+      expect(container.textContent).toContain('45s');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the task description on a running foreground agent row', () => {
@@ -1735,25 +1745,32 @@ describe('tool row rendering', () => {
   });
 
   it('renders no empty parentheses without a live sub-tool', () => {
-    const container = renderToolGroup([
-      makeTool({
-        callId: 'foreground-agent',
-        toolName: 'agent',
-        status: 'in_progress',
-        executionMode: 'foreground',
-        startTime: Date.now() - 45_000,
-        subTools: [
-          makeTool({
-            callId: 'sub-done',
-            toolName: 'read',
-            status: 'completed',
-          }),
-        ],
-      }),
-    ]);
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
 
-    expect(container.textContent).toContain('45s');
-    expect(container.textContent).not.toContain('()');
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+          subTools: [
+            makeTool({
+              callId: 'sub-done',
+              toolName: 'read',
+              status: 'completed',
+            }),
+          ],
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      expect(container.textContent).not.toContain('()');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the running foreground agent summary elapsed ticking', () => {
