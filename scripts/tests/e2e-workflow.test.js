@@ -248,6 +248,78 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('one build for every leg', () => {
+    // Each leg used to build and bundle on its own runner — 4–8 minutes on a
+    // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
+    // job does it once on a hosted VM and the legs unpack its archive; these
+    // pins keep a leg from quietly growing its own build back.
+    const build = yml.jobs.build;
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+
+    it('builds once, on a hosted runner, off the shared pool', () => {
+      expect(build.needs).toBeUndefined();
+      expect(build['runs-on']).toBe('ubuntu-latest');
+      const names = build.steps.map((step) => step.name);
+      expect(names).toContain('Build project');
+      expect(names).toContain('Bundle CLI for E2E tests');
+      const pack = build.steps.find(
+        (step) => step.name === 'Pack build outputs',
+      );
+      expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
+      const upload = build.steps.find(
+        (step) => step.name === 'Upload build artifact',
+      );
+      expect(upload.uses).toMatch(/^actions\/upload-artifact@/);
+      expect(upload.with.name).toBe('e2e-build');
+      expect(upload.with['retention-days']).toBe(1);
+    });
+
+    it('gates the build like the legs, so a skipped build skips them', () => {
+      expect(build.if).toBe(yml.jobs['e2e-test-linux'].if);
+    });
+
+    it.each(legs)('%s unpacks the shared build instead of building', (job) => {
+      const { needs, steps } = yml.jobs[job];
+      expect(needs).toEqual(['build']);
+      const names = steps.map((step) => step.name);
+      expect(names).not.toContain('Build project');
+      expect(names).not.toContain('Bundle CLI for E2E tests');
+      const download = steps.find(
+        (step) => step.name === 'Download build artifact',
+      );
+      expect(download.with.name).toBe('e2e-build');
+      const unpack = steps.find(
+        (step) => step.name === 'Unpack build artifact',
+      );
+      expect(unpack.run).toContain('.github/scripts/e2e-build-unpack.sh');
+      // Unpack before anything runs the CLI, after node_modules exist.
+      expect(names.indexOf('Install dependencies')).toBeLessThan(
+        names.indexOf('Unpack build artifact'),
+      );
+      expect(names.indexOf('Unpack build artifact')).toBeLessThan(
+        names.findIndex((name) => name.startsWith('Run ')),
+      );
+      const install = steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
+    });
+
+    it('keeps the docker sandbox image build on the leg', () => {
+      // The image builds inside Docker from the checkout, so it is not part
+      // of the archive; the leg still prepares it under the host locks.
+      const runStep = yml.jobs['e2e-test-linux'].steps.find(
+        (step) => step.name === 'Run E2E tests',
+      );
+      expect(runStep.run).toContain('npm run build:sandbox');
+    });
+  });
+
   it('routes Linux E2E scratch files away from /tmp', () => {
     const runStep = yml.jobs['e2e-test-linux'].steps.find(
       (step) => step.name === 'Run E2E tests',
