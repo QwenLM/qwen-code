@@ -32,6 +32,18 @@ export function releaseWebTerminal(terminalId: string): void {
   releaseCallbacks.get(terminalId)?.();
 }
 
+export function releaseDetachedWebTerminal(
+  baseUrl: string,
+  terminalId: string,
+  cwd?: string,
+): void {
+  const ws = new WebSocket(
+    buildWsUrl(baseUrl, terminalId, cwd, true),
+    wsProtocols(),
+  );
+  ws.onerror = () => ws.close();
+}
+
 // Browsers cannot set Authorization on a WebSocket. The daemon decodes this
 // bearer subprotocol during the upgrade; keep the prefix in sync with it
 // (see packages/cli/src/serve/acp-http/index.ts).
@@ -113,13 +125,8 @@ export function TerminalPanel({
 
   useEffect(() => {
     if (!enabled) {
-      const release = () => {
-        const ws = new WebSocket(
-          buildWsUrl(baseUrl, terminalId, cwd, true),
-          wsProtocols(),
-        );
-        ws.onerror = () => ws.close();
-      };
+      const release = () =>
+        releaseDetachedWebTerminal(baseUrl, terminalId, cwd);
       releaseCallbacks.set(terminalId, release);
       return () => {
         if (releaseCallbacks.get(terminalId) === release) {

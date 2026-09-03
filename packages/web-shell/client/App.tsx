@@ -172,7 +172,10 @@ import {
   type ImageTabSource,
   type SideTaskListItem,
 } from './components/artifacts/ArtifactPanel';
-import { releaseWebTerminal } from './components/terminal/TerminalPanel';
+import {
+  releaseDetachedWebTerminal,
+  releaseWebTerminal,
+} from './components/terminal/TerminalPanel';
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
@@ -5565,7 +5568,13 @@ export function App({
             const oldestState =
               artifactPanelStateBySessionRef.current.get(oldestSessionId);
             for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
+              if (tab.kind === 'terminal') {
+                releaseDetachedWebTerminal(
+                  workspace.baseUrl,
+                  tab.id,
+                  tab.workspaceCwd,
+                );
+              }
             }
             artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
@@ -5672,6 +5681,15 @@ export function App({
       artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
     if (!persisted && savedRuntimeTabs.length === 0) {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
+      for (const tab of savedState?.tabs ?? []) {
+        if (tab.kind === 'terminal') {
+          releaseDetachedWebTerminal(
+            workspace.baseUrl,
+            tab.id,
+            tab.workspaceCwd,
+          );
+        }
+      }
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       setArtifactPanelRestoring(false);
@@ -5972,6 +5990,7 @@ export function App({
     sessionAgentTraceSupported,
     sessionActions,
     webTerminalAvailable,
+    workspace.baseUrl,
     workspace.client,
   ]);
   const openShellPanel = useCallback(

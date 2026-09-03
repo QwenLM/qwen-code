@@ -48,7 +48,11 @@ vi.mock('../../i18n', () => ({
   }),
 }));
 
-import { releaseWebTerminal, TerminalPanel } from './TerminalPanel';
+import {
+  releaseDetachedWebTerminal,
+  releaseWebTerminal,
+  TerminalPanel,
+} from './TerminalPanel';
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -210,6 +214,18 @@ describe('TerminalPanel', () => {
     act(() => releaseWebTerminal('terminal:one'));
 
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
+
+  it('releases a detached terminal through a release-only socket', () => {
+    releaseDetachedWebTerminal(
+      'http://localhost/base',
+      'terminal:detached',
+      '/workspace',
+    );
+
+    expect(FakeWebSocket.instances[0]?.url).toBe(
+      'ws://localhost/base/terminal?terminalId=terminal%3Adetached&cwd=%2Fworkspace&release=1',
+    );
   });
 
   it('does not connect a restored inactive terminal until it is enabled', () => {

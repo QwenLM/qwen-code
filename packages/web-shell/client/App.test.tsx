@@ -239,6 +239,7 @@ const {
   qualifiedWorkspaceProviders,
   qualifiedSetWorkspaceSetting,
   sessionCatalogController,
+  mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
@@ -670,6 +671,7 @@ const {
       turnCompleted: vi.fn(),
     },
     mockReleaseWebTerminal: vi.fn(),
+    mockReleaseDetachedWebTerminal: vi.fn(),
   };
 });
 
@@ -2127,6 +2129,7 @@ vi.doMock('./components/messages/BtwMessage', async () => {
 vi.doMock('./components/terminal/TerminalPanel', async () => {
   const React = await import('react');
   return {
+    releaseDetachedWebTerminal: mockReleaseDetachedWebTerminal,
     releaseWebTerminal: mockReleaseWebTerminal,
     TerminalPanel: (props: { terminalId: string; enabled?: boolean }) =>
       React.createElement('div', {
@@ -3226,6 +3229,58 @@ describe('task activity key', () => {
         .querySelector('[data-terminal-id="terminal:inactive"]')
         ?.getAttribute('data-enabled'),
     ).toBe('true');
+  });
+
+  it('releases a detached terminal when its persisted session is evicted', async () => {
+    mockConnection.capabilities.features = ['web_terminal'];
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        v: 1,
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'terminal:stored',
+          tabs: [
+            {
+              id: 'terminal:stored',
+              kind: 'terminal',
+              title: 'Terminal',
+              workspaceCwd: '/tmp/project',
+            },
+          ],
+        },
+      }),
+    );
+    const { rerender } = renderApp({
+      rightPanel: { items: ['terminal'] },
+    });
+    await flush();
+
+    for (let index = 2; index <= 21; index += 1) {
+      act(() => {
+        mockConnection.sessionId = `session-${index}`;
+        rerender({ rightPanel: { items: ['terminal'] } });
+      });
+      await flush();
+    }
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'],
+    ).toBeUndefined();
+
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      rerender({ rightPanel: { items: ['terminal'] } });
+    });
+    await flush();
+
+    expect(mockReleaseDetachedWebTerminal).toHaveBeenCalledWith(
+      mockWorkspace.baseUrl,
+      'terminal:stored',
+      '/tmp/project',
+    );
   });
 
   it('defers terminal and Workflow tabs until their capabilities are available', async () => {
@@ -8288,6 +8343,7 @@ beforeEach(() => {
     // Web storage may be unavailable under storage-disabled jsdom contexts.
   }
   mockReleaseWebTerminal.mockReset();
+  mockReleaseDetachedWebTerminal.mockReset();
   localStorage.removeItem('qwen-code-web-shell-environment-panel-open');
   localStorage.removeItem('qwen-code-web-shell-right-panel-state');
   Object.defineProperty(document, 'hidden', {
