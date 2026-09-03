@@ -63,11 +63,13 @@ export class OpenTuiSlashGateway {
   }
 
   /**
-   * Whether the command in `text` opted into running while a model turn
-   * streams (dispatcher passthrough; false before the dispatcher attaches).
+   * Whether a slash submission must wait for the in-flight model turn to end.
+   * Answered from the real registry, so it awaits readiness exactly like
+   * {@link dispatch}; a failed init has nothing to defer (dispatch reports it).
    */
-  canRunDuringStreaming(text: string): boolean {
-    return this.dispatcher?.canRunDuringStreaming(text) ?? false;
+  async mustDeferDuringStreaming(text: string): Promise<boolean> {
+    await this.ready;
+    return this.dispatcher?.mustDeferDuringStreaming(text) ?? false;
   }
 
   /** True while a dispatched command is still running. */
