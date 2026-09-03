@@ -549,6 +549,23 @@ microphone capture, or Appshot capture. No production start caller may bypass
 this seam; stop and mute remain daemon-local operations on an already admitted
 call.
 
+Because the seam is asynchronous while the Host action dispatcher and the HTTP
+routes are not, a pending admission must linearize with later start-or-stop
+intents. Admission captures a coordinator action generation when a start enters
+the seam; every later Host `stop`, `toggle`, or `new` action and every later
+`/live/start`, `/live/new`, or `/live/stop` request advances that generation,
+whether or not a call exists at that moment. The seam rechecks the generation
+immediately before `LiveHostCoordinator.start()` and drops a superseded start
+without creating a session or activating capture: a stop that arrives while a
+start admission is still pending must not be followed by a call starting when
+that admission resolves. The coordinator's existing action epoch cannot express
+this ordering because it advances only when a call is created, so the
+generation lives beside the epoch and covers the pre-start window. The deferred
+`startCall()` continuation of an admitted `start('new')` is not a separate
+start caller: it carries the admission and generation captured by the
+originating request, and the existing teardown and disable paths already clear
+it.
+
 Live discovery and activation remain single-publisher, while the Conversations
 writer lease is session-scoped. A Live session on the elected publisher may
 therefore run at the same time as a different standalone session on another
@@ -860,7 +877,11 @@ nonce, rejects a valid different publisher with the existing retryable error,
 and fails missing, malformed, unsafe, or unreadable locator state closed without
 quarantining standalone.
 Both HTTP start routes and both Host-originated start actions use the same
-admission and perform no session or capture work on rejection. Standalone
+admission and perform no session or capture work on rejection. Admission
+linearization coverage proves that a start superseded while its admission is
+pending — by a later stop, toggle, or new intent through either entry family —
+performs no session or capture work once that admission resolves, and only the
+latest intent may activate a call. Standalone
 availability remains independent of discovery publication failure and of which
 daemon published the record. It also covers the elected daemon running Live
 while a second Live-enabled daemon serves a different standalone session.
