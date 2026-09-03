@@ -492,6 +492,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/help` — List available commands
 - `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
 - `/status` — Show session info and access policy
+- `/btw <question>` — Ask a side question without interrupting the current task; text-only questions up to 4096 characters, requires an agent connection with side-question support
 - `/sessions [all]` — List open named tasks, or include closed tasks; available only with `multiSession: true`
 - `/session current` — Show the selected named task
 - `/session new <name>` — Create and select a shared-workspace task
