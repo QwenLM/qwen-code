@@ -283,6 +283,33 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     }
   });
 
+  it('refuses a socket directory another uid owns', async () => {
+    // The uid guard is what stops the chmod below it from retargeting a
+    // directory someone else planted in a shared temp dir, and it is
+    // also what keeps "belongs to another user" distinguishable from
+    // "this user cannot create or lock down" -- a broken rootless-
+    // container mount versus a permission problem.
+    //
+    // The spy moves the comparison value rather than the directory's
+    // owner, so this fires whether or not the runner is root.
+    const uid = vi
+      .spyOn(process, 'getuid')
+      .mockReturnValue((process.getuid?.() ?? 0) + 1);
+    try {
+      const started = await startPeerInbox({
+        socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+        onFrame: () => {},
+      });
+      expect(started).toBeNull();
+      expect(getLastPeerInboxFailure()?.cause).toBe('foreign_owner');
+      expect(describePeerInboxFailure(getLastPeerInboxFailure()!)).toContain(
+        'belongs to another user',
+      );
+    } finally {
+      uid.mockRestore();
+    }
+  });
+
   it('reports automatic Windows paths as an unsupported platform', async () => {
     const platform = vi
       .spyOn(process, 'platform', 'get')
@@ -1012,7 +1039,33 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await fs.writeFile(path.join(mixed, 'keep.txt'), '');
     const old = new Date(Date.now() - 120_000);
     await fs.utimes(oldEmpty, old, old);
-    await fs.mkdir(path.join(parent, 'qwen-socks-notanonce'));
+
+    // Each of the three survivors below must survive for exactly one
+    // reason, or a deleted guard is invisible. Freshly-created empty
+    // directories are kept by the 60-second grace whatever else is
+    // removed, so every one of them is aged past it first.
+
+    // (a) Kept only by the name-shape filter. Without it, the sweep
+    // considers every entry of `parent` -- which in production is
+    // os.tmpdir() or literally /tmp -- and any aged empty directory the
+    // user owns falls through to rmdir.
+    const notANonce = path.join(parent, 'qwen-socks-notanonce');
+    await fs.mkdir(notANonce);
+    await fs.utimes(notANonce, old, old);
+
+    // (b) Kept only by the self-exclusion: aged, correctly named, and
+    // holding nothing but a provably dead socket, so every other guard
+    // would let it go.
+    await fs.writeFile(path.join(own, '4194303.sock'), '');
+    await fs.utimes(own, old, old);
+
+    // (c) Kept only by the PID liveness check: a socket file named for
+    // this live process, with nothing listening on it -- so the probe
+    // says dead and only `isPidAlive` stands in the way.
+    const liveNamed = nonce('f');
+    await fs.mkdir(liveNamed, { recursive: true });
+    await fs.writeFile(path.join(liveNamed, `${process.pid}.sock`), '');
+    await fs.utimes(liveNamed, old, old);
 
     expect(await sweepOrphanSocketDirs(parent, own)).toBe(2);
     const left = await fs.readdir(parent);
@@ -1021,6 +1074,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
         path.basename(mixed),
         path.basename(freshEmpty),
         path.basename(own),
+        path.basename(liveNamed),
         'qwen-socks-notanonce',
       ]),
     );
