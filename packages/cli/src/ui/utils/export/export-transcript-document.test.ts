@@ -854,6 +854,38 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(previews).toContainEqual({ kind: 'code_block', code: 'print(1)' });
   });
 
+  it('strips URL credentials embedded in command previews', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('shell-cmd', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  args: {
+                    command:
+                      'curl https://user:password@example.test/file?token=secret',
+                  },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const serialized = JSON.stringify(document);
+
+    expect(serialized).toContain('https://example.test/file');
+    expect(serialized).not.toContain('password');
+    expect(serialized).not.toContain('token=secret');
+  });
+
   it('rejects backslash authority Markdown destinations', () => {
     const document = createExportTranscriptDocumentV1(
       [

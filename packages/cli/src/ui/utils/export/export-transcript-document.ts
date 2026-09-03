@@ -536,7 +536,11 @@ function sanitizeBlock(
         ...common,
         kind: 'user_shell',
         text: budget.plainText(block.text),
-        command: budget.plainText(block.command),
+        command: budget.plainText(
+          sanitizeEmbeddedUrls(block.command, diagnostics, () =>
+            budget.markContentLoss(),
+          ),
+        ),
         ...(block.cwd
           ? { cwd: budget.label(safePath(block.cwd), 400, false) }
           : {}),
@@ -631,7 +635,11 @@ function sanitizeToolPreview(
     case 'command':
       return {
         kind: preview.kind,
-        command: budget.plainText(preview.command),
+        command: budget.plainText(
+          sanitizeEmbeddedUrls(preview.command, diagnostics, () =>
+            budget.markContentLoss(),
+          ),
+        ),
         ...(preview.cwd
           ? { cwd: budget.label(safePath(preview.cwd), 400, false) }
           : {}),
@@ -1803,6 +1811,43 @@ function safeDisplayUrl(
     onContentLoss?.();
     return '[link omitted]';
   }
+}
+
+/**
+ * Commands are free text that may EMBED a URL, so `safeDisplayUrl` (which
+ * expects the whole string to be one) does not apply. Rewrite each embedded
+ * http(s) URL through the same `normalizeNavigableUrl` the typed `web_fetch`
+ * and repository paths use, dropping userinfo, query and fragment. Without
+ * this a reachable `curl https://user:pass@host/f?token=...` carried both the
+ * credential and the secret query into the shareable document, against the
+ * contract that credentials never enter it.
+ *
+ * Runs BEFORE the byte budget: a URL truncated first may no longer match, and
+ * the truncation boundary should be measured on the text that actually ships.
+ *
+ * Scope is http(s) only, matching `normalizeNavigableUrl`. A credential in a
+ * non-navigable scheme (`ssh user:pw@host`) or in a bare flag (`-pSECRET`,
+ * `--token=...`) is NOT covered — those need argument-aware redaction, which
+ * this projector does not attempt.
+ */
+function sanitizeEmbeddedUrls(
+  raw: string,
+  diagnostics: DiagnosticCounter,
+  onContentLoss?: () => void,
+): string {
+  return raw.replace(/https?:\/\/[^\s"'<>\\]+/gi, (match) => {
+    const safe = normalizeNavigableUrl(match);
+    if (!safe) {
+      diagnostics.add('url_rejected', 'warning', 1, true);
+      onContentLoss?.();
+      return '[link omitted]';
+    }
+    if (safe !== match) {
+      diagnostics.add('url_sanitized', 'warning', 1, true);
+      onContentLoss?.();
+    }
+    return safe;
+  });
 }
 
 function safeRepository(
