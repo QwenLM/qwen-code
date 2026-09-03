@@ -96,6 +96,7 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonAgentTraceNode,
+  DaemonSessionResourcesStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
@@ -176,6 +177,7 @@ import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonSessionResourcesStatus as DaemonEntrySessionResourcesStatus,
   DaemonUiDebugReason as DaemonEntryUiDebugReason,
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
@@ -333,6 +335,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionResourcesStatus>().toEqualTypeOf<DaemonEntrySessionResourcesStatus>();
     expectTypeOf<DaemonTrustChangeRequestedData>().not.toBeNever();
     expectTypeOf<DaemonTrustChangeRequestedEvent>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustChangeRequest>().not.toBeNever();

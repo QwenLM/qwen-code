@@ -165,6 +165,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/resources',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/resources',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/hooks',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/hooks',

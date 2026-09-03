@@ -3423,6 +3423,25 @@ describe('createAcpSessionBridge', () => {
                 ],
               };
             }
+            if (method === 'qwen/status/session/resources') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                workspaceCwd: WS_A,
+                skills: {
+                  v: 1,
+                  workspaceCwd: WS_A,
+                  initialized: true,
+                  skills: [],
+                },
+                mcp: {
+                  v: 1,
+                  workspaceCwd: WS_A,
+                  initialized: true,
+                  servers: [],
+                },
+              };
+            }
             return {
               v: 1,
               sessionId: params['sessionId'],
@@ -3484,6 +3503,14 @@ describe('createAcpSessionBridge', () => {
         },
       ],
     });
+    await expect(
+      bridge.getSessionResourcesStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      skills: { initialized: true, skills: [] },
+      mcp: { initialized: true, servers: [] },
+    });
     expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
@@ -3491,6 +3518,7 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
+      'qwen/status/session/resources',
     ]);
     expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
       sessionId: session.sessionId,
@@ -4674,6 +4702,9 @@ describe('createAcpSessionBridge', () => {
     await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
+    await expect(
+      bridge.getSessionResourcesStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
     await expect(
       bridge.getSessionSavedWorkflow('missing', 'deep-review'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
