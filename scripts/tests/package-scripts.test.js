@@ -420,6 +420,48 @@ describe('package scripts', () => {
     );
   });
 
+  it('lets the CI unit lane retry a contended attempt', () => {
+    // Identical work measures 6.7min or 36min on this fleet depending only on
+    // which host the job lands on, and the same commit run three times failed
+    // three disjoint test sets (#10490). A retry lets that pass; a real break
+    // still fails every attempt. The release lane already runs this way.
+    const packageJson = readPackageJson();
+    // `test:ci` ends in `&&`, so args appended to it would reach only
+    // `test:scripts`. The workspaces half is its own script, ending in `--`,
+    // so a flag appended to it reaches every workspace's vitest.
+    expect(packageJson.scripts['test:ci:workspaces']).toMatch(/--$/);
+    expect(packageJson.scripts['test:ci:workspaces']).toContain(
+      'npm run test:ci --workspaces --if-present',
+    );
+    expect(packageJson.scripts['test:ci']).toBe(
+      'npm run test:ci:workspaces && npm run test:scripts',
+    );
+
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    expect(step).toContain(
+      'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
+    );
+    // 'off' must omit the flag rather than pass --retry=0, which would
+    // outrank a workspace's own config-level retry (sdk-typescript).
+    expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
+    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
+    expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
+    expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+  });
+
+  it('bounds the CI unit step so a hang fails instead of stalling', () => {
+    // #10490's run 3 was cancelled at ~60 minutes, leaving behind
+    // orphaned test processes; a stall reads as a timeout, not a failure.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    expect(step).toContain('timeout-minutes: 110');
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -778,6 +820,12 @@ describe('package scripts', () => {
       buildJob,
       'Check Serve Fast Path Bundle',
     );
+    const packStep = getWorkflowStep(buildJob, 'Pack Build Outputs');
+    const uploadStep = getWorkflowStep(buildJob, 'Upload Build Outputs');
+    const verifyPackageStep = getWorkflowStep(
+      buildJob,
+      'Verify Prepared Package',
+    );
     const workspaceTestStep = getWorkflowStep(
       workspaceTestJob,
       'Run Workspace Tests',
@@ -792,6 +840,15 @@ describe('package scripts', () => {
     expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
       buildJob.indexOf(buildStep),
     );
+    expect(buildJob.indexOf(uploadStep)).toBeGreaterThan(
+      buildJob.indexOf(packStep),
+    );
+    expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
+      buildJob.indexOf(uploadStep),
+    );
+    expect(verifyPackageStep).toContain('npm run bundle');
+    expect(verifyPackageStep).toContain('dist/review-sources.sha256');
+    expect(verifyPackageStep).toContain('npm run prepare:package');
     expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
     expect(scriptsTestStep).toContain('npm run test:scripts');
