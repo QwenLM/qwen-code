@@ -723,6 +723,72 @@ describe('FeishuChannel', () => {
     }
   });
 
+  it('matches prefixes after platform-normalized mentions with spaced names', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (messageId: string, text: string) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text }),
+        mentions: [
+          {
+            key: '@_user_1',
+            id: { open_id: 'ou_bot' },
+            name: 'Qwen Bot',
+          },
+          {
+            key: '@_user_2',
+            id: { open_id: 'ou_alice' },
+            name: 'Alice Smith',
+          },
+        ],
+      },
+      sender: {
+        sender_id: { open_id: 'ou_user' },
+        sender_type: 'user',
+      },
+    });
+
+    onMessage(
+      event(
+        'prefixed-spaced-mention',
+        '@_user_1 @_user_2 /review inspect this',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('inspect this'),
+      expect.anything(),
+    );
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).not.toContain(
+      '/review',
+    );
+
+    onMessage(
+      event(
+        'unprefixed-spaced-mention',
+        '@_user_1 @_user_2 inspect without prefix',
+      ),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       label: 'group pairing with a user parent',

@@ -691,6 +691,71 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('keeps permission and shared-clear instructions usable with a prefix', async () => {
+      const ch = createChannel({
+        messagePrefix: '/review',
+        sessionScope: 'single',
+      });
+      await ch.handleInbound(envelope({ text: '/review start' }));
+      ch.sent = [];
+      for (const requestId of ['req-1', 'req-2']) {
+        await ch.dispatchPermissionRequest({
+          requestId,
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: `Run ${requestId}` },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+              { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+            ],
+          },
+        });
+      }
+      expect(ch.sent).toHaveLength(2);
+
+      expect(ch.sent[0]?.text).toContain('/review /approve');
+      expect(ch.sent[0]?.text).toContain('/review /deny');
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/review /approve' }));
+      expect(ch.sent[0]?.text).toContain('/review /approve <request-id>');
+
+      ch.sent = [];
+      await ch.handleInbound(envelope({ text: '/review /clear' }));
+      expect(ch.sent[0]?.text).toContain('/review /clear confirm');
+    });
+
+    it('logs prefix mismatches for DMs but not ambient group traffic', async () => {
+      const ch = createChannel({
+        messagePrefix: '/review',
+        groupPolicy: 'open',
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: 'ambient',
+          isGroup: true,
+          isMentioned: false,
+          isReplyToBot: false,
+        }),
+      );
+      expect(
+        writeSpy.mock.calls.some(([message]) =>
+          String(message).includes('message_prefix_mismatch'),
+        ),
+      ).toBe(false);
+
+      await ch.handleInbound(envelope({ text: 'direct' }));
+      expect(
+        writeSpy.mock.calls.some(([message]) =>
+          String(message).includes('message_prefix_mismatch'),
+        ),
+      ).toBe(true);
+    });
+
     it('allows explicitly marked system envelopes through', async () => {
       const ch = createChannel({ messagePrefix: '/review' });
 
@@ -2126,9 +2191,12 @@ describe('ChannelBase', () => {
     });
 
     it('requires card-presented questions to be submitted or denied', async () => {
-      const ch = createChannel();
+      const ch = createChannel({ messagePrefix: '/review' });
       ch.userInputPresentationResult = { kind: 'presented' };
-      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      const active = await startActiveSession(ch, {
+        senderId: 'owner-1',
+        text: '/review run tests',
+      });
       emitUserQuestion(active.sessionId, 'req-card-command');
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
       const settled = vi.fn();
@@ -2137,7 +2205,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/approve req-card-command',
+          text: '/review /approve req-card-command',
         }),
       );
 
@@ -2145,11 +2213,12 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toContain(
         'Submit this question through its interactive card',
       );
+      expect(ch.sent.at(-1)?.text).toContain('/review /deny [request-id]');
 
       await ch.handleInbound(
         envelope({
           senderId: 'owner-1',
-          text: '/deny req-card-command',
+          text: '/review /deny req-card-command',
         }),
       );
 

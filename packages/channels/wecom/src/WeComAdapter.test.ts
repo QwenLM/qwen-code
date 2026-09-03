@@ -1676,7 +1676,11 @@ describe('WeComChannel', () => {
     mocks.httpResponse.headers = {
       'content-disposition': 'attachment; filename="../secret.png"',
     };
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
 
@@ -1690,6 +1694,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
+    expect(channel.envelopes[0]?.bypassMessagePrefix).toBe(true);
   });
 
   it('logs sanitized payloads only when debug payload logging is enabled', async () => {

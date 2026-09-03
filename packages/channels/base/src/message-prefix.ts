@@ -8,8 +8,8 @@ export function stripMessagePrefix(
 
   let candidate = text.trim();
   if (!candidate.startsWith(prefix)) {
-    while (candidate.startsWith('@')) {
-      const mention = candidate.match(/^@[^@\s]+\s+/u)?.[0];
+    while (candidate.startsWith('@') || candidate.startsWith('<@')) {
+      const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
       if (!mention) return undefined;
       candidate = candidate.slice(mention.length);
     }
@@ -28,9 +28,11 @@ export function applyMessagePrefix(
   if (!prefix || envelope.bypassMessagePrefix) return true;
 
   const displayText = envelope.displayText;
-  const sourceText = displayText ?? envelope.text;
+  const prefixText = envelope.messagePrefixText;
+  const sourceText = prefixText ?? displayText ?? envelope.text;
   const stripped = stripMessagePrefix(sourceText, prefix);
   if (stripped === undefined) return false;
+  if (prefixText !== undefined) envelope.messagePrefixText = stripped;
 
   if (displayText === undefined) {
     envelope.text = stripped;
@@ -43,7 +45,13 @@ export function applyMessagePrefix(
   } else if (envelope.text.endsWith(displayText)) {
     envelope.text = envelope.text.slice(0, -displayText.length) + stripped;
   } else {
-    envelope.text = stripped;
+    const at = envelope.text.indexOf(displayText);
+    envelope.text =
+      at === -1
+        ? stripped
+        : envelope.text.slice(0, at) +
+          stripped +
+          envelope.text.slice(at + displayText.length);
   }
   return true;
 }

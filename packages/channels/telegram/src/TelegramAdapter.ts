@@ -31,15 +31,6 @@ const TELEGRAM_BOT_COMMANDS = [
 ] as const;
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 
-const TELEGRAM_START_MESSAGE = [
-  'Qwen Code Telegram bot',
-  '',
-  'Send any message to chat with Qwen Code.',
-  'Use /new to start a fresh conversation.',
-  'Use /cancel to stop a running request.',
-  'Use /help to see available commands.',
-].join('\n');
-
 export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
@@ -59,7 +50,7 @@ export class TelegramChannel extends ChannelBase {
     super(name, config, bridge, options);
     this.bot = this.createBot();
     this.registerCommand('start', async (envelope) => {
-      await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
+      await this.sendMessage(envelope.chatId, this.startMessage());
       return true;
     });
     this.registerCancelCommand();
@@ -123,7 +114,7 @@ export class TelegramChannel extends ChannelBase {
       const msg = ctx.message;
       const text = msg.text;
 
-      const envelope = this.buildEnvelope(msg, text, msg.entities);
+      const envelope = this.buildEnvelope(msg, text, msg.entities, true);
 
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
@@ -297,6 +288,17 @@ export class TelegramChannel extends ChannelBase {
         `[Telegram:${this.name}] Failed to register bot commands: ${err instanceof Error ? err.message : err}\n`,
       );
     }
+  }
+
+  private startMessage(): string {
+    return [
+      'Qwen Code Telegram bot',
+      '',
+      'Send any message to chat with Qwen Code.',
+      `Use ${this.prefixedCommand('/new')} to start a fresh conversation.`,
+      `Use ${this.prefixedCommand('/cancel')} to stop a running request.`,
+      `Use ${this.prefixedCommand('/help')} to see available commands.`,
+    ].join('\n');
   }
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
@@ -497,6 +499,7 @@ export class TelegramChannel extends ChannelBase {
     },
     text: string,
     entities?: Array<{ type: string; offset: number; length: number }>,
+    allowRegisteredCommandBypass = false,
   ): Envelope {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
 
@@ -528,6 +531,17 @@ export class TelegramChannel extends ChannelBase {
 
     // Extract referenced message text (when user replies to a message)
     const referencedText = msg.reply_to_message?.text || undefined;
+    const bypassMessagePrefix =
+      allowRegisteredCommandBypass &&
+      (entities?.some((entity) => {
+        if (entity.type !== 'bot_command' || entity.offset !== 0) return false;
+        const value = text.slice(0, entity.length).toLowerCase();
+        const command = value.slice(1).split('@', 1)[0];
+        return TELEGRAM_BOT_COMMANDS.some(
+          (registered) => registered.command === command,
+        );
+      }) ??
+        false);
 
     return {
       channelName: this.name,
@@ -542,6 +556,7 @@ export class TelegramChannel extends ChannelBase {
           ? String(msg.message_thread_id)
           : undefined,
       text: cleanText,
+      ...(bypassMessagePrefix ? { bypassMessagePrefix: true as const } : {}),
       isGroup,
       isMentioned,
       isReplyToBot,

@@ -2362,13 +2362,14 @@ export class DingtalkChannel extends ChannelBase {
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
     placeholder?: string;
+    userAuthoredText: boolean;
   } {
     const msgtype = data.msgtype || 'text';
 
     if (msgtype === 'richText') {
       const richText = data.content?.richText;
       if (!Array.isArray(richText)) {
-        return { text: '', downloadCodes: [] };
+        return { text: '', downloadCodes: [], userAuthoredText: false };
       }
       let text = '';
       const codes: string[] = [];
@@ -2384,6 +2385,7 @@ export class DingtalkChannel extends ChannelBase {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
+        userAuthoredText: text.trim().length > 0,
       };
     }
 
@@ -2393,6 +2395,7 @@ export class DingtalkChannel extends ChannelBase {
         text: '(image)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
+        userAuthoredText: false,
       };
     }
 
@@ -2406,6 +2409,7 @@ export class DingtalkChannel extends ChannelBase {
         mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
         placeholder,
+        userAuthoredText: false,
       };
     }
 
@@ -2417,6 +2421,7 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: recognition ? undefined : '(audio)',
+        userAuthoredText: Boolean(recognition),
       };
     }
 
@@ -2427,6 +2432,7 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: '(video)',
+        userAuthoredText: false,
       };
     }
 
@@ -2438,11 +2444,16 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: text || '(chat record)',
         downloadCodes: [],
+        userAuthoredText: false,
       };
     }
 
     // Default: text message
-    return { text: data.text?.content?.trim() || '', downloadCodes: [] };
+    return {
+      text: data.text?.content?.trim() || '',
+      downloadCodes: [],
+      userAuthoredText: true,
+    };
   }
 
   /**
@@ -2683,6 +2694,9 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: messageText,
+        ...(!content.userAuthoredText
+          ? { bypassMessagePrefix: true as const }
+          : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,

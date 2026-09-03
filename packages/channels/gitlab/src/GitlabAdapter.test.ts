@@ -378,6 +378,7 @@ describe('GitlabChannel', () => {
       expect(env.senderId).toBe('alice');
       expect(env.isMentioned).toBe(true);
       expect(env.text).toContain('please fix this');
+      expect(env.bypassMessagePrefix).toBeUndefined();
       expect(env.metadata).toContain('Project: owner/repo');
     });
 
@@ -399,8 +400,36 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain(
         'Full issue description',
       );
-      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBe(true);
+      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBeUndefined();
       expect(mockApi.Issues.show).toHaveBeenCalled();
+    });
+
+    it('bypasses the prefix for provider-generated assignment todos', async () => {
+      const configured = makeConfig({
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+          assigned: 'Assigned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        configured,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        action_name: 'assigned',
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Please fix this',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.bypassMessagePrefix).toBe(true);
     });
 
     it('skips todo authored by bot', async () => {

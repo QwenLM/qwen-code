@@ -1771,7 +1771,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     key: string,
   ): Promise<void> {
     const rawText = message.content.trim();
-    const text = stripMessagePrefix(rawText, this.dwsMessagePrefix);
+    const providerDocumentNotification =
+      source.kind === 'direct'
+        ? parseDocumentMentionNotification(rawText)
+        : undefined;
+    const text = providerDocumentNotification
+      ? rawText
+      : stripMessagePrefix(rawText, this.dwsMessagePrefix);
     if (this.dwsMessagePrefix && !text) {
       this.markProcessedMessage(key);
       this.saveCursor();
@@ -1791,9 +1797,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
 
     const documentNotification =
-      source.kind === 'direct'
+      providerDocumentNotification ??
+      (source.kind === 'direct'
         ? parseDocumentMentionNotification(text)
-        : undefined;
+        : undefined);
     if (documentNotification) {
       await this.processDocumentNotification(
         message,

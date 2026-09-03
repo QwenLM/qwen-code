@@ -2628,6 +2628,7 @@ export class FeishuChannel extends ChannelBase {
       // Check @mention
       let isMentioned = false;
       let cleanText = content.text;
+      let messagePrefixText = content.text;
       if (msg.mentions && msg.mentions.length > 0) {
         for (const mention of msg.mentions) {
           const mentionId =
@@ -2640,6 +2641,7 @@ export class FeishuChannel extends ChannelBase {
             mention.key,
             () => `@${mention.name}`,
           );
+          messagePrefixText = messagePrefixText.replaceAll(mention.key, '');
         }
         // Strip bot @mention from text — use replace (not replaceAll) to
         // avoid removing literal occurrences of the bot's name the user typed.
@@ -2671,6 +2673,7 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
+        messagePrefixText: messagePrefixText.trim(),
         messageId: msgId,
         threadId: msg.root_id || undefined,
         isGroup,

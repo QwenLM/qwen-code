@@ -619,7 +619,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not resolve the current task for /btw.',
+        `Could not resolve the current task for ${this.prefixedCommand('/btw')}.`,
         sourceLabel,
       );
       return;
@@ -3087,7 +3087,7 @@ export abstract class ChannelBase {
     ].join('\n');
   }
 
-  private prefixedCommand(command: string): string {
+  protected prefixedCommand(command: string): string {
     return this.messagePrefix ? `${this.messagePrefix} ${command}` : command;
   }
 
@@ -3286,7 +3286,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        `Multiple permission requests are pending for this chat. Reply with /${decision} <request-id>.\n${requestList}`,
+        `Multiple permission requests are pending for this chat. Reply with ${this.prefixedCommand(`/${decision} <request-id>`)}.\n${requestList}`,
       );
       return true;
     }
@@ -3536,7 +3536,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /sessions [all]',
+        `Usage: ${this.prefixedCommand('/sessions [all]')}`,
       );
       return true;
     }
@@ -3589,7 +3589,7 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+              : `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
           );
           return true;
         }
@@ -3598,7 +3598,7 @@ export abstract class ChannelBase {
             await this.sendThreadMessage(
               envelope.chatId,
               envelope.threadId,
-              'Worktree tasks are planned for Part 4. Create a shared task with /session new <name>.',
+              `Worktree tasks are planned for Part 4. Create a shared task with ${this.prefixedCommand('/session new <name>')}.`,
             );
             return true;
           }
@@ -3690,7 +3690,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      `Usage: ${this.prefixedCommand('/session current')} | ${this.prefixedCommand('/session new <name>')} | ${this.prefixedCommand('/session use <name>')} | ${this.prefixedCommand('/session close <name>')} | ${this.prefixedCommand('/session cancel [<name>]')}`,
     );
     return true;
   }
@@ -3859,7 +3859,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. ${this.prefixedCommand('/clear confirm')}) to proceed.`,
         );
         return true;
       }
@@ -4111,7 +4111,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+          `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')} | ${this.prefixedCommand('/loop list')} | ${this.prefixedCommand('/loop inspect <id>')} | ${this.prefixedCommand('/loop cancel <id>')}`,
         );
         return true;
     }
@@ -4144,7 +4144,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop add "<cron>" <prompt>',
+        `Usage: ${this.prefixedCommand('/loop add "<cron>" <prompt>')}`,
       );
       return true;
     }
@@ -4371,7 +4371,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop inspect <id>',
+        `Usage: ${this.prefixedCommand('/loop inspect <id>')}`,
       );
       return true;
     }
@@ -4451,7 +4451,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop cancel <id>',
+        `Usage: ${this.prefixedCommand('/loop cancel <id>')}`,
       );
       return true;
     }
@@ -5753,7 +5753,11 @@ export abstract class ChannelBase {
       this.messagePrefixCheckedEnvelopes.add(envelope);
       if (!applyMessagePrefix(envelope, this.messagePrefix)) {
         this.messagePrefixRejectedEnvelopes.add(envelope);
-        this.logPreflightRejected('message_prefix_mismatch');
+        if (
+          !(envelope.isGroup && !envelope.isMentioned && !envelope.isReplyToBot)
+        ) {
+          this.logPreflightRejected('message_prefix_mismatch');
+        }
         return false;
       }
     }
@@ -6184,7 +6188,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Only authorized members can use /btw in this shared session.',
+            `Only authorized members can use ${this.prefixedCommand('/btw')} in this shared session.`,
           );
           return;
         }
@@ -6193,7 +6197,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Usage: /btw <question>',
+            `Usage: ${this.prefixedCommand('/btw <question>')}`,
           );
           return;
         }
@@ -6209,7 +6213,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            '/btw supports text-only questions.',
+            `${this.prefixedCommand('/btw')} supports text-only questions.`,
           );
           return;
         }
@@ -6311,7 +6315,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'No task is currently selected. Use /session new <name> or /session use <name>.',
+          `No task is currently selected. Use ${this.prefixedCommand('/session new <name>')} or ${this.prefixedCommand('/session use <name>')}.`,
         );
         return;
       }
@@ -6333,7 +6337,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Could not identify the selected task. Use /sessions, select it again, and retry.',
+        `Could not identify the selected task. Use ${this.prefixedCommand('/sessions')}, select it again, and retry.`,
       );
       return;
     }

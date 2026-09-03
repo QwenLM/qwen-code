@@ -77,7 +77,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                     |
 | `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                               |
 
-When `messagePrefix` is set, every user-authored message must contain the prefix and a non-empty payload, for example `/review inspect #123`. Shared, platform, and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Attachments therefore need a matching caption. Native todos, webhooks, and provider-generated assignment or review-request events continue to run without a prefix because they are system events rather than chat messages.
+When `messagePrefix` is set, every user-authored message must begin with the prefix and a non-empty payload, for example `/review inspect #123`. Shared and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Telegram's registered command-menu actions remain available without the prefix. Attachments need a matching caption when the platform supports one; captionless DingTalk and WeCom media messages continue to run. Native todos, webhooks, and provider-generated assignment or review-request events also continue to run without a prefix because they are system events rather than chat messages.
 
 ### Sender Policy
 

@@ -4622,6 +4622,7 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope).toMatchObject({
       text: '(image)',
       referencedText: '[image]',
+      bypassMessagePrefix: true,
     });
     expect(envelope.attachments).toHaveLength(2);
     expect(envelope.attachments).toEqual([

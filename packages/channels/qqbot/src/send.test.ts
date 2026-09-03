@@ -117,6 +117,9 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected getResponseSourceLabel(_sessionId: string): undefined {
         return undefined;
       }
+      protected configuredMessagePrefix(): string | undefined {
+        return this.config['messagePrefix'] as string | undefined;
+      }
       protected formatMarkdownAttributedText(
         text: string,
         sourceLabel?: string,
@@ -144,6 +147,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizeSenderName: real.sanitizeSenderName,
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
+    stripMessagePrefix: real.stripMessagePrefix,
     truncateCodePoints: real.truncateCodePoints,
   };
 });
@@ -309,7 +313,7 @@ describe('session persistence paths', () => {
 //   newlines, Unicode line separators, and BiDi overrides. The tests below
 //   validate each threat class individually.
 describe('group sender-name sanitization', () => {
-  function makeChannel() {
+  function makeChannel(messagePrefix?: string) {
     return new QQChannel(
       'qq-bot',
       {
@@ -324,6 +328,7 @@ describe('group sender-name sanitization', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        ...(messagePrefix ? { messagePrefix } : {}),
       },
       {} as unknown as ChannelAgentBridge,
     );
@@ -418,6 +423,29 @@ describe('group sender-name sanitization', () => {
     // With no mentions, isAtBot=false so isSlash=false; isSlash is corrected
     // when finalIsAtBot is forced — text becomes the clean slash command.
     expect(env.text).toBe('/clear');
+    expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('recognizes a slash command after the configured message prefix', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('review:');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-slash',
+      group_openid: 'grp-1',
+      content: 'review: /help',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as {
+      text: string;
+      alreadyPrefixed?: boolean;
+    };
+    expect(env.text).toBe('review: /help');
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 

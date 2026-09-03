@@ -441,6 +441,9 @@ export class WeComChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      ...(isSyntheticMediaText(body, text)
+        ? { bypassMessagePrefix: true as const }
+        : {}),
       messageId: rawMessageId ?? messageId,
       isGroup,
       // WeCom only delivers group callbacks when the intelligent robot is
@@ -1346,6 +1349,20 @@ function extractQuoteText(
 ): string | undefined {
   if (!quote) return undefined;
   return extractText(quote) || undefined;
+}
+
+function isSyntheticMediaText(
+  body: Record<string, unknown>,
+  text: string,
+): boolean {
+  const msgType = getString(body, 'msgtype');
+  if (msgType === 'image' || msgType === 'video' || msgType === 'file') {
+    return true;
+  }
+  if (msgType === 'voice') {
+    return !getString(getRecord(body, 'voice'), 'content');
+  }
+  return msgType === 'mixed' && text.length === 0;
 }
 
 interface InboundMediaRef {

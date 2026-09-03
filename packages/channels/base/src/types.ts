@@ -113,6 +113,8 @@ export interface Envelope {
   text: string;
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
+  /** User-authored text with platform mention tokens removed for prefix matching. */
+  messagePrefixText?: string;
   /** System event, or adapter input whose prefix was already checked. */
   bypassMessagePrefix?: true;
   threadId?: string;

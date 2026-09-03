@@ -360,6 +360,10 @@ class TestableDwsChannel extends DwsChannel {
     );
   }
 
+  processedMessageIds(): string[] {
+    return this.cursor.processedMessages;
+  }
+
   seedPendingMessages(count: number, separateConversations = false): void {
     this.cursor.pendingMessages = Array.from(
       { length: count },
@@ -1258,15 +1262,34 @@ describe('DwsChannel', () => {
     );
 
     expect(channel.inbound).toEqual([
-      expect.objectContaining({ messageId: 'direct', text: '456' }),
+      expect.objectContaining({
+        messageId: 'direct',
+        text: '456',
+        bypassMessagePrefix: true,
+      }),
       expect.objectContaining({
         messageId: 'valid',
         text: 'https://github.com/QwenLM/qwen-code/pull/123',
+        bypassMessagePrefix: true,
       }),
     ]);
+    expect(channel.processedMessageIds()).toEqual(
+      expect.arrayContaining(
+        [
+          'plain',
+          'empty',
+          'whitespace-only',
+          'similar',
+          'embedded',
+          'wrong-case',
+          'joined',
+          'malformed-mention',
+        ].map((messageId) => `cid-1\0${messageId}`),
+      ),
+    );
   });
 
-  it('filters a document notification before reading it', async () => {
+  it('lets provider-generated document notifications bypass the prefix', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
@@ -1277,8 +1300,8 @@ describe('DwsChannel', () => {
       1,
       message(
         'user_im_message_receive_o2o_all',
-        'document-with-prefix',
-        `/review ${documentMentionCard('doc-prefixed')}`,
+        'document-without-prefix',
+        documentMentionCard('doc-prefixed'),
       ),
     );
 

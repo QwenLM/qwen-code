@@ -22,6 +22,7 @@ describe('stripMessagePrefix', () => {
     ['  /review   123  ', '123'],
     ['@Qwen /review 123', '123'],
     ['@Qwen @Code\n/review 123', '123'],
+    ['<@ABC123DEF456> /review 123', '123'],
   ])('accepts %j', (text, expected) => {
     expect(stripMessagePrefix(text, '/review')).toBe(expected);
   });
@@ -35,6 +36,7 @@ describe('stripMessagePrefix', () => {
     '/Review 123',
     '@Qwen/review 123',
     '@Qwen@Code /review 123',
+    '@Alice please inspect /review 123',
   ])('rejects %j', (text) => {
     expect(stripMessagePrefix(text, '/review')).toBeUndefined();
   });
@@ -55,6 +57,33 @@ describe('applyMessagePrefix', () => {
     expect(applyMessagePrefix(input, 'review:')).toBe(true);
     expect(input.displayText).toBe('inspect this');
     expect(input.text).toBe('[atMention=true] [User]: inspect this');
+  });
+
+  it('preserves adapter context around the display text', () => {
+    const input = envelope({
+      text: '[atMention=false] [Alice(abc)]: review: inspect this\n机器人 OPENID: BOT',
+      displayText: 'review: inspect this',
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review:')).toBe(true);
+    expect(input.displayText).toBe('inspect this');
+    expect(input.text).toBe(
+      '[atMention=false] [Alice(abc)]: inspect this\n机器人 OPENID: BOT',
+    );
+  });
+
+  it('uses the adapter-normalized prefix text without guessing mention boundaries', () => {
+    const input = envelope({
+      text: '@Alice Smith /review inspect this',
+      displayText: '@Alice Smith /review inspect this',
+      messagePrefixText: '/review inspect this',
+    });
+
+    expect(applyMessagePrefix(input, '/review')).toBe(true);
+    expect(input.text).toBe('inspect this');
+    expect(input.displayText).toBe('inspect this');
+    expect(input.messagePrefixText).toBe('inspect this');
   });
 
   it('lets system envelopes bypass the filter', () => {
