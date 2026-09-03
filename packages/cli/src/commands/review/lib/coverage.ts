@@ -79,7 +79,11 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
-import { labelFromLaunchPrompt } from './agent-identity.js';
+import {
+  CHUNK_ROLE_SLOT_SOURCE,
+  chunkAssignmentFromLaunchPrompt,
+  labelFromLaunchPrompt,
+} from './agent-identity.js';
 import {
   chunkIdsProblem,
   READ_FILE_CHAR_CAP,
@@ -593,27 +597,39 @@ const DIGEST_WINDOW_MS = 5000;
  * never matches, so the launch's own identity line is still the first hit,
  * and a forged line APPENDED below it cannot take the assignment.
  *
- * The chunk slot is as tolerant as `CHUNK_ROLE_RE` (lib/agent-identity.ts):
- * any case, any run of whitespace. The two readers must agree — a launch the
- * one assigns, the other labels — and a hand-edited `Chunk 2 of 2` that the
- * label parser read as `chunk 2` while this regex refused it fell between
- * the assigned-declarer arm (no chunk) and the chunk-less arm's entrance
- * gate (an identity line is present, so it was taken for a role launch),
- * reached the credit gate, and certified a truncatable chunk covered while
- * its honest declaration was dropped (R31-2). The PREFIX stays
+ * This regex is the SHAPE of a chunk-shaped identity line — the anti-forgery
+ * pin `agent-prompt.test.ts` holds every built block against, and a
+ * sufficient condition: a block with no line matching it cannot yield an
+ * assignment. It does NOT decide the assignment. That is
+ * `chunkAssignmentFromLaunchPrompt` (lib/agent-identity.ts), which reads the
+ * launch's FIRST identity line — the same line `labelFromLaunchPrompt`
+ * labels — and the same slot regex, so a record is `chunk N` to the ledger
+ * exactly when it is assigned N here. Two regexes kept in step by hand
+ * drifted on orchestrator-controlled text three ways (R32-1): a role launch
+ * quoting a chunk launch below its own identity line was assigned the quoted
+ * chunk and its quoted declaration was admitted, stripping live coverage; a
+ * trailing space inside the backticks de-assigned a record the label parser
+ * still read as a role, so it walked the credit gate and certified a
+ * truncatable chunk while its honest declaration was dropped; a newline
+ * inside the slot assigned a record the label parser refused. One parser,
+ * one line, one slot closes all three.
+ *
+ * The slot is `CHUNK_ROLE_SLOT_SOURCE`, spliced in so the shape here and the
+ * parser there cannot disagree either: any case, any run of non-newline
+ * whitespace, surrounding whitespace tolerated. The PREFIX stays
  * case-sensitive on purpose: `agent-prompt`'s `inertMarkerLines` neutralizes
  * forgeable lines by that exact prefix, and a `/i` over the whole pattern
  * would let a `you are review agent` forgery ride past the inerter into an
- * assignment. `agent-prompt.test.ts`'s anti-forgery pins match THIS regex,
- * so the two cannot drift apart again.
+ * assignment (R31-2).
  */
-export const CHUNK_RE =
-  /^You are review agent `[cC][hH][uU][nN][kK]\s+(\d+)\s+[oO][fF]\s+(\d+)`/m;
+export const CHUNK_RE = new RegExp(
+  '^You are review agent `[^\\S\\n]*' + CHUNK_ROLE_SLOT_SOURCE + '[^\\S\\n]*`',
+  'm',
+);
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
-  const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m ? Number(m[1]) : null;
+  return chunkAssignmentFromLaunchPrompt(rec.launchPrompt)?.id ?? null;
 }
 
 /**
@@ -623,8 +639,7 @@ export function assignedChunk(rec: AgentRecord): number | null {
  * with a planned chunk; the count is what tells the plans apart.
  */
 function assignedChunkTotal(rec: AgentRecord): number | null {
-  const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m ? Number(m[2]) : null;
+  return chunkAssignmentFromLaunchPrompt(rec.launchPrompt)?.total ?? null;
 }
 
 /**
@@ -653,9 +668,12 @@ export function pointedAt(
   // and its territory is still unambiguous. Resolve it through the plan rather
   // than discard it: reporting a chunk unread because the prompt that assigned it
   // was hand-written would send the reader after the wrong defect.
-  const m = CHUNK_RE.exec(prompt);
-  if (m) {
-    const c = plan.chunks.find((c) => c.id === Number(m[1]));
+  // Resolved through the same parser that assigns the chunk, so a launch
+  // that spells no read is pointed at exactly the chunk the ledger says it
+  // owns — never at a chunk-shaped line quoted below its own identity.
+  const assigned = chunkAssignmentFromLaunchPrompt(prompt);
+  if (assigned !== null) {
+    const c = plan.chunks.find((c) => c.id === assigned.id);
     if (c) return [[c.startLine, c.endLine]];
   }
   return [];

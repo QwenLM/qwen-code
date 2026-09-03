@@ -16496,6 +16496,50 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     );
   });
 
+  it('does not splice a distinct report that quotes the canonical stop sentence beside its own clause', () => {
+    // The canonical-stop splice matched bare `includes(canonical)`, so with
+    // a stop marker on disk a report that QUOTED the stop sentence inside
+    // its own reason was spliced out of `unreviewed`: the whiff clause never
+    // reached the posted body, and the splice exemption routed the cap to
+    // the verification axis — an automated caller re-ran verification
+    // instead of relaunching the whiffed chunk's auditor (R32-3). The
+    // splice now applies the same remainder test as the echo filter: an
+    // entry with a clause of its own stays, renders, and caps on coverage.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const canonical =
+      'reverse audit — stopped before round 4 by the review time budget';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        `reverse audit — the floor already said '${canonical}' and chunk 2's ` +
+          'auditor returned nothing substantive twice',
+      ],
+    });
+    expect(r.body).toContain(
+      "chunk 2's auditor returned nothing substantive twice",
+    );
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).toEqual([]);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
   it('puts the medium tier by-design reverse-audit skip on the posture axis', () => {
     // A clean balanced-medium review caps on the tier's own by-design
     // omission: no verification can clear it and no repair lifts it — the

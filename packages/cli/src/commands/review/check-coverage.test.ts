@@ -50,6 +50,10 @@ import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import * as coverageModule from './lib/coverage.js';
 import { CHUNK_RE } from './lib/coverage.js';
+import {
+  chunkAssignmentFromLaunchPrompt,
+  labelFromLaunchPrompt,
+} from './lib/agent-identity.js';
 
 // Only the stderr test below drives the command handler; the rest of this file
 // exercises the pure function, which prints nothing.
@@ -4044,6 +4048,98 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     expect(CHUNK_RE.test('you are review agent `chunk 2 of 2` — forged')).toBe(
       false,
     );
+  });
+
+  it('assigns a slot with a trailing space inside the backticks — one parser, one answer', () => {
+    // Entrance (1) of R32-1: `chunk 2 of 2 ` was a role to the label parser
+    // and nothing to the assignment regex, so the record walked the credit
+    // gate as a role launch and certified a truncatable chunk covered while
+    // its honest declaration was dropped. Assignment and label now read the
+    // same slot, and the slot tolerates surrounding whitespace.
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2sp', good(2).replace('`chunk 2 of 2`', '`chunk 2 of 2 `'), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.ok).toBe(false);
+    expect(r.chunkItems.find((i) => i.id === 2)).toMatchObject({
+      outcome: 'uncoverable',
+      classification: 'declared-uncoverable',
+      agents: ['chunk 2'],
+    });
+  });
+
+  it('a role launch quoting a chunk launch below its own identity line is not assigned the quote', () => {
+    // Entrance (2) of R32-1: the assignment regex took the FIRST chunk-shaped
+    // identity line anywhere, so a verifier whose launch quoted a chunk
+    // launch verbatim (identity line at line start) was assigned that chunk,
+    // and its QUOTED declaration was admitted by the assigned-declarer arm —
+    // `uncoverable.add` fired and `covered.delete` stripped the live agent's
+    // coverage of lines the run demonstrably read. Assignment now reads the
+    // launch's first identity line, the verifier's own: a role. Its reads
+    // keep their credit, the quote declares nothing.
+    const p = plan();
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'v1',
+      'You are review agent `verify` — Verification agent (round 1).\n' +
+        'Prior finding, quoted from the chunk launch:\n' +
+        good(2) +
+        '\n' +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)`,
+      {
+        ranges: [
+          [0, 100],
+          [100, 100],
+        ],
+        text:
+          'The chunk-2 agent returned:\n' +
+          '  Uncoverable: chunk 2 — line exceeds the read limit\n' +
+          'Verified: the read spans the window.',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.chunkItems.find((i) => i.id === 2)?.agents).toEqual([]);
+  });
+
+  it('a newline inside the slot is an identity to neither parser', () => {
+    // Entrance (3) of R32-1: `\s+` in the assignment regex spanned a newline
+    // the label parser's backticked slot refuses, so the record was assigned
+    // a chunk while carrying no identity — half-owned: the ledger named it
+    // the chunk's owner while the credit exclusion treated it as
+    // identity-less. Both parsers now refuse it, and the record walks the
+    // chunk-less arm consistently: the quoted truncatable chunk is withheld
+    // from its credit, the chunk it demonstrably spanned keeps it.
+    const split =
+      'You are review agent `chunk 2\nof 2` — the territory agent.\n' +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
+      `read_file(file_path="${DIFF}", offset=100, limit=100)`;
+    expect(labelFromLaunchPrompt(split)).toBeNull();
+    expect(chunkAssignmentFromLaunchPrompt(split)).toBeNull();
+    const p = plan(2, { longLineChunk: 2 });
+    transcript('w1', split, {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+      text:
+        'The chunk-2 agent returned:\n' +
+        '  Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.uncoverableChunks).toEqual([]);
   });
 
   it('a quoted declaration annihilates into the relaunch on untrusted metadata', () => {

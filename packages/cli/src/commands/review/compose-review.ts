@@ -3557,6 +3557,45 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
   }
 }
 
+/**
+ * What may remain of an orchestrator entry once a structural sentence it
+ * contains is removed, for the entry to still count as a RELAY of that
+ * sentence rather than a claim of its own: whitespace, punctuation, and the
+ * one prefix shape the stderr instruction's own numbering coins (`step 5 —
+ * `, `第 5 步——`). Anything else — a clause, a word — is a remainder, and an
+ * entry with a remainder is a distinct disclosure: it renders, and it caps on
+ * the coverage axis (R30-1).
+ *
+ * This is a boundary held on purpose, not a class to be extended (R32-2
+ * asked for more decorations — `step 5/7 — `, `[step 5] `, `step five — ` —
+ * to count as residue). No finite rule separates a decoration from a claim
+ * in open-ended prose, so the rule picks a FAILURE DIRECTION, and it picks
+ * the one the module's contract picks everywhere else: a disclosed gap
+ * reaches the author, and over-withholding is the safe direction. An
+ * unlisted decoration therefore costs a second rendering of the gap and a
+ * coverage-axis cap; a bare `includes` costs a swallowed whiff report and a
+ * verification-axis cap on a run whose auditor read nothing — the R22-4 /
+ * R30-1 harm. The two alternatives R32-2 offered do not move this: equality
+ * against the minted set treats MORE decorations as claims, and deleting the
+ * matcher treats every relay as one. The instruction site (SKILL.md, the
+ * `BUDGET:` line) asks for the EXACT entry; a reshaped relay is
+ * non-compliance, and non-compliance already withholds the anchor.
+ *
+ * Shared by the two consumers that must agree — the caller-echo filter and
+ * the canonical-stop splice (R32-3) — so a relay spliced out of the rendered
+ * list is exactly a relay the echo filter would have deduped, never more.
+ */
+const RELAY_RESIDUE_RE =
+  /^[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*(?:step\s*\d+|\u7b2c\s*\d+\s*\u6b65)?[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*$/i;
+
+/** Is `entry` a relay of `sentence` — the sentence plus residue, nothing more? */
+function relaysSentence(entry: string, sentence: string): boolean {
+  return (
+    entry.includes(sentence) &&
+    RELAY_RESIDUE_RE.test(entry.replace(sentence, ''))
+  );
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -3873,9 +3912,18 @@ function composeReviewBody(
       // capping. (The anchor DECISION below stays exact-text: a reshaped
       // relay spliced here still withholds, over-withholding being the safe
       // direction.)
+      // A relay, not merely a container: the same remainder test the
+      // caller-echo filter applies (`relaysSentence`). Bare `includes`
+      // spliced a DISTINCT report that quoted the stop sentence inside its
+      // own reason — "reverse audit — the floor already said '…' and chunk
+      // 2's auditor returned nothing substantive twice" — out of the
+      // rendered list, so the whiff clause never reached the author while
+      // the splice exemption below routed the cap to the verification axis
+      // (R32-3). An entry with a remainder stays in `unreviewed`: rendered,
+      // and capping on the coverage axis.
       const entries = [...canonicalStopEntries];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (entries.some((c) => unreviewed[i].includes(c))) {
+        if (entries.some((c) => relaysSentence(unreviewed[i], c))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
@@ -4976,11 +5024,8 @@ function composeReviewBody(
   // nothing (R30-1). The remainder test keeps every compliant relay an echo
   // — verbatim, prefix-reshaped, zh — and hands anything carrying more to
   // the coverage axis, where a distinct claim belongs.
-  const RELAY_RESIDUE_RE =
-    /^[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*(?:step\s*\d+|\u7b2c\s*\d+\s*\u6b65)?[\s\u2014\u2013\-:\uff1a,\uff0c.\u3002;\uff1b()\uff08\uff09'"\u201c\u201d\u2018\u2019`]*$/i;
   const echoesSentence = (entry: string, sentence: string): boolean =>
-    entry.includes(sentence) &&
-    RELAY_RESIDUE_RE.test(entry.replace(sentence, ''));
+    relaysSentence(entry, sentence);
   const echoesCoverageEntry = (entry: string): boolean =>
     coverageEntries.some(
       (e) =>
