@@ -25,7 +25,7 @@ jobs:
     name: 'Resolve version'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 70
+    timeout-minutes: 100
     outputs:
       version: '${{ steps.version.outputs.version }}'
     steps:
@@ -36,13 +36,16 @@ jobs:
           # npm publishes asynchronously: `npm publish --provenance` returns
           # "Your package is being processed and may take a few minutes to
           # become available", and release.yml dispatches this workflow as soon
-          # as it returns. The gap varies widely: v0.22.3 took ~16 minutes
-          # (published 17:14Z, resolvable 17:30Z), and v0.23.0 took ~40
-          # minutes (published 11:03Z, resolvable ~11:43Z) — the previous
-          # 1500s budget gave up at 25 minutes and the run failed with the
+          # as it returns. The gap grows with the package size and varies
+          # widely: v0.22.3 took ~16 minutes, and v0.23.0 (a ~100 MB main
+          # package) took 55m22s measured end to end (npm accepted the upload
+          # 10:58:30Z, the registry served it 11:53:52Z). The previous 1500s
+          # budget gave up long before that and the run failed with the
           # package still in flight, leaving the fleet on the old version.
-          # Wait the registry out rather than losing the race.
-          RESOLVE_TIMEOUT_SECONDS: '3600'
+          # Budget ~1 hour for a main-package release and treat anything past
+          # 90 minutes as anomalous. The wait polls every 30s, so fast
+          # publishes still resolve immediately.
+          RESOLVE_TIMEOUT_SECONDS: '5400'
           RESOLVE_INTERVAL_SECONDS: '30'
         run: |-
           set -euo pipefail
