@@ -122,6 +122,7 @@ the issue comment.
 | Several strong candidates in one run                             | File them all; land at most one                            |
 | Report-only territory                                            | File with evidence, marked report-only. Never a PR         |
 | Path or symbol younger than ~90 days                             | Drop **silently** — unwired new feature, not rot           |
+| A young **subsystem** unwired, its wiring PR open and stale      | Not a deletion. Report the stall to that PR stack          |
 | A never-called migrator, validator, guard, or dropped wire-up    | Not cleanup. It may be a defect → `/bugfix` or `/review`   |
 | Any consumer cannot be named                                     | Drop                                                       |
 | Correct but tiny (one dead import, a typo)                       | Reject on the ledger: below both skills' intake bar        |

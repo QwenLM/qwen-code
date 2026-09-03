@@ -139,6 +139,27 @@ feature someone is still wiring up. (90 days is a heuristic, not a measured
 threshold; widen it for a large subsystem.) Proposing deletion of something
 that landed last week is the fastest way to lose a reviewer for good.
 
+But "young" is not the fact the gate is reaching for — "still being wired
+up" is, and the two come apart. A directory can keep growing for months
+while its consumer never lands, and then every re-run of this survey dates
+it young again and drops it again, which is how a subsystem gets to five
+figures with nothing calling it. So when the gate fires on a **subsystem**
+(not a single symbol), date the wiring rather than the code:
+
+```bash
+# has anything outside it ever referenced it?
+"$RG" -l '<dir>/' --glob '!<dir>/**' packages
+# and are the PRs that would wire it still open?
+gh pr list --repo QwenLM/qwen-code --search '<feature> in:title' --state all
+```
+
+Recent commits inside the directory plus no external reference plus an open,
+stalled wiring PR is **not** a deletion candidate and **not** a drop. It is a
+different finding with a different owner: the wiring stalled. Report it to
+that stack — the merged infrastructure has no entry point — and never as a
+deletion PR. The code is wanted; the review that would connect it is what is
+missing.
+
 **3 — Published-surface escape.** Is the surface reachable from outside the
 repo? SKILL.md § Territory is the authoritative list; keep the two in step.
 Everything under `packages/core/src` is, via that package's `"./src/*"`
@@ -262,13 +283,27 @@ registry entry), not in `packages/core`, and `git log` puts it well past the
 recency gate. Deletion is the component, its test, and its snapshot entry, in
 one commit. This is what a filed candidate should look like.
 
-**2. Everything says dead; `git` says five days old.** `packages/cli/src/agent-view`
-is ~6,000 lines whose entry flag is passed to a spawned process but parsed
-nowhere; every static signal calls it rot. Then:
+**2. Everything says dead; `git` says five days old — and says it again a
+month later.** `packages/cli/src/agent-view` was ~6,000 lines whose entry flag
+is passed to a spawned process but parsed nowhere; every static signal called
+it rot. Then:
 `git log --follow --diff-filter=A --format=%ad --date=short -- packages/cli/src/agent-view
-| tail -1` → `2026-08-01`, five days before HEAD. It is a feature mid-wiring.
-**Drop silently.** Do not file it, do not mention it — a "should we delete
-your new subsystem?" question costs more trust than the finding is worth.
+| tail -1` → `2026-08-01`, five days before HEAD. A feature mid-wiring, so:
+**do not file a deletion.** A "should we delete your new subsystem?" question
+costs more trust than the finding is worth.
+
+What this example originally got wrong was the second half — "do not mention
+it". Measured again on 2026-09-04: **11,004 production lines, still zero
+external references**, up ~8,000 in four weeks. The five merged PRs of its
+stack shipped the supervisor, the PTY workers and the lifecycle; the two that
+would give it an entry point (#7802 commands, #7803 roster TUI) have been
+open since 2026-07-27, the second at +31,699 lines across 104 files and
+conflicting. The recency gate kept firing and the survey kept dropping it, so
+nothing ever said out loud that a five-figure subsystem had no caller.
+
+The deletion verdict was right and stays right. The silence was not: this is
+the stalled-wiring finding above, owed to that PR stack, not to a cleanup
+list.
 
 **3. The naive count is wrong in both directions.**
 `eslint.legacy-filenames.mjs` lists 559 bare basenames. Checking "does a
