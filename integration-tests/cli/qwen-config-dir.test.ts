@@ -19,8 +19,14 @@
  * migration runs before arg parsing.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestRig } from '../test-helper.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
+  TestRig,
+} from '../test-helper.js';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import {
   existsSync,
   mkdirSync,
@@ -32,6 +38,12 @@ import { join, resolve } from 'node:path';
 
 // Keep in sync with SETTINGS_VERSION in packages/cli/src/config/settings.ts.
 const CURRENT_SETTINGS_VERSION = 4;
+
+// The fake server is reached over loopback, so a runner-level proxy must not
+// be allowed to intercept it.
+const NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
 
 // Helper: list files under a directory recursively, returning relative paths
 function listFilesRecursive(dir: string, base = dir): string[] {
@@ -58,6 +70,7 @@ describe('QWEN_HOME environment variable', () => {
 
   afterEach(async () => {
     // Always clean up env vars regardless of test outcome
+    vi.unstubAllEnvs();
     delete process.env['QWEN_HOME'];
     delete process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_DEBUG_LOG_FILE'];
@@ -169,8 +182,12 @@ describe('QWEN_HOME environment variable', () => {
      * unwritable $HOME the CLI dies during startup with `EACCES: permission
      * denied, mkdir '<home>/.qwen'`.
      *
-     * The redirected home carries no credentials, so as in 1a-1c the run may
-     * fail on auth; what this case pins is where the default global dir lands.
+     * The redirected home carries no credentials, so the run drives the fake
+     * OpenAI server through explicit CLI flags and is required to exit 0. That
+     * success requirement is load-bearing: globalSetup pins QWEN_HOME for every
+     * other spawned CLI, making this the suite's only end-to-end guard of the
+     * unset path, so tolerating a failed run would report green on a regression
+     * that kills it after config.initialize().
      */
     it('1d: CLI functions normally when QWEN_HOME is not set', async () => {
       await rig.setup('qwen-home-1d-default-behaviour');
@@ -182,20 +199,32 @@ describe('QWEN_HOME environment variable', () => {
       // depends on the real $HOME being writable (see the note above).
       const homeDir = join(rig.testDir!, 'home');
       mkdirSync(homeDir, { recursive: true });
-      const originalHome = process.env['HOME'];
-      process.env['HOME'] = homeDir;
+      vi.stubEnv('HOME', homeDir);
+      vi.stubEnv('NO_PROXY', NO_PROXY);
+      vi.stubEnv('no_proxy', NO_PROXY);
+
+      const fakeServer = await startFakeOpenAIServer(
+        () => ({ content: 'Hello!' }),
+        fakeServerHostOptions(),
+      );
 
       try {
-        await rig.run('say hello');
-      } catch {
-        // May fail without a valid API key; that is acceptable — we only
-        // need config.initialize() to run far enough to create installation_id
+        // Explicit CLI flags outrank ambient auth and any settings.json, so
+        // the run cannot be routed to a real model endpoint.
+        const result = await rig.run(
+          'say hello',
+          '--auth-type',
+          'openai',
+          '--model',
+          'fake-model',
+          '--openai-base-url',
+          fakeServer.baseUrl,
+          '--openai-api-key',
+          'fake-key',
+        );
+        expect(result).toBeTruthy();
       } finally {
-        if (originalHome === undefined) {
-          delete process.env['HOME'];
-        } else {
-          process.env['HOME'] = originalHome;
-        }
+        await fakeServer.close();
       }
 
       // The default global dir must have materialized under the redirected
