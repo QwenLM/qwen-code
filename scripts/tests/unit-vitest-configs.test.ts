@@ -223,37 +223,37 @@ describe('bundle-guard timeout ceiling', () => {
   });
 });
 
-describe('scripts suite timeout ceiling', () => {
-  it('keeps the shared-ECS ceiling in scripts/tests', async () => {
-    // The bash-spawning workflow suites are the leg that kept a flat ceiling
-    // on the shared pool. Re-imported under each stub: the config reads
-    // RUNNER_NAME at import time and the static import above already
-    // resolved the ambient branch. The unset arm is the config's only witness
-    // for its optional chaining: CI always sets RUNNER_NAME, so without that
-    // arm dropping the `?` stays green here and breaks every local load.
-    for (const [runnerName, expected] of [
-      ['ecs-qwen-parity', 60_000],
-      ['ubuntu-latest-runner', 30_000],
-      [undefined, 30_000],
+describe('scripts suite timeout', () => {
+  it('gives the scripts suite room for a contended host, and a knob', async () => {
+    // 30s was the quiet-host figure. Release run 33725742855 lost its Quality
+    // Checks (Scripts) job to two files at once — qwen-autofix-workflow, whose
+    // heaviest case measures ~14s idle, and acp-serve-boundary-guard — neither
+    // slow, both past 30s under contention. A per-file `vi.setConfig` cannot
+    // fix it: these cases register their timeout at collection.
+    for (const [stub, expected] of [
+      [undefined, 90_000],
+      ['5000', 5_000],
     ] as const) {
-      vi.stubEnv('RUNNER_NAME', runnerName);
+      if (stub === undefined) {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
+        vi.unstubAllEnvs();
+      } else {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
+      }
       vi.resetModules();
       const mod = await import('./vitest.config.js');
-      expect(
-        mod.default.test?.testTimeout,
-        `RUNNER_NAME=${runnerName ?? '<unset>'}`,
-      ).toBe(expected);
+      expect(mod.default.test?.testTimeout, `stub=${stub}`).toBe(expected);
       vi.unstubAllEnvs();
     }
   });
 
   it('leaves no file-level runtime override shadowing that ceiling', () => {
     // The pin above re-imports the config module, so it cannot see an override
-    // a suite applies to itself: that lands after the project config resolves,
-    // outranks it, and quietly holds the suite at the old flat ceiling on the
-    // shared pool while this file reads green. The walk spans the config's
-    // whole include+setup surface — recursive, and setup files as well as
-    // suites — because an override anywhere in it outranks the ceiling.
+    // a suite applies to itself: a runtime `setConfig` in a test file outranks
+    // the project config and holds that suite at its own number while this file
+    // reads green — install-script.test.js sat at 30s under the raised ceiling
+    // that way. The walk spans the config's whole include+setup surface, since
+    // an override anywhere in it outranks the ceiling.
     const here = fileURLToPath(new URL('.', import.meta.url));
     const shadowing = readdirSync(here, { encoding: 'utf8', recursive: true })
       .filter((name) => /\.[jt]s$/.test(name))
