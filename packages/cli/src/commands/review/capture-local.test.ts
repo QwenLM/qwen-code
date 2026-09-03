@@ -181,7 +181,9 @@ describe('capture-local (command boundary)', () => {
       // drop would send it promoting an earlier round's candidate.
       expect(plan['cacheCandidatePath']).toBeUndefined();
       expect(errs.join('\n')).toContain('Could not write the cache candidate');
-      // Nothing was written through the link.
+      // The CANDIDATE was not written through the link. That is the extent
+      // of this guard: the round's diff and plan writers predate it and
+      // still follow the link — tracked separately, not certified here.
       expect(
         existsSync(join(elsewhere, 'qwen-review-local-cache-candidate.json')),
       ).toBe(false);

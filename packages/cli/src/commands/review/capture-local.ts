@@ -841,6 +841,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // would promote that stale anchor merged with this round's ledger.
     // Absent IS the withheld state — fail quiet.
     try {
+      // The same parent-chain guard the write branch applies: a planted
+      // `.qwen/tmp` link redirects a removal exactly as it redirects a
+      // write, and the victim file would go while stderr reported only the
+      // anchor cost. A refusal lands in the catch below — the absent field
+      // is what withholds; removing the stale file is a courtesy.
+      assertUnredirectedParent(
+        candidatePath,
+        'cache candidate',
+        'capture-local',
+      );
       rmSync(candidatePath, { force: true });
     } catch {
       // The absent field above is the load-bearing half.

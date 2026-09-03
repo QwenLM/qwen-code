@@ -19,6 +19,7 @@ import {
   existsSync,
   mkdirSync,
   realpathSync,
+  symlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -335,6 +336,38 @@ describe('capture-local — the withheld candidate is not announced', () => {
     expect('cacheCandidatePath' in plan).toBe(false);
     expect(existsSync(stale)).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'a withhold does not delete through a symlinked `.qwen/tmp`',
+    () => {
+      // The removal side of the same guarded threat: a contributor branch
+      // commits `.qwen/tmp` as a link to a directory holding the
+      // deterministic candidate name, and the withhold branch's cleanup
+      // would otherwise delete the VICTIM file while stderr reported only
+      // the anchor cost. The guard must fail toward field-absence — the
+      // load-bearing half — never toward a round-crashing throw.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      const planted = join(victim, 'qwen-review-local-cache-candidate.json');
+      writeFileSync(planted, 'ORIGINAL');
+      mkdirSync(join(repo, '.qwen'), { recursive: true });
+      symlinkSync(victim, join(repo, '.qwen/tmp'));
+      try {
+        captures.push(
+          { diff: DIFF_A },
+          { diff: Buffer.from('moved mid-hash\n') },
+        );
+        run();
+        const plan = JSON.parse(
+          readFileSync(join(repo, 'plan.json'), 'utf8'),
+        ) as Record<string, unknown>;
+        expect('cacheCandidatePath' in plan).toBe(false);
+        expect(readFileSync(planted, 'utf8')).toBe('ORIGINAL');
+        expect(stderrLines.join('\n')).toContain('candidate is withheld');
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('announces the path when the candidate IS written', () => {
     captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
