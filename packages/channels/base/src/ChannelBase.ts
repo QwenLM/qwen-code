@@ -59,6 +59,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -469,8 +470,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -538,6 +540,7 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
     let target = this.router.getTarget(sessionId);
     if (

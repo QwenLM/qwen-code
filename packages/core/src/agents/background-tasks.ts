@@ -397,6 +397,7 @@ export interface NotificationMeta {
   stats?: AgentCompletionStats;
   toolUseId?: string;
   todoWorkChainId?: string;
+  label?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -1771,6 +1772,7 @@ export class BackgroundTaskRegistry {
       stats: entry.stats,
       toolUseId: entry.toolUseId,
       todoWorkChainId: entry.todoWorkChainId,
+      label: buildBackgroundEntryLabel(entry, { includePrefix: false }),
     };
 
     try {

@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
+  BackgroundResponseContext,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
@@ -178,15 +179,17 @@ vi.mock('@qwen-code/channel-base', async () => {
       async dispatchBackgroundResponse(
         sessionId: string,
         text: string,
+        context?: BackgroundResponseContext,
       ): Promise<void> {
         await (
           real.ChannelBase.prototype as unknown as {
             dispatchBackgroundResponse(
               sessionId: string,
               text: string,
+              context?: BackgroundResponseContext,
             ): Promise<void>;
           }
-        ).dispatchBackgroundResponse.call(this, sessionId, text);
+        ).dispatchBackgroundResponse.call(this, sessionId, text, context);
       }
       protected async deliverBackgroundReply(
         chatId: string,
@@ -314,6 +317,14 @@ it('uses SDK keepalive when the connection manager is disabled', () => {
   expect(
     (latestMockClient().config as { autoReconnect: boolean }).autoReconnect,
   ).toBe(true);
+});
+
+it('rejects a non-boolean background Agent aggregation setting', () => {
+  expect(() =>
+    createChannel({ aggregateBackgroundAgentResponses: 'true' }),
+  ).toThrow(
+    'Channel "test-dingtalk" aggregateBackgroundAgentResponses must be a boolean.',
+  );
 });
 
 it('rejects a non-boolean useConnectionManager value', () => {
@@ -6823,7 +6834,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       JSON.parse(String((init as RequestInit).body)),
     ) as Array<{ markdown: { text: string } }>;
     expect(bodies).toHaveLength(2);
-    expect(bodies[1]!.markdown.text).toBe('Background notification');
+    expect(bodies[1]!.markdown.text).toBe(
+      '## 🤖 Agent · 后台任务\n\nBackground notification',
+    );
     expect(JSON.stringify(bodies)).not.toContain('[FILE:');
     expect(JSON.stringify(bodies)).not.toContain('/workspace/report.txt');
   });
@@ -6863,7 +6876,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'cidGroup==' }),
-      'Background notification',
+      '## 🤖 Agent · 后台任务\n\nBackground notification',
     );
     // The notification bypassed sendReply entirely; only the turn's own
     // block reached the webhook, and the held marker stayed in the projector.
@@ -6933,6 +6946,314 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('immediately sends every labeled Agent response segment by default', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+    const context = {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent' as const,
+      turnComplete: false,
+      label: 'Review #10807',
+    };
+
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'First result.',
+      context,
+    );
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Second result.',
+      context,
+    );
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      ...context,
+      turnComplete: true,
+    });
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Transitional result.',
+      {
+        taskId: 'agent-2',
+        status: 'completed',
+        kind: 'agent',
+        label: 'Transitional Agent',
+      },
+    );
+    await channel.dispatchBackgroundResponse('session-1', 'Legacy result.');
+
+    expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
+      '## 🤖 Agent · Review \\#10807\n\nFirst result.',
+      '## 🤖 Agent · Review \\#10807\n\nSecond result.',
+      '## 🤖 Agent · Transitional Agent\n\nTransitional result.',
+      '## 🤖 Agent · 后台任务\n\nLegacy result.',
+    ]);
+  });
+
+  it('aggregates one agent notification turn into one ordinary Markdown message', async () => {
+    const channel = createChannel({
+      blockStreaming: 'on',
+      aggregateBackgroundAgentResponses: true,
+    });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', 'First result.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Review #10611',
+    });
+
+    expect(pushProactive).not.toHaveBeenCalled();
+
+    await channel.dispatchBackgroundResponse('session-1', 'Final result.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Review #10611',
+    });
+
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+      label: 'Review #10611',
+    });
+
+    expect(pushProactive).toHaveBeenCalledOnce();
+    expect(pushProactive).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'cidGroup==' }),
+      '## ✅ Agent · Review \\#10611\n\nFirst result.\n\nFinal result.',
+    );
+  });
+
+  it('keeps interleaved agents in separate ordinary Markdown messages', async () => {
+    const channel = createChannel({
+      blockStreaming: 'on',
+      aggregateBackgroundAgentResponses: true,
+    });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', 'First A.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Worker one',
+    });
+    await channel.dispatchBackgroundResponse('session-1', 'First B.', {
+      taskId: 'agent-2',
+      status: 'failed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Worker two',
+    });
+    await channel.dispatchBackgroundResponse('session-1', 'Final A.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Worker one',
+    });
+    await channel.dispatchBackgroundResponse('session-1', 'Final B.', {
+      taskId: 'agent-2',
+      status: 'failed',
+      kind: 'agent',
+      turnComplete: true,
+      label: 'Worker two',
+    });
+    await channel.dispatchBackgroundResponse('session-1', 'Stopped.', {
+      taskId: 'agent-3',
+      status: 'cancelled',
+      kind: 'agent',
+      turnComplete: true,
+      partial: true,
+    });
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+      label: 'Worker one',
+    });
+
+    expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
+      '## ❌ Agent · Worker two\n\nFirst B.\n\nFinal B.',
+      '## ⏹️ Agent · 后台任务（部分）\n\nStopped.',
+      '## ✅ Agent · Worker one\n\nFirst A.\n\nFinal A.',
+    ]);
+  });
+
+  it('flushes a partial aggregation after the bounded wait', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse('session-1', 'First result.', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: false,
+        label: 'Worker one',
+      });
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+      expect(pushProactive).toHaveBeenCalledOnce();
+      expect(pushProactive.mock.calls[0]![1]).toContain(
+        '## ✅ Agent · Worker one（部分）',
+      );
+      expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flushes what a dying session already produced', async () => {
+    // The buffer used to be deleted with the timer, so a session that died
+    // after segments arrived but before the terminal signal lost text the
+    // agent had already produced -- the exact case the partial card exists
+    // for. Before aggregation every segment was delivered on arrival.
+    const channel = createChannel({
+      blockStreaming: 'on',
+      aggregateBackgroundAgentResponses: true,
+    });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', 'Segment one.', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: false,
+      label: 'Worker one',
+    });
+    expect(pushProactive).not.toHaveBeenCalled();
+
+    channel.onSessionDied('session-1');
+    await Promise.resolve();
+
+    expect(pushProactive).toHaveBeenCalledOnce();
+    expect(pushProactive.mock.calls[0]![1]).toContain(
+      '## ✅ Agent · Worker one（部分）',
+    );
+    expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
+  });
+
+  it('retries an aggregation whose delivery failed instead of losing it', async () => {
+    // Aggregating concentrates a whole turn into one send, so a transient
+    // failure that used to cost one segment would now cost everything.
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockRejectedValueOnce(new Error('rate limited'))
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse('session-1', 'Only result.', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: true,
+        label: 'Worker one',
+      });
+
+      expect(pushProactive).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30 * 1000);
+
+      expect(pushProactive).toHaveBeenCalledTimes(2);
+      expect(pushProactive.mock.calls[1]![1]).toContain('Only result.');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('feeds status presentation only projected chunks and final text', async () => {

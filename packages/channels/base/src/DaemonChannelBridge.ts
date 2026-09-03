@@ -7,6 +7,7 @@ import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type BridgeSessionInfo,
@@ -997,10 +998,14 @@ export class DaemonChannelBridge
         if (meta?.['qwenDiscreteMessage'] === true) {
           if (
             meta['source'] === 'background_notification_response' &&
-            meta['rewritten'] !== true &&
-            text
+            meta['rewritten'] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (text || context?.turnComplete) {
+              this.emit('backgroundResponse', sessionId, text ?? '', context);
+            }
           } else if (meta['source'] === 'vision_bridge_notice' && text) {
             this.emit('textChunk', sessionId, text);
           }
