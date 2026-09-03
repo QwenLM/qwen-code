@@ -2238,8 +2238,12 @@ export function createServeApp(
     });
   }
   // Background agents are owned by the Agent View supervisor, not by this
-  // daemon, so they appear in none of the session routes above.
-  registerBackgroundAgentRoutes(app, {});
+  // daemon, so they appear in none of the session routes above. The gate
+  // is wired with the same predicate every other primary-workspace route
+  // uses, so an untrusted workspace is refused here exactly as elsewhere.
+  registerBackgroundAgentRoutes(app, {
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+  });
 
   registerCapabilitiesRoutes(app, {
     qwenCodeVersion: deps.qwenCodeVersion,

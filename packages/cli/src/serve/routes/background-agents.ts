@@ -28,6 +28,7 @@
 import type { Application } from 'express';
 import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store.js';
 import { managedSessionRows } from '../../commands/sessions/managed-rows.js';
+import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
 
 /** One background agent, as this route reports it. */
 export interface BackgroundAgentView {
@@ -47,7 +48,6 @@ export interface RegisterBackgroundAgentRoutesDeps {
   /** Overridden in tests; defaults to the real supervisor store. */
   listSnapshots?: typeof listAgentViewSessionSnapshots;
   isWorkspaceTrusted?: () => boolean;
-  sendUntrustedWorkspaceResponse?: (res: unknown) => void;
 }
 
 export function registerBackgroundAgentRoutes(
@@ -58,7 +58,7 @@ export function registerBackgroundAgentRoutes(
 
   app.get('/background-agents', async (_req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
-      deps.sendUntrustedWorkspaceResponse?.(res);
+      sendUntrustedWorkspaceResponse(res);
       return;
     }
     try {

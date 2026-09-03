@@ -125,16 +125,17 @@ describe('GET /background-agents', () => {
   });
 
   it('refuses to list anything for an untrusted workspace', async () => {
+    // No injected responder: the gate must answer with the daemon's
+    // canonical 403 envelope itself, or the request would hang.
     const app = express();
     registerBackgroundAgentRoutes(app, {
       listSnapshots: (async () => [snapshot()]) as never,
       isWorkspaceTrusted: () => false,
-      sendUntrustedWorkspaceResponse: (res) =>
-        void (res as express.Response).status(403).json({ error: 'untrusted' }),
     });
 
     const response = await request(app).get('/background-agents');
     expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
     expect(response.body).not.toHaveProperty('agents');
   });
 });

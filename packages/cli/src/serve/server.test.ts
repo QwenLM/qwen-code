@@ -25695,6 +25695,29 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('GET /background-agents', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('refuses the listing for an untrusted primary workspace', async () => {
+      // The registration must carry the trust predicate; without it the
+      // route answers while every sibling primary-workspace route refuses.
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        primaryWorkspaceTrusted: false,
+      });
+
+      const res = await auth(request(app).get('/background-agents'));
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      expect(res.body).not.toHaveProperty('agents');
+    });
+  });
+
   describe('POST /workspace/skills/:name/enable', () => {
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
