@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Pure-logic coverage for the live-turn driver: composer attachment folding

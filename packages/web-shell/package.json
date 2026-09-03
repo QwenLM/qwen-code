@@ -27,7 +27,7 @@
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "test:ci": "vitest run --config vitest.config.ts --coverage",
+    "test:ci": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
     "test:e2e:perf": "cross-env WEB_SHELL_PERF=1 playwright test --config playwright.config.ts --grep @perf --project=chromium",
